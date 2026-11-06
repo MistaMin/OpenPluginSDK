@@ -26,3 +26,8 @@ GoodLookin DRI provides hardware-accurate, procedural vector rendering for audio
 ### 3. Ballistic Meters
 - `MeterStyle::AnalogVu`: 300 ms ANSI C16.5 ballistic integration with illuminated warm yellow incandescent dial face.
 - `MeterStyle::Ppm`: Fast peak programme meter with quick rise and slow fall times.
+
+### 4. Studio Faders & Sliders (from SoundCraft Console UI)
+- `draw_fader`: Authentic console mixer fader with calibrated physical scale markings (+12, +6, 0, -5, -10, -20, -30, -40, -60, -inf dB), vertical slot track, and realistic 3D metallic fader cap with center indicator groove. Includes piecewise log-linear taper conversion (`fader_pos_to_db`, `fader_db_to_pos`).
+- `draw_slider`: Horizontal parameter slider with active fill track and rounded thumb handle.
+- `draw_pan_knob`: Console rotary pan knob with illuminated bipolar arc meter track from center (<L100 .. <C> .. R100>).
