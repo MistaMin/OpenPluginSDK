@@ -8,6 +8,19 @@ pub trait DriHostWindow {
     fn size(&self) -> (u32, u32);
 }
 
+#[cfg(target_os = "macos")]
+pub fn on_main_thread() -> bool {
+    extern "C" {
+        fn pthread_main_np() -> i32;
+    }
+    unsafe { pthread_main_np() == 1 }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn on_main_thread() -> bool {
+    std::thread::current().name() == Some("main")
+}
+
 pub struct DriView {
     pub width: u32,
     pub height: u32,
@@ -24,6 +37,7 @@ impl DriView {
     }
 
     /// Attaches the DRI rendering pipeline to an arbitrary OS window handle (HWND / NSView / X11).
+    /// Enforces host GUI safety: editors must attach on the main/UI thread only.
     pub fn attach<W: DriHostWindow>(&mut self, window: &W) -> Result<(), &'static str> {
         let handle = window.raw_handle();
         match handle {

@@ -204,6 +204,10 @@ pub trait Plugin: Send + 'static {
     /// Configures audio stream parameters before processing begins.
     fn prepare(&mut self, sample_rate: f32, max_block: usize, channels: usize);
 
+    /// Informs the plugin if the host is rendering offline (e.g. bounce/export) rather than realtime playback.
+    /// Plugins can use this to engage higher-order oversampling or non-realtime precision modes.
+    fn set_offline(&mut self, _offline: bool) {}
+
     /// Resets internal filter history, delay lines, and voice states.
     fn reset(&mut self);
 
