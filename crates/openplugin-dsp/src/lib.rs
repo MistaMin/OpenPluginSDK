@@ -6,12 +6,16 @@
 //! - [`VuMeter`]: ANSI standard 300 ms ballistic level detector.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 
+pub mod adaa;
 pub mod biquad;
 pub mod dynamics;
 pub mod meter;
+pub mod oversampling;
 pub mod saturation;
 
+pub use adaa::{Adaa2Taylor, ResidualAdaa1};
 pub use biquad::{Biquad, FilterType};
 pub use dynamics::Compressor;
 pub use meter::VuMeter;
+pub use oversampling::{OversampleFactor, Oversampler2x};
 pub use saturation::{SaturationMode, saturate_sample};

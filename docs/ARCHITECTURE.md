@@ -11,6 +11,8 @@ L0: Core Contracts (openplugin-core)
     - Plugin trait, ParamInfo, Transport, Unit, Taper, Events
 L1: Algorithms & DSP (openplugin-dsp)
     - Biquad filters, Dynamics (Compressor/Limiter/Gate), Saturation, Metering
+    - Antiderivative Anti-Aliasing (ADAA1 Residual, ADAA2 Taylor)
+    - Polyphase Half-Band Resamplers (2x, 4x Oversampling)
 L2: Direct Rendering Interface (openplugin-dri)
     - GoodLookin procedural vector engines, 47 knob styles, 40 plates, VU ballistics
 L3: Target Format Adapters (openplugin-targets)

@@ -16,7 +16,7 @@ pub use openplugin_targets as targets;
 
 pub mod prelude {
     pub use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Taper, Transport, Unit};
-    pub use openplugin_dsp::{Biquad, Compressor, FilterType, SaturationMode, VuMeter, saturate_sample};
+    pub use openplugin_dsp::{Adaa2Taylor, Biquad, Compressor, FilterType, OversampleFactor, Oversampler2x, ResidualAdaa1, SaturationMode, VuMeter, saturate_sample};
     pub use openplugin_dri::{Color, DrawList, FaceplateStyle, KnobStyle, MeterStyle, draw_faceplate, draw_knob, draw_vu_meter};
     pub use openplugin_targets::{AaxAdapter, AuAdapter, ClapAdapter, StandaloneRunner, Vst3Adapter};
 }
