@@ -1,0 +1,28 @@
+# GoodLookin DRI (Direct Rendering Interface) Guide
+
+## Summary
+
+GoodLookin DRI provides hardware-accurate, procedural vector rendering for audio plugin user interfaces without any JUCE dependency.
+
+## Aesthetic System
+
+### 1. Procedural Knobs
+47 procedural styles rendered through vector geometry and lighting:
+- `KnobStyle::Brit`: Classic vintage British console fluted skirt with distinct colored caps (Red, Blue, Green, Cream).
+- `KnobStyle::N`: Knurled industrial discrete channel strip dials.
+- `KnobStyle::A`: Precision studio pointer knobs with radial markers.
+- `KnobStyle::Bakelite`: Heavy vintage fluted bakelite with deep drop-shadows and engraved white indicators.
+- `KnobStyle::Metal` / `Chrome`: Machined concentric metallic specular rings.
+- `KnobStyle::Wood`: Hand-finished studio mahogany and walnut knobs.
+- `KnobStyle::Neon` / `Digital`: Cyberpunk neon rings and high-contrast digital displays.
+
+### 2. Faceplates
+40 plate finishes generated without bitmap images:
+- `FaceplateStyle::BrushedAluminum`: Horizontal anodized grain lines.
+- `FaceplateStyle::BritishConsole`: Classic olive/navy console finish with recessed beveled boundary.
+- `FaceplateStyle::DarkAnodized`: Matte black 19-inch rack unit aesthetic.
+- `FaceplateStyle::Cyberpunk`: High-contrast dark chassis with cyan/magenta neon edge glows.
+
+### 3. Ballistic Meters
+- `MeterStyle::AnalogVu`: 300 ms ANSI C16.5 ballistic integration with illuminated warm yellow incandescent dial face.
+- `MeterStyle::Ppm`: Fast peak programme meter with quick rise and slow fall times.

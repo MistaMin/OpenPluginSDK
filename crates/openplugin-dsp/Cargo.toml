@@ -1,0 +1,14 @@
+[package]
+name = "openplugin-dsp"
+description = "Textbook, realtime-safe DSP building blocks (filters, dynamics, reverbs, delays, saturation, meters)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openplugin-core = { workspace = true }
+serde = { workspace = true }
+rustfft = { workspace = true }
+log = { workspace = true }

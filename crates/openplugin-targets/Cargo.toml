@@ -1,0 +1,23 @@
+[package]
+name = "openplugin-targets"
+description = "Export targets and format bridges for OpenPluginSDK: CLAP, VST3, AU, AAX, Standalone"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openplugin-core = { workspace = true }
+openplugin-dri = { workspace = true }
+raw-window-handle = { workspace = true }
+cpal = { workspace = true, optional = true }
+log = { workspace = true }
+
+[features]
+default = ["clap", "vst3", "au", "aax", "standalone"]
+clap = []
+vst3 = []
+au = []
+aax = []
+standalone = ["dep:cpal"]

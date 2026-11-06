@@ -1,0 +1,9 @@
+[package]
+name = "example-gain"
+description = "Simple gain and saturation plugin built with OpenPluginSDK"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openplugin = { workspace = true }

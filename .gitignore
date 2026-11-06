@@ -1,0 +1,14 @@
+/target/
+**/*.rs.bk
+*.pdb
+*.obj
+*.exe
+*.dll
+*.dylib
+*.so
+*.vst3
+*.clap
+*.component
+*.aaxplugin
+.DS_Store
+Thumbs.db
