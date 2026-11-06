@@ -11,7 +11,7 @@
 
 ## Summary
 
-**OpenPluginSDK** is a clean-room, pure-Rust audio plugin framework designed to build high-performance, real-time safe audio plugins and virtual instruments that run everywhere.
+**OpenPluginSDK** is an independent, pure-Rust audio plugin framework designed to build high-performance, real-time safe audio plugins and virtual instruments that run everywhere.
 
 It combines:
 1. **Realtime-safe DSP core:** Zero-allocation processing loop (`process()`), hostile parameter sanitization, and no panics.
@@ -208,7 +208,7 @@ impl SaturatorPlugin {
 Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. Exposes standard C ABI via `openplugin_targets::clap`.
 
 ### VST3
-Steinberg VST3 compatibility via clean-room COM interface implementations (`IComponent`, `IEditController`, `IPlugView`).
+Steinberg VST3 compatibility via independent COM interface implementations (`IComponent`, `IEditController`, `IPlugView`).
 
 ### Audio Unit (macOS)
 Direct AUv2 `AudioComponent` wrapper and Cocoa view bridging for native Logic Pro, GarageBand, and macOS DAW compatibility.
