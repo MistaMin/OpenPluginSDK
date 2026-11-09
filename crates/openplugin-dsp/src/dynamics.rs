@@ -58,7 +58,11 @@ impl Compressor {
             }
 
             let input_db = 20.0 * max_abs.log10();
-            let coef = if input_db > self.envelope_db { att_coef } else { rel_coef };
+            let coef = if input_db > self.envelope_db {
+                att_coef
+            } else {
+                rel_coef
+            };
             self.envelope_db = input_db + coef * (self.envelope_db - input_db);
 
             // Compute target gain reduction with soft knee

@@ -10,6 +10,49 @@
 
 #![deny(unsafe_code)]
 
+pub mod automation;
+pub mod midi;
+pub mod plane;
+pub mod ramp;
+pub mod seqlock;
+pub mod smooth;
+pub mod spsc;
+pub mod state;
+
+pub use automation::{
+    AutomationInterpolation, AutomationLane, AutomationMode, CurveInterpolation, LaneMode,
+};
+pub use plane::{ParamCursor, ParamPlane};
+pub use ramp::SampleRamp;
+pub use seqlock::Seqlock;
+pub use smooth::OnePole;
+pub use state::{
+    decode_params, encode_params, restore_params, AbCompare, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
+};
+
+/// Levels the audio thread publishes for an editor. Decibels, not linear gain.
+/// Reduction is positive attenuation from the dynamics envelope.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeterFrame {
+    pub input_db: [f32; 2],
+    pub output_db: [f32; 2],
+    pub reduction_db: f32,
+}
+
+impl MeterFrame {
+    pub const SILENT: Self = Self {
+        input_db: [-100.0, -100.0],
+        output_db: [-100.0, -100.0],
+        reduction_db: 0.0,
+    };
+}
+
+impl Default for MeterFrame {
+    fn default() -> Self {
+        Self::SILENT
+    }
+}
+
 /// Plugin category for host menus and classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Category {
@@ -61,10 +104,20 @@ pub struct ParamInfo {
     pub taper: Taper,
     /// Choice labels for `Unit::Choice` (value is integer index).
     pub choices: &'static [&'static str],
+    /// Discrete positions including the endpoints. `0` or `1` means continuous.
+    /// A JUCE host turns this into `(max - min) / (steps - 1)`.
+    pub steps: u32,
 }
 
 impl ParamInfo {
-    pub const fn new(id: &'static str, name: &'static str, min: f32, max: f32, default: f32, unit: Unit) -> Self {
+    pub const fn new(
+        id: &'static str,
+        name: &'static str,
+        min: f32,
+        max: f32,
+        default: f32,
+        unit: Unit,
+    ) -> Self {
         Self {
             id,
             name,
@@ -74,11 +127,18 @@ impl ParamInfo {
             unit,
             taper: Taper::Linear,
             choices: &[],
+            steps: 0,
         }
     }
 
     pub const fn with_taper(mut self, taper: Taper) -> Self {
         self.taper = taper;
+        self
+    }
+
+    /// Snap the value to `steps` positions, including both endpoints.
+    pub const fn with_steps(mut self, steps: u32) -> Self {
+        self.steps = steps;
         self
     }
 
@@ -92,10 +152,24 @@ impl ParamInfo {
     pub fn clamp(&self, value: f32) -> f32 {
         let v = if value.is_nan() { self.default } else { value };
         let v = v.clamp(self.min, self.max);
-        match self.unit {
+        let v = match self.unit {
             Unit::Toggle | Unit::Choice => v.round().clamp(self.min, self.max),
             _ => v,
+        };
+        self.snap_steps(v)
+    }
+
+    fn snap_steps(&self, value: f32) -> f32 {
+        if self.steps <= 1 || matches!(self.unit, Unit::Toggle | Unit::Choice) {
+            return value;
         }
+        let span = self.max - self.min;
+        let divisions = (self.steps - 1) as f32;
+        if span <= 0.0 || !divisions.is_finite() {
+            return value;
+        }
+        let position = ((value - self.min) / span * divisions).round() / divisions;
+        self.min + span * position.clamp(0.0, 1.0)
     }
 
     /// Maps a raw value to normalized 0..1 travel honoring the taper.
@@ -106,7 +180,9 @@ impl ParamInfo {
             return 0.0;
         }
         match self.taper {
-            Taper::Log if self.min > 0.0 => ((v / self.min).ln() / (self.max / self.min).ln()).clamp(0.0, 1.0),
+            Taper::Log if self.min > 0.0 => {
+                ((v / self.min).ln() / (self.max / self.min).ln()).clamp(0.0, 1.0)
+            }
             _ => ((v - self.min) / span).clamp(0.0, 1.0),
         }
     }
@@ -214,8 +290,21 @@ pub trait Plugin: Send + 'static {
     /// Sets parameter value by ID. Returns false if ID is unrecognized.
     fn set_param(&mut self, id: &str, value: f32) -> bool;
 
+    /// Index form of [`Self::set_param`]. Hosts call this after reading a [`ParamPlane`].
+    fn set_param_index(&mut self, index: usize, value: f32) -> bool {
+        match self.info().params.get(index) {
+            Some(param) => self.set_param(param.id, value),
+            None => false,
+        }
+    }
+
     /// Retrieves current parameter value.
     fn param(&self, id: &str) -> Option<f32>;
+
+    /// Editor-facing levels. The audio thread publishes this through a [`Seqlock`].
+    fn meters(&self) -> MeterFrame {
+        MeterFrame::SILENT
+    }
 
     /// In-place planar audio processing.
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize);
@@ -250,6 +339,21 @@ pub trait Plugin: Send + 'static {
     /// Panic / All Notes Off.
     fn all_notes_off(&mut self) {}
 
+    /// Factory programs. `0` means the host shows no program list.
+    /// [`Self::preset_values`] is plain values in descriptor order and must
+    /// not touch DSP state: a JUCE message thread can read it during playback.
+    fn preset_count(&self) -> usize {
+        0
+    }
+
+    fn preset_name(&self, _index: usize) -> &'static str {
+        ""
+    }
+
+    fn preset_values(&self, _index: usize) -> Option<&'static [f32]> {
+        None
+    }
+
     /// Serializes plugin state into an opaque byte buffer.
     fn save_state(&mut self) -> Option<Vec<u8>> {
         None
@@ -258,5 +362,19 @@ pub trait Plugin: Send + 'static {
     /// Deserializes and restores state from an opaque byte buffer.
     fn load_state(&mut self, _data: &[u8]) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discrete_steps_snap_and_continuous_values_do_not() {
+        let stepped = ParamInfo::new("mode", "Mode", 0.0, 4.0, 0.0, Unit::None).with_steps(5);
+        assert_eq!(stepped.clamp(1.2), 1.0);
+        assert_eq!(stepped.clamp(1.6), 2.0);
+        let smooth = ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db);
+        assert!((smooth.clamp(1.2) - 1.2).abs() < 1e-6);
     }
 }

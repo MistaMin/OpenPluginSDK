@@ -1,4 +1,7 @@
-//! Avid Audio eXtension (AAX) target bridge for Pro Tools parity.
+//! AAX descriptor types.
+//!
+//! A host cannot load these. The working from-scratch AAX shell is OpenGridder's
+//! `native/aax/OpenGridder.mm`, and it still needs the Avid SDK to build.
 
 use openplugin_core::Plugin;
 

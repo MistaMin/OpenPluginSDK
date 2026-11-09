@@ -1,0 +1,17 @@
+[package]
+name = "openplugin-ffi"
+description = "C ABI a JUCE or native host links against an OpenPluginSDK plugin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+openplugin-core = { workspace = true }
+
+[dev-dependencies]
+openplugin-core = { workspace = true }
+
+[lib]
+crate-type = ["rlib"]

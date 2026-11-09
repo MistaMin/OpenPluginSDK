@@ -2,7 +2,9 @@
 
 ## Summary
 
-GoodLookin DRI provides hardware-accurate, procedural vector rendering for audio plugin user interfaces without any JUCE dependency.
+GoodLookin DRI draws through the GoodLookinDri crate. That crate is the JUCE-free port of the 47 knob styles, 40 faceplates, meters, faders, switches, and spectrum. `openplugin-dri` does not keep a second copy of those drawers.
+
+`draw_knob` and `draw_faceplate` accept the short style enums and call GoodLookinDri. `draw_knob_code` and `draw_faceplate_code` take any GoodLookin style code, for example `"Chk"` or `"Walnut"`.
 
 ## Aesthetic System
 

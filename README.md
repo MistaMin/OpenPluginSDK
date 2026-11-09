@@ -82,6 +82,7 @@ It combines:
 | [`openplugin-dsp`](crates/openplugin-dsp) | Realtime-safe DSP modules: RBJ biquads, dynamics, saturation, VU metering |
 | [`openplugin-dri`](crates/openplugin-dri) | GoodLookin procedural 3D hardware GUI engine (knobs, faceplates, meters) |
 | [`openplugin-targets`](crates/openplugin-targets) | Target bridges for CLAP, VST3, AU, AAX, and Standalone |
+| [`openplugin-ffi`](crates/openplugin-ffi) | C ABI static library a JUCE or native host links (`export_openplugin!`) |
 
 ---
 

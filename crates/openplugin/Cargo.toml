@@ -12,3 +12,4 @@ openplugin-core = { workspace = true }
 openplugin-dsp = { workspace = true }
 openplugin-dri = { workspace = true }
 openplugin-targets = { workspace = true }
+openplugin-ffi = { workspace = true }

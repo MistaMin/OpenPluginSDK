@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 openplugin-core = { workspace = true }
+goodlookindri = { workspace = true }
 serde = { workspace = true }
 raw-window-handle = { workspace = true }
 log = { workspace = true }

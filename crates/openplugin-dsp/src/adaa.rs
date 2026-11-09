@@ -205,7 +205,11 @@ fn evaluate_j(a: f32, b: f32) -> f32 {
     if d.abs() < 1e-4 {
         // Taylor expansion about b to eliminate 0/0 cancellation
         let mid = (a + 2.0 * b) / 3.0;
-        let q_val = if mid.abs() <= 1.0 { 1.5 * (mid - mid.powi(3) / 3.0) } else { mid.signum() };
+        let q_val = if mid.abs() <= 1.0 {
+            1.5 * (mid - mid.powi(3) / 3.0)
+        } else {
+            mid.signum()
+        };
         let q_d2 = if b.abs() <= 1.0 { -3.0 * b } else { 0.0 };
         0.5 * q_val + q_d2 * d * d / 72.0
     } else {

@@ -1,4 +1,7 @@
-//! macOS Audio Unit (AUv2 / AUv3) target bridge.
+//! Audio Unit descriptor types.
+//!
+//! A host cannot load these. The working from-scratch AU shell is OpenGridder's
+//! `native/au/OpenGridderAU.cpp`.
 
 use std::ffi::c_void;
 use openplugin_core::Plugin;

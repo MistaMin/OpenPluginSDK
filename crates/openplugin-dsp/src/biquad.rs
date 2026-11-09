@@ -42,7 +42,14 @@ impl Biquad {
     }
 
     /// Computes coefficients based on RBJ formulas.
-    pub fn configure(&mut self, filter_type: FilterType, sample_rate: f32, freq: f32, q: f32, gain_db: f32) {
+    pub fn configure(
+        &mut self,
+        filter_type: FilterType,
+        sample_rate: f32,
+        freq: f32,
+        q: f32,
+        gain_db: f32,
+    ) {
         let sr = sample_rate.max(1000.0);
         let f0 = freq.clamp(10.0, sr * 0.499);
         let q = q.max(0.01);
@@ -134,7 +141,9 @@ impl Biquad {
 
     #[inline]
     pub fn process_sample(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
         self.x2 = self.x1;
         self.x1 = x;
         self.y2 = self.y1;

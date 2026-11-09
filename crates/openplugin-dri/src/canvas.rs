@@ -1,4 +1,7 @@
-//! 2D Canvas abstraction and DrawList for hardware-accelerated rendering.
+//! 2D canvas. [`DrawList::scene`] is the GoodLookinDri command list. `commands` is a
+//! flattened copy for hosts that only draw rectangles, ellipses, lines, arcs, and text.
+
+use goodlookindri::scene::Scene;
 
 use crate::styles::Color;
 
@@ -18,15 +21,18 @@ pub enum DrawCmd {
 #[derive(Debug, Default, Clone)]
 pub struct DrawList {
     pub commands: Vec<DrawCmd>,
+    /// Full GoodLookinDri scene. This is the drawing the knob and plate styles actually produce.
+    pub scene: Scene,
 }
 
 impl DrawList {
     pub fn new() -> Self {
-        Self { commands: Vec::with_capacity(512) }
+        Self { commands: Vec::with_capacity(512), scene: Scene::new() }
     }
 
     pub fn clear(&mut self) {
         self.commands.clear();
+        self.scene.clear();
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {

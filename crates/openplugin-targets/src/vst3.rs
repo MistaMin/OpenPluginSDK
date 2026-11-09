@@ -1,4 +1,8 @@
-//! VST3 target export bridge.
+//! VST3 descriptor types.
+//!
+//! These are the COM layouts only. A host cannot load them. The working from-scratch
+//! VST3 shell is OpenGridder's `native/vst3/OpenGridderVST3.mm`. Porting it means
+//! separating that shell from the offload client, the same way the CLAP bridge was.
 
 use std::ffi::c_void;
 use openplugin_core::Plugin;
