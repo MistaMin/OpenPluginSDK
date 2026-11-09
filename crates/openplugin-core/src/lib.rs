@@ -105,7 +105,7 @@ pub struct ParamInfo {
     /// Choice labels for `Unit::Choice` (value is integer index).
     pub choices: &'static [&'static str],
     /// Discrete positions including the endpoints. `0` or `1` means continuous.
-    /// A JUCE host turns this into `(max - min) / (steps - 1)`.
+    /// A host turns this into `(max - min) / (steps - 1)`.
     pub steps: u32,
 }
 
@@ -341,7 +341,7 @@ pub trait Plugin: Send + 'static {
 
     /// Factory programs. `0` means the host shows no program list.
     /// [`Self::preset_values`] is plain values in descriptor order and must
-    /// not touch DSP state: a JUCE message thread can read it during playback.
+    /// not touch DSP state: a message thread can read it during playback.
     fn preset_count(&self) -> usize {
         0
     }

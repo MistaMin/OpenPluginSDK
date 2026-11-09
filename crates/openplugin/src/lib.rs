@@ -8,7 +8,7 @@
 //! - [`dsp`]: Standard library of textbook, realtime-safe DSP filters and dynamics.
 //! - [`dri`]: Procedural hardware GUI engine (GoodLookin DRI).
 //! - [`targets`]: Host target bridges (CLAP, VST3, AU, AAX, LV2, Standalone).
-//! - [`ffi`]: C ABI a JUCE or native host links as a static library.
+//! - [`ffi`]: Rust host session. A host writes the parameter plane and renders through scratch.
 
 pub use openplugin_core as core;
 pub use openplugin_dri as dri;

@@ -26,11 +26,10 @@ L3: Target Format Adapters (openplugin-targets)
     - LV2 descriptor: ports 0 and 1 in, 2 and 3 out, same parameter plane
     - VST3, AU, and AAX are descriptor layouts. The working shells are still in OpenGridder
       and should talk to the plugin through ParamPlane, the way OpenGridder's insert bridge does
-    - openplugin-ffi is the staticlib a JUCE processor links. export_openplugin! emits op_*
-      for one plugin: spec table (steps and log skew), plane writes, stereo/planar/interleaved
-      process through a scratch buffer allocated in prepare, factory presets, and an OPST snapshot. The header is
-      crates/openplugin-ffi/include/openplugin.h. cmake/OpenPluginRust.cmake is the cargo and
-      lipo step. Faceplate rasters stay in the product.
+    - openplugin-ffi is a Rust host session. FfiInstance publishes the parameter
+      plane, renders stereo, planar, and interleaved blocks through scratch
+      allocated in prepare, applies factory presets, and saves an OPST snapshot.
+      Faceplate rasters stay in the product.
 L4: Public Facade (openplugin)
     - Single-entrypoint prelude and ergonomics
 ```
