@@ -2,7 +2,7 @@
 
 Filter modes and processing cost of one six-band equaliser, built twice.
 
-FreEQ is the same equaliser in two languages. The Rust realisation sits on this SDK. The C++ realisation uses JUCE, compiled against 8.0.17-security and against 9.0.5. This note follows the work from the first filters to the convolver that now plays the long impulses, and it records the measurements taken after that change.
+FreEQ is the same equaliser in two languages. The Rust realisation sits on this SDK. Its picture and its spectrum are GoodLookin DRI: the `goodlookindri` crate draws the face, and `goodlookindri-shell` opens the window. The C++ realisation uses JUCE, compiled against 8.0.17-security and against 9.0.5. The published FreEQ repository contains the OpenPlugin crate. The JUCE numbers below are from that comparison build. This note follows the work from the first filters to `BlockConvolver`, and it records the measurements taken after that change.
 
 ![OpenPlugin FreEQ](freeq/openplugin.png)
 
