@@ -14,7 +14,11 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
 use std::sync::Mutex;
 
-use openplugin_core::{MeterFrame, ParamCursor, ParamPlane, Plugin, Seqlock};
+use openplugin_core::{
+    encode_params, release_momentary, BusMeters, IoConfig, MeterFrame, ParamCursor, ParamFlags,
+    ParamInfo, ParamPlane, Plugin, PortKind, Seqlock, SpeakerLayout, Tail, Transport,
+    MAX_AUDIO_CHANNELS,
+};
 
 use crate::clap_abi::*;
 
@@ -63,8 +67,7 @@ fn publish() -> Option<&'static Published> {
             cstring(info.version),
             cstring(info.name),
         ];
-        let kind = if info.is_instrument { "instrument" } else { "audio-effect" };
-        let features_owned = vec![cstring(kind), cstring("stereo")];
+        let features_owned = feature_labels(plugin.as_ref()).into_iter().map(cstring).collect();
         let mut published = Box::new(Published {
             owned,
             features_owned,
@@ -119,6 +122,7 @@ struct Sched {
     value: f32,
     note: u8,
     velocity: u8,
+    channel: u8,
     midi: [u8; 3],
 }
 
@@ -131,6 +135,7 @@ impl Sched {
             value: 0.0,
             note: 0,
             velocity: 0,
+            channel: 0,
             midi: [0; 3],
         }
     }
@@ -145,11 +150,18 @@ struct Instance {
     plane: ParamPlane,
     cursor: ParamCursor,
     meters: Seqlock<MeterFrame>,
+    bus_meters: Seqlock<BusMeters>,
     sched: [Sched; MAX_SCHED],
     sched_count: usize,
     buffers: Vec<Vec<f32>>,
+    sidechain: Vec<Vec<f32>>,
     sample_rate: f32,
     max_block: usize,
+    host: *const clap_host,
+    reported_latency: u32,
+    reported_tail: Option<u32>,
+    layout_index: u32,
+    activated: bool,
 }
 
 fn instance<'a>(plugin: *const clap_plugin) -> Option<&'a mut Instance> {
@@ -217,11 +229,13 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
             EVENT_NOTE_ON => {
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_note) };
                 let velocity = (event.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
+                let channel = if event.channel < 0 { 0 } else { event.channel.min(15) as u8 };
                 push_sched(instance, Sched {
                     time: header.time,
                     kind: KIND_NOTE_ON,
                     note: event.key as u8,
                     velocity,
+                    channel,
                     ..Sched::empty()
                 });
             }
@@ -265,7 +279,7 @@ fn apply_group(instance: &mut Instance, start: usize, end: usize) {
                 instance.plane.store(event.param as usize, event.value);
                 dirty = true;
             }
-            KIND_NOTE_ON => instance.inner.note_on(0, event.note, event.velocity),
+            KIND_NOTE_ON => instance.inner.note_on_channel(0, event.channel, event.note, event.velocity),
             KIND_NOTE_OFF => instance.inner.note_off(0, event.note),
             KIND_MIDI => instance.inner.midi(0, event.midi),
             _ => {}
@@ -273,50 +287,81 @@ fn apply_group(instance: &mut Instance, start: usize, end: usize) {
     }
     if dirty {
         instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+        sync_bypass(instance);
+    }
+}
+
+fn copy_bus(buffers: &mut [Vec<f32>], input: &clap_audio_buffer, start: usize, frames: usize) {
+    let host_channels = input.channel_count as usize;
+    for (channel, dst_buf) in buffers.iter_mut().enumerate() {
+        let dst = &mut dst_buf[..frames];
+        if channel >= host_channels || input.data32.is_null() {
+            dst.fill(0.0);
+            continue;
+        }
+        let src = unsafe { *input.data32.add(channel) };
+        if src.is_null() {
+            dst.fill(0.0);
+        } else {
+            let samples = unsafe { std::slice::from_raw_parts(src.add(start), frames) };
+            dst.copy_from_slice(samples);
+        }
     }
 }
 
 fn process_span(
     instance: &mut Instance,
     input: &clap_audio_buffer,
+    sidechain: Option<&clap_audio_buffer>,
     output: &mut clap_audio_buffer,
-    in_channels: usize,
-    out_channels: usize,
     start: usize,
     end: usize,
 ) {
     let n = end.saturating_sub(start);
-    if n == 0 || instance.buffers.len() < 2 || instance.buffers[0].len() < n {
+    if n == 0 || instance.buffers.is_empty() || instance.buffers[0].len() < n {
         return;
     }
-    for channel in 0..2 {
-        let src_channel = if channel < in_channels { channel } else { 0 };
-        let src = unsafe { *input.data32.add(src_channel) };
-        let dst = &mut instance.buffers[channel][..n];
-        if src.is_null() {
-            dst.fill(0.0);
-        } else {
-            let samples = unsafe { std::slice::from_raw_parts(src.add(start), n) };
-            dst.copy_from_slice(samples);
+    copy_bus(&mut instance.buffers, input, start, n);
+    if let Some(side) = sidechain {
+        if !instance.sidechain.is_empty() && instance.sidechain[0].len() >= n {
+            copy_bus(&mut instance.sidechain, side, start, n);
+        }
+    } else {
+        for channel in &mut instance.sidechain {
+            channel[..n].fill(0.0);
         }
     }
-    instance.inner.process(&mut instance.buffers, n);
+    let Instance {
+        inner,
+        buffers,
+        sidechain,
+        ..
+    } = instance;
+    let sidechain_arg = if sidechain.is_empty() {
+        None
+    } else {
+        Some(sidechain.as_slice())
+    };
+    inner.process_buses(buffers, sidechain_arg, n);
+    let out_channels = (output.channel_count as usize).min(buffers.len());
+    if output.data32.is_null() {
+        return;
+    }
     for channel in 0..out_channels {
         let dst = unsafe { *output.data32.add(channel) };
         if dst.is_null() {
             continue;
         }
         let out = unsafe { std::slice::from_raw_parts_mut(dst.add(start), n) };
-        out.copy_from_slice(&instance.buffers[channel][..n]);
+        out.copy_from_slice(&buffers[channel][..n]);
     }
 }
 
 fn render_block(
     instance: &mut Instance,
     input: &clap_audio_buffer,
+    sidechain: Option<&clap_audio_buffer>,
     output: &mut clap_audio_buffer,
-    in_channels: usize,
-    out_channels: usize,
     frames: usize,
 ) {
     let max_block = instance.max_block.max(1);
@@ -326,6 +371,7 @@ fn render_block(
     while done < frames {
         let chunk_end = (done + max_block).min(frames);
         instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+        sync_bypass(instance);
         let mut cursor = done;
         while event < count {
             let raw = instance.sched[event].time as usize;
@@ -334,7 +380,7 @@ fn render_block(
             }
             let at = raw.clamp(done, chunk_end);
             if at > cursor {
-                process_span(instance, input, output, in_channels, out_channels, cursor, at);
+                process_span(instance, input, sidechain, output, cursor, at);
                 cursor = at;
             }
             let group_time = instance.sched[event].time;
@@ -345,11 +391,14 @@ fn render_block(
             apply_group(instance, group_start, event);
         }
         if cursor < chunk_end {
-            process_span(instance, input, output, in_channels, out_channels, cursor, chunk_end);
+            process_span(instance, input, sidechain, output, cursor, chunk_end);
         }
         done = chunk_end;
     }
     instance.meters.publish(instance.inner.meters());
+    instance.bus_meters.publish(instance.inner.bus_meters());
+    watch_latency(instance);
+    watch_tail(instance);
 }
 
 unsafe extern "C" fn plugin_init(plugin: *const clap_plugin) -> bool {
@@ -368,18 +417,35 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
 
 unsafe extern "C" fn plugin_activate(plugin: *const clap_plugin, sample_rate: f64, _min_frames: u32, max_frames: u32) -> bool {
     let Some(instance) = instance(plugin) else { return false };
-    let rate = if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate as f32 } else { 48_000.0 };
+    if !sample_rate.is_finite() || sample_rate <= 0.0 {
+        return false;
+    }
+    let rate = sample_rate as f32;
+    if !instance.inner.accepts_sample_rate(rate) {
+        return false;
+    }
     let max_block = max_frames.max(1) as usize;
+    let layout = selected_layout(instance);
+    let main = layout.main_channels().clamp(1, MAX_AUDIO_CHANNELS);
+    let side = layout.sidechain_channels().min(MAX_AUDIO_CHANNELS);
     instance.sample_rate = rate;
     instance.max_block = max_block;
-    instance.buffers = vec![vec![0.0; max_block]; 2];
-    instance.inner.prepare(rate, max_block, 2);
+    instance.buffers = vec![vec![0.0; max_block]; main];
+    instance.sidechain = vec![vec![0.0; max_block]; side];
+    instance.inner.prepare_layout(rate, max_block, layout);
     instance.cursor.invalidate();
     instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+    sync_bypass(instance);
+    notify_latency(instance);
+    instance.activated = true;
     true
 }
 
-unsafe extern "C" fn plugin_deactivate(_plugin: *const clap_plugin) {}
+unsafe extern "C" fn plugin_deactivate(plugin: *const clap_plugin) {
+    if let Some(instance) = instance(plugin) {
+        instance.activated = false;
+    }
+}
 
 unsafe extern "C" fn plugin_start(_plugin: *const clap_plugin) -> bool {
     true
@@ -400,51 +466,135 @@ unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const 
     }
     let process = unsafe { &*process };
     collect_events(instance, process.in_events);
-    if process.frames_count == 0 || process.audio_inputs_count == 0 || process.audio_outputs_count == 0 {
+    apply_transport(instance, process.transport, process.steady_time);
+    if process.frames_count == 0 || process.audio_outputs_count == 0 {
         if instance.sched_count > 0 {
             let count = instance.sched_count;
             apply_group(instance, 0, count);
         }
+        watch_latency(instance);
+        watch_tail(instance);
         return PROCESS_CONTINUE;
     }
-    if process.audio_inputs.is_null() || process.audio_outputs.is_null() {
+    if process.audio_outputs.is_null() {
         return PROCESS_ERROR;
     }
-    let input = unsafe { &*process.audio_inputs };
     let output = unsafe { &mut *process.audio_outputs };
-    if input.data32.is_null() || output.data32.is_null() {
+    if output.data32.is_null() {
         return PROCESS_ERROR;
     }
     let frames = process.frames_count as usize;
-    let in_channels = input.channel_count.min(2) as usize;
-    let out_channels = output.channel_count.min(2) as usize;
-    if in_channels == 0 || out_channels == 0 {
-        return PROCESS_CONTINUE;
-    }
-    if instance.buffers.len() < 2 {
+    let layout = selected_layout(instance);
+    let (input, sidechain) = if process.audio_inputs_count == 0 || process.audio_inputs.is_null() {
+        (None, None)
+    } else {
+        let input = unsafe { &*process.audio_inputs };
+        let side = if process.audio_inputs_count > 1 && layout.sidechain_channels() > 0 {
+            Some(unsafe { &*process.audio_inputs.add(1) })
+        } else {
+            None
+        };
+        (Some(input), side)
+    };
+    if instance.buffers.is_empty() {
         return PROCESS_ERROR;
     }
-    render_block(instance, input, output, in_channels, out_channels, frames);
+    if let Some(input) = input {
+        if input.data32.is_null() && layout.input_channels() > 0 {
+            return PROCESS_ERROR;
+        }
+        render_block(instance, input, sidechain, output, frames);
+    } else {
+        let silent = clap_audio_buffer {
+            data32: std::ptr::null_mut(),
+            data64: std::ptr::null_mut(),
+            channel_count: 0,
+            latency: 0,
+            constant_mask: 0,
+        };
+        render_block(instance, &silent, None, output, frames);
+    }
+    if !process.out_events.is_null() {
+        drain_midi(instance, process.out_events);
+    }
     PROCESS_CONTINUE
 }
 
-unsafe extern "C" fn audio_ports_count(_plugin: *const clap_plugin, _is_input: bool) -> u32 {
-    1
+fn selected_layout(instance: &Instance) -> IoConfig {
+    instance
+        .inner
+        .supported_layouts()
+        .get(instance.layout_index as usize)
+        .copied()
+        .unwrap_or(IoConfig::STEREO)
 }
 
-unsafe extern "C" fn audio_ports_get(_plugin: *const clap_plugin, index: u32, is_input: bool, info: *mut clap_audio_port_info) -> bool {
-    if index != 0 || info.is_null() {
+fn port_type_ptr(layout: SpeakerLayout) -> *const c_char {
+    let bytes: &'static [u8] = match layout.kind() {
+        PortKind::Mono => PORT_MONO,
+        PortKind::Stereo => PORT_STEREO,
+        PortKind::Surround => PORT_SURROUND,
+        PortKind::Ambisonic => PORT_AMBISONIC,
+        PortKind::Empty | PortKind::Discrete => return std::ptr::null(),
+    };
+    bytes.as_ptr() as *const c_char
+}
+
+fn write_audio_port(info: &mut clap_audio_port_info, id: u32, name: &str, layout: SpeakerLayout, main: bool) {
+    info.id = id;
+    copy_cstr(&mut info.name, name);
+    info.flags = if main { AUDIO_PORT_IS_MAIN } else { 0 };
+    info.channel_count = layout.channels().unwrap_or(0) as u32;
+    info.port_type = port_type_ptr(layout);
+    info.in_place_pair = if main { id } else { CLAP_INVALID_ID };
+}
+
+fn layout_port(layout: IoConfig, is_input: bool, index: u32) -> Option<(u32, &'static str, SpeakerLayout, bool)> {
+    if is_input {
+        if layout.input != SpeakerLayout::Absent && index == 0 {
+            return Some((0, "Audio In", layout.input, true));
+        }
+        let side_index = if layout.input == SpeakerLayout::Absent { 0 } else { 1 };
+        if index == side_index {
+            if let Some(side) = layout.sidechain {
+                if side.channels().unwrap_or(0) > 0 {
+                    return Some((1, "Sidechain", side, false));
+                }
+            }
+        }
+        None
+    } else if index == 0 && layout.output != SpeakerLayout::Absent {
+        Some((0, "Audio Out", layout.output, true))
+    } else {
+        None
+    }
+}
+
+unsafe extern "C" fn audio_ports_count(plugin: *const clap_plugin, is_input: bool) -> u32 {
+    let Some(instance) = instance(plugin) else { return 0 };
+    let layout = selected_layout(instance);
+    if is_input {
+        let main = if layout.input == SpeakerLayout::Absent { 0 } else { 1 };
+        let side = if layout.sidechain_channels() > 0 { 1 } else { 0 };
+        main + side
+    } else if layout.output == SpeakerLayout::Absent {
+        0
+    } else {
+        1
+    }
+}
+
+unsafe extern "C" fn audio_ports_get(plugin: *const clap_plugin, index: u32, is_input: bool, info: *mut clap_audio_port_info) -> bool {
+    let Some(instance) = instance(plugin) else { return false };
+    if info.is_null() {
         return false;
     }
+    let Some((id, name, layout, main)) = layout_port(selected_layout(instance), is_input, index) else {
+        return false;
+    };
     unsafe {
         std::ptr::write_bytes(info, 0, 1);
-        let info = &mut *info;
-        info.id = 0;
-        copy_cstr(&mut info.name, if is_input { "Audio In" } else { "Audio Out" });
-        info.flags = AUDIO_PORT_IS_MAIN;
-        info.channel_count = 2;
-        info.port_type = c"stereo".as_ptr();
-        info.in_place_pair = 0;
+        write_audio_port(&mut *info, id, name, layout, main);
     }
     true
 }
@@ -454,8 +604,10 @@ static AUDIO_PORTS: clap_plugin_audio_ports = clap_plugin_audio_ports {
     get: Some(audio_ports_get),
 };
 
-unsafe extern "C" fn note_ports_count(_plugin: *const clap_plugin, is_input: bool) -> u32 {
-    if is_input { 1 } else { 0 }
+unsafe extern "C" fn note_ports_count(plugin: *const clap_plugin, is_input: bool) -> u32 {
+    let Some(instance) = instance(plugin) else { return 0 };
+    let ports = instance.inner.note_ports();
+    u32::from(if is_input { ports.input } else { ports.output })
 }
 
 unsafe extern "C" fn note_ports_get(_plugin: *const clap_plugin, index: u32, is_input: bool, info: *mut clap_note_port_info) -> bool {
@@ -498,7 +650,7 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
         std::ptr::write_bytes(info, 0, 1);
         let info = &mut *info;
         info.id = index;
-        info.flags = PARAM_IS_AUTOMATABLE;
+        info.flags = clap_param_flags(param);
         copy_cstr(&mut info.name, param.name);
         info.min_value = param.min as f64;
         info.max_value = param.max as f64;
@@ -565,7 +717,15 @@ unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_
     }
     let stream = unsafe { &*stream };
     let Some(write) = stream.write else { return false };
-    let Some(bytes) = instance.inner.save_state() else { return false };
+    let bytes = if let Some(custom) = instance.inner.save_state() {
+        custom
+    } else {
+        let info = instance.inner.info();
+        let values: Vec<f32> = (0..instance.plane.len())
+            .map(|index| instance.plane.load(index).unwrap_or(0.0))
+            .collect();
+        encode_params(info, &values)
+    };
     let wrote = unsafe { write(stream, bytes.as_ptr() as *const c_void, bytes.len() as u64) };
     wrote == bytes.len() as i64
 }
@@ -594,7 +754,361 @@ static STATE: clap_plugin_state = clap_plugin_state {
     load: Some(state_load),
 };
 
-unsafe extern "C" fn plugin_extension(_plugin: *const clap_plugin, id: *const c_char) -> *const c_void {
+fn clap_param_flags(param: &ParamInfo) -> u32 {
+    let stepped = param.flags.contains(ParamFlags::STEPPED)
+        || param.steps > 1
+        || !param.choices.is_empty()
+        || matches!(param.unit, openplugin_core::Unit::Toggle | openplugin_core::Unit::Choice);
+    let mut flags = 0;
+    if stepped {
+        flags |= PARAM_IS_STEPPED;
+    }
+    if param.flags.contains(ParamFlags::HIDDEN) {
+        flags |= PARAM_IS_HIDDEN;
+    }
+    if param.flags.contains(ParamFlags::READ_ONLY) {
+        flags |= PARAM_IS_READONLY;
+    }
+    if param.flags.contains(ParamFlags::BYPASS) {
+        flags |= PARAM_IS_BYPASS;
+    }
+    if param.flags.contains(ParamFlags::NOT_REALTIME) {
+        flags |= PARAM_REQUIRES_PROCESS;
+    }
+    if param.flags.contains(ParamFlags::AUTOMATABLE)
+        && !param.flags.contains(ParamFlags::READ_ONLY)
+        && !param.flags.contains(ParamFlags::NOT_REALTIME)
+    {
+        flags |= PARAM_IS_AUTOMATABLE;
+    }
+    flags
+}
+
+fn sync_bypass(instance: &mut Instance) {
+    let params = instance.inner.info().params;
+    for (index, param) in params.iter().enumerate() {
+        if !param.flags.contains(ParamFlags::BYPASS) {
+            continue;
+        }
+        let value = instance.plane.load(index).unwrap_or(param.default);
+        instance.inner.set_host_bypass(value >= 0.5);
+    }
+}
+
+fn host_call(host: *const clap_host, id: &[u8]) -> *const c_void {
+    if host.is_null() {
+        return std::ptr::null();
+    }
+    unsafe {
+        match (*host).get_extension {
+            Some(get) => get(host, id.as_ptr() as *const c_char),
+            None => std::ptr::null(),
+        }
+    }
+}
+
+fn request_restart(host: *const clap_host) {
+    if host.is_null() {
+        return;
+    }
+    unsafe {
+        if let Some(restart) = (*host).request_restart {
+            restart(host);
+        }
+    }
+}
+
+fn notify_latency(instance: &mut Instance) {
+    let now = instance.inner.latency().min(u32::MAX as usize) as u32;
+    if now == instance.reported_latency {
+        return;
+    }
+    let ext = host_call(instance.host, EXT_LATENCY) as *const clap_host_latency;
+    if !ext.is_null() {
+        unsafe {
+            if let Some(changed) = (*ext).changed {
+                changed(instance.host);
+            }
+        }
+    }
+    instance.reported_latency = now;
+}
+
+fn watch_latency(instance: &mut Instance) {
+    if !instance.activated {
+        return;
+    }
+    let now = instance.inner.latency().min(u32::MAX as usize) as u32;
+    if now != instance.reported_latency {
+        request_restart(instance.host);
+    }
+}
+
+fn watch_tail(instance: &mut Instance) {
+    let now = instance.inner.tail().clap_samples();
+    if now == instance.reported_tail {
+        return;
+    }
+    instance.reported_tail = now;
+    let ext = host_call(instance.host, EXT_TAIL) as *const clap_host_tail;
+    if !ext.is_null() {
+        unsafe {
+            if let Some(changed) = (*ext).changed {
+                changed(instance.host);
+            }
+        }
+    }
+}
+
+fn apply_transport(instance: &mut Instance, transport: *const clap_event_transport, steady_time: i64) {
+    if transport.is_null() {
+        return;
+    }
+    let transport = unsafe { &*transport };
+    let flags = transport.flags;
+    let mut info = Transport::default();
+    info.playing = flags & TRANSPORT_IS_PLAYING != 0;
+    info.recording = flags & TRANSPORT_IS_RECORDING != 0;
+    info.sample_pos = if steady_time >= 0 { steady_time } else { 0 };
+    if flags & TRANSPORT_HAS_TEMPO != 0 && transport.tempo.is_finite() {
+        info.tempo = transport.tempo;
+    }
+    if flags & TRANSPORT_HAS_SIGNATURE != 0 {
+        info.numerator = u32::from(transport.tsig_num);
+        info.denominator = u32::from(transport.tsig_denom);
+    }
+    let beat = (1i64 << 31) as f64;
+    if flags & TRANSPORT_HAS_BEATS != 0 {
+        info.quarter_notes = transport.song_pos_beats as f64 / beat;
+        info.bar_start = transport.bar_start as f64 / beat;
+        info.bar_number = i64::from(transport.bar_number);
+    }
+    if flags & TRANSPORT_HAS_SECONDS != 0 {
+        info.seconds = transport.song_pos_seconds as f64 / beat;
+    }
+    instance.inner.set_transport(&info);
+}
+
+fn drain_midi(instance: &mut Instance, out: *const clap_output_events) {
+    if out.is_null() {
+        return;
+    }
+    let out = unsafe { &*out };
+    let Some(push) = out.try_push else { return };
+    while let Some((time, data)) = instance.inner.pull_midi() {
+        let event = clap_event_midi {
+            header: clap_event_header {
+                size: std::mem::size_of::<clap_event_midi>() as u32,
+                time,
+                space_id: 0,
+                type_: EVENT_MIDI,
+                flags: 0,
+            },
+            port_index: 0,
+            data,
+        };
+        if !unsafe { push(out, &event.header) } {
+            break;
+        }
+    }
+}
+
+fn release_offline_momentary(instance: &mut Instance, offline: bool) {
+    if !offline {
+        return;
+    }
+    let params = instance.inner.info().params;
+    for (index, param) in params.iter().enumerate() {
+        if param.flags.contains(ParamFlags::MOMENTARY) {
+            instance.plane.store(index, param.default);
+        }
+    }
+    release_momentary(instance.inner.as_mut());
+}
+
+unsafe extern "C" fn tail_get(plugin: *const clap_plugin) -> u32 {
+    instance(plugin)
+        .and_then(|item| item.inner.tail().clap_samples())
+        .unwrap_or(0)
+}
+
+static TAIL: clap_plugin_tail = clap_plugin_tail { get: Some(tail_get) };
+
+unsafe extern "C" fn config_count(plugin: *const clap_plugin) -> u32 {
+    instance(plugin)
+        .map(|item| item.inner.supported_layouts().len() as u32)
+        .unwrap_or(0)
+}
+
+unsafe extern "C" fn config_get(plugin: *const clap_plugin, index: u32, config: *mut clap_audio_ports_config) -> bool {
+    let Some(instance) = instance(plugin) else { return false };
+    let Some(layout) = instance.inner.supported_layouts().get(index as usize).copied() else {
+        return false;
+    };
+    if config.is_null() {
+        return false;
+    }
+    unsafe {
+        std::ptr::write_bytes(config, 0, 1);
+        let config = &mut *config;
+        config.id = index;
+        copy_cstr(&mut config.name, &layout.name());
+        config.input_port_count = if layout.input == SpeakerLayout::Absent { 0 } else { 1 }
+            + u32::from(layout.sidechain_channels() > 0);
+        config.output_port_count = u32::from(layout.output != SpeakerLayout::Absent);
+        config.has_main_input = layout.input != SpeakerLayout::Absent;
+        config.main_input_channel_count = layout.input_channels() as u32;
+        config.main_input_port_type = port_type_ptr(layout.input);
+        config.has_main_output = layout.output != SpeakerLayout::Absent;
+        config.main_output_channel_count = layout.output_channels() as u32;
+        config.main_output_port_type = port_type_ptr(layout.output);
+    }
+    true
+}
+
+unsafe extern "C" fn config_select(plugin: *const clap_plugin, config_id: u32) -> bool {
+    let Some(instance) = instance(plugin) else { return false };
+    if instance.activated {
+        return false;
+    }
+    let Some(layout) = instance.inner.supported_layouts().get(config_id as usize).copied() else {
+        return false;
+    };
+    if !instance.inner.set_layout(layout) {
+        return false;
+    }
+    instance.layout_index = config_id;
+    true
+}
+
+static AUDIO_PORTS_CONFIG: clap_plugin_audio_ports_config = clap_plugin_audio_ports_config {
+    count: Some(config_count),
+    get: Some(config_get),
+    select: Some(config_select),
+};
+
+unsafe extern "C" fn config_current(plugin: *const clap_plugin) -> u32 {
+    instance(plugin).map(|item| item.layout_index).unwrap_or(CLAP_INVALID_ID)
+}
+
+unsafe extern "C" fn config_info_get(
+    plugin: *const clap_plugin,
+    config_id: u32,
+    port_index: u32,
+    is_input: bool,
+    info: *mut clap_audio_port_info,
+) -> bool {
+    let Some(instance) = instance(plugin) else { return false };
+    let Some(layout) = instance.inner.supported_layouts().get(config_id as usize).copied() else {
+        return false;
+    };
+    if info.is_null() {
+        return false;
+    }
+    let Some((id, name, speakers, main)) = layout_port(layout, is_input, port_index) else {
+        return false;
+    };
+    unsafe {
+        std::ptr::write_bytes(info, 0, 1);
+        write_audio_port(&mut *info, id, name, speakers, main);
+    }
+    true
+}
+
+static AUDIO_PORTS_CONFIG_INFO: clap_plugin_audio_ports_config_info = clap_plugin_audio_ports_config_info {
+    current_config: Some(config_current),
+    get: Some(config_info_get),
+};
+
+fn mask_supported(instance: &Instance, channel_mask: u64) -> bool {
+    instance.inner.supported_layouts().iter().any(|layout| {
+        layout.input.surround_mask() == Some(channel_mask) || layout.output.surround_mask() == Some(channel_mask)
+    })
+}
+
+unsafe extern "C" fn surround_supported(plugin: *const clap_plugin, channel_mask: u64) -> bool {
+    instance(plugin).map(|item| mask_supported(item, channel_mask)).unwrap_or(false)
+}
+
+unsafe extern "C" fn surround_map(
+    plugin: *const clap_plugin,
+    is_input: bool,
+    port_index: u32,
+    channel_map: *mut u8,
+    channel_map_capacity: u32,
+) -> u32 {
+    let Some(instance) = instance(plugin) else { return 0 };
+    let Some((_, _, layout, _)) = layout_port(selected_layout(instance), is_input, port_index) else {
+        return 0;
+    };
+    let Some(map) = layout.surround_map() else { return 0 };
+    if channel_map.is_null() || (channel_map_capacity as usize) < map.len() {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(map.as_ptr(), channel_map, map.len());
+    }
+    map.len() as u32
+}
+
+static SURROUND: clap_plugin_surround = clap_plugin_surround {
+    is_channel_mask_supported: Some(surround_supported),
+    get_channel_map: Some(surround_map),
+};
+
+unsafe extern "C" fn ambisonic_supported(_plugin: *const clap_plugin, config: *const clap_ambisonic_config) -> bool {
+    if config.is_null() {
+        return false;
+    }
+    let config = unsafe { &*config };
+    config.ordering == AMBISONIC_ORDERING_ACN && config.normalization == AMBISONIC_NORMALIZATION_SN3D
+}
+
+unsafe extern "C" fn ambisonic_get(
+    plugin: *const clap_plugin,
+    is_input: bool,
+    port_index: u32,
+    config: *mut clap_ambisonic_config,
+) -> bool {
+    let Some(instance) = instance(plugin) else { return false };
+    let Some((_, _, layout, _)) = layout_port(selected_layout(instance), is_input, port_index) else {
+        return false;
+    };
+    if layout.kind() != PortKind::Ambisonic || config.is_null() {
+        return false;
+    }
+    unsafe {
+        *config = clap_ambisonic_config {
+            ordering: AMBISONIC_ORDERING_ACN,
+            normalization: AMBISONIC_NORMALIZATION_SN3D,
+        };
+    }
+    true
+}
+
+static AMBISONIC: clap_plugin_ambisonic = clap_plugin_ambisonic {
+    is_config_supported: Some(ambisonic_supported),
+    get_config: Some(ambisonic_get),
+};
+
+unsafe extern "C" fn render_hard(_plugin: *const clap_plugin) -> bool {
+    false
+}
+
+unsafe extern "C" fn render_set(plugin: *const clap_plugin, mode: u32) -> bool {
+    let Some(instance) = instance(plugin) else { return false };
+    let offline = mode == RENDER_OFFLINE;
+    instance.inner.set_offline(offline);
+    release_offline_momentary(instance, offline);
+    true
+}
+
+static RENDER: clap_plugin_render = clap_plugin_render {
+    has_hard_realtime_requirement: Some(render_hard),
+    set: Some(render_set),
+};
+
+unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_char) -> *const c_void {
     if id.is_null() {
         return std::ptr::null();
     }
@@ -614,15 +1128,65 @@ unsafe extern "C" fn plugin_extension(_plugin: *const clap_plugin, id: *const c_
     if id == EXT_STATE {
         return &STATE as *const clap_plugin_state as *const c_void;
     }
+    if id == EXT_RENDER {
+        return &RENDER as *const clap_plugin_render as *const c_void;
+    }
+    if id == EXT_TAIL {
+        let unknown = instance(plugin).map(|item| item.inner.tail() == Tail::Unknown).unwrap_or(true);
+        if unknown {
+            return std::ptr::null();
+        }
+        return &TAIL as *const clap_plugin_tail as *const c_void;
+    }
+    if id == EXT_AUDIO_PORTS_CONFIG {
+        return &AUDIO_PORTS_CONFIG as *const clap_plugin_audio_ports_config as *const c_void;
+    }
+    if id == EXT_AUDIO_PORTS_CONFIG_INFO {
+        return &AUDIO_PORTS_CONFIG_INFO as *const clap_plugin_audio_ports_config_info as *const c_void;
+    }
+    if id == EXT_SURROUND || id == EXT_SURROUND_COMPAT {
+        return &SURROUND as *const clap_plugin_surround as *const c_void;
+    }
+    if id == EXT_AMBISONIC || id == EXT_AMBISONIC_COMPAT {
+        return &AMBISONIC as *const clap_plugin_ambisonic as *const c_void;
+    }
     std::ptr::null()
 }
 
 unsafe extern "C" fn plugin_main_thread(_plugin: *const clap_plugin) {}
 
-fn spawn(inner: Box<dyn Plugin>) -> *const clap_plugin {
+fn feature_labels(plugin: &dyn Plugin) -> Vec<&'static str> {
+    let mut labels = Vec::with_capacity(4);
+    labels.push(if plugin.info().is_instrument { "instrument" } else { "audio-effect" });
+    let layouts = plugin.supported_layouts();
+    let stereo = layouts.is_empty()
+        || layouts.iter().any(|layout| {
+            layout.input.kind() == PortKind::Stereo || layout.output.kind() == PortKind::Stereo
+        });
+    let surround = layouts.iter().any(|layout| {
+        layout.input.kind() == PortKind::Surround || layout.output.kind() == PortKind::Surround
+    });
+    let ambisonic = layouts.iter().any(|layout| {
+        layout.input.kind() == PortKind::Ambisonic || layout.output.kind() == PortKind::Ambisonic
+    });
+    if stereo || (!surround && !ambisonic) {
+        labels.push("stereo");
+    }
+    if surround {
+        labels.push("surround");
+    }
+    if ambisonic {
+        labels.push("ambisonic");
+    }
+    labels
+}
+
+fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
     let info = inner.info();
-    let kind = if info.is_instrument { "instrument" } else { "audio-effect" };
-    let strings = vec![
+    let labels = feature_labels(inner.as_ref());
+    let reported_latency = inner.latency().min(u32::MAX as usize) as u32;
+    let reported_tail = inner.tail().clap_samples();
+    let mut strings = vec![
         cstring(info.id),
         cstring(info.name),
         cstring(info.vendor),
@@ -631,9 +1195,10 @@ fn spawn(inner: Box<dyn Plugin>) -> *const clap_plugin {
         cstring(info.email),
         cstring(info.version),
         cstring(info.name),
-        cstring(kind),
-        cstring("stereo"),
     ];
+    for label in labels {
+        strings.push(cstring(label));
+    }
     let plane = ParamPlane::new(info);
     plane.seed_from(inner.as_ref());
     let cursor = ParamCursor::new(plane.len());
@@ -670,17 +1235,25 @@ fn spawn(inner: Box<dyn Plugin>) -> *const clap_plugin {
         plane,
         cursor,
         meters: Seqlock::new(MeterFrame::SILENT),
+        bus_meters: Seqlock::new(BusMeters::SILENT),
         sched: [Sched::empty(); MAX_SCHED],
         sched_count: 0,
         buffers: Vec::new(),
+        sidechain: Vec::new(),
         sample_rate: 48_000.0,
         max_block: 0,
+        host,
+        reported_latency,
+        reported_tail,
+        layout_index: 0,
+        activated: false,
     });
     let raw = Box::into_raw(instance);
     unsafe {
         let inst = &mut *raw;
         inst.plugin.plugin_data = raw as *mut c_void;
-        inst.feature_ptrs = vec![inst.strings[8].as_ptr(), inst.strings[9].as_ptr(), std::ptr::null()];
+        inst.feature_ptrs = inst.strings[8..].iter().map(|text| text.as_ptr()).collect();
+        inst.feature_ptrs.push(std::ptr::null());
         let s = |i: usize| inst.strings[i].as_ptr();
         inst.desc = clap_plugin_descriptor {
             clap_version: CLAP_VERSION,
@@ -707,7 +1280,7 @@ pub struct ClapAdapter<P: Plugin> {
 
 impl<P: Plugin + 'static> ClapAdapter<P> {
     pub fn new(inner: P) -> Self {
-        let raw = spawn(Box::new(inner));
+        let raw = spawn(Box::new(inner), std::ptr::null());
         unsafe {
             if let Some(init) = (*raw).init {
                 init(raw);
@@ -723,6 +1296,10 @@ impl<P: Plugin + 'static> ClapAdapter<P> {
     /// Last meter frame published by `process`.
     pub fn meters(&self) -> MeterFrame {
         instance(self.raw).map(|inst| inst.meters.read()).unwrap_or(MeterFrame::SILENT)
+    }
+
+    pub fn bus_meters(&self) -> BusMeters {
+        instance(self.raw).map(|inst| inst.bus_meters.read()).unwrap_or(BusMeters::SILENT)
     }
 
     pub fn activate(&mut self, sample_rate: f64, min_frames: u32, max_frames: u32) -> bool {
@@ -757,7 +1334,7 @@ unsafe extern "C" fn factory_descriptor(_factory: *const clap_plugin_factory, in
     publish().map(|published| &published.desc as *const clap_plugin_descriptor).unwrap_or(std::ptr::null())
 }
 
-unsafe extern "C" fn factory_create(_factory: *const clap_plugin_factory, _host: *const clap_host, plugin_id: *const c_char) -> *const clap_plugin {
+unsafe extern "C" fn factory_create(_factory: *const clap_plugin_factory, host: *const clap_host, plugin_id: *const c_char) -> *const clap_plugin {
     let Some(create) = creator() else { return std::ptr::null() };
     let Some(published) = publish() else { return std::ptr::null() };
     if plugin_id.is_null() {
@@ -768,7 +1345,7 @@ unsafe extern "C" fn factory_create(_factory: *const clap_plugin_factory, _host:
     if requested != published_id {
         return std::ptr::null();
     }
-    spawn(create())
+    spawn(create(), host)
 }
 
 static FACTORY: clap_plugin_factory = clap_plugin_factory {
@@ -1022,8 +1599,77 @@ mod tests {
             assert!(!ports.is_null());
             let latency = (*plugin).get_extension.unwrap()(plugin, c"clap.latency".as_ptr()) as *const clap_plugin_latency;
             assert_eq!((*latency).get.unwrap()(plugin), 0);
+            let tail = (*plugin).get_extension.unwrap()(plugin, c"clap.tail".as_ptr()) as *const clap_plugin_tail;
+            assert!(!tail.is_null());
+            assert_eq!((*tail).get.unwrap()(plugin), 0);
 
             (*plugin).destroy.unwrap()(plugin);
         }
+    }
+
+    static WIDE_LAYOUTS: &[openplugin_core::IoConfig] = &[
+        openplugin_core::IoConfig::STEREO,
+        openplugin_core::IoConfig {
+            input: openplugin_core::SpeakerLayout::Surround51,
+            output: openplugin_core::SpeakerLayout::Surround51,
+            sidechain: Some(openplugin_core::SpeakerLayout::Mono),
+        },
+    ];
+
+    struct Wide;
+
+    impl Plugin for Wide {
+        fn info(&self) -> &'static PluginInfo { &INFO }
+        fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+        fn reset(&mut self) {}
+        fn set_param(&mut self, _: &str, _: f32) -> bool { false }
+        fn param(&self, _: &str) -> Option<f32> { None }
+        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn supported_layouts(&self) -> &'static [openplugin_core::IoConfig] { WIDE_LAYOUTS }
+        fn accepts_sample_rate(&self, sample_rate: f32) -> bool {
+            sample_rate == 48_000.0 || sample_rate == 96_000.0
+        }
+    }
+
+    #[test]
+    fn surround_layout_adds_a_sidechain_and_a_channel_map() {
+        let adapter = ClapAdapter::new(Wide);
+        let plugin = adapter.as_plugin();
+        unsafe {
+            let ports = (*plugin).get_extension.unwrap()(plugin, c"clap.audio-ports".as_ptr()) as *const clap_plugin_audio_ports;
+            assert_eq!((*ports).count.unwrap()(plugin, true), 1);
+            let configs = (*plugin).get_extension.unwrap()(plugin, c"clap.audio-ports-config".as_ptr()) as *const clap_plugin_audio_ports_config;
+            assert_eq!((*configs).count.unwrap()(plugin), 2);
+            assert!((*configs).select.unwrap()(plugin, 1));
+            assert_eq!((*ports).count.unwrap()(plugin, true), 2);
+            let mut info = std::mem::zeroed::<clap_audio_port_info>();
+            assert!((*ports).get.unwrap()(plugin, 0, false, &mut info));
+            assert_eq!(info.channel_count, 6);
+            assert_eq!(CStr::from_ptr(info.port_type), c"surround");
+            let surround = (*plugin).get_extension.unwrap()(plugin, c"clap.surround/4".as_ptr()) as *const clap_plugin_surround;
+            let mut map = [0u8; 8];
+            let stored = (*surround).get_channel_map.unwrap()(plugin, false, 0, map.as_mut_ptr(), map.len() as u32);
+            assert_eq!(stored, 6);
+            assert_eq!(map[3], 3);
+            assert!(!(*plugin).activate.unwrap()(plugin, 11_025.0, 1, 64));
+            assert!((*plugin).activate.unwrap()(plugin, 48_000.0, 1, 32));
+            assert!(!(*configs).select.unwrap()(plugin, 0));
+        }
+    }
+
+    /// Sizes measured with clang on this aarch64 macOS host against CLAP 1.2.
+    #[test]
+    fn clap_structs_match_the_host_abi() {
+        use crate::clap_abi::{clap_audio_ports_config, clap_event_transport};
+        assert_eq!(std::mem::size_of::<clap_event_transport>(), 104);
+        assert_eq!(std::mem::offset_of!(clap_event_transport, bar_number), 96);
+        assert_eq!(std::mem::offset_of!(clap_event_transport, tsig_num), 100);
+        assert_eq!(std::mem::size_of::<clap_audio_ports_config>(), 304);
+        assert_eq!(std::mem::offset_of!(clap_audio_ports_config, has_main_input), 268);
+        assert_eq!(std::mem::offset_of!(clap_audio_ports_config, main_input_channel_count), 272);
+        assert_eq!(std::mem::offset_of!(clap_audio_ports_config, main_input_port_type), 280);
+        assert_eq!(std::mem::offset_of!(clap_audio_ports_config, has_main_output), 288);
+        assert_eq!(std::mem::offset_of!(clap_audio_ports_config, main_output_channel_count), 292);
+        assert_eq!(std::mem::offset_of!(clap_audio_ports_config, main_output_port_type), 296);
     }
 }

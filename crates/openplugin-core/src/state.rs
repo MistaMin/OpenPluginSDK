@@ -51,6 +51,65 @@ pub fn decode_params(info: &PluginInfo, bytes: &[u8]) -> Option<Vec<f32>> {
     Some(values)
 }
 
+pub const SESSION_MAGIC: &[u8; 4] = b"OPCH";
+pub const SESSION_VERSION: u16 = 1;
+
+/// Parameter plane plus the plugin's own chunk.
+///
+/// An old OPST blob decodes as a session with an empty chunk. A plugin that
+/// already returns its own document from [`Plugin::save_state`] keeps that
+/// document as `chunk`. The plane is stored beside it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Session {
+    pub values: Vec<f32>,
+    pub chunk: Vec<u8>,
+}
+
+/// OPCH envelope: magic, version, the OPST plane, then the opaque chunk.
+pub fn encode_session(info: &PluginInfo, values: &[f32], chunk: &[u8]) -> Vec<u8> {
+    let plane = encode_params(info, values);
+    let mut bytes = Vec::with_capacity(10 + plane.len() + 4 + chunk.len());
+    bytes.extend_from_slice(SESSION_MAGIC);
+    bytes.extend_from_slice(&SESSION_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(plane.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&plane);
+    bytes.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(chunk);
+    bytes
+}
+
+/// Accepts an OPCH session or a bare OPST plane. A bad length returns `None`.
+pub fn decode_session(info: &PluginInfo, bytes: &[u8]) -> Option<Session> {
+    if bytes.len() >= 4 && &bytes[0..4] == SNAPSHOT_MAGIC {
+        return decode_params(info, bytes).map(|values| Session {
+            values,
+            chunk: Vec::new(),
+        });
+    }
+    if bytes.len() < 10 || &bytes[0..4] != SESSION_MAGIC {
+        return None;
+    }
+    let version = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if version != SESSION_VERSION {
+        return None;
+    }
+    let plane_len = u32::from_le_bytes(bytes[6..10].try_into().ok()?) as usize;
+    let plane_end = 10usize.checked_add(plane_len)?;
+    if bytes.len() < plane_end.checked_add(4)? {
+        return None;
+    }
+    let values = decode_params(info, &bytes[10..plane_end])?;
+    let rest = &bytes[plane_end..];
+    let chunk_len = u32::from_le_bytes(rest[0..4].try_into().ok()?) as usize;
+    if rest.len() != 4 + chunk_len {
+        return None;
+    }
+    Some(Session {
+        values,
+        chunk: rest[4..].to_vec(),
+    })
+}
+
 /// Apply a decoded vector only after every entry has been checked.
 pub fn restore_params(plugin: &mut dyn Plugin, values: &[f32]) -> bool {
     let info = plugin.info();
@@ -203,5 +262,21 @@ mod tests {
         assert_eq!(plugin.db, -6.0);
         assert!(ab.toggle(&mut plugin));
         assert_eq!(plugin.db, 3.0);
+    }
+
+    #[test]
+    fn session_keeps_the_plane_and_the_chunk() {
+        let chunk = b"{\"program\":2}";
+        let bytes = encode_session(&INFO, &[3.5], chunk);
+        let session = decode_session(&INFO, &bytes).unwrap();
+        assert_eq!(session.values, vec![3.5]);
+        assert_eq!(session.chunk, chunk);
+        let plane = encode_params(&INFO, &[1.0]);
+        let old = decode_session(&INFO, &plane).unwrap();
+        assert_eq!(old.values, vec![1.0]);
+        assert!(old.chunk.is_empty());
+        let mut broken = bytes.clone();
+        broken.pop();
+        assert!(decode_session(&INFO, &broken).is_none());
     }
 }

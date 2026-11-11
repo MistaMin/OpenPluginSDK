@@ -18,9 +18,10 @@ pub use openplugin_targets as targets;
 
 pub mod prelude {
     pub use openplugin_core::{
-        decode_params, encode_params, restore_params, AbCompare, Category, MeterFrame, OnePole,
-        ParamCursor, ParamInfo, ParamPlane, Plugin, PluginInfo, SampleRamp, Seqlock, Taper,
-        Transport, Unit,
+        decode_params, decode_session, encode_params, encode_session, restore_params, AbCompare,
+        BusMeters, Category, IoConfig, MeterFrame, NotePorts, OnePole, ParamCursor, ParamFlags,
+        ParamInfo, ParamPlane, Plugin, PluginInfo, SampleRamp, Seqlock, SpeakerLayout, Tail,
+        Taper, Transport, Unit,
     };
     pub use openplugin_dri::{
         draw_faceplate, draw_faceplate_code, draw_fader, draw_knob, draw_knob_code, draw_pan_knob,
@@ -31,7 +32,8 @@ pub mod prelude {
         f32_to_i16, f32_to_i32, hann, hz_from_midi, i16_to_f32, i32_to_f32, lerp, midi_from_hz,
         ms_from_samples, ms_per_beat, plan_rate, samples_from_ms, samples_from_ticks,
         samples_per_beat, saturate_sample, Adaa2Taylor, Biquad, Compressor, DelayLine, FilterType,
-        GainComp, LinearPhaseOversampler, MeterBank, MeterReadings, Oscillator, OversampleFactor,
+        correlation, BlockLevel, GainComp, LinearPhaseOversampler, MeterBank, MeterReadings,
+        Oscillator, OversampleFactor, SoftBypass,
         Oversampler2x, Polyphony, ResidualAdaa1, SampleVoice, SaturationMode, VuMeter, Wave,
         WindowRms,
     };

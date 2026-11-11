@@ -12,7 +12,8 @@ L0: Core Contracts (openplugin-core)
     - ParamPlane and ParamCursor: atomic parameter bits, audio thread pulls changes
     - MIDI parser with running status (note-on velocity 0 stays a note-on)
     - Seqlock meter snapshots, SPSC gesture queue, one-pole smoother
-    - Versioned OPST parameter snapshot and A/B compare
+    - Versioned OPST parameter snapshot, OPCH session chunk, and A/B compare
+    - Speaker layouts from mono through 7.1.4 and seventh-order ambisonics, plus an optional sidechain
 L1: Algorithms & DSP (openplugin-dsp)
     - Biquad filters, Dynamics (Compressor/Limiter/Gate), Saturation, Metering
     - Antiderivative Anti-Aliasing (ADAA1 Residual, ADAA2 Taylor)
@@ -22,13 +23,14 @@ L1: Algorithms & DSP (openplugin-dsp)
 L2: Direct Rendering Interface (openplugin-dri)
     - Calls GoodLookinDri for the 47 knob styles, 40 plates, meters, faders, and switches
 L3: Target Format Adapters (openplugin-targets)
-    - CLAP instantiates a Plugin, pulls the parameter plane, and honours event sample offsets
+    - CLAP instantiates a Plugin, pulls the parameter plane, honours event sample offsets, and can select a surround or ambisonic layout with an optional sidechain. It publishes tail, asks the host to restart when latency changes, and passes transport into `set_transport`
     - LV2 descriptor: ports 0 and 1 in, 2 and 3 out, same parameter plane
     - VST3, AU, and AAX are descriptor layouts. The working shells are still in OpenGridder
       and should talk to the plugin through ParamPlane, the way OpenGridder's insert bridge does
     - openplugin-ffi is a Rust host session. FfiInstance publishes the parameter
-      plane, renders stereo, planar, and interleaved blocks through scratch
-      allocated in prepare, applies factory presets, and saves an OPST snapshot.
+      plane, renders stereo, planar, interleaved, and sidechain blocks through scratch
+      allocated in prepare (up to 64 channels), applies factory presets, and saves an OPCH
+      session that still accepts an OPST plane.
       Faceplate rasters stay in the product.
 L4: Public Facade (openplugin)
     - Single-entrypoint prelude and ergonomics

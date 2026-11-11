@@ -11,7 +11,7 @@ static INFO: PluginInfo = PluginInfo {
     vendor: "MistaMin",
     url: "https://github.com/MistaMin/OpenPluginSDK",
     email: "contact@mistamin.com",
-    version: "0.1.0-beta.1",
+    version: "0.1.1-beta.1",
     category: Category::Utility,
     params: &PARAMS,
     is_instrument: false,

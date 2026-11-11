@@ -15,8 +15,8 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
 use openplugin_core::{
-    decode_params, encode_params, MeterFrame, ParamCursor, ParamInfo, ParamPlane, PluginInfo,
-    Seqlock, Taper, Unit,
+    decode_session, encode_session, release_momentary, BusMeters, MeterFrame, ParamCursor,
+    ParamFlags, ParamInfo, ParamPlane, PluginInfo, Seqlock, Taper, Unit, MAX_AUDIO_CHANNELS,
 };
 
 pub use openplugin_core::Plugin;
@@ -33,6 +33,8 @@ pub struct ParamSpec {
     pub steps: u32,
     pub is_log: bool,
     pub unit: Unit,
+    /// [`ParamFlags::bits`].
+    pub flags: u32,
 }
 
 struct PresetEntry {
@@ -57,10 +59,11 @@ pub fn spec_from(param: &ParamInfo) -> ParamSpec {
         min: param.min,
         max: param.max,
         default_value: param.default,
-        is_discrete: steps > 1,
+        is_discrete: steps > 1 || param.flags.contains(ParamFlags::STEPPED),
         steps,
         is_log: param.taper == Taper::Log,
         unit: param.unit,
+        flags: param.flags.bits(),
     }
 }
 
@@ -78,9 +81,11 @@ fn collect_presets(plugin: &dyn Plugin) -> Vec<PresetEntry> {
 struct Audio {
     inner: Box<dyn Plugin>,
     buffers: Vec<Vec<f32>>,
+    sidechain: Vec<Vec<f32>>,
     cursor: ParamCursor,
     applied_offline: Option<bool>,
     channels: usize,
+    side_channels: usize,
     max_block: usize,
 }
 
@@ -90,6 +95,7 @@ pub struct FfiInstance {
     audio: UnsafeCell<Audio>,
     plane: ParamPlane,
     meters: Seqlock<MeterFrame>,
+    bus_meters: Seqlock<BusMeters>,
     latency: AtomicU32,
     offline: AtomicU32,
     preset: AtomicI32,
@@ -112,7 +118,14 @@ impl FfiInstance {
         let plane = ParamPlane::new(info);
         plane.seed_from(plugin.as_ref());
         let max_block = max_block.clamp(1, 65_536);
-        let channels = channels.clamp(1, 8);
+        let channels = channels.clamp(1, MAX_AUDIO_CHANNELS);
+        let side_channels = plugin
+            .supported_layouts()
+            .iter()
+            .map(|layout| layout.sidechain_channels())
+            .max()
+            .unwrap_or(0)
+            .min(MAX_AUDIO_CHANNELS);
         let rate = finite_rate(sample_rate);
         plugin.prepare(rate, max_block, channels);
         let mut cursor = ParamCursor::new(plane.len());
@@ -122,13 +135,16 @@ impl FfiInstance {
             audio: UnsafeCell::new(Audio {
                 inner: plugin,
                 buffers: (0..channels).map(|_| vec![0.0; max_block]).collect(),
+                sidechain: (0..side_channels).map(|_| vec![0.0; max_block]).collect(),
                 cursor,
                 applied_offline: None,
                 channels,
+                side_channels,
                 max_block,
             }),
             plane,
             meters: Seqlock::new(MeterFrame::SILENT),
+            bus_meters: Seqlock::new(BusMeters::SILENT),
             latency: AtomicU32::new(latency),
             offline: AtomicU32::new(0),
             preset: AtomicI32::new(-1),
@@ -176,6 +192,10 @@ impl FfiInstance {
         self.meters.read()
     }
 
+    pub fn bus_meters(&self) -> BusMeters {
+        self.bus_meters.read()
+    }
+
     pub fn preset_index(&self) -> i32 {
         self.preset.load(Ordering::Acquire)
     }
@@ -202,14 +222,27 @@ impl FfiInstance {
 
     /// Exclusive with `process`. Allocates the scratch buffers.
     pub fn prepare(&self, sample_rate: f64, max_block: usize, channels: usize) -> bool {
-        if max_block == 0 || max_block > 65_536 || !(1..=8).contains(&channels) {
+        if max_block == 0 || max_block > 65_536 || !(1..=MAX_AUDIO_CHANNELS).contains(&channels) {
             return false;
         }
         let audio = unsafe { &mut *self.audio.get() };
         let rate = finite_rate(sample_rate);
+        if !audio.inner.accepts_sample_rate(rate) {
+            return false;
+        }
+        let side_channels = audio
+            .inner
+            .supported_layouts()
+            .iter()
+            .map(|layout| layout.sidechain_channels())
+            .max()
+            .unwrap_or(0)
+            .min(MAX_AUDIO_CHANNELS);
         audio.inner.prepare(rate, max_block, channels);
         audio.buffers = (0..channels).map(|_| vec![0.0; max_block]).collect();
+        audio.sidechain = (0..side_channels).map(|_| vec![0.0; max_block]).collect();
         audio.channels = channels;
+        audio.side_channels = side_channels;
         audio.max_block = max_block;
         audio.cursor.invalidate();
         audio.cursor.pull(&self.plane, audio.inner.as_mut());
@@ -227,18 +260,28 @@ impl FfiInstance {
         }
     }
 
+    /// OPCH session: the parameter plane plus `Plugin::save_state` when the plugin has one.
+    /// A bare OPST plane still loads.
     pub fn save_bytes(&self) -> Vec<u8> {
         let values: Vec<f32> = (0..self.plane.len())
             .map(|index| self.load_param(index))
             .collect();
-        encode_params(self.info, &values)
+        let audio = unsafe { &mut *self.audio.get() };
+        let chunk = audio.inner.save_state().unwrap_or_default();
+        encode_session(self.info, &values, &chunk)
     }
 
     pub fn load_bytes(&self, bytes: &[u8]) -> bool {
-        let Some(values) = decode_params(self.info, bytes) else {
+        let Some(session) = decode_session(self.info, bytes) else {
             return false;
         };
-        for (index, value) in values.iter().enumerate() {
+        if !session.chunk.is_empty() {
+            let audio = unsafe { &mut *self.audio.get() };
+            if !audio.inner.load_state(&session.chunk) {
+                return false;
+            }
+        }
+        for (index, value) in session.values.iter().enumerate() {
             self.plane.store(index, *value);
         }
         true
@@ -262,7 +305,7 @@ impl FfiInstance {
             copy_in(right, &mut audio.buffers[1][..frames]);
         }
         let width = audio.channels.min(2);
-        self.render(audio, width, frames);
+        self.render(audio, width, frames, false);
         left.copy_from_slice(&audio.buffers[0][..frames]);
         let right_index = if audio.channels > 1 { 1 } else { 0 };
         right.copy_from_slice(&audio.buffers[right_index][..frames]);
@@ -290,7 +333,7 @@ impl FfiInstance {
         for (index, channel) in channels.iter().enumerate() {
             copy_in(channel, &mut audio.buffers[index][..frames]);
         }
-        self.render(audio, count, frames);
+        self.render(audio, count, frames, false);
         for (index, channel) in channels.iter_mut().enumerate() {
             channel.copy_from_slice(&audio.buffers[index][..frames]);
         }
@@ -316,7 +359,7 @@ impl FfiInstance {
                 audio.buffers[channel][frame] = if sample.is_finite() { sample } else { 0.0 };
             }
         }
-        self.render(audio, channels, frames);
+        self.render(audio, channels, frames, false);
         for frame in 0..frames {
             for channel in 0..channels {
                 samples[frame * channels + channel] = audio.buffers[channel][frame];
@@ -325,7 +368,41 @@ impl FfiInstance {
         true
     }
 
-    fn render(&self, audio: &mut Audio, channels: usize, frames: usize) {
+    /// Main bus plus a sidechain. The sidechain is copied into scratch and is not written back.
+    pub fn process_with_sidechain(&self, main: &mut [&mut [f32]], sidechain: &[&[f32]]) -> bool {
+        if main.is_empty() || main.iter().any(|channel| channel.len() != main[0].len()) {
+            return false;
+        }
+        if sidechain.iter().any(|channel| channel.len() != main[0].len()) {
+            return false;
+        }
+        let frames = main[0].len();
+        let count = main.len();
+        let audio = unsafe { &mut *self.audio.get() };
+        if count > audio.channels || sidechain.len() > audio.side_channels || frames > audio.max_block {
+            return false;
+        }
+        if frames == 0 {
+            return true;
+        }
+        for (index, channel) in main.iter().enumerate() {
+            copy_in(channel, &mut audio.buffers[index][..frames]);
+        }
+        for (index, channel) in audio.sidechain.iter_mut().enumerate() {
+            if let Some(source) = sidechain.get(index) {
+                copy_in(source, &mut channel[..frames]);
+            } else {
+                channel[..frames].fill(0.0);
+            }
+        }
+        self.render(audio, count, frames, true);
+        for (index, channel) in main.iter_mut().enumerate() {
+            channel.copy_from_slice(&audio.buffers[index][..frames]);
+        }
+        true
+    }
+
+    fn render(&self, audio: &mut Audio, channels: usize, frames: usize, with_sidechain: bool) {
         let flag = self.offline.load(Ordering::Acquire);
         let offline = match flag {
             1 => Some(false),
@@ -335,14 +412,37 @@ impl FfiInstance {
         if let Some(offline) = offline {
             if audio.applied_offline != Some(offline) {
                 audio.inner.set_offline(offline);
+                if offline {
+                    let params = audio.inner.info().params;
+                    for (index, param) in params.iter().enumerate() {
+                        if param.flags.contains(ParamFlags::MOMENTARY) {
+                            self.plane.store(index, param.default);
+                        }
+                    }
+                    release_momentary(audio.inner.as_mut());
+                }
                 audio.applied_offline = Some(offline);
             }
         }
         audio.cursor.pull(&self.plane, audio.inner.as_mut());
-        audio.inner.process(&mut audio.buffers[..channels], frames);
-        self.latency
-            .store(audio.inner.latency() as u32, Ordering::Release);
-        self.meters.publish(audio.inner.meters());
+        let (latency, meters, bus) = {
+            let Audio {
+                inner,
+                buffers,
+                sidechain,
+                ..
+            } = audio;
+            let side = if with_sidechain && !sidechain.is_empty() {
+                Some(sidechain.as_slice())
+            } else {
+                None
+            };
+            inner.process_buses(&mut buffers[..channels], side, frames);
+            (inner.latency(), inner.meters(), inner.bus_meters())
+        };
+        self.latency.store(latency as u32, Ordering::Release);
+        self.meters.publish(meters);
+        self.bus_meters.publish(bus);
     }
 }
 
@@ -505,5 +605,24 @@ mod tests {
         assert!(instance.process_stereo(&mut left, &mut right));
         let expected = 0.2 * 10f32.powf(6.0 / 20.0);
         assert!((left[3] - expected).abs() < 1e-4);
+    }
+
+    #[test]
+    fn prepare_accepts_twelve_channels_and_rejects_sixty_five() {
+        let instance = FfiInstance::new(gain(), 48_000.0, 32, 2);
+        assert!(instance.prepare(48_000.0, 32, 12));
+        assert!(!instance.prepare(48_000.0, 32, 65));
+        assert!(!instance.prepare(48_000.0, 32, 0));
+    }
+
+    #[test]
+    fn an_old_opst_plane_still_loads() {
+        let instance = FfiInstance::new(gain(), 48_000.0, 8, 2);
+        let bytes = openplugin_core::encode_params(&INFO, &[6.0, 1.0]);
+        assert!(bytes.starts_with(b"OPST"));
+        assert!(instance.load_bytes(&bytes));
+        assert!((instance.load_param(0) - 6.0).abs() < 1e-4);
+        let saved = instance.save_bytes();
+        assert!(saved.starts_with(b"OPCH"));
     }
 }

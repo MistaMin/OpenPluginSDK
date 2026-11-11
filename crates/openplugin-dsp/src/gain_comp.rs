@@ -12,14 +12,27 @@ pub struct GainComp {
     power_alpha: f64,
     match_alpha: f64,
     off_alpha: f64,
+    limit_db: f64,
 }
 
 impl GainComp {
+    /// Match clamped to ±12 dB. That is the original toolbox range.
     pub fn new(sample_rate: f32) -> Self {
+        Self::with_limit(sample_rate, 12.0)
+    }
+
+    /// `limit_db` is the absolute correction cap, from 0 to 60. A non-finite
+    /// limit falls back to 12. This trim is not the plugin's output knob.
+    pub fn with_limit(sample_rate: f32, limit_db: f32) -> Self {
         let rate = if sample_rate.is_finite() {
             f64::from(sample_rate.max(8_000.0))
         } else {
             48_000.0
+        };
+        let limit = if limit_db.is_finite() {
+            f64::from(limit_db.clamp(0.0, 60.0))
+        } else {
+            12.0
         };
         Self {
             input_power: 0.0,
@@ -28,7 +41,12 @@ impl GainComp {
             power_alpha: 1.0 - (-1.0 / (rate * 2.0)).exp(),
             match_alpha: 1.0 - (-1.0 / (rate * 2.0)).exp(),
             off_alpha: 1.0 - (-1.0 / (rate * 0.05)).exp(),
+            limit_db: limit,
         }
+    }
+
+    pub fn limit_db(&self) -> f32 {
+        self.limit_db as f32
     }
 
     pub fn correction_db(&self) -> f32 {
@@ -57,7 +75,8 @@ impl GainComp {
         let target = if !enabled {
             0.0
         } else if self.input_power > 1e-6 && self.output_power > 1e-12 {
-            (10.0 * (self.input_power / self.output_power).log10()).clamp(-12.0, 12.0)
+            (10.0 * (self.input_power / self.output_power).log10())
+                .clamp(-self.limit_db, self.limit_db)
         } else {
             self.correction_db
         };
@@ -109,5 +128,19 @@ mod tests {
             comp.process([0.0; 2], [0.0; 2], false);
         }
         assert!(comp.correction_db() < 0.001);
+    }
+
+    #[test]
+    fn a_wider_limit_can_pass_a_24_db_offset() {
+        let mut narrow = GainComp::new(48_000.0);
+        let mut wide = GainComp::with_limit(48_000.0, 24.0);
+        let quiet = 0.25 / 10f32.powf(24.0 / 20.0);
+        for _ in 0..48_000 * 30 {
+            narrow.process([0.25; 2], [quiet; 2], true);
+            wide.process([0.25; 2], [quiet; 2], true);
+        }
+        assert!((narrow.correction_db() - 12.0).abs() < 0.05);
+        assert!((wide.correction_db() - 24.0).abs() < 0.05);
+        assert!((GainComp::with_limit(48_000.0, 90.0).limit_db() - 60.0).abs() < 1e-3);
     }
 }

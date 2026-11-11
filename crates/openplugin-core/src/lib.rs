@@ -11,6 +11,7 @@
 #![deny(unsafe_code)]
 
 pub mod automation;
+pub mod layout;
 pub mod midi;
 pub mod plane;
 pub mod ramp;
@@ -22,21 +23,36 @@ pub mod state;
 pub use automation::{
     AutomationInterpolation, AutomationLane, AutomationMode, CurveInterpolation, LaneMode,
 };
+pub use layout::{
+    BusMeters, IoConfig, NotePorts, ParamFlags, PortKind, SpeakerLayout, Tail, STEREO_LAYOUTS,
+    BUS_METER_CHANNELS, MAX_AUDIO_CHANNELS,
+};
 pub use plane::{ParamCursor, ParamPlane};
 pub use ramp::SampleRamp;
 pub use seqlock::Seqlock;
 pub use smooth::OnePole;
 pub use state::{
-    decode_params, encode_params, restore_params, AbCompare, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
+    decode_params, decode_session, encode_params, encode_session, restore_params, AbCompare,
+    Session, SESSION_MAGIC, SESSION_VERSION, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
 };
 
 /// Levels the audio thread publishes for an editor. Decibels, not linear gain.
 /// Reduction is positive attenuation from the dynamics envelope.
+///
+/// `true_peak_db`, the loudness fields, `correlation`, and `sidechain_db` are
+/// whatever the plugin last published. `correlation` runs from -1 to 1.
+/// `clip` bit 0 is left and bit 1 is right. Wider buses use [`BusMeters`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeterFrame {
     pub input_db: [f32; 2],
     pub output_db: [f32; 2],
     pub reduction_db: f32,
+    pub true_peak_db: [f32; 2],
+    pub short_loudness_db: f32,
+    pub integrated_loudness_db: f32,
+    pub correlation: f32,
+    pub sidechain_db: [f32; 2],
+    pub clip: u8,
 }
 
 impl MeterFrame {
@@ -44,6 +60,12 @@ impl MeterFrame {
         input_db: [-100.0, -100.0],
         output_db: [-100.0, -100.0],
         reduction_db: 0.0,
+        true_peak_db: [-100.0, -100.0],
+        short_loudness_db: -100.0,
+        integrated_loudness_db: -100.0,
+        correlation: 0.0,
+        sidechain_db: [-100.0, -100.0],
+        clip: 0,
     };
 }
 
@@ -107,6 +129,8 @@ pub struct ParamInfo {
     /// Discrete positions including the endpoints. `0` or `1` means continuous.
     /// A host turns this into `(max - min) / (steps - 1)`.
     pub steps: u32,
+    /// Host roles. [`ParamInfo::new`] sets [`ParamFlags::AUTOMATABLE`].
+    pub flags: ParamFlags,
 }
 
 impl ParamInfo {
@@ -128,6 +152,7 @@ impl ParamInfo {
             taper: Taper::Linear,
             choices: &[],
             steps: 0,
+            flags: ParamFlags::AUTOMATABLE,
         }
     }
 
@@ -145,6 +170,21 @@ impl ParamInfo {
     pub const fn with_choices(mut self, choices: &'static [&'static str]) -> Self {
         self.choices = choices;
         self.unit = Unit::Choice;
+        self
+    }
+
+    /// Replace the flag word.
+    pub const fn with_flags(mut self, flags: ParamFlags) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    /// Add one flag. Read-only and not-realtime clear [`ParamFlags::AUTOMATABLE`].
+    pub const fn flag(mut self, flag: ParamFlags) -> Self {
+        self.flags = self.flags.union(flag);
+        if flag.contains(ParamFlags::READ_ONLY) || flag.contains(ParamFlags::NOT_REALTIME) {
+            self.flags = self.flags.difference(ParamFlags::AUTOMATABLE);
+        }
         self
     }
 
@@ -319,6 +359,80 @@ pub trait Plugin: Send + 'static {
         0
     }
 
+    /// Tail as a host property. The default maps [`Self::tail_samples`]: zero
+    /// is [`Tail::None`], anything else is [`Tail::Finite`]. Override this to
+    /// report [`Tail::Unknown`] or [`Tail::Infinite`].
+    fn tail(&self) -> Tail {
+        match self.tail_samples() {
+            0 => Tail::None,
+            samples => Tail::Finite(samples.min(u32::MAX as usize) as u32),
+        }
+    }
+
+    /// Layouts the host may select while the plugin is deactivated.
+    /// The default is stereo in, stereo out, and no sidechain.
+    fn supported_layouts(&self) -> &'static [IoConfig] {
+        STEREO_LAYOUTS
+    }
+
+    /// Apply a layout from [`Self::supported_layouts`]. Called while deactivated.
+    fn set_layout(&mut self, layout: IoConfig) -> bool {
+        self.supported_layouts().contains(&layout)
+    }
+
+    /// `prepare` for a chosen layout. The default passes the wider main bus
+    /// and ignores the sidechain width.
+    fn prepare_layout(&mut self, sample_rate: f32, max_block: usize, layout: IoConfig) {
+        let channels = layout.main_channels().clamp(1, MAX_AUDIO_CHANNELS);
+        self.prepare(sample_rate, max_block, channels);
+    }
+
+    /// Main bus plus an optional sidechain. The sidechain is detector input.
+    /// The default drops it and calls [`Self::process`].
+    fn process_buses(&mut self, io: &mut [Vec<f32>], sidechain: Option<&[Vec<f32>]>, frames: usize) {
+        let _ = sidechain;
+        self.process(io, frames);
+    }
+
+    /// Note ports. The default keeps a MIDI input so existing instruments and
+    /// MIDI effects still receive notes. An audio effect that does not read
+    /// MIDI should return both flags false.
+    fn note_ports(&self) -> NotePorts {
+        NotePorts {
+            input: true,
+            output: false,
+        }
+    }
+
+    /// Same as [`Self::note_on`] with a MIDI channel 0..15.
+    fn note_on_channel(&mut self, offset: usize, _channel: u8, note: u8, velocity: u8) {
+        self.note_on(offset, note, velocity);
+    }
+
+    /// One queued MIDI output event, in block-sample order. `None` ends the drain.
+    fn pull_midi(&mut self) -> Option<(u32, [u8; 3])> {
+        None
+    }
+
+    /// Host bypass, separate from a power parameter inside the processor.
+    fn set_host_bypass(&mut self, _bypassed: bool) {}
+
+    /// Soft bypass keeps the reported latency and the dry path delayed by it.
+    /// Hard bypass may drop the reported latency on the next activate.
+    fn keeps_latency_when_bypassed(&self) -> bool {
+        true
+    }
+
+    /// Peaks and gain reduction past the stereo [`MeterFrame`].
+    fn bus_meters(&self) -> BusMeters {
+        BusMeters::SILENT
+    }
+
+    /// False rejects the rate at activate. The default accepts 8 kHz through 768 kHz.
+    fn accepts_sample_rate(&self, sample_rate: f32) -> bool {
+        sample_rate.is_finite() && (8_000.0..=768_000.0).contains(&sample_rate)
+    }
+
     /// Metering: current gain reduction in dB (e.g. for compressor VU meters).
     fn gain_reduction_db(&self) -> f32 {
         0.0
@@ -362,6 +476,17 @@ pub trait Plugin: Send + 'static {
     /// Deserializes and restores state from an opaque byte buffer.
     fn load_state(&mut self, _data: &[u8]) -> bool {
         false
+    }
+}
+
+/// Set every momentary parameter back to its default. An offline render calls
+/// this so listen, delta, and solo buttons do not stay down.
+pub fn release_momentary(plugin: &mut dyn Plugin) {
+    let params = plugin.info().params;
+    for (index, param) in params.iter().enumerate() {
+        if param.flags.contains(ParamFlags::MOMENTARY) {
+            let _ = plugin.set_param_index(index, param.default);
+        }
     }
 }
 

@@ -92,7 +92,7 @@ Add `openplugin` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-openplugin = "0.1.0-beta.1"
+openplugin = "0.1.1-beta.1"
 ```
 
 ---

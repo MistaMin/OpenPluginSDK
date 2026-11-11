@@ -102,6 +102,7 @@ impl Plugin for Wire {
             input_db: [self.db, self.db],
             output_db: [self.linear, self.linear],
             reduction_db: if self.offline { 1.0 } else { 0.0 },
+            ..openplugin_core::MeterFrame::SILENT
         }
     }
     fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
