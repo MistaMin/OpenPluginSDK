@@ -6,6 +6,7 @@
 //! - [`VuMeter`]: ANSI standard 300 ms ballistic level detector.
 //! - [`MeterBank`]: stereo peak, RMS, PPM, and VU, plus envelope gain reduction.
 //! - [`LinearPhaseOversampler`]: 1x/2x/4x linear-phase resampling, 64 host samples at 2x and 4x.
+//! - [`BlockConvolver`]: overlap-save playback of a real impulse of at most 1024 taps.
 //! - [`GainComp`]: slow stereo RMS loudness match. The default cap is ±12 dB. `with_limit` opens it to ±60 dB.
 //! - [`SoftBypass`]: dry path delayed by the reported latency, with a short crossfade.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
@@ -13,6 +14,7 @@
 pub mod adaa;
 pub mod biquad;
 pub mod bypass;
+pub mod convolve;
 pub mod delay;
 pub mod dynamics;
 pub mod gain_comp;
@@ -31,6 +33,7 @@ pub mod window;
 pub use adaa::{Adaa2Taylor, ResidualAdaa1};
 pub use biquad::{Biquad, FilterType};
 pub use bypass::SoftBypass;
+pub use convolve::BlockConvolver;
 pub use delay::DelayLine;
 pub use dynamics::Compressor;
 pub use gain_comp::GainComp;

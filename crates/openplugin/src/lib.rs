@@ -31,7 +31,8 @@ pub mod prelude {
     pub use openplugin_dsp::{
         f32_to_i16, f32_to_i32, hann, hz_from_midi, i16_to_f32, i32_to_f32, lerp, midi_from_hz,
         ms_from_samples, ms_per_beat, plan_rate, samples_from_ms, samples_from_ticks,
-        samples_per_beat, saturate_sample, Adaa2Taylor, Biquad, Compressor, DelayLine, FilterType,
+        samples_per_beat, saturate_sample, Adaa2Taylor, Biquad, BlockConvolver, Compressor,
+        DelayLine, FilterType,
         correlation, BlockLevel, GainComp, LinearPhaseOversampler, MeterBank, MeterReadings,
         Oscillator, OversampleFactor, SoftBypass,
         Oversampler2x, Polyphony, ResidualAdaa1, SampleVoice, SaturationMode, VuMeter, Wave,
