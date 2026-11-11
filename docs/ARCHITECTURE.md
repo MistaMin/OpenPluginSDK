@@ -16,6 +16,7 @@ L0: Core Contracts (openplugin-core)
     - Speaker layouts from mono through 7.1.4 and seventh-order ambisonics, plus an optional sidechain
 L1: Algorithms & DSP (openplugin-dsp)
     - Biquad filters, Dynamics (Compressor/Limiter/Gate), Saturation, Metering
+    - BlockConvolver: overlap-save of a real impulse, at most 1024 taps, 2048-point rustfft, no allocation in process
     - Antiderivative Anti-Aliasing (ADAA1 Residual, ADAA2 Taylor)
     - Polyphase Half-Band Resamplers (2x, 4x Oversampling)
     - Linear-phase 1x/2x/4x oversampler (64-sample latency at 2x and 4x), dry delay, slow RMS gain comp

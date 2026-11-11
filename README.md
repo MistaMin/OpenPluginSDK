@@ -15,7 +15,7 @@
 
 It combines:
 1. **Realtime-safe DSP core:** Zero-allocation processing loop (`process()`), hostile parameter sanitization, and no panics.
-2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, and ANSI standard ballistic VU meters.
+2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, overlap-save convolution for impulses up to 1024 taps (`BlockConvolver`), log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, and ANSI standard ballistic VU meters.
 3. **GoodLookin Direct Rendering Interface (DRI):** Procedural 3D hardware rendering (47 authentic knob styles, 40 faceplate finishes, illuminated needle VU meters) running directly on GPU/platform window contexts (`HWND`, `NSView`, `X11`) without requiring a JUCE dependency or license.
 4. **Universal format bridges:** Export to **CLAP**, **VST3**, **macOS Audio Unit (AUv2/AUv3)**, **Avid AAX** (for Pro Tools parity using Avid AAX SDK), and native **Standalone** desktop executables.
 
@@ -79,8 +79,8 @@ It combines:
 |---|---|
 | [`openplugin`](crates/openplugin) | Top-level facade and prelude |
 | [`openplugin-core`](crates/openplugin-core) | Core `Plugin` trait, `ParamInfo`, tapers, transport, and MIDI |
-| [`openplugin-dsp`](crates/openplugin-dsp) | Realtime-safe DSP modules: RBJ biquads, dynamics, saturation, VU metering |
-| [`openplugin-dri`](crates/openplugin-dri) | GoodLookin procedural 3D hardware GUI engine (knobs, faceplates, meters) |
+| [`openplugin-dsp`](crates/openplugin-dsp) | Realtime-safe DSP: RBJ biquads, `BlockConvolver`, dynamics, saturation, VU metering. See [docs/CONVOLVE.md](docs/CONVOLVE.md) |
+| [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knobs, faceplates, meters). Drawing lives in GoodLookinDri |
 | [`openplugin-targets`](crates/openplugin-targets) | Target bridges for CLAP, VST3, AU, AAX, and Standalone |
 | [`openplugin-ffi`](crates/openplugin-ffi) | Rust host session: parameter plane, scratch render, presets, OPST snapshot |
 
