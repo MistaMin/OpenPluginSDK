@@ -217,6 +217,11 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
         let header = unsafe { &*header };
         match header.type_ {
             EVENT_PARAM_VALUE => {
+                // CLAP namespace 0 is the only namespace defined for parameter events.
+                // Events from another namespace must not reach the parameter plane.
+                if header.space_id != 0 {
+                    continue;
+                }
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_value) };
                 push_sched(instance, Sched {
                     time: header.time,
@@ -726,8 +731,16 @@ unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_
             .collect();
         encode_params(info, &values)
     };
-    let wrote = unsafe { write(stream, bytes.as_ptr() as *const c_void, bytes.len() as u64) };
-    wrote == bytes.len() as i64
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        let wrote = unsafe { write(stream, remaining.as_ptr() as *const c_void, remaining.len() as u64) };
+        if wrote <= 0 {
+            return false;
+        }
+        offset = offset.saturating_add(wrote as usize);
+    }
+    true
 }
 
 unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_istream) -> bool {
@@ -746,7 +759,15 @@ unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_
         }
         bytes.extend_from_slice(&chunk[..n as usize]);
     }
-    !bytes.is_empty() && instance.inner.load_state(&bytes)
+    if bytes.is_empty() || !instance.inner.load_state(&bytes) {
+        return false;
+    }
+    // The host reads parameters from the plane. A state chunk changes the plugin
+    // directly, so republish the loaded values or the host would keep the old ones.
+    instance.plane.seed_from(instance.inner.as_ref());
+    instance.cursor.invalidate();
+    notify_params_rescan(instance);
+    true
 }
 
 static STATE: clap_plugin_state = clap_plugin_state {
@@ -803,6 +824,18 @@ fn host_call(host: *const clap_host, id: &[u8]) -> *const c_void {
         match (*host).get_extension {
             Some(get) => get(host, id.as_ptr() as *const c_char),
             None => std::ptr::null(),
+        }
+    }
+}
+
+fn notify_params_rescan(instance: &Instance) {
+    let ext = host_call(instance.host, EXT_PARAMS) as *const clap_host_params;
+    if ext.is_null() {
+        return;
+    }
+    unsafe {
+        if let Some(rescan) = (*ext).rescan {
+            rescan(instance.host, CLAP_PARAM_RESCAN_VALUES);
         }
     }
 }

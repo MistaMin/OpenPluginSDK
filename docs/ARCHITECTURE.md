@@ -2,7 +2,7 @@
 
 ## Summary
 
-OpenPluginSDK provides a layered architecture that isolates core DSP and parameter modeling from OS windowing and host plugin ABIs.
+OpenPluginSDK 0.2.0 Beta isolates DSP and parameter modelling from OS windowing and host plugin ABIs. CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX load through the native shells in [SHELL.md](SHELL.md).
 
 ## Layer Model
 
@@ -26,8 +26,7 @@ L2: Direct Rendering Interface (openplugin-dri)
 L3: Target Format Adapters (openplugin-targets)
     - CLAP instantiates a Plugin, pulls the parameter plane, honours event sample offsets, and can select a surround or ambisonic layout with an optional sidechain. It publishes tail, asks the host to restart when latency changes, and passes transport into `set_transport`
     - LV2 descriptor: ports 0 and 1 in, 2 and 3 out, same parameter plane
-    - VST3, AU, and AAX are descriptor layouts. The working shells are still in OpenGridder
-      and should talk to the plugin through ParamPlane, the way OpenGridder's insert bridge does
+    - VST3, AU, and AAX layouts in this crate are not loadable. `export_shell!` exports the C ABI. The loadable adapters are `native/vst3`, `native/au`, and `native/aax`. They write the parameter plane and render through scratch. See [SHELL.md](SHELL.md)
     - openplugin-ffi is a Rust host session. FfiInstance publishes the parameter
       plane, renders stereo, planar, interleaved, and sidechain blocks through scratch
       allocated in prepare (up to 64 channels), applies factory presets, and saves an OPCH

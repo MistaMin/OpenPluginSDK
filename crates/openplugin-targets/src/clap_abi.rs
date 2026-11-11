@@ -96,6 +96,15 @@ pub struct clap_host {
 }
 
 #[repr(C)]
+pub struct clap_host_params {
+    pub rescan: Option<unsafe extern "C" fn(host: *const clap_host, flags: u32)>,
+    pub clear: Option<unsafe extern "C" fn(host: *const clap_host, param_id: u32, flags: u32)>,
+    pub request_flush: Option<unsafe extern "C" fn(host: *const clap_host)>,
+}
+
+pub const CLAP_PARAM_RESCAN_VALUES: u32 = 1 << 0;
+
+#[repr(C)]
 pub struct clap_event_header {
     pub size: u32,
     pub time: u32,

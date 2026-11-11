@@ -1,7 +1,6 @@
 //! Audio Unit descriptor types.
 //!
-//! A host cannot load these. The working from-scratch AU shell is OpenGridder's
-//! `native/au/OpenGridderAU.cpp`.
+//! A host cannot load these. The loadable shell is `native/au`, over the `op_shell_*` ABI.
 
 use std::ffi::c_void;
 use openplugin_core::Plugin;

@@ -12,7 +12,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
@@ -23,12 +23,12 @@ keywords = ["audio", "plugin", "vst3", "clap", "aax"]
 categories = ["multimedia::audio", "gui"]
 
 [workspace.dependencies]
-openplugin-core = { path = "crates/openplugin-core", version = "0.1.1-beta.1" }
-openplugin-dsp = { path = "crates/openplugin-dsp", version = "0.1.1-beta.1" }
-openplugin-dri = { path = "crates/openplugin-dri", version = "0.1.1-beta.1" }
-openplugin-targets = { path = "crates/openplugin-targets", version = "0.1.1-beta.1" }
-openplugin-ffi = { path = "crates/openplugin-ffi", version = "0.1.1-beta.1" }
-openplugin = { path = "crates/openplugin", version = "0.1.1-beta.1" }
+openplugin-core = { path = "crates/openplugin-core", version = "0.2.0-beta" }
+openplugin-dsp = { path = "crates/openplugin-dsp", version = "0.2.0-beta" }
+openplugin-dri = { path = "crates/openplugin-dri", version = "0.2.0-beta" }
+openplugin-targets = { path = "crates/openplugin-targets", version = "0.2.0-beta" }
+openplugin-ffi = { path = "crates/openplugin-ffi", version = "0.2.0-beta" }
+openplugin = { path = "crates/openplugin", version = "0.2.0-beta" }
 goodlookindri = { path = "../GoodLookinDri" }
 
 serde = { version = "1.0", features = ["derive"] }

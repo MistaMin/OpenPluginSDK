@@ -1,7 +1,7 @@
 //! AAX descriptor types.
 //!
-//! A host cannot load these. The working from-scratch AAX shell is OpenGridder's
-//! `native/aax/OpenGridder.mm`, and it still needs the Avid SDK to build.
+//! A host cannot load these. The loadable shell is `native/aax`, over the `op_shell_*` ABI.
+//! Building it needs an external Avid AAX SDK. The SDK is not copied into this tree.
 
 use openplugin_core::Plugin;
 

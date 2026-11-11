@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>@OP_PRODUCT@</string>
+<key>CFBundleIdentifier</key><string>@OP_BUNDLE_ID@.au</string>
+<key>CFBundleName</key><string>@OP_PRODUCT@</string>
+<key>CFBundlePackageType</key><string>BNDL</string>
+<key>CFBundleShortVersionString</key><string>@OP_VERSION@</string>
+<key>CFBundleVersion</key><string>@OP_VERSION@</string>
+<key>AudioComponents</key><array><dict>
+<key>name</key><string>@OP_MANUFACTURER@: @OP_PRODUCT@</string>
+<key>description</key><string>@OP_PRODUCT@</string>
+<key>manufacturer</key><string>@OP_AU_MANUFACTURER@</string>
+<key>type</key><string>aufx</string>
+<key>subtype</key><string>@OP_AU_SUBTYPE@</string>
+<key>factoryFunction</key><string>OpenPluginAUFactory</string>
+<key>version</key><integer>1</integer>
+</dict></array>
+</dict></plist>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>@OP_PRODUCT@</string>
+<key>CFBundleIdentifier</key><string>@OP_BUNDLE_ID@.vst3</string>
+<key>CFBundleName</key><string>@OP_PRODUCT@</string>
+<key>CFBundlePackageType</key><string>BNDL</string>
+<key>CFBundleShortVersionString</key><string>@OP_VERSION@</string>
+<key>CFBundleVersion</key><string>@OP_VERSION@</string>
+<key>CFBundleSignature</key><string>Vst3</string>
+</dict></plist>

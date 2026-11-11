@@ -42,13 +42,15 @@ The editors are 980 by 640 points and keep that shape when the window is resized
 
 | Piece | Version | Commit | Date |
 | --- | --- | --- | --- |
-| OpenPlugin SDK | 0.1.1-beta.1 | `8ab9e16`, plus the convolver on top | 11 Nov 2026 |
+| OpenPlugin SDK used for these numbers | 0.1.1-beta.1 | `8ab9e16`, plus the convolver on top | 11 Nov 2026 |
 | GoodLookin | 0.1.0 | `d8311fa` | 25 Oct 2026 |
 | JUCE, first build | 8.0.4 | `51d11a2` | 18 Nov 2024 |
 | JUCE 8 used for the final numbers | 8.0.17-security | `dabd5ad` | 2 Nov 2026 |
 | JUCE 9 used for the final numbers | 9.0.5 | `d60b7a7` | 2 Nov 2026 |
 
 The first JUCE tree kept the directory name `JUCE-8.0.4` after its checkout moved to the 8.0.17-security tag. JUCE 9.0.5 is a worktree beside it. Two other copies of JUCE, used by a different project, carry three local changes on top of 9.0.5. Those copies were not used for the numbers here.
+
+OpenPlugin SDK 0.2.0 Beta adds the VST3, Audio Unit, and AAX shells in [SHELL.md](SHELL.md). Those shells call the same FreEQ processor. They are not part of the timing table above.
 
 ## How the cost was measured
 

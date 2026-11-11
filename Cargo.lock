@@ -204,14 +204,14 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "example-console-eq"
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 dependencies = [
  "openplugin",
 ]
 
 [[package]]
 name = "example-gain"
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 dependencies = [
  "openplugin",
 ]
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin"
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 dependencies = [
  "openplugin-core",
  "openplugin-dri",
@@ -541,7 +541,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin-core"
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 dependencies = [
  "log",
  "serde",
@@ -550,7 +550,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin-dri"
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 dependencies = [
  "goodlookindri",
  "log",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin-dsp"
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 dependencies = [
  "log",
  "openplugin-core",
@@ -571,19 +571,20 @@ dependencies = [
 
 [[package]]
 name = "openplugin-ffi"
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 dependencies = [
  "openplugin-core",
 ]
 
 [[package]]
 name = "openplugin-targets"
-version = "0.1.1-beta.1"
+version = "0.2.0-beta"
 dependencies = [
  "cpal",
  "log",
  "openplugin-core",
  "openplugin-dri",
+ "openplugin-ffi",
  "raw-window-handle",
 ]
 

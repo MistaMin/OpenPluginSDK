@@ -21,6 +21,8 @@ use openplugin_core::{
 
 pub use openplugin_core::Plugin;
 
+pub mod shell;
+
 /// One parameter, the way a host builds its control.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ParamSpec {
@@ -184,6 +186,27 @@ impl FfiInstance {
         self.plane.load(index).unwrap_or(0.0)
     }
 
+    /// Plain value from normalized 0..1 travel, using the parameter taper.
+    /// The audio thread applies it on the next `process_*`. Does not allocate.
+    pub fn store_normalized(&self, index: usize, normalized: f32) -> bool {
+        let Some(param) = self.info.params.get(index) else {
+            return false;
+        };
+        let travel = if normalized.is_finite() {
+            normalized
+        } else {
+            param.to_normalized(param.default)
+        };
+        self.plane.store(index, param.from_normalized(travel))
+    }
+
+    pub fn load_normalized(&self, index: usize) -> f32 {
+        let Some(param) = self.info.params.get(index) else {
+            return 0.0;
+        };
+        param.to_normalized(self.load_param(index))
+    }
+
     pub fn latency(&self) -> u32 {
         self.latency.load(Ordering::Acquire)
     }
@@ -309,6 +332,49 @@ impl FfiInstance {
         left.copy_from_slice(&audio.buffers[0][..frames]);
         let right_index = if audio.channels > 1 { 1 } else { 0 };
         right.copy_from_slice(&audio.buffers[right_index][..frames]);
+        true
+    }
+
+    /// Planar raw pointers. Copies every input into scratch before writing any output,
+    /// so an input pointer may alias an output pointer. A null right pointer is mono.
+    ///
+    /// # Safety
+    /// Each non-null pointer addresses `frames` floats. `frames` is at most the
+    /// block size passed to [`FfiInstance::new`] or [`FfiInstance::prepare`].
+    pub unsafe fn process_io(
+        &self,
+        in_left: *const f32,
+        in_right: *const f32,
+        out_left: *mut f32,
+        out_right: *mut f32,
+        frames: usize,
+    ) -> bool {
+        if frames == 0 {
+            return true;
+        }
+        if in_left.is_null() || out_left.is_null() {
+            return false;
+        }
+        let audio = unsafe { &mut *self.audio.get() };
+        if frames > audio.max_block || audio.channels == 0 {
+            return false;
+        }
+        unsafe {
+            copy_ptr(in_left, &mut audio.buffers[0][..frames]);
+            if audio.channels > 1 {
+                let source = if in_right.is_null() { in_left } else { in_right };
+                copy_ptr(source, &mut audio.buffers[1][..frames]);
+            }
+        }
+        let width = audio.channels.min(2);
+        self.render(audio, width, frames, false);
+        unsafe {
+            copy_out(&audio.buffers[0][..frames], out_left);
+            if !out_right.is_null() {
+                let index = if audio.channels > 1 { 1 } else { 0 };
+                copy_out(&audio.buffers[index][..frames], out_right);
+            }
+        }
         true
     }
 
@@ -457,6 +523,23 @@ fn finite_rate(sample_rate: f64) -> f32 {
 fn copy_in(src: &[f32], dst: &mut [f32]) {
     for (out, sample) in dst.iter_mut().zip(src) {
         *out = if sample.is_finite() { *sample } else { 0.0 };
+    }
+}
+
+/// # Safety
+/// `src` addresses `dst.len()` floats.
+unsafe fn copy_ptr(src: *const f32, dst: &mut [f32]) {
+    for (index, out) in dst.iter_mut().enumerate() {
+        let sample = unsafe { *src.add(index) };
+        *out = if sample.is_finite() { sample } else { 0.0 };
+    }
+}
+
+/// # Safety
+/// `dst` addresses `src.len()` floats.
+unsafe fn copy_out(src: &[f32], dst: *mut f32) {
+    for (index, sample) in src.iter().enumerate() {
+        unsafe { *dst.add(index) = *sample };
     }
 }
 

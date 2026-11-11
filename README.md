@@ -5,7 +5,7 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
-[![Version](https://img.shields.io/badge/release-v0.1.0--beta.1-orange.svg)](#)
+[![Version](https://img.shields.io/badge/version-0.2.0%20Beta-orange.svg)](#)
 
 ---
 
@@ -17,7 +17,7 @@ It combines:
 1. **Realtime-safe DSP core:** Zero-allocation processing loop (`process()`), hostile parameter sanitization, and no panics.
 2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, overlap-save convolution for impulses up to 1024 taps (`BlockConvolver`), log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, and ANSI standard ballistic VU meters.
 3. **GoodLookin Direct Rendering Interface (DRI):** Procedural 3D hardware rendering (47 authentic knob styles, 40 faceplate finishes, illuminated needle VU meters) running directly on GPU/platform window contexts (`HWND`, `NSView`, `X11`) without requiring a JUCE dependency or license.
-4. **Universal format bridges:** Export to **CLAP**, **VST3**, **macOS Audio Unit (AUv2/AUv3)**, **Avid AAX** (for Pro Tools parity using Avid AAX SDK), and native **Standalone** desktop executables.
+4. **Format bridges:** CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX are macOS native shells over `export_shell!`. Standalone is a CPAL window. The shell contract is [docs/SHELL.md](docs/SHELL.md).
 
 ---
 
@@ -67,7 +67,7 @@ It combines:
    │                                   Format Target Bridges                                   │
    ├───────────────┬───────────────┬───────────────────────────┬───────────────┬───────────────┤
    │     CLAP      │     VST3      │      AU (Audio Unit)      │      AAX      │  Standalone   │
-   │ (Rust entry)  │ (Rust layout) │      (Rust layout)        │ (Rust layout) │  (CPAL audio) │
+   │ (Rust entry)  │ (native shell)│      (native shell)       │(native shell) │  (CPAL audio) │
    └───────────────┴───────────────┴───────────────────────────┴───────────────┴───────────────┘
 ```
 
@@ -81,8 +81,8 @@ It combines:
 | [`openplugin-core`](crates/openplugin-core) | Core `Plugin` trait, `ParamInfo`, tapers, transport, and MIDI |
 | [`openplugin-dsp`](crates/openplugin-dsp) | Realtime-safe DSP: RBJ biquads, `BlockConvolver`, dynamics, saturation, VU metering. See [docs/CONVOLVE.md](docs/CONVOLVE.md) |
 | [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knobs, faceplates, meters). Drawing lives in GoodLookinDri |
-| [`openplugin-targets`](crates/openplugin-targets) | Target bridges for CLAP, VST3, AU, AAX, and Standalone |
-| [`openplugin-ffi`](crates/openplugin-ffi) | Rust host session: parameter plane, scratch render, presets, OPST snapshot |
+| [`openplugin-targets`](crates/openplugin-targets) | CLAP and LV2 entries, plus `export_shell!`. See [docs/SHELL.md](docs/SHELL.md) |
+| [`openplugin-ffi`](crates/openplugin-ffi) | Rust host session and the `op_shell_*` ABI: parameter plane, scratch render, presets, OPST snapshot |
 
 ---
 
@@ -92,7 +92,7 @@ Add `openplugin` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-openplugin = "0.1.1-beta.1"
+openplugin = "0.2.0-beta"
 ```
 
 ---
@@ -209,13 +209,13 @@ impl SaturatorPlugin {
 Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. Exposes standard C ABI via `openplugin_targets::clap`.
 
 ### VST3
-Steinberg VST3 compatibility via independent COM interface implementations (`IComponent`, `IEditController`, `IPlugView`).
+A thin native factory in `native/vst3` calls the `op_shell_*` ABI from `export_shell!`. It implements the processor and the edit controller. It does not open an editor view. See [docs/SHELL.md](docs/SHELL.md).
 
 ### Audio Unit (macOS)
-Direct AUv2 `AudioComponent` wrapper and Cocoa view bridging for native Logic Pro, GarageBand, and macOS DAW compatibility.
+A thin `AUEffectBase` adapter in `native/au` calls the same ABI. The proof loads the component in-process. It does not install it.
 
 ### Avid AAX (Pro Tools)
-Full Pro Tools compatibility built to link with the official Avid AAX SDK (`AAX_CEffectParameters`, `AAX_IEffectGUI`).
+An unsigned native adapter in `native/aax` links an external Avid SDK and calls the same ABI. The proof runs the process callback and checks the ACF exports. It is not a Pro Tools session, and the build does not sign or install the bundle. Replace the derived development IDs before a signed release.
 
 ### Standalone
 Desktop application executable powered by `cpal` for zero-friction testing and live hardware performance.
