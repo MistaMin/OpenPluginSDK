@@ -18,7 +18,7 @@ rust-version = "1.80"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/MistaMin/OpenPluginSDK"
 homepage = "https://github.com/MistaMin/OpenPluginSDK"
-authors = ["MistaMin", "OpenPluginSDK Contributors"]
+authors = ["Marcos Quirino Deida", "OpenPluginSDK Contributors"]
 keywords = ["audio", "plugin", "vst3", "clap", "aax"]
 categories = ["multimedia::audio", "gui"]
 
