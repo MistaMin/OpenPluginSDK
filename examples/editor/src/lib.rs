@@ -3,8 +3,8 @@
 //! The engine shares a peak meter with its editor through
 //! [`Plugin::editor_state`]. The editor is drawn with GoodLookin DRI 0.2 and
 //! rasterised by [`SceneCanvas`]: a Navy plate, a lit Brit knob for the gain
-//! (drag it up or down; double-click resets), a bat toggle for Warm (click it),
-//! and an LED ladder. Its changes go through [`EditorHost`] as gestures, and the host's
+//! (drag it up or down, Shift for fine; double-click resets), a bat toggle for Warm (click it),
+//! and an LED ladder. Hit areas and drags live in a [`ControlSet`]. Its changes go through [`EditorHost`] as gestures, and the host's
 //! values come back through [`Editor::param_changed`]. The same editor runs in
 //! CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), and the VST3, Audio Unit and AAX
 //! shells (`op_editor_*`). The factory presets are text files in `presets/`,
@@ -13,11 +13,12 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use openplugin::core::editor::Modifiers;
 use openplugin::core::{Editor, EditorHost, EditorState, Frame, PresetBank};
 use openplugin::dri::goodlookindri::color::Color as GlColor;
 use openplugin::dri::goodlookindri::scene::{Rect, Scene};
 use openplugin::dri::goodlookindri::{meters, switches};
-use openplugin::dri::{draw_faceplate_code, draw_knob_code, SceneCanvas};
+use openplugin::dri::{draw_faceplate_code, draw_knob_code, Area, Control, ControlKind, ControlSet, SceneCanvas};
 use openplugin::prelude::*;
 
 static PARAMS: [ParamInfo; 2] = [
@@ -146,38 +147,30 @@ pub const METER: (f32, f32, f32, f32) = (190.0, 20.0, 18.0, 120.0);
 /// How far a drag moves the knob from end to end, in points.
 const DRAG_RANGE: f32 = 150.0;
 
-fn inside(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
-    x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
-}
-
 fn rect(r: (f32, f32, f32, f32)) -> Rect {
     Rect::new(r.0, r.1, r.2, r.3)
 }
 
-/// The editor: GoodLookin DRI parts on a [`SceneCanvas`].
+/// The editor: GoodLookin DRI parts on a [`SceneCanvas`], with its hit areas
+/// and gestures in a [`ControlSet`].
 pub struct GainEditor {
-    host: EditorHost,
-    values: [f32; 2],
+    controls: ControlSet,
     shared: Option<Arc<Shared>>,
     level: f32,
-    drag: Option<(f32, f32)>,
     canvas: SceneCanvas,
 }
 
 impl GainEditor {
     pub fn new(host: EditorHost) -> Self {
-        Self {
-            host,
-            values: [PARAMS[0].default, PARAMS[1].default],
-            shared: None,
-            level: 0.0,
-            drag: None,
-            canvas: SceneCanvas::new(WIDTH as f32, HEIGHT as f32),
-        }
+        let controls = ControlSet::new(host)
+            .with(Control::knob(Area::from_tuple(KNOB), 0, &PARAMS[0]).drag_range(DRAG_RANGE))
+            .with(Control::toggle(Area::from_tuple(SWITCH), 1, &PARAMS[1]));
+        Self { controls, shared: None, level: 0.0, canvas: SceneCanvas::new(WIDTH as f32, HEIGHT as f32) }
     }
 
     pub fn values(&self) -> [f32; 2] {
-        self.values
+        let v = |i: usize| self.controls.for_param(i).map_or(PARAMS[i].default, |c| c.value());
+        [v(0), v(1)]
     }
 
     pub fn is_bound(&self) -> bool {
@@ -200,9 +193,7 @@ impl Editor for GainEditor {
     }
 
     fn param_changed(&mut self, index: usize, plain: f32) {
-        if let Some(slot) = self.values.get_mut(index) {
-            *slot = PARAMS[index].clamp(plain);
-        }
+        self.controls.param_changed(index, plain);
     }
 
     fn tick(&mut self, dt: f32) {
@@ -213,59 +204,62 @@ impl Editor for GainEditor {
     }
 
     fn render(&mut self, scale: f32) -> Frame<'_> {
-        let gain = self.values[0];
-        let warm = self.values[1] > 0.5;
         let level_db = 20.0 * self.level.max(1e-6).log10();
+        let controls = &self.controls;
         // The plate is static: painted once per scale, then reused under the moving parts.
         let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, WIDTH as f32, HEIGHT as f32, "Navy");
         self.canvas.frame_layered(scale, 0, plate, |dl| {
-            let (x, y, w, h) = KNOB;
-            let normalized = PARAMS[0].to_normalized(gain);
-            draw_knob_code(dl, x + w * 0.5, y + h * 0.5, w * 0.5, normalized, "GAIN", &PARAMS[0].format(gain), "Brit", Color::BRIT_RED);
             let mut parts = Scene::new();
-            switches::draw_toggle(&mut parts, rect(SWITCH), warm, switches::ToggleStyle::Bat, GlColor(0xffe08030));
-            parts.text(
-                openplugin::dri::goodlookindri::scene::Point::new(SWITCH.0 + SWITCH.2 * 0.5, SWITCH.1 + SWITCH.3 + 16.0),
-                "WARM",
-                GlColor(0xffffffff),
-                11.0,
-                true,
-            );
+            for c in controls.iter() {
+                let (x, y, w, h) = c.area.bounds();
+                match c.kind {
+                    ControlKind::Knob => draw_knob_code(
+                        dl,
+                        x + w * 0.5,
+                        y + h * 0.5,
+                        w * 0.5,
+                        c.normalized(),
+                        "GAIN",
+                        &c.info.format(c.value()),
+                        "Brit",
+                        Color::BRIT_RED,
+                    ),
+                    ControlKind::Toggle => {
+                        switches::draw_toggle(&mut parts, rect((x, y, w, h)), c.is_on(), switches::ToggleStyle::Bat, GlColor(0xffe08030));
+                        parts.text(
+                            openplugin::dri::goodlookindri::scene::Point::new(x + w * 0.5, y + h + 16.0),
+                            "WARM",
+                            GlColor(0xffffffff),
+                            11.0,
+                            true,
+                        );
+                    }
+                    _ => {}
+                }
+            }
             meters::draw_led_ladder(&mut parts, rect(METER), false, level_db, level_db, 16);
             dl.append(parts);
         })
     }
 
+    fn modifiers_changed(&mut self, modifiers: Modifiers) {
+        self.controls.set_modifiers(modifiers);
+    }
+
     fn mouse_down(&mut self, x: f32, y: f32, clicks: u32) {
-        if inside(KNOB, x, y) {
-            if clicks >= 2 {
-                self.values[0] = PARAMS[0].default;
-                self.host.set(0, self.values[0]);
-                return;
-            }
-            self.host.begin(0);
-            self.drag = Some((y, PARAMS[0].to_normalized(self.values[0])));
-        } else if inside(SWITCH, x, y) {
-            self.values[1] = if self.values[1] > 0.5 { 0.0 } else { 1.0 };
-            self.host.set(1, self.values[1]);
-        }
+        self.controls.mouse_down(x, y, clicks);
     }
 
-    fn mouse_move(&mut self, _x: f32, y: f32) {
-        if let Some((start_y, start)) = self.drag {
-            let t = (start + (start_y - y) / DRAG_RANGE).clamp(0.0, 1.0);
-            let v = PARAMS[0].from_normalized(t);
-            if v != self.values[0] {
-                self.values[0] = v;
-                self.host.perform(0, v);
-            }
-        }
+    fn mouse_move(&mut self, x: f32, y: f32) {
+        self.controls.mouse_move(x, y);
     }
 
-    fn mouse_up(&mut self, _x: f32, _y: f32) {
-        if self.drag.take().is_some() {
-            self.host.end(0);
-        }
+    fn mouse_up(&mut self, x: f32, y: f32) {
+        self.controls.mouse_up(x, y);
+    }
+
+    fn wheel(&mut self, x: f32, y: f32, dy: f32) {
+        self.controls.wheel(x, y, dy);
     }
 }
 
