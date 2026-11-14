@@ -17,6 +17,13 @@ OpenPluginSDK's target crates line up with the five formats:
 | **AAX** | macOS | In-process process callback and ACF exports. A Pro Tools load is not claimed | `native/aax` linked to an external AAX SDK. Native mono and stereo. Editor view with `-DOP_EDITOR=ON` |
 | **Standalone**| Windows, macOS, Linux | Live performance, test harnesses | CPAL audio driver + window runner |
 
+## Validators in CI
+
+- **CLAP.** `clap-validator` 0.4.1 on the `examples/editor` bundle.
+- **LV2.** The `lv2-validate` job installs `lv2` and `lilv` with Homebrew, assembles `example_editor.lv2` from the `examples/editor` dylib and the files `lv2_ttl` writes, runs `lv2_validate` on `manifest.ttl` and `libexample_editor.ttl`, then renders a stereo sine through `lv2apply` with `Gain` at 6 dB and checks that the peak doubled.
+- **VST3 and AU.** The `shell-validators` job runs pluginval 1.0.4 at strictness 10 on the VST3 bundle and the installed Audio Unit, and `auval -v aufx ExGn OpGd` (also `-strict`) on the Audio Unit. See `docs/SHELL.md`.
+- **AAX.** Not validated in CI: the Avid SDK and AAX Validator are not redistributable.
+
 ## Sample rates
 
 Every format bridge accepts a finite sample rate from **1 000 Hz to 768 000 Hz** inclusive. The bounds live in `openplugin_core::MIN_SAMPLE_RATE` and `openplugin_core::MAX_SAMPLE_RATE`; `openplugin_core::sample_rate_supported` is the shared predicate.

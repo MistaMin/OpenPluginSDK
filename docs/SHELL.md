@@ -119,6 +119,8 @@ The example, in this process only, on 14 November 2026. Sample rate 48 kHz. The 
 
 The allocation count comes from `native/au/alloc_hook.cpp`, a shared library the proof links that interposes the malloc family with dyld. The interposer is test code and is never linked into a shell. In CI the `audio-unit` job builds the example, configures `native/` with only the Audio Unit shell against a pinned public AudioUnitSDK (1.4.0) and runs `ctest -R '^au_'`.
 
+The `shell-validators` CI job builds the VST3 and Audio Unit shells for the example (product "Example Gain") and runs two external tools against them. `auval -v aufx ExGn OpGd` runs on the component installed into the runner's `~/Library/Audio/Plug-Ins/Components`, after `AudioComponentRegistrar` is restarted and `auval -a` lists it; `auval -strict` runs next. pluginval 1.0.4 (pinned, SHA-256 checked before it runs) runs at strictness 10, with `--skip-gui-tests`, on the VST3 bundle and on the installed component. A failed test fails the job. Only the CI runner installs the component.
+
 Run one proof to see its lines: `build-shell/VST3Proof "build-shell/Example Gain.vst3"`, `build-shell/AUProof "build-shell/Example Gain.component"`, `build-shell/AAXProof`, `build-shell/AAXStateProof`, `build-shell/AAXAllocProof`, or `build-shell/AAXBundleProof "build-shell/Example Gain.aaxplugin"`. `ctest --output-on-failure` prints them only when a proof fails.
 
 ## Known limits
