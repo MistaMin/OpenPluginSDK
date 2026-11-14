@@ -588,6 +588,68 @@ int main(int argc, char** argv) {
         const auto hostLegacy = render_host(processor, channels, 8, {}, false);
         std::printf("VST3 %s state without a bypass flag: max difference %.3g\n", label, max_difference(hostGain, hostLegacy));
         CHECK(max_difference(hostGain, hostLegacy) <= 1e-6);
+        // The plugin's own state, the blob of op_shell_save_state, rides after the
+        // bypass flag: 'OPSB', trailer version 1, length, bytes. A damaged blob is
+        // refused and the held state stays as it was. (The chunk round trip is in
+        // state.cpp; the example has no chunk of its own.)
+        {
+            MemoryStream current;
+            CHECK(component->getState(&current) == kResultOk);
+            const size_t headSize = 8 + 8 * info.param_count + 4;
+            const std::string held(current.getData(), static_cast<size_t>(current.getSize()));
+            CHECK(held.size() > headSize + 12);
+            uint32_t tag = 0;
+            std::memcpy(&tag, held.data() + headSize, 4);
+            CHECK(tag == 0x4F505342);
+            uint32_t blobLength = 0;
+            std::memcpy(&blobLength, held.data() + headSize + 8, 4);
+            CHECK(held.size() == headSize + 12 + blobLength);
+            std::printf("VST3 %s state: %zu bytes, head %zu, plugin blob %u\n", label, held.size(), headSize, blobLength);
+            // Each damage is applied to a state with other parameter values.
+            std::string different = held;
+            const double otherValue = 0.123;
+            std::memcpy(&different[8], &otherValue, sizeof(otherValue));
+            auto refused = [&](std::string damaged) {
+                MemoryStream stream;
+                CHECK(stream.write(damaged.data(), static_cast<int32>(damaged.size()), nullptr) == kResultOk);
+                stream.seek(0, IBStream::kIBSeekSet, nullptr);
+                CHECK(component->setState(&stream) != kResultOk);
+                MemoryStream after;
+                CHECK(component->getState(&after) == kResultOk);
+                CHECK(std::string(after.getData(), static_cast<size_t>(after.getSize())) == held);
+            };
+            std::string flipped = different;
+            flipped[headSize + 12] ^= 0x5A;
+            refused(flipped);
+            std::string cut = different;
+            cut.resize(cut.size() - 1);
+            refused(cut);
+            std::string extended = different;
+            extended.push_back('x');
+            refused(extended);
+            std::string foreign = different;
+            foreign[headSize] ^= 0x01;
+            refused(foreign);
+            std::string version = different;
+            version[headSize + 4] = 2;
+            refused(version);
+            std::string empty = different.substr(0, headSize + 12);
+            std::memset(&empty[headSize + 8], 0, 4);
+            refused(empty);
+            std::string huge = different;
+            huge[headSize + 11] = 0x7F;
+            refused(huge);
+            std::string nan = different;
+            const double notANumber = std::nan("");
+            std::memcpy(&nan[8], &notANumber, sizeof(notANumber));
+            refused(nan);
+            std::printf("VST3 %s state: 8 damaged plugin blobs refused, the held state unchanged\n", label);
+            // The state the shell wrote still loads, unchanged.
+            MemoryStream again;
+            CHECK(again.write(const_cast<char*>(held.data()), static_cast<int32>(held.size()), nullptr) == kResultOk);
+            again.seek(0, IBStream::kIBSeekSet, nullptr);
+            CHECK(component->setState(&again) == kResultOk);
+        }
         MemoryStream truncated;
         char bad[4] = {};
         CHECK(truncated.write(bad, 4, nullptr) == kResultOk);

@@ -158,6 +158,30 @@ if(OP_BUILD_VST3)
     add_test(NAME vst3_bypass_latency_proof COMMAND VST3BypassLatencyProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Latency>")
     add_dependencies(VST3NoAllocProof OpenPluginVST3Latency)
     add_test(NAME vst3_noalloc_latency_proof COMMAND VST3NoAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Latency>")
+    # The same shell over a stub plugin that has a chunk of its own, for the
+    # state proof: the example has none, so it cannot show the chunk travel.
+    set(OP_PRODUCT_SAVED "${OP_PRODUCT}")
+    set(OP_PRODUCT "State Stub")
+    configure_file(vst3/Info.plist.in "${CMAKE_BINARY_DIR}/vst3-state-Info.plist" @ONLY)
+    set(OP_PRODUCT "${OP_PRODUCT_SAVED}")
+    add_library(OpenPluginVST3State MODULE
+      vst3/OpenPluginVST3.cpp
+      vst3/state_stub.cpp
+      "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
+    target_include_directories(OpenPluginVST3State PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    set_target_properties(OpenPluginVST3State PROPERTIES
+      OUTPUT_NAME "State Stub"
+      BUNDLE TRUE
+      BUNDLE_EXTENSION vst3
+      PREFIX ""
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-state-Info.plist")
+    target_link_libraries(OpenPluginVST3State PRIVATE sdk "-framework CoreFoundation")
+    add_executable(VST3StateProof vst3/state.cpp
+      "${OP_VST3_SDK}/public.sdk/source/common/memorystream.cpp")
+    target_include_directories(VST3StateProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/vst3")
+    target_link_libraries(VST3StateProof PRIVATE sdk "-framework CoreFoundation")
+    add_dependencies(VST3StateProof OpenPluginVST3State)
+    add_test(NAME vst3_state_proof COMMAND VST3StateProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3State>")
   endif()
   if(OP_EDITOR)
     # The editor in the VST3 shell. OP_EDITOR_PROOF_CLICK is "x;y;param":

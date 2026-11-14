@@ -15,6 +15,7 @@
 #include "pluginterfaces/base/ustring.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "base/source/fstreamer.h"
+#include "pluginterfaces/base/ibstream.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -59,6 +60,38 @@ constexpr double kBypassFadeSeconds = 0.010;
 constexpr const char* kEngineMessage = "openplugin.engine";
 #endif
 
+// Component state. The head is unchanged since version 1: int32 version (1),
+// int32 parameter count, one double per parameter, then an int32 bypass flag
+// (absent in states written before bypass). After the flag a state may carry
+// the plugin's whole state from op_shell_save_state as one trailer:
+//   uint32 kStateTrailerTag, int32 trailer version (1), uint32 length, bytes.
+// The trailer is last, so a shell that predates it reads the head and stops.
+// A state without a trailer is a version 1 state and loads as before. A
+// trailer with another tag or version, a length of 0 or above kMaxStateBlob,
+// fewer bytes than its length, or bytes after it, is refused.
+constexpr uint32 kStateTrailerTag = 0x4F505342;  // 'OPSB'
+constexpr int32 kStateTrailerVersion = 1;
+constexpr uint32 kMaxStateBlob = 1u << 30;
+
+// Saves the whole state of `instance`: query the size, then copy, and repeat
+// while the plugin says the state grew in between (OP_STATE_TOO_SMALL).
+bool save_blob(void* instance, std::vector<uint8_t>& out) {
+    uint32_t needed = 0;
+    if (!instance || op_shell_save_state(instance, nullptr, 0, &needed) != OP_STATE_TOO_SMALL) return false;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        if (needed == 0 || needed > kMaxStateBlob) return false;
+        out.assign(needed, 0);
+        const uint32_t result = op_shell_save_state(instance, out.data(), needed, &needed);
+        if (result == OP_STATE_OK) {
+            if (needed == 0 || needed > out.size()) return false;
+            out.resize(needed);
+            return true;
+        }
+        if (result != OP_STATE_TOO_SMALL) return false;
+    }
+    return false;
+}
+
 class Processor final : public AudioEffect {
 public:
     Processor() {
@@ -99,15 +132,22 @@ public:
     tresult PLUGIN_API setActive(TBool active) SMTG_OVERRIDE {
         if (!active) {
             announce(nullptr);
+            keepChunk();
             destroy();
             return AudioEffect::setActive(active);
         }
         if (processSetup.maxSamplesPerBlock < 1) return kResultFalse;
         void* next = op_shell_create(processSetup.sampleRate, static_cast<uint32_t>(processSetup.maxSamplesPerBlock), channels_);
         if (!next) return kResultFalse;
+        keepChunk();
         destroy();
         engine_ = next;
         op_shell_reset(engine_);
+        // The plugin's state set while inactive, or kept from the engine that
+        // just went away, goes into the new engine.
+        if (!pendingBlob_.empty() && op_shell_load_state(engine_, pendingBlob_.data(), static_cast<uint32_t>(pendingBlob_.size())))
+            pushValues(engine_);
+        pendingBlob_.clear();
         prepareBypass();
         announce(engine_);
         return AudioEffect::setActive(active);
@@ -130,6 +170,10 @@ public:
         return samples > 0.0 ? static_cast<uint32>(samples) : kNoTail;
     }
 #endif
+    // Loads the head and, if present, the plugin-state trailer (see above). It
+    // changes nothing unless everything is accepted: op_shell_load_state
+    // validates before it applies, and the parameter values and bypass change
+    // only after that.
     tresult PLUGIN_API setState(IBStream* stream) SMTG_OVERRIDE {
         if (!stream || count_ == 0) return kResultFalse;
         IBStreamer reader(stream, kLittleEndian);
@@ -143,29 +187,51 @@ public:
         // Bypass follows the parameters. A state written before bypass existed
         // ends here, which means not bypassed.
         int32 bypass = 0;
-        if (!reader.readInt32(bypass)) bypass = 0;
+        bool hasTrailer = false;
+        std::vector<uint8_t> blob;
+        if (reader.readInt32(bypass)) {
+            if (!readTrailer(stream, hasTrailer, blob)) return kResultFalse;
+        } else {
+            bypass = 0;
+        }
+        if (hasTrailer) {
+            if (engine_) {
+                if (!op_shell_load_state(engine_, blob.data(), static_cast<uint32_t>(blob.size()))) return kResultFalse;
+            } else {
+                // No engine to load into: check the blob on a scratch instance
+                // and keep it for the next setActive.
+                if (!checkBlob(blob)) return kResultFalse;
+                pendingBlob_ = std::move(blob);
+            }
+        }
         for (uint32_t i = 0; i < count_; ++i) values_[i].store(loaded[i]);
         bypass_.store(bypass != 0);
+        if (hasTrailer && engine_) pushValues(engine_);
         return kResultOk;
     }
     tresult PLUGIN_API getState(IBStream* stream) SMTG_OVERRIDE {
         if (!stream || count_ == 0) return kResultFalse;
+        // The plugin's state first, so a failure writes nothing. The engine
+        // gets the values held here before it is saved, so head and blob agree.
+        std::vector<uint8_t> blob;
+        if (engine_) {
+            pushValues(engine_);
+            if (!save_blob(engine_, blob)) return kResultFalse;
+        } else {
+            blob = pendingBlob_;
+        }
         IBStreamer writer(stream, kLittleEndian);
         if (!writer.writeInt32(1) || !writer.writeInt32(static_cast<int32>(count_))) return kResultFalse;
         for (uint32_t i = 0; i < count_; ++i) {
             if (!writer.writeDouble(values_[i].load())) return kResultFalse;
         }
         if (!writer.writeInt32(bypass_.load() ? 1 : 0)) return kResultFalse;
+        if (blob.empty()) return kResultOk;
+        if (!writer.writeInt32(static_cast<int32>(kStateTrailerTag)) || !writer.writeInt32(kStateTrailerVersion) || !writer.writeInt32(static_cast<int32>(blob.size()))) return kResultFalse;
+        int32 written = 0;
+        if (stream->write(blob.data(), static_cast<int32>(blob.size()), &written) != kResultOk || written != static_cast<int32>(blob.size())) return kResultFalse;
         return kResultOk;
     }
-    // Parameter changes are sample-accurate. Every point of every input queue
-    // (the bypass parameter included) is collected and ordered by sample offset.
-    // The block is then rendered in segments between change points: the values
-    // that change at a segment's start are set before op_shell_process for that
-    // segment, so a value applies from the segment's first sample. Bypass starts
-    // its crossfade at the sample of its change. Nothing here allocates: the
-    // scratch is sized in setActive. A block with more points than the scratch
-    // holds is thinned per queue (see collectChanges).
     tresult PLUGIN_API process(ProcessData& data) SMTG_OVERRIDE {
         const int32 numSamples = std::max<int32>(data.numSamples, 0);
         const uint32_t pending = collectChanges(data.inputParameterChanges, numSamples);
@@ -213,6 +279,61 @@ public:
     }
 
 private:
+    // Reads the trailer that follows the bypass flag. `present` stays false when
+    // the stream ends right there; a partial, foreign, empty, oversized or
+    // extended trailer is an error.
+    static bool readTrailer(IBStream* stream, bool& present, std::vector<uint8_t>& blob) {
+        present = false;
+        IBStreamer reader(stream, kLittleEndian);
+        uint32_t tagBytes = 0;
+        int32 got = 0;
+        if (stream->read(&tagBytes, 4, &got) != kResultOk || got == 0) return true;
+        if (got != 4) return false;
+#if BYTEORDER == kBigEndian
+        tagBytes = SWAP_32(tagBytes);
+#endif
+        int32 version = 0;
+        int32 length = 0;
+        if (tagBytes != kStateTrailerTag || !reader.readInt32(version) || version != kStateTrailerVersion || !reader.readInt32(length)) return false;
+        if (length < 1 || static_cast<uint32_t>(length) > kMaxStateBlob) return false;
+        // Read in pieces so a corrupt length cannot make a huge allocation
+        // before the stream has run out.
+        constexpr int32 kPiece = 1 << 16;
+        blob.clear();
+        int32 remaining = length;
+        while (remaining > 0) {
+            const int32 want = std::min(remaining, kPiece);
+            const size_t at = blob.size();
+            blob.resize(at + static_cast<size_t>(want));
+            int32 read = 0;
+            if (stream->read(blob.data() + at, want, &read) != kResultOk || read != want) return false;
+            remaining -= want;
+        }
+        uint8_t extra = 0;
+        int32 more = 0;
+        if (stream->read(&extra, 1, &more) == kResultOk && more != 0) return false;
+        present = true;
+        return true;
+    }
+    // Checks a blob without an engine: a scratch instance loads it, then goes.
+    bool checkBlob(const std::vector<uint8_t>& blob) const {
+        const double rate = processSetup.sampleRate >= 8000.0 ? processSetup.sampleRate : 48000.0;
+        const uint32_t block = processSetup.maxSamplesPerBlock >= 1 ? static_cast<uint32_t>(processSetup.maxSamplesPerBlock) : 512u;
+        void* scratch = op_shell_create(rate, block, channels_);
+        if (!scratch) return false;
+        const bool ok = op_shell_load_state(scratch, blob.data(), static_cast<uint32_t>(blob.size())) != 0;
+        op_shell_destroy(scratch);
+        return ok;
+    }
+    // Hands the engine the parameter values held here.
+    void pushValues(void* instance) {
+        for (uint32_t i = 0; i < count_; ++i) op_shell_set_normalized(instance, i, static_cast<float>(values_[i].load()));
+    }
+    // Before the engine goes away, keep the plugin's state for the next one.
+    void keepChunk() {
+        if (engine_ && !save_blob(engine_, pendingBlob_)) pendingBlob_.clear();
+    }
+    std::vector<uint8_t> pendingBlob_;
     struct Change {
         int32 offset;
         uint32_t order;
@@ -411,6 +532,7 @@ public:
             if (!reader.readDouble(value) || !std::isfinite(value)) return kResultFalse;
             setParamNormalized(static_cast<ParamID>(i), value);
         }
+        // The plugin-state trailer after the flag belongs to the processor.
         int32 bypass = 0;
         if (!reader.readInt32(bypass)) bypass = 0;
         setParamNormalized(kBypassId, bypass != 0 ? 1.0 : 0.0);
