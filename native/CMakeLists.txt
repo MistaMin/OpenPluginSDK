@@ -110,7 +110,10 @@ if(OP_BUILD_VST3)
   add_custom_command(TARGET OpenPluginVST3 POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_VST3_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources/VST3-SDK-LICENSE.txt"
-    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/vst3/PkgInfo" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/PkgInfo")
+    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/vst3/PkgInfo" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/PkgInfo"
+    # The copies above change the bundle after the linker signed it; sign it
+    # again (ad hoc) so codesign, auval and hosts accept it.
+    COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:OpenPluginVST3>")
   add_executable(VST3Proof vst3/host.cpp
     "${OP_VST3_SDK}/public.sdk/source/common/memorystream.cpp"
     "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp")
@@ -203,7 +206,9 @@ if(OP_BUILD_AU)
   op_link_rust(OpenPluginAU)
   add_custom_command(TARGET OpenPluginAU POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources"
-    COMMAND ${CMAKE_COMMAND} -E copy "${OP_AU_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources/AudioUnitSDK-LICENSE.txt")
+    COMMAND ${CMAKE_COMMAND} -E copy "${OP_AU_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources/AudioUnitSDK-LICENSE.txt"
+    # Sign again (ad hoc) after changing the bundle, or registration refuses it.
+    COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
   add_executable(AUProof au/host.cpp)
   target_include_directories(AUProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(AUProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
@@ -311,6 +316,10 @@ if(OP_BUILD_AAX)
     add_custom_command(TARGET OpenPluginAAX POST_BUILD
       COMMAND OpenPluginAAXPages "$<TARGET_BUNDLE_DIR:OpenPluginAAX>/Contents/Resources/${OP_PRODUCT}Pages.xml")
   endif()
+  # Last post-build step: sign again (ad hoc) after the licence and page table
+  # changed the bundle. A release build re-signs with PACE and a Developer ID.
+  add_custom_command(TARGET OpenPluginAAX POST_BUILD
+    COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:OpenPluginAAX>")
   add_executable(AAXProof aax/host_process.cpp aax/OpenPluginAAXProcess.cpp)
   target_include_directories(AAXProof PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
