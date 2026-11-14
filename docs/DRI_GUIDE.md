@@ -83,3 +83,52 @@ The view repaints 30 times a second on the main thread, so an editor of any size
 - `draw_fader`: Authentic console mixer fader with calibrated physical scale markings (+12, +6, 0, -5, -10, -20, -30, -40, -60, -inf dB), vertical slot track, and realistic 3D metallic fader cap with center indicator groove. Includes piecewise log-linear taper conversion (`fader_pos_to_db`, `fader_db_to_pos`).
 - `draw_slider`: Horizontal parameter slider with active fill track and rounded thumb handle.
 - `draw_pan_knob`: Console rotary pan knob with illuminated bipolar arc meter track from center (<L100 .. <C> .. R100>).
+
+## Controls and hit testing
+
+`openplugin_dri::hit` is a registry that replaces hand-coded hit rectangles and drag code. An editor owns a `ControlSet` built with its `EditorHost`, adds controls, forwards its input, and iterates the set to draw.
+
+| Control | Constructor | Input |
+|---|---|---|
+| Rotary knob | `Control::knob(area, param, &INFO)` | vertical drag, 200 points for the full range (`.drag_range(points)` changes it) |
+| Fader | `fader_v`, `fader_h` | drag, 1:1 with the length of its area |
+| Toggle | `toggle` | click flips it (`begin`, value, `end`) |
+| Momentary button | `button` | begin and the maximum on press; the minimum and end on release, wherever the pointer is |
+| Key bank | `key_bank(area, param, &INFO, vertical)` | click or drag across equal keys; for a choice parameter |
+
+An `Area` is a half-open rectangle or a circle (rim included), in points. A later control is on top where areas overlap. A read-only parameter never reacts.
+
+```rust
+let controls = ControlSet::new(host)
+    .with(Control::knob(Area::circle(55.0, 68.0, 30.0), 0, &PARAMS[0]))
+    .with(Control::toggle(Area::rect(118.0, 40.0, 34.0, 56.0), 1, &PARAMS[1]));
+
+// Editor::mouse_down / mouse_move / mouse_up / wheel / modifiers_changed:
+controls.mouse_down(x, y, clicks);   // and the others, same arguments
+// Editor::param_changed:
+controls.param_changed(index, plain);
+
+// render:
+for c in controls.iter() {           // back to front
+    let (x, y, w, h) = c.area.bounds();
+    match c.kind {
+        ControlKind::Knob => draw_knob_code(dl, x + w * 0.5, y + h * 0.5, w * 0.5, c.normalized(), "GAIN", &c.info.format(c.value()), "Brit", Color::BRIT_RED),
+        ControlKind::Toggle => { /* c.is_on(), c.hover(), c.pressed() */ }
+        _ => {}
+    }
+}
+```
+
+Behaviour, in gestures:
+
+- Drag: `Begin`, one `Perform` per change of value, `End`. A click without movement sends `Begin`, `End` and no value. The drag is relative, so a grab never jumps, and the travel is clamped to the range so reversing at an end responds at once.
+- Fine: while `Modifiers::fine()` (Shift or Command) is held, drags and wheel steps count a tenth. Changing the modifier mid-drag does not jump the value.
+- Double-click on a knob or fader: one `Begin`, `Perform(default)`, `End`.
+- Wheel: a continuous control moves 2% of its range per unit, as one `Begin`, `Perform`, `End`. A stepped, toggle or choice parameter moves one position per whole unit of accumulated scroll, so a trackpad does not run away. Nothing is sent at an end of the range.
+- Every value sent is `ParamInfo::clamp`ed, so it is in range and snapped for `with_steps`, `Toggle` and `Choice`; a repeated value is not sent again. NaN and infinite coordinates, wheel deltas and host values are dropped.
+- `param_changed` stores the host's value (clamped) and sends nothing. While the user holds a control on that parameter it is ignored, so a late echo cannot make the control jump; the host's value arrives again after the release.
+- `hovered()`, `pressed()`, `Control::hover()` and `Control::pressed()` give the state to draw. Call `mouse_exit()` when the pointer leaves the view.
+
+Why 200 points: it is about the height of a small plugin window and one hand movement on a trackpad, and it keeps one point under 0.5% of the range. A 150 point range (the old example) still works through `.drag_range(150.0)`.
+
+The modifier keys reach the editor through `Editor::modifiers_changed`, an optional method with an empty default. The macOS view does not call it yet, so on macOS today the fine adjustment is available only to a host that reports modifiers some other way. Call `ControlSet::set_modifiers` yourself in a standalone window.

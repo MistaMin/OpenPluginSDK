@@ -87,6 +87,27 @@ impl EditorHost {
     }
 }
 
+/// Which modifier keys are held. A view that knows them reports a change
+/// through [`Editor::modifiers_changed`]; a view that does not never calls it
+/// and the editor sees none held.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub command: bool,
+}
+
+impl Modifiers {
+    pub const NONE: Self = Self { shift: false, ctrl: false, alt: false, command: false };
+
+    /// The modifiers that ask for fine adjustment: Shift or Command. Control
+    /// is left out because a Control-click is a right click on macOS.
+    pub fn fine(&self) -> bool {
+        self.shift || self.command
+    }
+}
+
 /// A rendered editor frame. `pixels.len() == width * height`.
 #[derive(Clone, Copy)]
 pub struct Frame<'a> {
@@ -112,6 +133,11 @@ pub trait Editor {
 
     /// Draw the editor at `scale` device pixels per point.
     fn render(&mut self, scale: f32) -> Frame<'_>;
+
+    /// The held modifier keys changed. Called before the mouse call that
+    /// they belong to, never when nothing changed. Optional: a view that does
+    /// not report modifiers leaves this uncalled.
+    fn modifiers_changed(&mut self, _modifiers: Modifiers) {}
 
     /// Mouse input in points, origin at the top left.
     fn mouse_down(&mut self, _x: f32, _y: f32, _clicks: u32) {}

@@ -17,6 +17,7 @@ pub mod canvas;
 #[cfg(target_os = "macos")]
 pub mod cocoa;
 pub mod controls;
+pub mod hit;
 pub mod render;
 pub mod styles;
 pub mod window;
@@ -30,5 +31,6 @@ pub use controls::{
     draw_vu_meter, fader_db_to_pos, fader_pos_to_db, knob_angle,
 };
 pub use goodlookindri;
+pub use hit::{Area, Control, ControlId, ControlKind, ControlSet, Modifiers};
 pub use styles::{Color, FaceplateStyle, KnobStyle, MeterStyle};
 pub use window::{DriHostWindow, DriView};
