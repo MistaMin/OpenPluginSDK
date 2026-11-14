@@ -192,6 +192,7 @@ if(OP_BUILD_AAX)
   add_library(OpenPluginAAX MODULE
     aax/OpenPluginAAXDescribe.cpp
     aax/OpenPluginAAXParameters.cpp
+    aax/OpenPluginAAXState.cpp
     aax/OpenPluginAAXProcess.cpp
     aax/OpenPluginAAXGUI.cpp
     "${OP_AAX_SDK}/Interfaces/AAX_Exports.cpp")
@@ -230,9 +231,29 @@ if(OP_BUILD_AAX)
     "${OP_AAX_SDK}/Interfaces/ACF")
   target_link_libraries(AAXProof PRIVATE openplugin_aax_sdk)
   op_link_rust(AAXProof)
+  # State chunk proof: the shell's real AAX_CEffectParameters, no controller.
+  add_executable(AAXStateProof aax/host_state.cpp aax/OpenPluginAAXParameters.cpp aax/OpenPluginAAXState.cpp aax/OpenPluginAAXProcess.cpp)
+  target_include_directories(AAXStateProof PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aax"
+    "${OP_AAX_SDK}/Interfaces"
+    "${OP_AAX_SDK}/Interfaces/ACF"
+    "${OP_AAX_SDK}/Libs/AAXLibrary/include")
+  target_link_libraries(AAXStateProof PRIVATE openplugin_aax_sdk)
+  op_link_rust(AAXStateProof)
+  # Allocation proof: replaces operator new and hooks malloc, so it stays a separate binary.
+  add_executable(AAXAllocProof aax/host_alloc.cpp aax/OpenPluginAAXProcess.cpp)
+  target_include_directories(AAXAllocProof PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aax"
+    "${OP_AAX_SDK}/Interfaces"
+    "${OP_AAX_SDK}/Interfaces/ACF")
+  op_link_rust(AAXAllocProof)
   add_executable(AAXBundleProof aax/host_bundle.cpp)
   target_link_libraries(AAXBundleProof PRIVATE "-framework CoreFoundation")
   add_dependencies(AAXBundleProof OpenPluginAAX)
   add_test(NAME aax_process_proof COMMAND AAXProof)
+  add_test(NAME aax_state_proof COMMAND AAXStateProof)
+  add_test(NAME aax_alloc_proof COMMAND AAXAllocProof)
   add_test(NAME aax_bundle_proof COMMAND AAXBundleProof "$<TARGET_BUNDLE_DIR:OpenPluginAAX>")
 endif()
