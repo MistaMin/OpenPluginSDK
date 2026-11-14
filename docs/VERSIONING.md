@@ -125,4 +125,4 @@ The minimum Rust version, why it is what it is, and when it may rise, are writte
 4. The release is tagged `vMAJOR.MINOR.PATCH[-suffix]`. Only `v0.1.0-beta.1` is tagged so far; from the next release every release gets a tag.
 5. Publishing to crates.io, the 1.0 freeze and any yank are the owner's decisions.
 
-(The release steps for publishing are not written yet: there is no `docs/PUBLISHING.md` in the repository at this commit, and roadmap tasks for crate metadata and GoodLookin DRI as a versioned dependency come first.)
+The release steps for publishing, in crate order, are in [PUBLISHING.md](PUBLISHING.md).

@@ -8,11 +8,11 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
 
 ## [Unreleased]
 
-Commits `7fd84c0` to `18a5b3f` (after the 0.3.1 Beta release commit `a708cac`). This is the 0.4 work on macOS format conformance.
+Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS format conformance and the first 0.5 and 1.0 tasks.
 
 ### Added
 
-- `op_shell_save_state` and `op_shell_load_state` in the shell ABI. They carry the parameters and the plugin's own chunk (`Plugin::save_state` / `load_state`) in one blob, all or nothing. `OP_SHELL_ABI` stays 1; nothing existing changed. The VST3, Audio Unit and AAX adapters do not call them yet, so a plugin's own state still does not reach those sessions.
+- `op_shell_save_state` and `op_shell_load_state` in the shell ABI. They carry the parameters and the plugin's own chunk (`Plugin::save_state` / `load_state`) in one blob, all or nothing. `OP_SHELL_ABI` stays 1; nothing existing changed. The VST3 shell carries the blob in its component state (a trailer after the version 1 fields), the Audio Unit in its class-info dictionary (key `OpenPluginState`), and AAX in state chunk version 2; states written by earlier versions still load.
 - `openplugin_ffi::STATE_WAIT` (two seconds) and `FfiInstance::try_save_bytes`, the bounded form of `save_bytes`.
 - VST3: a `kIsBypass` host bypass parameter. VST3, the Audio Unit and AAX bypass by delaying the dry signal by the reported latency with a 10 ms crossfade, and the plugin keeps running. CLAP's `PARAM_IS_BYPASS` reaches `Plugin::set_host_bypass`.
 - AAX: parameter and plugin state saved as a versioned chunk (corrupt chunks are refused without touching any parameter); the controls packet is sized by the parameter count, so plugins with more than 64 parameters work (proven with 200).
@@ -20,17 +20,26 @@ Commits `7fd84c0` to `18a5b3f` (after the 0.3.1 Beta release commit `a708cac`). 
 - `scripts/aax_validate.sh`, which runs Avid's AAX Validator against the example bundle locally (13 passed, 0 failed, 1 skipped).
 - Proofs: CLAP host bypass through the exported `clap_plugin`; allocation-free `process` for the VST3, Audio Unit and AAX C++ paths (counting every malloc-family call in the process); Audio Unit editor proof (`au_editor_proof`); VST3 bypass and parameter changes proven sample-accurate.
 - CI: `clap-validator` 0.4.1, VST3 and Audio Unit shell proofs against pinned public SDKs, `auval` (normal and strict), pluginval at strictness 10, `lv2_validate`, and a render through lilv's `lv2apply`.
+- `Plugin::state_is_parameters_only` (default `false`). A plugin that returns `true` saves and loads from the parameter plane without the state gate, in the shells and in CLAP, so a host saving during playback never skips a block. The SDK's examples opt in.
+- `openplugin_dri::hit`: a control registry (knobs, faders, toggles, buttons, key banks) that turns mouse input into host gestures, with double-click reset, fine adjustment, wheel and stepped snapping; `Editor::modifiers_changed`.
+- `openplugin_dri::DesignEditor`: an editor built from a GoodLookin design CSV, each row bound to a parameter by id; `examples/design_editor`.
+- `docs/PUBLISHING.md`, `CHANGELOG.md`, `docs/VERSIONING.md` and `docs/API_REVIEW.md`; crate metadata (authors, homepage, keywords, categories, readme, documentation) inherited by every crate; GoodLookin DRI named by version as well as path.
 - `docs/ROADMAP.md` for macOS to 1.0 and `docs/ROADMAP_WINDOWS_LINUX.md`.
 
 ### Changed
 
 - VST3 applies parameter changes and the bypass crossfade at their sample offset instead of at the start of the block.
 - Audio Unit bypass no longer resets the plugin when it ends; the plugin keeps running and the dry signal is delayed by the reported latency (the base class copied the input with no delay).
+- CLAP saves and loads beside `process` safely: a gate for plugins with a chunk, the parameter plane for parameter-only plugins.
+- The native build signs each shell bundle again (ad hoc) after its post-build copies, so the bundles verify and the Audio Unit registers.
+- Unused dependencies removed: `log` and `serde_json` from core, `serde` and `log` from dsp, `serde` from dri, `cpal` and `raw-window-handle` from targets. The `standalone` feature no longer pulls `cpal`.
 - `FfiInstance` guards the plugin object with a gate so that saving and loading a session is safe beside `process`. A block that starts while a state call holds the plugin passes the input through dry. This is behaviour, not a signature change, except for the additions above.
 
 ### Fixed
 
-- `save_bytes` / `load_bytes` raced with `process` (fixed by the gate above).
+- `save_bytes` / `load_bytes` raced with `process` (fixed by the gate above), and so did CLAP's `state.save` / `state.load`.
+- VST3 `setState` applied values while it was still reading them, so a bad state left them half-applied; it now validates first.
+- The shell bundles' signatures were broken by the post-build copies ("code has no resources but signature indicates they must be present").
 - AAX bypass copied the dry signal without the reported latency; it is now delayed by the reported latency like VST3 and the Audio Unit.
 
 ## [0.3.1-beta] - 2026-11-14
