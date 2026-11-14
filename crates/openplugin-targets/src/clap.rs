@@ -19,11 +19,13 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
+use std::sync::atomic::{fence, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant as Clock};
 
 use openplugin_core::{
     decode_params, encode_params, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Gesture, GestureQueue,
-    IoConfig, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PortKind,
+    IoConfig, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
     Seqlock, SpeakerLayout, Tail, Transport, MAX_AUDIO_CHANNELS,
 };
 
@@ -172,6 +174,18 @@ struct Instance {
     feature_ptrs: Vec<*const c_char>,
     inner: Box<dyn Plugin>,
     plane: Arc<ParamPlane>,
+    /// The audio thread's consistent copy of `plane`; the cursor pulls from it.
+    snapshot: ParamPlane,
+    /// Odd while a state load is writing the plane (see `pull_params`).
+    plane_epoch: AtomicU32,
+    /// Who is inside the plugin object: `GATE_AUDIO`, `GATE_STATE` (see `enter_state`).
+    gate: AtomicU32,
+    /// Serialises state calls against each other (the host calls them on the main thread).
+    state_lock: Mutex<()>,
+    /// `Plugin::save_state` returned a chunk when probed on the main thread. When false
+    /// the state is the parameters alone and state calls never touch `inner`.
+    has_chunk: bool,
+    info: &'static PluginInfo,
     cursor: ParamCursor,
     /// Editor gestures waiting to be reported to the host.
     gestures: Arc<GestureQueue>,
@@ -322,7 +336,7 @@ fn apply_group(instance: &mut Instance, start: usize, end: usize) {
         }
     }
     if dirty {
-        instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+        pull_params(instance);
         sync_bypass(instance);
     }
 }
@@ -406,7 +420,7 @@ fn render_block(
     let mut event = 0;
     while done < frames {
         let chunk_end = (done + max_block).min(frames);
-        instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+        pull_params(instance);
         sync_bypass(instance);
         let mut cursor = done;
         while event < count {
@@ -477,6 +491,7 @@ unsafe extern "C" fn plugin_activate(plugin: *const clap_plugin, sample_rate: f6
     instance.buffers = vec![vec![0.0; max_block]; main];
     instance.sidechain = vec![vec![0.0; max_block]; side];
     instance.inner.prepare_layout(rate, max_block, layout);
+    instance.has_chunk = instance.inner.save_state().is_some();
     instance.cursor.invalidate();
     instance.cursor.pull(&instance.plane, instance.inner.as_mut());
     sync_bypass(instance);
@@ -503,11 +518,151 @@ unsafe extern "C" fn plugin_reset(plugin: *const clap_plugin) {
     }
 }
 
-unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const clap_process) -> i32 {
-    let Some(instance) = instance(plugin) else { return PROCESS_ERROR };
-    if process.is_null() {
+const GATE_AUDIO: u32 = 1;
+const GATE_STATE: u32 = 2;
+/// How long a state call waits for a block in flight before it gives up.
+const STATE_WAIT: Duration = Duration::from_millis(250);
+
+/// Held by the audio thread for the length of one block.
+struct AudioGate<'a>(&'a AtomicU32);
+
+impl Drop for AudioGate<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_and(!GATE_AUDIO, Ordering::Release);
+    }
+}
+
+/// Held by a state call while it is inside the plugin object.
+struct StateGate<'a>(&'a AtomicU32);
+
+impl Drop for StateGate<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_and(!GATE_STATE, Ordering::Release);
+    }
+}
+
+/// Takes the plugin object for a state call. Announces itself first, so a block that
+/// starts from now on is skipped (the audio thread never waits), then waits a bounded
+/// time for the block already running to end. `None` after `STATE_WAIT`.
+fn enter_state(gate: &AtomicU32) -> Option<StateGate<'_>> {
+    gate.fetch_or(GATE_STATE, Ordering::AcqRel);
+    let deadline = Clock::now() + STATE_WAIT;
+    let mut spins = 0u32;
+    loop {
+        if gate.load(Ordering::Acquire) & GATE_AUDIO == 0 {
+            return Some(StateGate(gate));
+        }
+        if Clock::now() >= deadline {
+            gate.fetch_and(!GATE_STATE, Ordering::Release);
+            return None;
+        }
+        spins += 1;
+        if spins < 64 {
+            std::hint::spin_loop();
+        } else {
+            std::thread::sleep(Duration::from_micros(50));
+        }
+    }
+}
+
+/// Brackets a write of several plane slots so `pull_params` never applies half of it.
+fn plane_write<R>(epoch: &AtomicU32, write: impl FnOnce() -> R) -> R {
+    epoch.fetch_add(1, Ordering::Relaxed);
+    fence(Ordering::Release);
+    let result = write();
+    epoch.fetch_add(1, Ordering::Release);
+    result
+}
+
+/// Applies the plane to the plugin from a consistent copy. While a state load is
+/// writing the plane, the pull is skipped and the plugin keeps its values for this
+/// chunk; the cursor applies the loaded set whole at the next one.
+fn pull_params(instance: &mut Instance) {
+    let before = instance.plane_epoch.load(Ordering::Acquire);
+    if before & 1 == 1 {
+        return;
+    }
+    for index in 0..instance.plane.len() {
+        instance.snapshot.store(index, instance.plane.load(index).unwrap_or(0.0));
+    }
+    fence(Ordering::Acquire);
+    if instance.plane_epoch.load(Ordering::Relaxed) != before {
+        return;
+    }
+    instance.cursor.pull(&instance.snapshot, instance.inner.as_mut());
+}
+
+/// The block a state call made the audio thread skip: parameter events still reach
+/// the plane, the input passes through (silence where it has no channel), and nothing
+/// touches the plugin object.
+unsafe fn skipped_block(plane: &ParamPlane, process: &clap_process) -> i32 {
+    if !process.in_events.is_null() {
+        let events = unsafe { &*process.in_events };
+        if let (Some(size), Some(get)) = (events.size, events.get) {
+            for index in 0..unsafe { size(events) } {
+                let header = unsafe { get(events, index) };
+                if header.is_null() {
+                    continue;
+                }
+                let header = unsafe { &*header };
+                if header.type_ == EVENT_PARAM_VALUE && header.space_id == 0 {
+                    let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_value) };
+                    plane.store(event.param_id as usize, event.value as f32);
+                }
+            }
+        }
+    }
+    if process.frames_count == 0 || process.audio_outputs_count == 0 || process.audio_outputs.is_null() {
+        return PROCESS_CONTINUE;
+    }
+    let output = unsafe { &*process.audio_outputs };
+    if output.data32.is_null() {
         return PROCESS_ERROR;
     }
+    let frames = process.frames_count as usize;
+    let input = if process.audio_inputs_count == 0 || process.audio_inputs.is_null() {
+        None
+    } else {
+        Some(unsafe { &*process.audio_inputs })
+    };
+    for channel in 0..output.channel_count as usize {
+        let dst = unsafe { *output.data32.add(channel) };
+        if dst.is_null() {
+            continue;
+        }
+        let src = match input {
+            Some(input) if channel < input.channel_count as usize && !input.data32.is_null() => unsafe { *input.data32.add(channel) },
+            _ => std::ptr::null_mut(),
+        };
+        if src.is_null() {
+            unsafe { std::ptr::write_bytes(dst, 0, frames) };
+        } else if src != dst {
+            unsafe { std::ptr::copy(src, dst, frames) };
+        }
+    }
+    PROCESS_CONTINUE
+}
+
+unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const clap_process) -> i32 {
+    if plugin.is_null() || process.is_null() {
+        return PROCESS_ERROR;
+    }
+    let raw = unsafe { (*plugin).plugin_data } as *mut Instance;
+    if raw.is_null() {
+        return PROCESS_ERROR;
+    }
+    // Only the gate is touched before the block owns the instance: a state call may
+    // be inside the plugin object, and it never touches the rest.
+    let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
+    if gate.compare_exchange(0, GATE_AUDIO, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        let plane = unsafe { &*std::ptr::addr_of!((*raw).plane) };
+        return unsafe { skipped_block(plane, &*process) };
+    }
+    let _held = AudioGate(gate);
+    process_block(unsafe { &mut *raw }, process)
+}
+
+fn process_block(instance: &mut Instance, process: *const clap_process) -> i32 {
     let process = unsafe { &*process };
     collect_events(instance, process.in_events);
     report_gestures(instance, process.out_events);
@@ -802,22 +957,40 @@ static PARAMS: clap_plugin_params = clap_plugin_params {
     flush: Some(params_flush),
 };
 
+/// State calls reach the instance through field pointers and never form a
+/// `&mut Instance`, which would alias the audio thread's. `gate` decides who may use
+/// `inner` and `cursor`.
+unsafe fn state_target(plugin: *const clap_plugin) -> Option<*mut Instance> {
+    if plugin.is_null() {
+        return None;
+    }
+    let raw = unsafe { (*plugin).plugin_data } as *mut Instance;
+    (!raw.is_null()).then_some(raw)
+}
+
+fn params_snapshot(plane: &ParamPlane, info: &'static PluginInfo) -> Vec<u8> {
+    let values: Vec<f32> = (0..plane.len()).map(|index| plane.load(index).unwrap_or(0.0)).collect();
+    encode_params(info, &values)
+}
+
 unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_ostream) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
+    let Some(raw) = (unsafe { state_target(plugin) }) else { return false };
     if stream.is_null() {
         return false;
     }
     let stream = unsafe { &*stream };
     let Some(write) = stream.write else { return false };
-    let bytes = if let Some(custom) = instance.inner.save_state() {
-        custom
+    let (plane, info, has_chunk) = unsafe { (&*std::ptr::addr_of!((*raw).plane), (*raw).info, (*raw).has_chunk) };
+    let _serial = unsafe { &*std::ptr::addr_of!((*raw).state_lock) }.lock();
+    let custom = if has_chunk {
+        // The plugin owns state beyond its parameters: take it between blocks.
+        let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
+        let Some(_held) = enter_state(gate) else { return false };
+        unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.save_state()
     } else {
-        let info = instance.inner.info();
-        let values: Vec<f32> = (0..instance.plane.len())
-            .map(|index| instance.plane.load(index).unwrap_or(0.0))
-            .collect();
-        encode_params(info, &values)
+        None
     };
+    let bytes = custom.unwrap_or_else(|| params_snapshot(plane, info));
     let mut offset = 0usize;
     while offset < bytes.len() {
         let remaining = &bytes[offset..];
@@ -831,7 +1004,7 @@ unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_
 }
 
 unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_istream) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
+    let Some(raw) = (unsafe { state_target(plugin) }) else { return false };
     if stream.is_null() {
         return false;
     }
@@ -849,24 +1022,43 @@ unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_
     if bytes.is_empty() {
         return false;
     }
-    if instance.inner.load_state(&bytes) {
-        // The host reads parameters from the plane. A state chunk changes the plugin
-        // directly, so republish the loaded values or the host would keep the old ones.
-        instance.plane.seed_from(instance.inner.as_ref());
-        instance.cursor.invalidate();
-    } else {
-        // `save` wrote the parameter snapshot because the plugin has no state
-        // of its own. The plane takes it, and the engine pulls it before the
-        // next block.
-        let Some(values) = decode_params(instance.inner.info(), &bytes) else { return false };
-        if values.len() != instance.plane.len() || values.iter().any(|v| !v.is_finite()) {
-            return false;
-        }
-        for (index, value) in values.iter().enumerate() {
-            instance.plane.store(index, *value);
+    let (plane, epoch, info, has_chunk, host) = unsafe {
+        (
+            &*std::ptr::addr_of!((*raw).plane),
+            &*std::ptr::addr_of!((*raw).plane_epoch),
+            (*raw).info,
+            (*raw).has_chunk,
+            (*raw).host,
+        )
+    };
+    let _serial = unsafe { &*std::ptr::addr_of!((*raw).state_lock) }.lock();
+    if has_chunk {
+        let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
+        let Some(held) = enter_state(gate) else { return false };
+        let inner = unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) };
+        if inner.load_state(&bytes) {
+            // The host reads parameters from the plane. A state chunk changes the plugin
+            // directly, so republish the loaded values or the host would keep the old ones.
+            plane_write(epoch, || plane.seed_from(inner.as_ref()));
+            unsafe { &mut *std::ptr::addr_of_mut!((*raw).cursor) }.invalidate();
+            drop(held);
+            notify_params_rescan(host);
+            return true;
         }
     }
-    notify_params_rescan(instance);
+    // The parameter snapshot `save` writes for a plugin without a state chunk. It goes
+    // to the plane only, and the engine pulls it before the next block. Everything is
+    // checked before the first slot is written.
+    let Some(values) = decode_params(info, &bytes) else { return false };
+    if values.len() != plane.len() || values.iter().any(|v| !v.is_finite()) {
+        return false;
+    }
+    plane_write(epoch, || {
+        for (index, value) in values.iter().enumerate() {
+            plane.store(index, *value);
+        }
+    });
+    notify_params_rescan(host);
     true
 }
 
@@ -928,14 +1120,14 @@ fn host_call(host: *const clap_host, id: &[u8]) -> *const c_void {
     }
 }
 
-fn notify_params_rescan(instance: &Instance) {
-    let ext = host_call(instance.host, EXT_PARAMS) as *const clap_host_params;
+fn notify_params_rescan(host: *const clap_host) {
+    let ext = host_call(host, EXT_PARAMS) as *const clap_host_params;
     if ext.is_null() {
         return;
     }
     unsafe {
         if let Some(rescan) = (*ext).rescan {
-            rescan(instance.host, CLAP_PARAM_RESCAN_VALUES);
+            rescan(host, CLAP_PARAM_RESCAN_VALUES);
         }
     }
 }
@@ -1320,7 +1512,7 @@ fn feature_labels(plugin: &dyn Plugin) -> Vec<&'static str> {
     labels
 }
 
-fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
+fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
     let info = inner.info();
     let labels = feature_labels(inner.as_ref());
     let reported_latency = inner.latency().min(u32::MAX as usize) as u32;
@@ -1341,6 +1533,7 @@ fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
     let plane = Arc::new(ParamPlane::new(info));
     plane.seed_from(inner.as_ref());
     let cursor = ParamCursor::new(plane.len());
+    let has_chunk = inner.save_state().is_some();
     let editor_state = inner.editor_state();
     let instance = Box::new(Instance {
         plugin: clap_plugin {
@@ -1372,6 +1565,12 @@ fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
         strings,
         feature_ptrs: Vec::new(),
         inner,
+        snapshot: ParamPlane::new(info),
+        plane_epoch: AtomicU32::new(0),
+        gate: AtomicU32::new(0),
+        state_lock: Mutex::new(()),
+        has_chunk,
+        info,
         plane,
         cursor,
         gestures: Arc::new(GestureQueue::new(GESTURE_CAPACITY)),
