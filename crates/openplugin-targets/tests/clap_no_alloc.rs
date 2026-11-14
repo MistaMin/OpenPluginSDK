@@ -186,7 +186,7 @@ struct BlockSpec {
     editor_gestures: usize,
 }
 
-static BLOCKS: [BlockSpec; 7] = [
+const BLOCKS: [BlockSpec; 7] = [
     BlockSpec {
         label: "stereo/512/separate/param-event+gestures",
         channels: 2,
