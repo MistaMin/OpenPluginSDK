@@ -9,7 +9,7 @@
 //!
 //! The assertions that go beyond "it survived" are the documented contract:
 //!
-//! - `create` accepts 8 kHz..=768 kHz, 1..=65_536 frames and 1..=2 channels and
+//! - `create` accepts 1 kHz..=768 kHz, 1..=65_536 frames and 1..=2 channels and
 //!   returns null outside those ranges.
 //! - `process` returns 0 for a null mandatory pointer or a block larger than the
 //!   prepared one, and non-zero for every block it can run. Zero frames is a
@@ -27,6 +27,14 @@
 
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Tail, Unit};
 use openplugin_ffi::shell::{self, OpParamDesc, OpShellInfo, ShellInstance, ABI, PARAM_DISCRETE};
+
+fn write_info(out: *mut OpShellInfo) -> u32 {
+    unsafe { shell::write_info::<FuzzGain>(out) }
+}
+
+fn write_param(index: u32, out: *mut OpParamDesc) -> u32 {
+    unsafe { shell::write_param::<FuzzGain>(index, out) }
+}
 
 /// Fixed fuzz seed. Do not randomise it: every generated case must reproduce.
 const SEED: u64 = 0x5EED_0F2A_1700_0103;
@@ -478,7 +486,7 @@ fn clean_block_after_junk(rigs: &mut [Rig]) {
 
 #[test]
 fn shell_create_accepts_only_the_documented_ranges() {
-    const GOOD_RATES: [f64; 4] = [8_000.0, 44_100.0, 48_000.0, 768_000.0];
+    const GOOD_RATES: [f64; 5] = [1_000.0, 7_999.0, 44_100.0, 48_000.0, 768_000.0];
     const BAD_RATES: [f64; 13] = [
         f64::NAN,
         f64::INFINITY,
@@ -486,8 +494,8 @@ fn shell_create_accepts_only_the_documented_ranges() {
         0.0,
         -0.0,
         -48_000.0,
-        7_999.0,
-        7_999.9,
+        999.0,
+        999.9,
         768_000.1,
         768_001.0,
         1.0e300,
@@ -501,7 +509,7 @@ fn shell_create_accepts_only_the_documented_ranges() {
         for &max_block in &BLOCKS {
             for &channels in &CHANNELS {
                 let accepted = rate.is_finite()
-                    && (8_000.0..=768_000.0).contains(&rate)
+                    && (1_000.0..=768_000.0).contains(&rate)
                     && (1..=65_536).contains(&max_block)
                     && (1..=2).contains(&channels);
                 let ptr = shell::create::<FuzzGain>(rate, max_block, channels);
@@ -532,11 +540,11 @@ fn shell_null_pointers_are_rejected_calls() {
     let null_const = std::ptr::null::<ShellInstance>();
     let mut desc = unsafe { std::mem::zeroed::<OpParamDesc>() };
     assert_eq!(
-        shell::write_param::<FuzzGain>(GAIN, std::ptr::null_mut()),
+        write_param(GAIN, std::ptr::null_mut()),
         0
     );
-    assert_eq!(shell::write_param::<FuzzGain>(GAIN, &mut desc), 1);
-    assert_eq!(shell::write_info::<FuzzGain>(std::ptr::null_mut()), 0);
+    assert_eq!(write_param(GAIN, &mut desc), 1);
+    assert_eq!(write_info(std::ptr::null_mut()), 0);
     unsafe {
         shell::destroy(null);
         shell::reset(null);
@@ -686,7 +694,7 @@ fn shell_parameter_surface_survives_generated_junk() {
             4 => {
                 let mut desc = unsafe { std::mem::zeroed::<OpParamDesc>() };
                 assert_eq!(
-                    shell::write_param::<FuzzGain>(index, &mut desc),
+                    write_param(index, &mut desc),
                     u32::from(valid),
                     "write_param({index})"
                 );
@@ -697,17 +705,17 @@ fn shell_parameter_surface_survives_generated_junk() {
             _ => {
                 // Null outputs are rejected with 0 and never written.
                 assert_eq!(
-                    shell::write_param::<FuzzGain>(index, std::ptr::null_mut()),
+                    write_param(index, std::ptr::null_mut()),
                     0
                 );
-                assert_eq!(shell::write_info::<FuzzGain>(std::ptr::null_mut()), 0);
+                assert_eq!(write_info(std::ptr::null_mut()), 0);
             }
         }
     }
     // Descriptors and the header are static data: junk values cannot change
     // the real parameter count.
     let mut info = unsafe { std::mem::zeroed::<OpShellInfo>() };
-    assert_eq!(shell::write_info::<FuzzGain>(&mut info), 1);
+    assert_eq!(write_info(&mut info), 1);
     assert_eq!(info.param_count, PARAM_COUNT);
     assert_eq!(info.abi, ABI);
     for ptr in instances {
@@ -956,9 +964,9 @@ fn shell_info_and_descriptors_ignore_junk_plane_values() {
     let ptr = shell::create::<FuzzGain>(48_000.0, 32, 2);
     assert!(!ptr.is_null());
     let mut before = unsafe { std::mem::zeroed::<OpParamDesc>() };
-    assert_eq!(shell::write_param::<FuzzGain>(GAIN, &mut before), 1);
+    assert_eq!(write_param(GAIN, &mut before), 1);
     let mut info_before = unsafe { std::mem::zeroed::<OpShellInfo>() };
-    assert_eq!(shell::write_info::<FuzzGain>(&mut info_before), 1);
+    assert_eq!(write_info(&mut info_before), 1);
 
     for _ in 0..512 {
         let index = rng.index();
@@ -968,12 +976,12 @@ fn shell_info_and_descriptors_ignore_junk_plane_values() {
             let _ = shell::set_normalized(ptr, index, junk_value(&mut rng));
         }
         let mut desc = unsafe { std::mem::zeroed::<OpParamDesc>() };
-        let _ = shell::write_param::<FuzzGain>(index, &mut desc);
+        let _ = write_param(index, &mut desc);
     }
 
     // Real parameter count, ABI and identity survive the junk.
     let mut info = unsafe { std::mem::zeroed::<OpShellInfo>() };
-    assert_eq!(shell::write_info::<FuzzGain>(&mut info), 1);
+    assert_eq!(write_info(&mut info), 1);
     assert_eq!(info.abi, ABI);
     assert_eq!(info.param_count, PARAM_COUNT);
     assert!(info.name.starts_with(b"Shell Fuzz"));
@@ -987,7 +995,7 @@ fn shell_info_and_descriptors_ignore_junk_plane_values() {
 
     // Descriptors are unchanged by plane writes.
     let mut after = unsafe { std::mem::zeroed::<OpParamDesc>() };
-    assert_eq!(shell::write_param::<FuzzGain>(GAIN, &mut after), 1);
+    assert_eq!(write_param(GAIN, &mut after), 1);
     assert_eq!(after.min, before.min);
     assert_eq!(after.max, before.max);
     assert_eq!(after.default_plain, before.default_plain);
@@ -999,14 +1007,14 @@ fn shell_info_and_descriptors_ignore_junk_plane_values() {
     // Out-of-range descriptors are rejected, valid ones agree with `PARAMS`.
     for (index, _) in PARAMS.iter().enumerate() {
         let mut desc = unsafe { std::mem::zeroed::<OpParamDesc>() };
-        assert_eq!(shell::write_param::<FuzzGain>(index as u32, &mut desc), 1);
+        assert_eq!(write_param(index as u32, &mut desc), 1);
         assert_desc(index as u32, &desc);
     }
     for index in [PARAM_COUNT, PARAM_COUNT + 1, u32::MAX] {
         let mut desc = unsafe { std::mem::zeroed::<OpParamDesc>() };
-        assert_eq!(shell::write_param::<FuzzGain>(index, &mut desc), 0);
+        assert_eq!(write_param(index, &mut desc), 0);
         assert_eq!(
-            shell::write_param::<FuzzGain>(index, std::ptr::null_mut()),
+            write_param(index, std::ptr::null_mut()),
             0
         );
     }
