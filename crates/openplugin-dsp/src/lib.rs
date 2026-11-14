@@ -53,7 +53,7 @@ pub use oscillator::{Oscillator, Wave};
 pub use oversampling::{OversampleFactor, Oversampler2x};
 pub use pcm::{f32_to_i16, f32_to_i32, i16_to_f32, i32_to_f32, lerp};
 pub use pitch::{hz_from_midi, midi_from_hz};
-pub use rate::{is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
+pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
 pub use saturation::{saturate_sample, SaturationMode};
 pub use voice::{Polyphony, SampleVoice};
 pub use window::{hann, WindowRms};

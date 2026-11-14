@@ -26,11 +26,7 @@ pub const ABSOLUTE_GATE_LUFS: f64 = -70.0;
 pub const RELATIVE_GATE_LU: f64 = -10.0;
 
 fn rate_of(sample_rate: f32) -> f64 {
-    if sample_rate.is_finite() && sample_rate >= 8_000.0 {
-        f64::from(sample_rate)
-    } else {
-        48_000.0
-    }
+    f64::from(crate::rate::effective_rate(sample_rate))
 }
 
 /// Mean square energy to LUFS: `-0.691 + 10 log10(energy)`.
@@ -76,7 +72,10 @@ impl KWeighting {
     pub fn new(sample_rate: f32) -> Self {
         let fs = rate_of(sample_rate);
         // Stage 1: the head's acoustic effect, a high shelf.
-        let f0 = 1_681.974_450_955_533;
+        // BS.1770 defines the filter for broadcast rates. Below about 3.4 kHz the
+        // shelf would sit above Nyquist and the bilinear transform would be
+        // unstable, so it is held just under Nyquist there.
+        let f0 = 1_681.974_450_955_533f64.min(fs * 0.45);
         let gain_db = 3.999_843_853_973_347;
         let q = 0.707_175_236_955_419_6;
         let k = (std::f64::consts::PI * f0 / fs).tan();

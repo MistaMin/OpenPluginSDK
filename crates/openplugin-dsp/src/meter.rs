@@ -98,8 +98,9 @@ fn db(x: f64) -> f64 {
 }
 
 impl MeterBank {
+    /// `None` outside the SDK's rate range, 1 kHz to 768 kHz.
     pub fn new(sample_rate: u32) -> Option<Self> {
-        if !(8_000..=768_000).contains(&sample_rate) {
+        if !openplugin_core::sample_rate_supported(f64::from(sample_rate)) {
             return None;
         }
         let fs = f64::from(sample_rate);
@@ -258,11 +259,7 @@ pub struct BlockLevel {
 
 impl BlockLevel {
     pub fn new(sample_rate: f32) -> Self {
-        let rate = if sample_rate.is_finite() {
-            f64::from(sample_rate.max(8_000.0))
-        } else {
-            48_000.0
-        };
+        let rate = f64::from(crate::rate::effective_rate(sample_rate));
         Self {
             short: 0.0,
             integrated: 0.0,

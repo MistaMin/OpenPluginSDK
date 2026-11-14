@@ -4,6 +4,20 @@
 //! 1, 2, or 4, and a product that overflows. The model-file inventory stays in
 //! the plugin. This is only the rate arithmetic a plugin needs before `prepare`.
 
+/// The rate a DSP block computes its coefficients for: a finite `sample_rate`
+/// clamped to the SDK's range ([`openplugin_core::MIN_SAMPLE_RATE`] 1 kHz to
+/// [`openplugin_core::MAX_SAMPLE_RATE`] 768 kHz), and 48 kHz for NaN or
+/// infinity. Every block in this crate that takes a rate goes through this, so
+/// a rate the format bridges accept is the rate the DSP uses.
+pub fn effective_rate(sample_rate: f32) -> f32 {
+    use openplugin_core::{MAX_SAMPLE_RATE, MIN_SAMPLE_RATE};
+    if sample_rate.is_finite() {
+        sample_rate.clamp(MIN_SAMPLE_RATE, MAX_SAMPLE_RATE)
+    } else {
+        48_000.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RatePlan {
     pub host_hz: u32,

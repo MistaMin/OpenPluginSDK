@@ -382,9 +382,11 @@ pub struct Transport {
 
 /// Lowest sample rate a format bridge accepts, in hertz.
 ///
-/// 1 kHz is the floor the SDK's DSP assumes: biquads, dynamics and meters clamp
-/// their coefficients to it. `clap-validator`'s varying-sample-rates test also
-/// runs at 1234.5678 Hz, so the old 8 kHz floor failed validation.
+/// Every DSP block in `openplugin-dsp` computes its coefficients for the real
+/// rate down to this floor (`openplugin_dsp::effective_rate`), and
+/// `openplugin-dsp/tests/low_rates.rs` checks their time constants at 1 kHz.
+/// `clap-validator`'s varying-sample-rates test runs at 1234.5678 Hz, so the
+/// old 8 kHz floor failed validation.
 pub const MIN_SAMPLE_RATE: f32 = 1_000.0;
 
 /// Highest sample rate a format bridge accepts, in hertz: 16 x 48 kHz.

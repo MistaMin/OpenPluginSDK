@@ -27,7 +27,7 @@ impl Delta {
     pub fn prepare(channels: usize, max_latency: usize, sample_rate: f32, glide_ms: f32) -> Self {
         let channels = channels.clamp(1, 64);
         let cap = max_latency.saturating_add(1).max(1);
-        let rate = if sample_rate.is_finite() && sample_rate >= 8_000.0 { sample_rate } else { 48_000.0 };
+        let rate = crate::rate::effective_rate(sample_rate);
         let glide = if glide_ms.is_finite() { glide_ms.max(0.0) } else { 20.0 };
         Self {
             rings: vec![vec![0.0; cap]; channels],

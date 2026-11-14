@@ -24,11 +24,7 @@ impl GainComp {
     /// `limit_db` is the absolute correction cap, from 0 to 60. A non-finite
     /// limit falls back to 12. This trim is not the plugin's output knob.
     pub fn with_limit(sample_rate: f32, limit_db: f32) -> Self {
-        let rate = if sample_rate.is_finite() {
-            f64::from(sample_rate.max(8_000.0))
-        } else {
-            48_000.0
-        };
+        let rate = f64::from(crate::rate::effective_rate(sample_rate));
         let limit = if limit_db.is_finite() {
             f64::from(limit_db.clamp(0.0, 60.0))
         } else {

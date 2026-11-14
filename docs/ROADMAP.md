@@ -24,6 +24,16 @@ The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin
 - **Hostile input everywhere.** Fuzz CLAP events, LV2 ports, `op_shell_*` and state loading with garbage, NaN and out-of-range values. Test that the audio path does not allocate in every format, not only in the FFI session.
 - **CI on macOS.** The workspace tests, the main-thread Cocoa test, and the minimum Rust version (1.80) on every push.
 
+### Status
+
+Done: generic shell proofs over `examples/editor`; clippy clean with warnings as errors, checked in CI; rates from 1 kHz to 768 kHz in every bridge, with every DSP block computing for the real rate (`effective_rate`, `tests/low_rates.rs`); hostile-input suites for CLAP, LV2, the shell ABI and state loading; no-allocation tests for CLAP, LV2 and the shell; macOS CI with the Rust 1.80 check, GoodLookinDri pinned to a commit.
+
+Open:
+
+- The VST3 and Audio Unit proofs do not check bypass, and the AAX proof does not check a state round-trip.
+- The shell proofs need the third-party SDKs, so they are not in CI.
+- The no-allocation tests cover the Rust side; the C++ shells' own process paths are not measured.
+
 ## 0.4: format conformance on macOS
 
 - **Validators in CI** against the example: `clap-validator`, `auval`, AAX Validator, pluginval and `lv2_validate`.
