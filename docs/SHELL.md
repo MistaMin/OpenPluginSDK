@@ -11,12 +11,12 @@ The shell is mono or stereo, 32-bit float, and one plugin per binary. It hosts a
 ## Export
 
 ```rust
-openplugin_targets::export_clap!(EqPlugin);
-openplugin_targets::export_lv2!(EqPlugin);
-openplugin_targets::export_shell!(EqPlugin);
+openplugin_targets::export_clap!(EditorGain);
+openplugin_targets::export_lv2!(EditorGain);
+openplugin_targets::export_shell!(EditorGain);
 
 // With an editor (macOS): the same three, plus `editor = make_editor`.
-openplugin_targets::export_shell!(EqPlugin, editor = make_editor);
+openplugin_targets::export_shell!(EditorGain, editor = make_editor);
 ```
 
 The crate type includes `staticlib`. The native build links that archive. It does not sign or copy a plugin into a system folder.
@@ -37,7 +37,7 @@ Class IDs are 16 bytes from a 128-bit mix of the plugin id. VST3 prints them wit
 
 ## Editor
 
-A plugin with an editor exports `op_editor_*` (`native/include/op_editor.h`) next to `op_shell_*`, and the shells are configured with `-DOP_EDITOR=ON`. Without that option the shells build as before and a host shows its generic controls. `export_shell!(P, editor = make_editor)` writes these symbols in Rust over `openplugin_dri::cocoa::EditorView`, for any `openplugin_core::Editor` (see [EDITOR.md](EDITOR.md)). With `OP_EDITOR` the build also links AppKit, CoreGraphics and `libobjc`, which the Rust view uses and a static library does not carry.
+A plugin with an editor exports `op_editor_*` (`native/include/op_editor.h`) next to `op_shell_*`, and the shells are configured with `-DOP_EDITOR=ON`. Without that option the shells build as before and a host shows its generic controls. `export_shell!(P, editor = make_editor)` writes these symbols in Rust over `openplugin_dri::cocoa::EditorView`, for any `openplugin_core::Editor` (see [EDITOR.md](EDITOR.md)). The Rust view draws with AppKit, CoreGraphics and libobjc. A static library does not carry its framework links, so `native/CMakeLists.txt` names those frameworks for every target that links the archive, proofs included. That is necessary even with `-DOP_EDITOR=OFF` when the plugin still exports the editor ABI, as `examples/editor` does: the option only decides whether the shells host the view.
 
 | Call | Does |
 |---|---|
@@ -64,7 +64,7 @@ A host may call `AudioUnitReset` from its main thread while its render thread is
 
 ## Tail
 
-`export_shell!` always exports `op_shell_tail_seconds(instance)`: seconds of ring-out after the input stops, infinity for an endless tail. The value is `Plugin::tail` as of the last processed block. `tail` is called once per block on the audio thread, so it must be cheap and must not allocate. `Tail::Unknown` reports zero. The call works from any thread and never blocks. With `-DOP_TAIL=ON`, VST3 reports it from `getTailSamples`. The Audio Unit reports it as its tail time, with an endless tail given as ten minutes. Without the option VST3 reports no tail and the Audio Unit does not support the property.
+`export_shell!` always exports `op_shell_tail_seconds(instance)`: seconds of ring-out after the input stops, infinity for an endless tail. The value is `Plugin::tail` as of the last processed block. `tail` is called once per block on the audio thread, so it must be cheap and must not allocate. `Tail::Unknown` reports zero. The call works from any thread and never blocks. With `-DOP_TAIL=ON`, VST3 reports it from `getTailSamples`. The Audio Unit reports it as its tail time, with an endless tail given as ten minutes. Without the option VST3 reports no tail and the Audio Unit does not support the property. The SDK example has a finite zero tail, so `-DOP_TAIL=ON` exercises both adapters without a ringing sound.
 
 ## Trace
 
@@ -72,40 +72,49 @@ For a host that goes silent and says nothing. Create `<name>-trace.on` in the te
 
 ## Build
 
-The SDK checkouts stay outside this repository. FreEQ is the proof plugin.
+The SDK checkouts stay outside this repository. The proofs build `examples/editor`, the `EditorGain` example. Its two parameters are `Gain` (dB) and `Warm` (toggle), and every expected value in the proofs comes from `op_shell_info`, `op_shell_param`, `op_shell_latency` and `op_shell_tail_seconds`, not from constants in the proof.
 
 ```bash
-cargo build --release --lib --manifest-path openplugin-eq/Cargo.toml
+CARGO_BUILD_JOBS=2 cargo build --release --lib -p example-editor
 cmake -S native -B build-shell -DCMAKE_BUILD_TYPE=Release \
-  -DOP_RUST_LIB=openplugin-eq/target/release/libopenplugin_eq.a \
+  -DOP_RUST_LIB="$PWD/target/release/libexample_editor.a" \
   -DOP_VST3_SDK=/path/to/vst3sdk \
   -DOP_AU_SDK=/path/to/AudioUnitSDK \
   -DOP_AAX_SDK=/path/to/aax-sdk \
-  -DOP_PRODUCT=FreEQ -DOP_BUNDLE_ID=com.mistamin.freeq -DOP_VERSION=0.1.0 \
-  -DOP_MANUFACTURER=MistaMin -DOP_AU_SUBTYPE=FrEQ -DOP_AU_MANUFACTURER=MstM
-cmake --build build-shell --config Release
+  -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
+  -DOP_VERSION=0.3.0 -DOP_MANUFACTURER=OpenGrid \
+  -DOP_AU_SUBTYPE=ExGn -DOP_AU_MANUFACTURER=OpGd \
+  -DOP_TAIL=ON -DOP_EDITOR=OFF
+cmake --build build-shell -j 2
 ctest --test-dir build-shell --output-on-failure
 ```
 
-`vst3_proof` and `au_proof` load the bundle in the test process. `aax_process_proof` calls the process callback. `aax_bundle_proof` checks the seven ACF exports and `ACFGetSDKVersion`. None of those tests is a Cubase, Logic, or Pro Tools session.
+`OP_TAIL=ON` is what makes `vst3_proof` and `au_proof` exercise the tail report. A build with `-DOP_TAIL=OFF` still builds and passes the other checks; those two proofs print that the tail check was not built instead of claiming it ran. In this workspace `build-shell` is on the external build volume, not inside the repository, because the internal disk is full.
 
 ## Proof
 
-FreEQ, 11 November 2026, in this process only. Sample rate 48 kHz. The tone is a 1 kHz sine. Band 4 is a peak at 1 kHz, Q 1, +6 dB. The other bands are peaks at 0 dB. Phase is minimum. Trim is 0 dB.
+The example, in this process only, on 14 November 2026. Sample rate 48 kHz. The tone is a 1 kHz sine. `Gain` is 6 dB unless a check says otherwise; `Warm` is off. The proofs load the built VST3 and Audio Unit bundles, or call the AAX process callback, and compare the adapter with a second instance made straight through the C ABI.
 
 | Check | Result |
 |---|---|
-| VST3 mono and stereo | 6.00 dB, unity when the bells are flat, state restore, in-place buffers, 32 hex class IDs, 26 parameters |
-| Audio Unit mono and stereo | 6.00 dB, unity, latency 0, a NaN parameter is rejected |
-| AAX mono and stereo | 6.00 dB, unity, dry bypass, a non-finite packet writes silence |
+| VST3 mono and stereo | parameter count, names, units, defaults, steps and automation flags match `op_shell_info`/`op_shell_param`; 32 hex class IDs equal the ABI processor and controller IDs; latency equals `op_shell_latency` (0 samples); tail equals `op_shell_tail_seconds` (0 samples, `kNoTail`); audio at the default and at 6 dB equals a direct ABI render sample for sample; in-place buffers match out-of-place; save, change and restore through `getState`/`setState`/`setComponentState` restores the audio exactly; truncated and wrong-count state are rejected |
+| Audio Unit mono and stereo | parameter list, order, names, ranges, defaults, units and log flags match the ABI; a NaN and an out-of-range value are rejected; latency equals `op_shell_latency` (0 s); tail equals `op_shell_tail_seconds` (0 s); audio at the default and at 6 dB equals a direct ABI render sample for sample; a `kAudioUnitProperty_ClassInfo` save, change and restore restores the audio exactly |
+| AAX mono and stereo | prepare rejects an invalid rate and a third channel; parameter count and every default come from the ABI and reach the engine; audio at the default, at 6 dB and with `Warm` on equals a direct ABI render sample for sample; bypass copies the dry buffers exactly; a NaN parameter and an oversized packet write silence |
 | AAX bundle | seven ACF exports and a non-zero `ACFGetSDKVersion` |
+
+Run one proof to see its lines: `build-shell/VST3Proof "build-shell/Example Gain.vst3"`, `build-shell/AUProof "build-shell/Example Gain.component"`, `build-shell/AAXProof`, or `build-shell/AAXBundleProof "build-shell/Example Gain.aaxplugin"`. `ctest --output-on-failure` prints them only when a proof fails.
 
 ## Known limits
 
 - Without `OP_EDITOR` there is no editor view: hosts use a generic parameter list, and the AAX view is an empty rectangle. The editor ABI is macOS (`NSView`) only.
 - The AAX shell has a page table only with `-DOP_AAX_PAGES=ON`: the build runs `OpenPluginAAXPages`, which writes `<Product>Pages.xml` into the bundle with the parameters in declared order. It needs manufacturer, product and plug-in IDs of four printable characters, so the plugin must set them; the hashed development IDs are refused. Without the option AAX Validator's `test.page_table.load` fails with "Failed to load page tables library".
-- AAX has no tail report.
-- `VST3EditorProof` (built with `OP_EDITOR`) loads the VST3 in process and opens the editor. It re-creates the engine with the editor open. If `OP_EDITOR_PROOF_CLICK` is `x;y;param`, it checks the edits a click makes. The FreEQ proofs (`vst3_proof`, `au_proof`, `aax_process_proof`) check FreEQ's parameters and only pass for FreEQ.
+- AAX has no tail report. The tail contract is checked for VST3 and the Audio Unit only.
+- AAX has no shell chunk state: the host keeps the parameter values and sends them in the packet, so `aax_process_proof` checks the packet path rather than a save/restore call.
+- AAX host latency is published by `AAX_CEffectParameters::EffectInit` through `SetSignalLatency`, which needs an AAX host controller. `aax_process_proof` checks that the process engine's `op_shell_latency` matches the ABI; it does not instantiate the AAX controller.
+- The AAX parameter manager built by `EffectInit` is assembled from the same `op_shell_param` table, but constructing it needs an AAX controller. The direct process proof checks the packet count, the per-parameter IDs and every default value instead.
+- VST3 and Audio Unit bypass is host-side and is not a shell behaviour. Those shells do not implement or report a bypass, and their proofs do not invent one. AAX bypass is the shell's dry copy and is checked.
+- `vst3_proof`, `au_proof`, `aax_process_proof` and `aax_bundle_proof` are in-process tests. They load the built bundles in the test process, or call the process callback, and compare the adapter with the C ABI. None of them is a Cubase, Logic, Pro Tools or format-validator session.
+- `VST3EditorProof` (built with `OP_EDITOR`) loads the VST3 in process and opens the editor. It re-creates the engine with the editor open. If `OP_EDITOR_PROOF_CLICK` is `x;y;param`, it checks the edits a click makes.
 - VST3 parameter changes are applied at the block, using the last point in each queue.
 - AAX bypass is a dry copy. It does not keep a reported latency.
 - The AAX binary links the external Avid SDK. That binary is not an MIT-only artifact. The SDK license is copied into the bundle resources. Nothing in the build signs it or installs it.
