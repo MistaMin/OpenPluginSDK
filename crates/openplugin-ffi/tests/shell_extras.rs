@@ -87,7 +87,7 @@ impl Plugin for Verb {
 #[test]
 fn fixed_aax_ids_replace_the_hashed_ones() {
     let mut info = unsafe { std::mem::zeroed::<OpShellInfo>() };
-    assert_eq!(shell::write_info::<Verb>(&mut info), 1);
+    assert_eq!(unsafe { shell::write_info::<Verb>(&mut info) }, 1);
     assert_eq!(info.manufacturer_id, u32::from_be_bytes(*b"OpGd"));
     assert_eq!(info.product_id, u32::from_be_bytes(*b"TVrb"));
     assert_eq!(info.plugin_id_mono, u32::from_be_bytes(*b"TVrM"));

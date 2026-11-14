@@ -12,6 +12,12 @@ pub struct VuMeter {
     envelope: f32,
 }
 
+impl Default for VuMeter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VuMeter {
     pub fn new() -> Self {
         Self {

@@ -139,6 +139,7 @@ impl DrawList {
         self.commands.push(DrawCmd::FillRoundedRect { x, y, w, h, radius, color });
     }
 
+    #[allow(clippy::too_many_arguments)] // public drawing API; grouping would break callers
     pub fn stroke_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color, stroke_width: f32) {
         self.commands.push(DrawCmd::StrokeRoundedRect { x, y, w, h, radius, color, stroke_width });
     }
@@ -155,6 +156,7 @@ impl DrawList {
         self.commands.push(DrawCmd::Line { x1, y1, x2, y2, color, width });
     }
 
+    #[allow(clippy::too_many_arguments)] // public drawing API; grouping would break callers
     pub fn arc(&mut self, cx: f32, cy: f32, radius: f32, start_angle: f32, end_angle: f32, color: Color, width: f32) {
         self.commands.push(DrawCmd::Arc { cx, cy, radius, start_angle, end_angle, color, width });
     }

@@ -219,7 +219,7 @@ mod tests {
         assert!(voice.next(&pcm).abs() < 1e-6);
         let mid = voice.next(&pcm);
         assert!(mid > 0.0 && mid <= 1.0);
-        assert!(voice.stop(61) == false);
+        assert!(!voice.stop(61));
         assert!(voice.stop(60));
         assert_eq!(voice.next(&pcm), 0.0);
     }

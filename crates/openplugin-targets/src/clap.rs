@@ -383,13 +383,13 @@ fn process_span(
     if output.data32.is_null() {
         return;
     }
-    for channel in 0..out_channels {
+    for (channel, buffer) in buffers.iter().enumerate().take(out_channels) {
         let dst = unsafe { *output.data32.add(channel) };
         if dst.is_null() {
             continue;
         }
         let out = unsafe { std::slice::from_raw_parts_mut(dst.add(start), n) };
-        out.copy_from_slice(&buffers[channel][..n]);
+        out.copy_from_slice(&buffer[..n]);
     }
 }
 
@@ -999,10 +999,12 @@ fn apply_transport(instance: &mut Instance, transport: *const clap_event_transpo
     }
     let transport = unsafe { &*transport };
     let flags = transport.flags;
-    let mut info = Transport::default();
-    info.playing = flags & TRANSPORT_IS_PLAYING != 0;
-    info.recording = flags & TRANSPORT_IS_RECORDING != 0;
-    info.sample_pos = if steady_time >= 0 { steady_time } else { 0 };
+    let mut info = Transport {
+        playing: flags & TRANSPORT_IS_PLAYING != 0,
+        recording: flags & TRANSPORT_IS_RECORDING != 0,
+        sample_pos: if steady_time >= 0 { steady_time } else { 0 },
+        ..Transport::default()
+    };
     if flags & TRANSPORT_HAS_TEMPO != 0 && transport.tempo.is_finite() {
         info.tempo = transport.tempo;
     }
@@ -1514,6 +1516,10 @@ static FACTORY: clap_plugin_factory = clap_plugin_factory {
 };
 
 /// `clap_entry.get_factory`. Returns the plugin factory after [`set_creator`].
+///
+/// # Safety
+/// `factory_id` is null or a NUL-terminated string owned by the host and
+/// valid for the call.
 pub unsafe extern "C" fn entry_get_factory(factory_id: *const c_char) -> *const c_void {
     if factory_id.is_null() {
         return std::ptr::null();
@@ -1525,6 +1531,10 @@ pub unsafe extern "C" fn entry_get_factory(factory_id: *const c_char) -> *const 
     std::ptr::null()
 }
 
+/// `clap_entry.deinit`. Nothing to release.
+///
+/// # Safety
+/// Called by the CLAP host on unload; it has no preconditions.
 pub unsafe extern "C" fn entry_deinit() {}
 
 /// What an editor's gestures do in CLAP: store the value in the plane, queue

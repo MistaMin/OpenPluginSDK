@@ -218,7 +218,12 @@ fn fill_desc(param: &ParamInfo, out: &mut OpParamDesc) {
     put(&mut out.id, param.id);
 }
 
-pub fn write_info<P: Plugin + Default>(out: *mut OpShellInfo) -> u32 {
+/// Fill `out` with the plugin identity. Returns 1, or 0 when `out` is null.
+///
+/// # Safety
+/// `out` is null or points to writable memory for one [`OpShellInfo`].
+/// Writes happen only after the null check.
+pub unsafe fn write_info<P: Plugin + Default>(out: *mut OpShellInfo) -> u32 {
     if out.is_null() {
         return 0;
     }
@@ -263,7 +268,13 @@ pub fn write_info<P: Plugin + Default>(out: *mut OpShellInfo) -> u32 {
     u32::from(filled.is_ok())
 }
 
-pub fn write_param<P: Plugin + Default>(index: u32, out: *mut OpParamDesc) -> u32 {
+/// Fill `out` with parameter `index`. Returns 1, or 0 when `out` is null or
+/// `index` is past the end.
+///
+/// # Safety
+/// `out` is null or points to writable memory for one [`OpParamDesc`].
+/// Writes happen only after the null check and the index lookup.
+pub unsafe fn write_param<P: Plugin + Default>(index: u32, out: *mut OpParamDesc) -> u32 {
     if out.is_null() {
         return 0;
     }
@@ -626,7 +637,7 @@ mod tests {
     #[test]
     fn shell_describes_a_stable_identity_and_a_log_taper() {
         let mut info = unsafe { std::mem::zeroed::<OpShellInfo>() };
-        assert_eq!(write_info::<Gain>(&mut info), 1);
+        assert_eq!(unsafe { write_info::<Gain>(&mut info) }, 1);
         assert_eq!(info.abi, ABI);
         assert_eq!(info.param_count, 2);
         assert_ne!(info.processor_cid, [0; 16]);
@@ -637,13 +648,13 @@ mod tests {
     #[test]
     fn shell_identity_fields_are_nonzero() {
         let mut info = unsafe { std::mem::zeroed::<OpShellInfo>() };
-        assert_eq!(write_info::<Gain>(&mut info), 1);
+        assert_eq!(unsafe { write_info::<Gain>(&mut info) }, 1);
         assert_ne!(info.manufacturer_id, 0);
         assert_ne!(info.product_id, 0);
         assert_ne!(info.plugin_id_mono, 0);
         assert_ne!(info.plugin_id_stereo, 0);
         let mut again = unsafe { std::mem::zeroed::<OpShellInfo>() };
-        assert_eq!(write_info::<Gain>(&mut again), 1);
+        assert_eq!(unsafe { write_info::<Gain>(&mut again) }, 1);
         assert_eq!(info.processor_cid, again.processor_cid);
         assert!(info.name.starts_with(b"Gain"));
         assert!(info.category.starts_with(b"Fx|Tools"));
@@ -652,7 +663,7 @@ mod tests {
     #[test]
     fn shell_log_roundtrip_and_six_db_inplace() {
         let mut desc = unsafe { std::mem::zeroed::<OpParamDesc>() };
-        assert_eq!(write_param::<Gain>(1, &mut desc), 1);
+        assert_eq!(unsafe { write_param::<Gain>(1, &mut desc) }, 1);
         assert_ne!(desc.flags & PARAM_LOG, 0);
         let normalized = to_normalized::<Gain>(1, 1_000.0);
         let plain = to_plain::<Gain>(1, normalized);

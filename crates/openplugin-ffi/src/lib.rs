@@ -549,7 +549,7 @@ impl FfiInstance {
 }
 
 fn finite_rate(sample_rate: f64) -> f32 {
-    if sample_rate.is_finite() && sample_rate >= 8_000.0 && sample_rate <= 768_000.0 {
+    if sample_rate.is_finite() && (8_000.0..=768_000.0).contains(&sample_rate) {
         sample_rate as f32
     } else {
         48_000.0
