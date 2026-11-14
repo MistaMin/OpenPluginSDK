@@ -62,6 +62,15 @@ The shells recreate the engine when the host reconfigures them, so each one bind
 
 A host may call `AudioUnitReset` from its main thread while its render thread is inside the engine, and `op_shell_reset` is exclusive with `process`. The Audio Unit shell therefore only marks the reset, and the render thread performs it at the start of its next block.
 
+## Audio Unit bypass
+
+The Audio Unit shell owns `kAudioUnitProperty_BypassEffect`. `AUEffectBase` would copy the input to the output with no delay and reset the plugin when bypass ends, so the shell turns that off (`ShouldBypassEffect` is false, and the property is handled in `SetProperty`). The plugin keeps running while bypassed, so leaving bypass finds it warm. The shell mixes two signals:
+
+- the dry signal, the input delayed by `op_shell_latency` samples, the same value the unit reports as `kAudioUnitProperty_Latency`;
+- the plugin output.
+
+A switch moves the mix linearly over 10 ms. Settled bypass is the delayed input exactly. The delay line and the scratch buffers are allocated in `Initialize`, so rendering allocates nothing. A reset (`AudioUnitReset`) clears the delay line on the render thread, with the engine reset described above. The cost is that a bypassed unit still pays for its plugin's CPU.
+
 ## Tail
 
 `export_shell!` always exports `op_shell_tail_seconds(instance)`: seconds of ring-out after the input stops, infinity for an endless tail. The value is `Plugin::tail` as of the last processed block. `tail` is called once per block on the audio thread, so it must be cheap and must not allocate. `Tail::Unknown` reports zero. The call works from any thread and never blocks. With `-DOP_TAIL=ON`, VST3 reports it from `getTailSamples`. The Audio Unit reports it as its tail time, with an endless tail given as ten minutes. Without the option VST3 reports no tail and the Audio Unit does not support the property. The SDK example has a finite zero tail, so `-DOP_TAIL=ON` exercises both adapters without a ringing sound.
@@ -98,9 +107,13 @@ The example, in this process only, on 14 November 2026. Sample rate 48 kHz. The 
 | Check | Result |
 |---|---|
 | VST3 mono and stereo | parameter count, names, units, defaults, steps and automation flags match `op_shell_info`/`op_shell_param`; 32 hex class IDs equal the ABI processor and controller IDs; latency equals `op_shell_latency` (0 samples); tail equals `op_shell_tail_seconds` (0 samples, `kNoTail`); audio at the default and at 6 dB equals a direct ABI render sample for sample; in-place buffers match out-of-place; save, change and restore through `getState`/`setState`/`setComponentState` restores the audio exactly; truncated and wrong-count state are rejected |
-| Audio Unit mono and stereo | parameter list, order, names, ranges, defaults, units and log flags match the ABI; a NaN and an out-of-range value are rejected; latency equals `op_shell_latency` (0 s); tail equals `op_shell_tail_seconds` (0 s); audio at the default and at 6 dB equals a direct ABI render sample for sample; a `kAudioUnitProperty_ClassInfo` save, change and restore restores the audio exactly |
+| Audio Unit mono and stereo | parameter list, order, names, ranges, defaults, units and log flags match the ABI; a NaN and an out-of-range value are rejected; latency equals `op_shell_latency` (0 s); tail equals `op_shell_tail_seconds` (0 s); audio at the default and at 6 dB equals a direct ABI render sample for sample; a `kAudioUnitProperty_ClassInfo` save, change and restore restores the audio exactly; bypass is reported and settable, the bypassed output is the input delayed by the reported latency exactly, the switch has no step larger than the tone itself, and switching back restores the processed signal |
+| Audio Unit bypass with latency | `au_bypass_proof` loads a test bundle (`native/au/latency_shell.cpp`, a C++ stand-in plugin that reports 37 samples, because the example reports 0): mono and stereo, the bypassed output is the input delayed by the 37 samples the unit reports, a reset empties the delay line, and switching back restores the processed signal |
+| Audio Unit render allocation | `au_alloc_proof` (example) and `au_alloc_latency_proof` (latency test bundle): every malloc-family call and the global `operator new` in the process are counted while armed around `AudioUnitRender` only. Mono and stereo, 100, 512 and 4096 frames, parameter changes, bypass on, bypassed and off, and a render after a reset: zero allocations and zero frees. A self-check first shows the counter sees `malloc`, `calloc`, `realloc`, `strdup`, a CoreFoundation allocation, `operator new`, `std::vector` and a Rust allocation, and a negative control (an allocation put into the crossfade) fails the proof |
 | AAX mono and stereo | prepare rejects an invalid rate and a third channel; parameter count and every default come from the ABI and reach the engine; audio at the default, at 6 dB and with `Warm` on equals a direct ABI render sample for sample; bypass copies the dry buffers exactly; a NaN parameter and an oversized packet write silence |
 | AAX bundle | seven ACF exports and a non-zero `ACFGetSDKVersion` |
+
+The allocation count comes from `native/au/alloc_hook.cpp`, a shared library the proof links that interposes the malloc family with dyld. The interposer is test code and is never linked into a shell. In CI the `audio-unit` job builds the example, configures `native/` with only the Audio Unit shell against a pinned public AudioUnitSDK (1.4.0) and runs `ctest -R '^au_'`.
 
 Run one proof to see its lines: `build-shell/VST3Proof "build-shell/Example Gain.vst3"`, `build-shell/AUProof "build-shell/Example Gain.component"`, `build-shell/AAXProof`, or `build-shell/AAXBundleProof "build-shell/Example Gain.aaxplugin"`. `ctest --output-on-failure` prints them only when a proof fails.
 
@@ -112,7 +125,7 @@ Run one proof to see its lines: `build-shell/VST3Proof "build-shell/Example Gain
 - AAX has no shell chunk state: the host keeps the parameter values and sends them in the packet, so `aax_process_proof` checks the packet path rather than a save/restore call.
 - AAX host latency is published by `AAX_CEffectParameters::EffectInit` through `SetSignalLatency`, which needs an AAX host controller. `aax_process_proof` checks that the process engine's `op_shell_latency` matches the ABI; it does not instantiate the AAX controller.
 - The AAX parameter manager built by `EffectInit` is assembled from the same `op_shell_param` table, but constructing it needs an AAX controller. The direct process proof checks the packet count, the per-parameter IDs and every default value instead.
-- VST3 and Audio Unit bypass is host-side and is not a shell behaviour. Those shells do not implement or report a bypass, and their proofs do not invent one. AAX bypass is the shell's dry copy and is checked.
+- VST3 bypass is host-side and is not a shell behaviour. That shell does not implement or report a bypass, and its proof does not invent one. AAX bypass is the shell's dry copy and is checked. The Audio Unit shell implements bypass itself (see Audio Unit bypass).
 - `vst3_proof`, `au_proof`, `aax_process_proof` and `aax_bundle_proof` are in-process tests. They load the built bundles in the test process, or call the process callback, and compare the adapter with the C ABI. None of them is a Cubase, Logic, Pro Tools or format-validator session.
 - `VST3EditorProof` (built with `OP_EDITOR`) loads the VST3 in process and opens the editor. It re-creates the engine with the editor open. If `OP_EDITOR_PROOF_CLICK` is `x;y;param`, it checks the edits a click makes.
 - VST3 parameter changes are applied at the block, using the last point in each queue.
