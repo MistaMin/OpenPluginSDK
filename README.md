@@ -241,6 +241,12 @@ Desktop application executable powered by `cpal` for zero-friction testing and l
 
 What comes after 0.3.1 Beta, from hardening on macOS to Windows, Linux and a stable 1.0: [docs/ROADMAP.md](docs/ROADMAP.md).
 
+Changes release by release: [CHANGELOG.md](CHANGELOG.md).
+
+What counts as a breaking change, and how versions and deprecations work: [docs/VERSIONING.md](docs/VERSIONING.md).
+
+Every public item with a keep, rename, hide or remove recommendation for the 1.0 freeze: [docs/API_REVIEW.md](docs/API_REVIEW.md).
+
 ---
 
 ## License
