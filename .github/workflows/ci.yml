@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Workspace tests (stable)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      # The SDK has a path dependency on ../GoodLookinDri.
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run the workspace tests
+        working-directory: OpenPluginSDK
+        run: cargo test --workspace
+
+  msrv:
+    name: MSRV check (Rust 1.80.0)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      # The SDK has a path dependency on ../GoodLookinDri.
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          path: GoodLookinDri
+      - name: Install Rust 1.80.0
+        uses: dtolnay/rust-toolchain@1.80.0
+      - name: Check the workspace on the minimum Rust version
+        working-directory: OpenPluginSDK
+        run: cargo +1.80.0 check --workspace --all-targets --locked
