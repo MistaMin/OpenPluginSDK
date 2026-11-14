@@ -15,9 +15,9 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use openplugin_core::{
-    decode_session, encode_session, release_momentary, BusMeters, EditorState, MeterFrame,
-    ParamCursor, ParamFlags, ParamInfo, ParamPlane, PluginInfo, Seqlock, Tail, Taper, Unit,
-    MAX_AUDIO_CHANNELS,
+    decode_session, encode_session, release_momentary, sample_rate_supported, BusMeters,
+    EditorState, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, PluginInfo, Seqlock,
+    Tail, Taper, Unit, MAX_AUDIO_CHANNELS,
 };
 
 pub use openplugin_core::Plugin;
@@ -124,6 +124,11 @@ unsafe impl Send for FfiInstance {}
 unsafe impl Sync for FfiInstance {}
 
 impl FfiInstance {
+    /// Builds a host instance.
+    ///
+    /// This constructor cannot fail, so an invalid or out-of-range
+    /// `sample_rate` is replaced with 48 kHz. [`FfiInstance::prepare`]
+    /// rejects such a rate instead.
     pub fn new(
         mut plugin: Box<dyn Plugin>,
         sample_rate: f64,
@@ -275,12 +280,20 @@ impl FfiInstance {
     }
 
     /// Exclusive with `process`. Allocates the scratch buffers.
+    ///
+    /// Returns false for a sample rate outside
+    /// [`openplugin_core::MIN_SAMPLE_RATE`]..=[`openplugin_core::MAX_SAMPLE_RATE`],
+    /// for a rate the plugin refuses, or for an out-of-range block size or
+    /// channel count. It does not substitute a rate.
     pub fn prepare(&self, sample_rate: f64, max_block: usize, channels: usize) -> bool {
         if max_block == 0 || max_block > 65_536 || !(1..=MAX_AUDIO_CHANNELS).contains(&channels) {
             return false;
         }
+        if !sample_rate_supported(sample_rate) {
+            return false;
+        }
         let audio = unsafe { &mut *self.audio.get() };
-        let rate = finite_rate(sample_rate);
+        let rate = sample_rate as f32;
         if !audio.inner.accepts_sample_rate(rate) {
             return false;
         }
@@ -549,7 +562,7 @@ impl FfiInstance {
 }
 
 fn finite_rate(sample_rate: f64) -> f32 {
-    if sample_rate.is_finite() && sample_rate >= 8_000.0 && sample_rate <= 768_000.0 {
+    if sample_rate_supported(sample_rate) {
         sample_rate as f32
     } else {
         48_000.0

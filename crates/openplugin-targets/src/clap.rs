@@ -22,7 +22,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use openplugin_core::{
-    decode_params, encode_params, release_momentary, BusMeters, EditorFactory, EditorState, Gesture, GestureQueue,
+    decode_params, encode_params, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Gesture, GestureQueue,
     IoConfig, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PortKind,
     Seqlock, SpeakerLayout, Tail, Transport, MAX_AUDIO_CHANNELS,
 };
@@ -461,7 +461,7 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
 
 unsafe extern "C" fn plugin_activate(plugin: *const clap_plugin, sample_rate: f64, _min_frames: u32, max_frames: u32) -> bool {
     let Some(instance) = instance(plugin) else { return false };
-    if !sample_rate.is_finite() || sample_rate <= 0.0 {
+    if !sample_rate_supported(sample_rate) {
         return false;
     }
     let rate = sample_rate as f32;

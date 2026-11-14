@@ -21,8 +21,8 @@ use std::fmt::Write as _;
 use std::sync::{Mutex, OnceLock};
 
 use openplugin_core::{
-    Category, EditorFactory, EditorState, MeterFrame, ParamCursor, ParamPlane, Plugin, Seqlock,
-    Taper, Unit,
+    sample_rate_supported, Category, EditorFactory, EditorState, MeterFrame, ParamCursor, ParamPlane,
+    Plugin, Seqlock, Taper, Unit,
 };
 
 type CreateFn = fn() -> Box<dyn Plugin>;
@@ -115,6 +115,18 @@ fn param_count() -> usize {
     *COUNT.get_or_init(|| creator().map(|create| create().info().params.len()).unwrap_or(0))
 }
 
+/// The rate a new LV2 instance is prepared at.
+///
+/// An LV2 host that does not know the rate yet passes `0.0`, which uses the
+/// 48 kHz default. Every other rate outside the shared range fails
+/// instantiation instead of being replaced silently.
+fn instantiate_rate(sample_rate: f64) -> Option<f32> {
+    if sample_rate == 0.0 {
+        return Some(48_000.0);
+    }
+    sample_rate_supported(sample_rate).then_some(sample_rate as f32)
+}
+
 fn new_instance(sample_rate: f64) -> Option<Box<Instance>> {
     let create = creator()?;
     let mut inner = create();
@@ -122,11 +134,10 @@ fn new_instance(sample_rate: f64) -> Option<Box<Instance>> {
     let plane = ParamPlane::new(info);
     plane.seed_from(inner.as_ref());
     let mut cursor = ParamCursor::new(plane.len());
-    let rate = if sample_rate.is_finite() && sample_rate >= 8_000.0 {
-        sample_rate as f32
-    } else {
-        48_000.0
-    };
+    let rate = instantiate_rate(sample_rate)?;
+    if !inner.accepts_sample_rate(rate) {
+        return None;
+    }
     inner.prepare(rate, PREPARED, 2);
     cursor.invalidate();
     cursor.pull(&plane, inner.as_mut());
@@ -688,11 +699,9 @@ impl<P: Plugin> Lv2Harness<P> {
         let plane = ParamPlane::new(info);
         plane.seed_from(&plugin);
         let mut cursor = ParamCursor::new(plane.len());
-        let rate = if sample_rate.is_finite() && sample_rate >= 8_000.0 {
-            sample_rate
-        } else {
-            48_000.0
-        };
+        // The in-process harness has no failure path, so an unsupported rate
+        // prepares at 48 kHz. The instantiate path above rejects it instead.
+        let rate = instantiate_rate(f64::from(sample_rate)).unwrap_or(48_000.0);
         plugin.prepare(rate, PREPARED, 2);
         cursor.invalidate();
         cursor.pull(&plane, &mut plugin);

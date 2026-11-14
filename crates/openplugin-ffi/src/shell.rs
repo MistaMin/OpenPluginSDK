@@ -7,7 +7,10 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::{Mutex, OnceLock};
 
-use openplugin_core::{AaxIds, Category, EditorState, ParamFlags, ParamInfo, PluginInfo, Taper, Unit};
+use openplugin_core::{
+    sample_rate_supported, AaxIds, Category, EditorState, ParamFlags, ParamInfo, PluginInfo, Taper,
+    Unit,
+};
 
 use crate::{FfiInstance, Plugin};
 
@@ -296,7 +299,7 @@ pub fn to_normalized<P: Plugin + Default>(index: u32, plain: f64) -> f64 {
 
 pub fn create<P: Plugin + Default>(rate: f64, max_block: u32, channels: u32) -> *mut ShellInstance {
     let created = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        if !rate.is_finite() || !(8_000.0..=768_000.0).contains(&rate) {
+        if !sample_rate_supported(rate) {
             return None;
         }
         if max_block == 0 || max_block > 65_536 || !(1..=2).contains(&channels) {
