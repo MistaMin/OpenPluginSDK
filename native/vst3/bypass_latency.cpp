@@ -25,7 +25,7 @@ using namespace Steinberg::Vst;
 
 // One block of `frames` starting at global sample `start`. A null `bypass` leaves
 // bypass as it is. Returns the output (the input buffer when in place).
-static std::vector<float> run_block(IAudioProcessor* processor, int channels, int start, int frames, bool in_place, const double* bypass, ParamID bypassId) {
+static std::vector<float> run_block(IAudioProcessor* processor, int channels, int start, int frames, bool in_place, const double* bypass, ParamID bypassId, int bypassAt = 0, const double* second = nullptr, int secondAt = 0) {
     std::vector<float> inL(frames), inR(frames), outL(frames), outR(frames);
     fill_sine(inL.data(), frames, 48000.0, 1000.0, 0.25, start);
     fill_sine(inR.data(), frames, 48000.0, 1000.0, 0.25, start);
@@ -40,7 +40,9 @@ static std::vector<float> run_block(IAudioProcessor* processor, int channels, in
     ParameterChanges changes;
     if (bypass) {
         int32 index = 0;
-        changes.addParameterData(bypassId, index)->addPoint(0, *bypass, index);
+        auto* queue = changes.addParameterData(bypassId, index);
+        queue->addPoint(bypassAt, *bypass, index);
+        if (second) queue->addPoint(secondAt, *second, index);
     }
     ProcessData data{};
     data.processMode = kRealtime;
@@ -144,6 +146,35 @@ int main(int argc, char** argv) {
             const int processedFrom = start;
             phase(nullptr, 8, false, true, processedFrom);
             CHECK(worstProcessed < 1e-6);
+            // Bypass switched inside a block: on at sample 300, off again at 700, so the
+            // crossfade starts at 300, is cut short at 700 and runs back. The dry signal
+            // is the input delayed by the stub's latency, the wet one half of the input.
+            {
+                const int frames = 900;
+                const int onAt = 300;
+                const int offAt = 700;
+                const auto out = run_block(processor, channels, start, frames, in_place, &on, bypassId, onAt, &off, offAt);
+                const float step = static_cast<float>(1.0 / (0.010 * 48000.0));
+                float mix = 0.0f;
+                double worst = 0.0;
+                for (int i = 0; i < frames; ++i) {
+                    const float target = i >= onAt && i < offAt ? 1.0f : 0.0f;
+                    if (mix < target) mix = std::min(target, mix + step);
+                    else if (mix > target) mix = std::max(target, mix - step);
+                    const int t = start + i;
+                    const double dry = t - latency >= 0 ? 0.25 * std::sin(2.0 * M_PI * 1000.0 * (t - latency) / 48000.0) : 0.0;
+                    const double wet = 0.5 * 0.25 * std::sin(2.0 * M_PI * 1000.0 * t / 48000.0);
+                    worst = std::max(worst, std::fabs(out[i] - (wet + (dry - wet) * mix)));
+                    if (i < onAt) CHECK(std::fabs(out[i] - wet) < 1e-6);
+                }
+                CHECK(worst < 1e-6);
+                CHECK(std::fabs(out[onAt] - 0.5 * 0.25 * std::sin(2.0 * M_PI * 1000.0 * (start + onAt) / 48000.0)) > 1e-7);
+                std::printf("VST3 bypass latency %d, %s, %s: bypass on at sample %d and off at %d of one block: max difference from the crossfade model %.3g\n",
+                            latency, channels == 1 ? "mono" : "stereo", in_place ? "in place" : "separate buffers", onAt, offAt, worst);
+                start += frames;
+                // The fade back finishes in the next blocks and processing resumes.
+                phase(nullptr, 8, false, true, start + 600);
+            }
             std::printf("VST3 bypass latency %d, %s, %s: bypassed output max difference from the delayed input %.3g, processed again %.3g\n",
                         latency, channels == 1 ? "mono" : "stereo", in_place ? "in place" : "separate buffers", worstBypassed, worstProcessed);
             CHECK(processor->setProcessing(false) == kResultOk);
