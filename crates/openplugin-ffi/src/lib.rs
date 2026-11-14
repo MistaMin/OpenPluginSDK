@@ -8,11 +8,36 @@
 //!
 //! `store_param`, `load_param`, `apply_preset`, and `meters` do not enter the
 //! plugin object and do not allocate. The audio thread applies the plane
-//! inside `process_*`. `prepare` and `reset` stay exclusive with `process`.
+//! inside `process_*`. `prepare` stays exclusive with `process`.
+//!
+//! # Session state and the audio thread
+//!
+//! [`FfiInstance::save_bytes`] and [`FfiInstance::load_bytes`] (and their
+//! `try_` forms) need `&mut` access to the plugin object, which the audio
+//! thread uses inside `process_*`. A one-word gate arbitrates, and the audio
+//! thread never waits on it:
+//!
+//! - `process_*` and `reset` take the gate with one compare-exchange. If a
+//!   state call holds or has requested the gate, the block is **skipped**: the
+//!   input is copied to the output (dry), the plugin is not entered, and the
+//!   call still returns success. A `reset` that cannot enter is remembered and
+//!   runs at the start of the next block that can.
+//! - A state call (message thread) serialises with other state calls on a
+//!   mutex, raises a request bit, then waits for a block in flight to finish.
+//!   The wait is bounded by [`STATE_WAIT`]; on timeout the call fails and
+//!   changes nothing. New blocks see the request bit and skip, so the wait
+//!   cannot be starved.
+//!
+//! The request bit and the in-flight bit are one atomic, so for any pair of
+//! (block, state call) either the block sees the request and skips, or the
+//! state call sees the block and waits. The audio side allocates nothing.
 #![allow(unsafe_code)]
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use openplugin_core::{
     decode_session, encode_session, release_momentary, sample_rate_supported, BusMeters,
@@ -102,6 +127,30 @@ fn tail_seconds_of(tail: Tail, rate: f32) -> f64 {
     }
 }
 
+/// Longest a state call waits for a block in flight before it gives up.
+pub const STATE_WAIT: Duration = Duration::from_secs(2);
+
+const GATE_AUDIO: u32 = 1;
+const GATE_STATE: u32 = 2;
+
+/// Releases the audio side of the gate when a block (or reset) ends.
+struct AudioGuard<'a>(&'a AtomicU32);
+
+impl Drop for AudioGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_and(!GATE_AUDIO, Ordering::SeqCst);
+    }
+}
+
+/// Drops the state request when a state call ends, panic included.
+struct StateGuard<'a>(&'a AtomicU32);
+
+impl Drop for StateGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_and(!GATE_STATE, Ordering::SeqCst);
+    }
+}
+
 /// One host instance. Message-thread calls use the plane and the atomics.
 /// The audio thread is the only caller that enters `audio`.
 pub struct FfiInstance {
@@ -118,6 +167,13 @@ pub struct FfiInstance {
     editor_state: Option<EditorState>,
     /// Seconds of tail as `f64` bits, refreshed after every block.
     tail: AtomicU64,
+    /// `GATE_AUDIO` while a block runs, `GATE_STATE` while a state call holds
+    /// or has asked for the plugin object.
+    gate: AtomicU32,
+    /// Serialises state calls with each other (message thread only).
+    state_lock: Mutex<()>,
+    /// A `reset` that found the gate busy; the next block performs it.
+    reset_pending: AtomicBool,
 }
 
 unsafe impl Send for FfiInstance {}
@@ -177,7 +233,50 @@ impl FfiInstance {
             presets,
             editor_state,
             tail: AtomicU64::new(tail.to_bits()),
+            gate: AtomicU32::new(0),
+            state_lock: Mutex::new(()),
+            reset_pending: AtomicBool::new(false),
         }
+    }
+
+    /// Audio side of the gate. `None` when a state call holds or wants the
+    /// plugin object (or another block is somehow in flight): the caller
+    /// skips. Never blocks, never allocates. Runs a deferred reset first.
+    fn enter_audio(&self) -> Option<AudioGuard<'_>> {
+        self.gate
+            .compare_exchange(0, GATE_AUDIO, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()?;
+        let guard = AudioGuard(&self.gate);
+        if self.reset_pending.swap(false, Ordering::AcqRel) {
+            let audio = unsafe { &mut *self.audio.get() };
+            audio.inner.reset();
+            for buffer in &mut audio.buffers {
+                buffer.fill(0.0);
+            }
+        }
+        Some(guard)
+    }
+
+    /// Run `f` with exclusive access to the audio state. Message thread.
+    /// `None` when no block finished within [`STATE_WAIT`]; `f` did not run.
+    fn with_exclusive<T>(&self, f: impl FnOnce(&mut Audio) -> T) -> Option<T> {
+        let _serial = self.state_lock.lock().unwrap_or_else(|e| e.into_inner());
+        self.gate.fetch_or(GATE_STATE, Ordering::SeqCst);
+        let _request = StateGuard(&self.gate);
+        let deadline = Instant::now() + STATE_WAIT;
+        let mut spins = 0u32;
+        while self.gate.load(Ordering::SeqCst) & GATE_AUDIO != 0 {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            spins += 1;
+            if spins < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        Some(f(unsafe { &mut *self.audio.get() }))
     }
 
     /// What the engine shares with its editor ([`Plugin::editor_state`]).
@@ -321,40 +420,78 @@ impl FfiInstance {
         true
     }
 
-    /// Exclusive with `process`.
+    /// Resets the plugin now, or, when a state call holds the gate, at the
+    /// start of the next block. The Audio Unit shell calls this from its
+    /// render thread, so it never waits.
     pub fn reset(&self) {
-        let audio = unsafe { &mut *self.audio.get() };
-        audio.inner.reset();
-        for buffer in &mut audio.buffers {
-            buffer.fill(0.0);
+        match self.enter_audio() {
+            Some(_gate) => {
+                let audio = unsafe { &mut *self.audio.get() };
+                audio.inner.reset();
+                for buffer in &mut audio.buffers {
+                    buffer.fill(0.0);
+                }
+            }
+            None => self.reset_pending.store(true, Ordering::Release),
         }
     }
 
     /// OPCH session: the parameter plane plus `Plugin::save_state` when the plugin has one.
     /// A bare OPST plane still loads.
+    ///
+    /// Empty when the plugin object could not be reached (see
+    /// [`FfiInstance::try_save_bytes`]); an empty vector is never a valid session.
     pub fn save_bytes(&self) -> Vec<u8> {
-        let values: Vec<f32> = (0..self.plane.len())
-            .map(|index| self.load_param(index))
-            .collect();
-        let audio = unsafe { &mut *self.audio.get() };
-        let chunk = audio.inner.save_state().unwrap_or_default();
-        encode_session(self.info, &values, &chunk)
+        self.try_save_bytes().unwrap_or_default()
     }
 
+    /// [`FfiInstance::save_bytes`], or `None` when a block did not finish within
+    /// [`STATE_WAIT`] or the plugin's `save_state` panicked. Message thread;
+    /// allocates; blocks at most [`STATE_WAIT`]. Safe beside the audio thread:
+    /// blocks that start meanwhile are skipped (dry).
+    pub fn try_save_bytes(&self) -> Option<Vec<u8>> {
+        self.with_exclusive(|audio| {
+            catch_unwind(AssertUnwindSafe(|| {
+                // The chunk should describe the values the plane holds now.
+                audio.cursor.pull(&self.plane, audio.inner.as_mut());
+                let chunk = audio.inner.save_state().unwrap_or_default();
+                let values: Vec<f32> = (0..self.plane.len())
+                    .map(|index| self.load_param(index))
+                    .collect();
+                encode_session(self.info, &values, &chunk)
+            }))
+            .ok()
+        })
+        .flatten()
+    }
+
+    /// Restores a session (OPCH, or a bare OPST plane). All or nothing: the
+    /// envelope is checked before the plugin is touched, a refused or
+    /// panicking `load_state` leaves the plane as it was. Returns false for a
+    /// corrupt or foreign blob, a refused chunk, or a gate timeout. Message
+    /// thread; blocks at most [`STATE_WAIT`]; safe beside the audio thread.
+    ///
+    /// A plugin whose `load_state` returns false must itself have changed
+    /// nothing; the SDK cannot undo a plugin's partial write.
     pub fn load_bytes(&self, bytes: &[u8]) -> bool {
         let Some(session) = decode_session(self.info, bytes) else {
             return false;
         };
-        if !session.chunk.is_empty() {
-            let audio = unsafe { &mut *self.audio.get() };
-            if !audio.inner.load_state(&session.chunk) {
+        self.with_exclusive(|audio| {
+            let applied = catch_unwind(AssertUnwindSafe(|| {
+                session.chunk.is_empty() || audio.inner.load_state(&session.chunk)
+            }));
+            if !matches!(applied, Ok(true)) {
                 return false;
             }
-        }
-        for (index, value) in session.values.iter().enumerate() {
-            self.plane.store(index, *value);
-        }
-        true
+            for (index, value) in session.values.iter().enumerate() {
+                self.plane.store(index, *value);
+            }
+            // The chunk may have moved plugin parameters; push the plane again.
+            audio.cursor.invalidate();
+            true
+        })
+        .unwrap_or(false)
     }
 
     /// In-place stereo. Copies through scratch, so `left` and `right` are both the input and the output.
@@ -363,6 +500,9 @@ impl FfiInstance {
             return false;
         }
         let frames = left.len();
+        let Some(_gate) = self.enter_audio() else {
+            return true;
+        };
         let audio = unsafe { &mut *self.audio.get() };
         if frames > audio.max_block || audio.channels == 0 {
             return false;
@@ -402,6 +542,17 @@ impl FfiInstance {
         if in_left.is_null() || out_left.is_null() {
             return false;
         }
+        let Some(_gate) = self.enter_audio() else {
+            // A state call holds the plugin: pass the block through dry.
+            unsafe {
+                dry_copy(in_left, out_left, frames);
+                if !out_right.is_null() {
+                    let source = if in_right.is_null() { in_left } else { in_right };
+                    dry_copy(source, out_right, frames);
+                }
+            }
+            return true;
+        };
         let audio = unsafe { &mut *self.audio.get() };
         if frames > audio.max_block || audio.channels == 0 {
             return false;
@@ -436,6 +587,9 @@ impl FfiInstance {
         }
         let frames = channels[0].len();
         let count = channels.len();
+        let Some(_gate) = self.enter_audio() else {
+            return true;
+        };
         let audio = unsafe { &mut *self.audio.get() };
         if count > audio.channels || frames > audio.max_block {
             return false;
@@ -459,6 +613,9 @@ impl FfiInstance {
             return false;
         }
         let frames = samples.len() / channels;
+        let Some(_gate) = self.enter_audio() else {
+            return true;
+        };
         let audio = unsafe { &mut *self.audio.get() };
         if channels > audio.channels || frames > audio.max_block {
             return false;
@@ -491,6 +648,9 @@ impl FfiInstance {
         }
         let frames = main[0].len();
         let count = main.len();
+        let Some(_gate) = self.enter_audio() else {
+            return true;
+        };
         let audio = unsafe { &mut *self.audio.get() };
         if count > audio.channels || sidechain.len() > audio.side_channels || frames > audio.max_block {
             return false;
@@ -572,6 +732,15 @@ fn finite_rate(sample_rate: f64) -> f32 {
 fn copy_in(src: &[f32], dst: &mut [f32]) {
     for (out, sample) in dst.iter_mut().zip(src) {
         *out = if sample.is_finite() { *sample } else { 0.0 };
+    }
+}
+
+/// # Safety
+/// `src` and `dst` address `frames` floats; they may be the same buffer.
+unsafe fn dry_copy(src: *const f32, dst: *mut f32, frames: usize) {
+    for index in 0..frames {
+        let sample = unsafe { *src.add(index) };
+        unsafe { *dst.add(index) = if sample.is_finite() { sample } else { 0.0 } };
     }
 }
 
