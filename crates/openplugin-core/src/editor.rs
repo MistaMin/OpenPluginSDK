@@ -18,6 +18,11 @@
 //!   reconfigures it). [`Editor::bind`] hands it the [`EditorState`] that the
 //!   engine published through [`crate::Plugin::editor_state`], or `None`.
 //!
+//! Size: an editor is fixed-size unless it says otherwise. [`Editor::size_range`]
+//! gives the sizes it can take ([`SizeRange`]) and [`Editor::resize`] is how a
+//! host moves it to one of them; [`Editor::size`] is always the current size.
+//! An editor asks its host for a size with [`EditorHost::request_resize`].
+//!
 //! Pixels are 32-bit words `0x00RRGGBB`, rows top to bottom, which is what
 //! the macOS view in `openplugin-dri` blits.
 
@@ -44,11 +49,32 @@ pub enum Gesture {
 #[derive(Clone)]
 pub struct EditorHost {
     sink: Rc<dyn Fn(Gesture)>,
+    resize: Option<Rc<dyn Fn(u32, u32) -> bool>>,
 }
 
 impl EditorHost {
     pub fn new(sink: impl Fn(Gesture) + 'static) -> Self {
-        Self { sink: Rc::new(sink) }
+        Self { sink: Rc::new(sink), resize: None }
+    }
+
+    /// The same host, with a way to ask the format's host for a new editor
+    /// size. The handler returns whether the host agreed; the host then
+    /// resizes the editor through its own calls (`set_size`, `ui:resize`).
+    pub fn with_resize(mut self, request: impl Fn(u32, u32) -> bool + 'static) -> Self {
+        self.resize = Some(Rc::new(request));
+        self
+    }
+
+    /// Ask the host to give the editor `width` x `height` points. The size is
+    /// brought into the editor's [`SizeRange`] first. Returns whether the host
+    /// agreed; a `false` leaves the editor as it is. The editor is resized
+    /// later, through [`Editor::resize`], and not inside this call.
+    pub fn request_resize(&self, range: &SizeRange, width: u32, height: u32) -> bool {
+        let (w, h) = range.clamp(width, height);
+        match &self.resize {
+            Some(request) => request(w, h),
+            None => false,
+        }
     }
 
     /// A host that drops every gesture (previews, tests, a standalone window
@@ -95,10 +121,106 @@ pub struct Frame<'a> {
     pub height: usize,
 }
 
+/// The sizes an editor can take, in points. [`SizeRange::fixed`] is the
+/// default for every editor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizeRange {
+    pub min: (u32, u32),
+    pub max: (u32, u32),
+    /// Width and height of the shape to keep (3, 2 for 3:2), or `None` for any shape.
+    pub aspect: Option<(u32, u32)>,
+}
+
+impl SizeRange {
+    /// One size only.
+    pub const fn fixed(width: u32, height: u32) -> Self {
+        Self { min: (width, height), max: (width, height), aspect: None }
+    }
+
+    /// Any size from `min` to `max`, in any shape.
+    pub const fn between(min: (u32, u32), max: (u32, u32)) -> Self {
+        Self { min, max, aspect: None }
+    }
+
+    /// The same range, keeping the shape `width`:`height`.
+    pub const fn with_aspect(mut self, width: u32, height: u32) -> Self {
+        self.aspect = Some((width, height));
+        self
+    }
+
+    /// Bounds in order and at least 1 x 1, whatever was written.
+    fn bounds(&self) -> ((u32, u32), (u32, u32)) {
+        let min = (self.min.0.max(1), self.min.1.max(1));
+        (min, (self.max.0.max(min.0), self.max.1.max(min.1)))
+    }
+
+    /// The editor takes one size only.
+    pub fn is_fixed(&self) -> bool {
+        let (min, max) = self.bounds();
+        min == max
+    }
+
+    pub fn can_resize_horizontally(&self) -> bool {
+        let (min, max) = self.bounds();
+        min.0 < max.0
+    }
+
+    pub fn can_resize_vertically(&self) -> bool {
+        let (min, max) = self.bounds();
+        min.1 < max.1
+    }
+
+    /// The shape to keep, if both numbers are set.
+    pub fn aspect_ratio(&self) -> Option<(u32, u32)> {
+        self.aspect.filter(|a| a.0 > 0 && a.1 > 0)
+    }
+
+    /// Whether `width` x `height` is inside the bounds (the shape is a hint).
+    pub fn contains(&self, width: u32, height: u32) -> bool {
+        let (min, max) = self.bounds();
+        (min.0..=max.0).contains(&width) && (min.1..=max.1).contains(&height)
+    }
+
+    /// The size nearest to a request that the editor can take. Without an
+    /// aspect each side is held to its bounds. With one, the result has that
+    /// shape (to a point) and the area nearest to the request, inside both
+    /// bounds. Clamping a result again changes nothing.
+    pub fn clamp(&self, width: u32, height: u32) -> (u32, u32) {
+        let (min, max) = self.bounds();
+        let Some((aw, ah)) = self.aspect_ratio() else {
+            return (width.clamp(min.0, max.0), height.clamp(min.1, max.1));
+        };
+        let (aw, ah) = (f64::from(aw), f64::from(ah));
+        // The size is `s * (aw, ah)`; find `s` for the requested area, inside both bounds.
+        let wanted = (f64::from(width.max(1)) * f64::from(height.max(1)) / (aw * ah)).sqrt();
+        let low = (f64::from(min.0) / aw).max(f64::from(min.1) / ah);
+        let high = (f64::from(max.0) / aw).min(f64::from(max.1) / ah).max(low);
+        let s = wanted.clamp(low, high);
+        // Width decides; height follows from it, so a result is its own fixed point.
+        let w = ((s * aw).round() as u32).clamp(min.0, max.0);
+        let h = ((f64::from(w) * ah / aw).round() as u32).clamp(min.1, max.1);
+        (w, h)
+    }
+}
+
 /// The plugin's editor. Main thread only; it is never sent to another thread.
 pub trait Editor {
-    /// Size in points (logical pixels). The SDK views do not resize.
+    /// The current size in points (logical pixels). A fixed editor never
+    /// changes it; a resizable one changes it in [`Self::resize`].
     fn size(&self) -> (u32, u32);
+
+    /// The sizes this editor can take. The default is the current size alone,
+    /// so an editor that does not override this and [`Self::resize`] stays
+    /// fixed in every format.
+    fn size_range(&self) -> SizeRange {
+        let (w, h) = self.size();
+        SizeRange::fixed(w, h)
+    }
+
+    /// The host gives the editor a new size in points. Called only with a size
+    /// inside [`Self::size_range`]. Afterwards [`Self::size`] is that size and
+    /// [`Self::render`] draws at it. The default ignores it.
+    fn resize(&mut self, _width: u32, _height: u32) {}
 
     /// Show the engine whose state this is, or no engine. Called after
     /// creation when the engine is known, and again whenever it changes.
@@ -271,6 +393,84 @@ mod tests {
             }
         }
         producer.join().unwrap();
+    }
+
+    #[test]
+    fn size_range_clamps_each_side_without_an_aspect() {
+        let r = SizeRange::between((100, 50), (400, 200));
+        assert_eq!(r.clamp(10, 10), (100, 50));
+        assert_eq!(r.clamp(1000, 1000), (400, 200));
+        assert_eq!(r.clamp(250, 60), (250, 60));
+        assert_eq!(r.clamp(0, 0), (100, 50));
+        assert!(r.contains(100, 200) && !r.contains(99, 100) && !r.contains(100, 201));
+        assert!(r.can_resize_horizontally() && r.can_resize_vertically() && !r.is_fixed());
+    }
+
+    #[test]
+    fn fixed_range_always_gives_its_size() {
+        let r = SizeRange::fixed(240, 160);
+        assert!(r.is_fixed() && !r.can_resize_horizontally() && !r.can_resize_vertically());
+        for (w, h) in [(0, 0), (240, 160), (1, 9999), (u32::MAX, u32::MAX)] {
+            assert_eq!(r.clamp(w, h), (240, 160));
+        }
+        // Written upside down, the bounds are put in order.
+        let odd = SizeRange { min: (300, 300), max: (10, 10), aspect: Some((0, 5)) };
+        assert_eq!(odd.clamp(5, 5), (300, 300));
+        assert!(odd.is_fixed());
+    }
+
+    #[test]
+    fn aspect_keeps_the_shape_inside_the_bounds() {
+        let r = SizeRange::between((180, 120), (480, 320)).with_aspect(3, 2);
+        assert_eq!(r.clamp(240, 160), (240, 160));
+        for (w, h) in [(300, 160), (100, 100), (900, 100), (1, 1), (481, 321), (333, 777), (u32::MAX, 1)] {
+            let (cw, ch) = r.clamp(w, h);
+            assert!(r.contains(cw, ch), "{w}x{h} gave {cw}x{ch}");
+            assert!((i64::from(cw) * 2 - i64::from(ch) * 3).abs() <= 2, "{w}x{h} gave {cw}x{ch}");
+            assert_eq!(r.clamp(cw, ch), (cw, ch), "a result is a fixed point");
+        }
+        assert_eq!(r.clamp(2000, 2000), (480, 320));
+        assert_eq!(r.clamp(1, 1), (180, 120));
+        for (aw, ah) in [(3, 2), (16, 9), (1, 1), (7, 5)] {
+            let r = SizeRange::between((151, 97), (611, 433)).with_aspect(aw, ah);
+            for w in (1..800).step_by(13) {
+                for h in (1..600).step_by(11) {
+                    let c = r.clamp(w, h);
+                    assert!(r.contains(c.0, c.1), "{aw}:{ah} {w}x{h} gave {c:?}");
+                    assert_eq!(r.clamp(c.0, c.1), c, "{aw}:{ah} {w}x{h} gave {c:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn aspect_with_bounds_of_another_shape_stays_inside_them() {
+        // 1:1 inside a wide box: the height limit decides.
+        let r = SizeRange::between((100, 100), (400, 200)).with_aspect(1, 1);
+        assert_eq!(r.clamp(900, 900), (200, 200));
+        assert_eq!(r.clamp(5, 5), (100, 100));
+    }
+
+    #[test]
+    fn default_editor_is_fixed_and_ignores_resize() {
+        let mut probe = Probe(Vec::new());
+        assert_eq!(probe.size_range(), SizeRange::fixed(1, 1));
+        probe.resize(50, 50);
+        assert_eq!(probe.size(), (1, 1));
+    }
+
+    #[test]
+    fn request_resize_needs_a_handler_and_clamps() {
+        let range = SizeRange::between((10, 10), (100, 100));
+        assert!(!EditorHost::detached().request_resize(&range, 50, 50));
+        let seen = Rc::new(std::cell::Cell::new((0, 0)));
+        let sink = seen.clone();
+        let host = EditorHost::detached().with_resize(move |w, h| {
+            sink.set((w, h));
+            true
+        });
+        assert!(host.request_resize(&range, 500, 5));
+        assert_eq!(seen.get(), (100, 10));
     }
 
     struct Probe(Vec<(usize, f32)>);
