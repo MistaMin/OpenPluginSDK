@@ -1,0 +1,13 @@
+[package]
+name = "example-design-editor"
+description = "A plugin whose editor is built from a GoodLookin design CSV, exported as CLAP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+openplugin = { workspace = true }

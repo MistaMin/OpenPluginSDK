@@ -132,3 +132,41 @@ Behaviour, in gestures:
 Why 200 points: it is about the height of a small plugin window and one hand movement on a trackpad, and it keeps one point under 0.5% of the range. A 150 point range (the old example) still works through `.drag_range(150.0)`.
 
 The modifier keys reach the editor through `Editor::modifiers_changed`, an optional method with an empty default. The macOS view does not call it yet, so on macOS today the fine adjustment is available only to a host that reports modifiers some other way. Call `ControlSet::set_modifiers` yourself in a standalone window.
+
+## Editors from a design file
+
+`openplugin_dri::design_editor::DesignEditor` builds a whole `Editor` from a GoodLookin design CSV (`id,parameter,label,style,colour,x,y,width,height,font size[,marks]`, read by `goodlookindri::design::read_design`). Each row becomes a control of the `hit` registry, bound to the plugin parameter whose id is in the `parameter` column, placed with `goodlookindri::host::map_rect`, and drawn through GoodLookin DRI. The plate and the labels are one cached layer (`frame_layered`); only the controls and the value text are painted each frame.
+
+```rust
+const DESIGN: &str = include_str!("../design.csv");
+
+fn make_editor(host: EditorHost) -> Option<Box<dyn Editor>> {
+    DesignEditor::from_csv(DESIGN, &INFO, host).map(|e| Box::new(e) as Box<dyn Editor>)
+}
+```
+
+| Constructor | Use |
+|---|---|
+| `DesignEditor::from_csv(csv, &INFO, host)` | An editor factory: a bad design is logged and gives `None`, so the host shows its generic controls |
+| `DesignEditor::try_new(csv, &INFO, host, &DesignOptions)` | The same with the error (`DesignEditorError`) and options |
+| `DesignEditor::from_items(rows, &INFO, host, &DesignOptions)` | Rows you already read or built with `Item::new` |
+
+The control follows the parameter, not the row:
+
+| Parameter | Control | Drawn as |
+|---|---|---|
+| `Unit::Toggle` | toggle | `Lvr` a lever, `Mini` and `Tab` a mini toggle, any other style a bat; the row colour is the lamp |
+| `Unit::Choice` | key bank | one latching key per choice, in a push style taken from the knob style (`Sq` square, `Rd` round, `Dm` dome, `Cyb` chamfer, `Neo` neon, and so on); vertical when the row is taller than wide |
+| anything else | knob or fader | the row's knob style; a vertical fader when the row is at least twice as tall as wide, a horizontal one when at least twice as wide as tall |
+
+GoodLookin DRI's loader accepts only knob styles in the `style` column, so a fader or a switch cannot be named there. The shape of the row picks the fader, and the knob style picks the look of the switch, the keys and the fader cap (console cap for `Brit`, `N`, `A`, `FS` and `Mtl`, oval for the others). `marks` is read and validated but not used yet: the text colours come from the plate.
+
+The top of a row is the control and the hit area (a circle for a knob, the rectangle for the rest). Under it is a text strip as high as the row's font size asks: the label (the parameter's name when the label is empty) and, for knobs and faders, the value. The strip does not answer the mouse.
+
+`DesignOptions` carries what the file does not: the faceplate (`.plate("Navy")`, the default, any of GoodLookin's 40 codes), `map_rect`'s `.scale()` and `.origin()`, an explicit `.size()` (by default the furthest edge of the rows plus 12 points) and `.strict()`.
+
+Rows that cannot bind are reported, not dropped silently. A row with an empty `parameter` or an unknown id is not a control and is not drawn; `DesignEditor::issues()` lists it (`RowIssue`), and a warning goes to the log. With `.strict(true)` the same rows make `try_new` fail with `DesignEditorError::Unbound`. A malformed CSV, an invalid row, a duplicate id, an unknown faceplate or a bad option are always errors.
+
+`bindings()` gives each bound row, its parameter index and its control; `controls()` the `ControlSet` with the hit areas and values; `control_for("gain")` the control of a parameter.
+
+`examples/design_editor` is a working plugin: five rows of CSV give two knobs, a fader, a lever switch and a three-key bank. `cargo run -p example-design-editor --bin snapshot -- out.ppm 2` writes its editor to an image.

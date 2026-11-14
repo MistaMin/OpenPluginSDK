@@ -40,6 +40,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-design-editor"
+version = "0.3.1-beta"
+dependencies = [
+ "openplugin",
+]
+
+[[package]]
 name = "example-editor"
 version = "0.3.1-beta"
 dependencies = [

@@ -64,3 +64,17 @@ None of these is a session in Logic, Cubase, Pro Tools, Bitwig or Reaper.
 An editor does not have to hand-code hit rectangles. `openplugin_dri::ControlSet` holds knobs, faders, toggles, momentary buttons and key banks, each with a hit area, a parameter index and its `ParamInfo`. The editor forwards `mouse_down`, `mouse_move`, `mouse_up`, `wheel`, `modifiers_changed` and `param_changed` to it. The set turns the mouse into `begin`, `perform` and `end` gestures through the `EditorHost`: relative drags, a fine adjustment with Shift or Command, double-click to reset, wheel steps, snapping for stepped and choice parameters, and a clamp so that only in-range values reach the host. A value from the host updates a control without sending a gesture back. The set also keeps hover and pressed state, and iterating it gives what to draw. `examples/editor` is written this way; see [DRI_GUIDE.md](DRI_GUIDE.md#controls-and-hit-testing) for the rules.
 
 `Editor::modifiers_changed(Modifiers)` is the one addition to the contract: optional, empty by default, so existing editors are unaffected. The macOS view does not call it yet.
+
+## Editors from a design file
+
+An editor does not have to be written by hand. `openplugin_dri::DesignEditor` implements `Editor` from a GoodLookin design CSV and the plugin's `PluginInfo`: each row is a control bound to the parameter named in its `parameter` column, so the layout lives in a text file and the plugin has no drawing or hit-testing code.
+
+```rust
+fn make_editor(host: EditorHost) -> Option<Box<dyn Editor>> {
+    DesignEditor::from_csv(include_str!("../design.csv"), &INFO, host).map(|e| Box::new(e) as Box<dyn Editor>)
+}
+
+openplugin::targets::export_clap!(MyPlugin, editor = make_editor);
+```
+
+It goes through the same contract as any editor: gestures through `EditorHost`, host values through `param_changed`, pixels from `SceneCanvas` with the plate cached. It works in every format that takes an `EditorFactory`. A design with a malformed row makes `from_csv` return `None`, and the host shows its generic controls. Rows that name no parameter, or one the plugin does not have, are listed by `issues()`. The kinds of control, the options and the rules are in [DRI_GUIDE.md](DRI_GUIDE.md#editors-from-a-design-file). The working example is [`examples/design_editor`](../examples/design_editor), exported as CLAP; its tests load the CSV, check that every parameter has a control, and render a frame. It has not been opened in a host.
