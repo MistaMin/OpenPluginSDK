@@ -109,11 +109,34 @@ public:
         }
         op_shell_reset(engine_);
         resetPending_.store(false, std::memory_order_relaxed);
+        // Bypass state is sized here, on the message thread, so the render thread never allocates.
+        latency_ = op_shell_latency(engine_);
+        delayPos_ = 0;
+        delay_.assign(static_cast<size_t>(channels) * latency_, 0.0f);
+        dry_.assign(static_cast<size_t>(channels) * frames, 0.0f);
+        mix_ = bypass_.load(std::memory_order_relaxed) ? 0.0f : 1.0f;
+        mixStep_ = static_cast<float>(1.0 / std::max(1.0, kCrossfadeSeconds * rate));
         return noErr;
     }
     void Cleanup() override {
         destroy();
         AUEffectBase::Cleanup();
+    }
+    // Bypass is the shell's, not the base class's. AUEffectBase would copy the input to the
+    // output with no delay, and reset the plugin when bypass ends. The shell instead keeps
+    // running the plugin, delays the dry signal by the reported latency, and crossfades.
+    bool ShouldBypassEffect() AUSDK_RTSAFE override { return false; }
+    void SetBypassEffect(bool flag) override {
+        AUEffectBase::SetBypassEffect(flag);
+        bypass_.store(flag, std::memory_order_relaxed);
+    }
+    OSStatus SetProperty(AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement element, const void* data, UInt32 size) override {
+        if (scope == kAudioUnitScope_Global && id == kAudioUnitProperty_BypassEffect) {
+            if (size < sizeof(UInt32) || !data) return kAudioUnitErr_InvalidPropertyValue;
+            SetBypassEffect(*static_cast<const UInt32*>(data) != 0);
+            return noErr;
+        }
+        return AUEffectBase::SetProperty(id, scope, element, data, size);
     }
     OSStatus Reset(AudioUnitScope scope, AudioUnitElement element) override {
         // A host may call this from its main thread while the render thread is
@@ -191,7 +214,11 @@ public:
 private:
     OSStatus render(AudioUnitRenderActionFlags& flags, const AudioBufferList& input, AudioBufferList& output, UInt32 frames) {
         if (!engine_ || frames == 0) return kAudioUnitErr_Uninitialized;
-        if (resetPending_.exchange(false, std::memory_order_acquire)) op_shell_reset(engine_);
+        if (resetPending_.exchange(false, std::memory_order_acquire)) {
+            op_shell_reset(engine_);
+            std::fill(delay_.begin(), delay_.end(), 0.0f);
+            delayPos_ = 0;
+        }
         const UInt32 channels = input.mNumberBuffers;
         if ((channels != 1 && channels != 2) || output.mNumberBuffers != channels) return kAudioUnitErr_FormatNotSupported;
         for (UInt32 i = 0; i < channels; ++i) {
@@ -208,11 +235,57 @@ private:
             auto* outLeft = static_cast<float*>(output.mBuffers[0].mData) + offset;
             const float* inRight = channels > 1 ? static_cast<const float*>(input.mBuffers[1].mData) + offset : nullptr;
             float* outRight = channels > 1 ? static_cast<float*>(output.mBuffers[1].mData) + offset : nullptr;
+            const float target = bypass_.load(std::memory_order_relaxed) ? 0.0f : 1.0f;
+            const bool settledWet = mix_ == 1.0f && target == 1.0f && latency_ == 0;
+            // The dry copy is taken before the plugin runs: the host may pass the same buffer for both.
+            if (!settledWet) delayDry(channels, inLeft, inRight, count);
             if (!op_shell_process(engine_, inLeft, inRight, outLeft, outRight, count)) return kAudioUnitErr_FailedInitialization;
+            if (!settledWet) crossfade(channels, target, outLeft, outRight, count);
             offset += count;
         }
         flags &= ~kAudioUnitRenderAction_OutputIsSilence;
         return noErr;
+    }
+    // dry_[ch] gets the input delayed by the reported latency. The ring holds the last
+    // latency_ samples of each channel and is written on every block, bypassed or not,
+    // so it is already full when bypass starts.
+    void delayDry(UInt32 channels, const float* inLeft, const float* inRight, uint32_t count) {
+        for (UInt32 ch = 0; ch < channels; ++ch) {
+            const float* in = ch == 0 ? inLeft : inRight;
+            float* dry = dry_.data() + static_cast<size_t>(ch) * maxFrames_;
+            if (latency_ == 0) {
+                std::memcpy(dry, in, count * sizeof(float));
+                continue;
+            }
+            float* ring = delay_.data() + static_cast<size_t>(ch) * latency_;
+            size_t pos = delayPos_;
+            for (uint32_t i = 0; i < count; ++i) {
+                dry[i] = ring[pos];
+                ring[pos] = in[i];
+                if (++pos == latency_) pos = 0;
+            }
+        }
+        if (latency_ > 0) delayPos_ = (delayPos_ + count) % latency_;
+    }
+    // Moves mix_ (0 dry, 1 plugin) toward the target over about 10 ms and writes the blend.
+    // Settled bypass is the delayed input exactly; settled processing leaves the output alone.
+    void crossfade(UInt32 channels, float target, float* outLeft, float* outRight, uint32_t count) {
+        if (mix_ == target && target == 1.0f) return;
+        for (UInt32 ch = 0; ch < channels; ++ch) {
+            if (mix_ == target) std::memcpy(ch == 0 ? outLeft : outRight, dry_.data() + static_cast<size_t>(ch) * maxFrames_, count * sizeof(float));
+        }
+        if (mix_ == target) return;
+        float mix = mix_;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (mix < target) mix = std::min(target, mix + mixStep_);
+            else mix = std::max(target, mix - mixStep_);
+            for (UInt32 ch = 0; ch < channels; ++ch) {
+                float* out = ch == 0 ? outLeft : outRight;
+                const float dry = dry_[static_cast<size_t>(ch) * maxFrames_ + i];
+                out[i] = mix == 0.0f ? dry : out[i] * mix + dry * (1.0f - mix);
+            }
+        }
+        mix_ = mix;
     }
     void destroy() {
         if (engine_) {
@@ -224,6 +297,14 @@ private:
     std::atomic<bool> resetPending_{false};
     std::atomic<OSStatus> lastError_{noErr};
     UInt32 maxFrames_ = 512;
+    static constexpr double kCrossfadeSeconds = 0.010;
+    std::atomic<bool> bypass_{false};
+    uint32_t latency_ = 0;
+    size_t delayPos_ = 0;
+    float mix_ = 1.0f;
+    float mixStep_ = 1.0f;
+    std::vector<float> delay_;
+    std::vector<float> dry_;
     std::vector<CachedParam> params_;
 };
 AUSDK_COMPONENT_ENTRY(ausdk::AUBaseFactory, OpenPluginAU)

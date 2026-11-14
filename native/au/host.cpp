@@ -6,26 +6,8 @@
 // Run from the native build (see native/CMakeLists.txt):
 //   ctest --test-dir build-shell -R au_proof --output-on-failure
 #include "op_shell.h"
-#include "proof_shell.h"
-#include <AudioToolbox/AudioToolbox.h>
-#include <CoreFoundation/CoreFoundation.h>
-#include <algorithm>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include "proof_au.h"
 #include <limits>
-#include <vector>
-#define CHECK(cond) do { if (!(cond)) { std::fprintf(stderr, "AU proof failed line %d: %s\n", __LINE__, #cond); std::exit(1); } } while (0)
-static OSStatus render_input(void*, AudioUnitRenderActionFlags*, const AudioTimeStamp* time, UInt32, UInt32 frames, AudioBufferList* data) {
-    for (UInt32 channel = 0; channel < data->mNumberBuffers; ++channel) {
-        auto* samples = static_cast<float*>(data->mBuffers[channel].mData);
-        if (!samples) return kAudio_ParamError;
-        fill_sine(samples, static_cast<int>(frames), 48000.0, 1000.0, 0.25, time->mSampleTime);
-        data->mBuffers[channel].mDataByteSize = frames * sizeof(float);
-    }
-    return noErr;
-}
 static std::vector<AudioUnitParameterID> parameter_ids(AudioUnit unit) {
     UInt32 size = 0;
     CHECK(AudioUnitGetPropertyInfo(unit, kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0, &size, nullptr) == noErr);
@@ -101,53 +83,13 @@ static std::vector<float> render_au(AudioUnit unit, UInt32 channels, int blocks)
 }
 int main(int argc, char** argv) {
     CHECK(argc == 2);
-    CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(argv[1]), static_cast<CFIndex>(std::strlen(argv[1])), true);
-    CHECK(url);
-    CFBundleRef bundle = CFBundleCreate(nullptr, url);
-    CFRelease(url);
-    CHECK(bundle && CFBundleLoadExecutable(bundle));
-    CFDictionaryRef info = CFBundleGetInfoDictionary(bundle);
-    CFArrayRef components = static_cast<CFArrayRef>(CFDictionaryGetValue(info, CFSTR("AudioComponents")));
-    CHECK(components && CFArrayGetCount(components) == 1);
-    CFDictionaryRef componentInfo = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(components, 0));
-    auto fourcc = [](CFDictionaryRef dict, CFStringRef key) {
-        char text[5] = {};
-        auto value = static_cast<CFStringRef>(CFDictionaryGetValue(dict, key));
-        CHECK(value && CFStringGetCString(value, text, 5, kCFStringEncodingUTF8));
-        return OSType(text[0] << 24 | text[1] << 16 | text[2] << 8 | text[3]);
-    };
-    const OSType type = fourcc(componentInfo, CFSTR("type"));
-    const OSType subtype = fourcc(componentInfo, CFSTR("subtype"));
-    const OSType manufacturer = fourcc(componentInfo, CFSTR("manufacturer"));
-    auto factoryName = static_cast<CFStringRef>(CFDictionaryGetValue(componentInfo, CFSTR("factoryFunction")));
-    CHECK(factoryName);
-    auto factory = reinterpret_cast<AudioComponentFactoryFunction>(CFBundleGetFunctionPointerForName(bundle, factoryName));
-    CHECK(factory);
-    AudioComponentDescription desc{type, subtype, manufacturer, 0, 0};
-    AudioComponent component = AudioComponentRegister(&desc, CFSTR("OpenPlugin shell proof"), 0, factory);
-    CHECK(component);
+    AudioComponent component = proof_register_component(argv[1]);
     OpShellInfo shellInfo{};
     CHECK(op_shell_info(&shellInfo) != 0);
     for (UInt32 channels : {1u, 2u}) {
         ReferenceShell reference(channels);
         CHECK(reference.instance);
-        AudioUnit unit = nullptr;
-        CHECK(AudioComponentInstanceNew(component, &unit) == noErr && unit);
-        AudioStreamBasicDescription format{};
-        format.mSampleRate = 48000;
-        format.mFormatID = kAudioFormatLinearPCM;
-        format.mFormatFlags = static_cast<UInt32>(kAudioFormatFlagsNativeFloatPacked) | static_cast<UInt32>(kAudioFormatFlagIsNonInterleaved);
-        format.mBytesPerPacket = sizeof(float);
-        format.mFramesPerPacket = 1;
-        format.mBytesPerFrame = sizeof(float);
-        format.mChannelsPerFrame = channels;
-        format.mBitsPerChannel = 32;
-        CHECK(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0, &format, sizeof(format)) == noErr);
-        CHECK(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0, &format, sizeof(format)) == noErr);
-        UInt32 maximum = 4096;
-        CHECK(AudioUnitSetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maximum, sizeof(maximum)) == noErr);
-        AURenderCallbackStruct callback{render_input, nullptr};
-        CHECK(AudioUnitSetProperty(unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0, &callback, sizeof(callback)) == noErr);
+        AudioUnit unit = proof_make_unit(component, channels);
         check_parameters(unit);
         const int gainId = find_param(unit, "Gain");
         const int warmId = find_param(unit, "Warm");
@@ -231,14 +173,15 @@ int main(int argc, char** argv) {
         op_shell_reset(reference.instance);
         const auto shellRestored = render_shell(reference.instance, channels, 8, plain);
         CHECK(max_difference(shellRestored, auRestored) <= 1e-6);
+        proof_check_bypass(unit, channels, label, static_cast<UInt32>(op_shell_latency(reference.instance)));
         CHECK(AudioUnitReset(unit, kAudioUnitScope_Global, 0) == noErr);
         CHECK(AudioUnitUninitialize(unit) == noErr);
         CHECK(AudioComponentInstanceDispose(unit) == noErr);
     }
 #if OP_HAS_TAIL
-    std::puts("AU proof: factory from the bundle plist, parameter metadata, latency, tail, shell-equal audio, state round-trip, rejected NaN and out-of-range values: PASS");
+    std::puts("AU proof: factory from the bundle plist, parameter metadata, latency, tail, shell-equal audio, state round-trip, bypass, rejected NaN and out-of-range values: PASS");
 #else
-    std::puts("AU proof: factory from the bundle plist, parameter metadata, latency, shell-equal audio, state round-trip, rejected NaN and out-of-range values, tail not built (OP_TAIL=OFF): PASS");
+    std::puts("AU proof: factory from the bundle plist, parameter metadata, latency, shell-equal audio, state round-trip, bypass, rejected NaN and out-of-range values, tail not built (OP_TAIL=OFF): PASS");
 #endif
     return 0;
 }
