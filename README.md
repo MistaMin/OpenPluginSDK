@@ -97,6 +97,8 @@ Add `openplugin` to your `Cargo.toml`:
 openplugin = "0.3.1-beta"
 ```
 
+To build a plugin into CLAP, LV2, VST3, Audio Unit and AAX bundles, with optional signing and notarisation, see [docs/BUILD.md](docs/BUILD.md).
+
 ---
 
 ## Writing a Plugin
