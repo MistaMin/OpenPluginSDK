@@ -31,6 +31,31 @@ void op_editor_bind(void* editor, void* instance);
 void op_editor_set_plain(void* editor, uint32_t index, float plain);
 // Removes the view from its parent and frees the editor.
 void op_editor_destroy(void* editor);
+
+// Resizable editors. Optional: a shell defines OP_EDITOR_RESIZE before
+// including this header to use them, and a shell that does not still builds.
+// The Rust side exports them with the rest of op_editor_*. Sizes are points.
+#ifdef OP_EDITOR_RESIZE
+// The sizes any editor of this plugin takes. The aspect is 0, 0 for any
+// shape. The editor is fixed when min equals max. Call before op_editor_create.
+uint32_t op_editor_size_range(uint32_t* min_width, uint32_t* min_height,
+                              uint32_t* max_width, uint32_t* max_height,
+                              uint32_t* aspect_width, uint32_t* aspect_height);
+// The editor's current size (op_editor_size is the size it opens at).
+uint32_t op_editor_get_size(void* editor, uint32_t* width, uint32_t* height);
+// Replaces a proposed size with the nearest one the editor takes, without
+// changing the editor (VST3 checkSizeConstraint, a host's adjust-size call).
+uint32_t op_editor_adjust_size(void* editor, uint32_t* width, uint32_t* height);
+// Gives the editor and its view a new size. Returns 1 if the size is inside
+// the range, 0 and no change if not.
+uint32_t op_editor_resize(void* editor, uint32_t width, uint32_t height);
+// How an editor asks the host for a size. Return non-zero if the host agrees;
+// the shell then calls op_editor_resize. Null removes it. Replaces nothing in
+// OpEditorHost, so a shell that does not set it is unchanged.
+typedef uint32_t (*OpEditorRequestResize)(void* context, uint32_t width, uint32_t height);
+void op_editor_set_request_resize(void* editor, void* context, OpEditorRequestResize request);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

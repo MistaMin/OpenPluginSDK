@@ -6,7 +6,9 @@
 //! `export_shell!(P, editor = make_editor)` also exports the editor ABI of
 //! `native/include/op_editor.h` (`op_editor_*`, macOS), written here in Rust
 //! over [`openplugin_dri::cocoa::EditorView`]. Build the shells with
-//! `-DOP_EDITOR=ON` for it. Both forms export `op_shell_tail_seconds` from
+//! `-DOP_EDITOR=ON` for it. Resizing is a second, optional block of that
+//! header (`OP_EDITOR_RESIZE`): the size range, `op_editor_resize`, and a
+//! callback for an editor that asks its host for a size. Both forms export `op_shell_tail_seconds` from
 //! [`Plugin::tail`](crate::PluginForExport::tail), for `-DOP_TAIL=ON`, and
 //! `op_shell_save_state` / `op_shell_load_state` for the whole plugin state.
 
@@ -28,8 +30,21 @@ pub mod editor {
     use super::ShellInstance;
     use openplugin_core::{EditorFactory, EditorHost, Gesture};
     use openplugin_dri::cocoa::EditorView;
+    use std::cell::Cell;
     use std::ffi::c_void;
+    use std::rc::Rc;
     use std::sync::OnceLock;
+
+    /// `OpEditorRequestResize`: the editor wants this size; non-zero if the
+    /// shell's host agreed (and will then call `op_editor_resize`).
+    pub type RequestResize = unsafe extern "C" fn(context: *mut c_void, width: u32, height: u32) -> u32;
+
+    /// What `op_editor_create` returns: the view, and the callback an editor
+    /// uses to ask for a size (set by `op_editor_set_request_resize`).
+    pub struct Handle {
+        view: EditorView,
+        request: Rc<Cell<Option<(usize, RequestResize)>>>,
+    }
 
     /// How the editor reports a gesture to the host (`OpEditorHost` in C).
     /// Plain values; main thread.
@@ -93,16 +108,110 @@ pub mod editor {
             Some(callbacks) => host_for(*callbacks),
             None => EditorHost::detached(),
         };
+        let request: Rc<Cell<Option<(usize, RequestResize)>>> = Rc::new(Cell::new(None));
+        let asked = request.clone();
+        let editor_host = editor_host.with_resize(move |w, h| match asked.get() {
+            Some((context, f)) => unsafe { f(context as *mut c_void, w, h) != 0 },
+            None => false,
+        });
         let Some(mut editor) = factory(editor_host) else { return std::ptr::null_mut() };
         editor.bind(None);
         match EditorView::new(editor, None) {
-            Some(view) => Box::into_raw(Box::new(view)) as *mut c_void,
+            Some(view) => Box::into_raw(Box::new(Handle { view, request })) as *mut c_void,
             None => std::ptr::null_mut(),
         }
     }
 
     unsafe fn view<'a>(editor: *mut c_void) -> Option<&'a mut EditorView> {
-        unsafe { (editor as *mut EditorView).as_mut() }
+        unsafe { (editor as *mut Handle).as_mut() }.map(|h| &mut h.view)
+    }
+
+    /// `op_editor_size_range`. The range of an editor made once with no host.
+    /// The aspect is 0, 0 for any shape.
+    ///
+    /// # Safety
+    /// Every pointer is null or writable.
+    pub unsafe fn size_range(
+        factory: EditorFactory,
+        min_w: *mut u32,
+        min_h: *mut u32,
+        max_w: *mut u32,
+        max_h: *mut u32,
+        aspect_w: *mut u32,
+        aspect_h: *mut u32,
+    ) -> u32 {
+        static RANGE: OnceLock<Option<openplugin_core::editor::SizeRange>> = OnceLock::new();
+        let Some(r) = *RANGE.get_or_init(|| factory(EditorHost::detached()).map(|e| e.size_range())) else { return 0 };
+        let (aw, ah) = r.aspect_ratio().unwrap_or((0, 0));
+        let values = [(min_w, r.min.0), (min_h, r.min.1), (max_w, r.max.0), (max_h, r.max.1), (aspect_w, aw), (aspect_h, ah)];
+        if values.iter().any(|(p, _)| p.is_null()) {
+            return 0;
+        }
+        for (p, v) in values {
+            unsafe { *p = v };
+        }
+        1
+    }
+
+    /// `op_editor_get_size`. The editor's current size.
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`]; the pointers are null or writable.
+    pub unsafe fn get_size(editor: *mut c_void, width: *mut u32, height: *mut u32) -> u32 {
+        let Some(v) = (unsafe { view(editor) }) else { return 0 };
+        if width.is_null() || height.is_null() {
+            return 0;
+        }
+        let (w, h) = v.size();
+        unsafe {
+            *width = w;
+            *height = h;
+        }
+        1
+    }
+
+    /// `op_editor_adjust_size`. Replaces a proposed size with the nearest one
+    /// the editor takes (the host's `checkSizeConstraint`, `adjust_size`).
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`]; the pointers are null or read-write.
+    pub unsafe fn adjust_size(editor: *mut c_void, width: *mut u32, height: *mut u32) -> u32 {
+        let Some(v) = (unsafe { view(editor) }) else { return 0 };
+        if width.is_null() || height.is_null() {
+            return 0;
+        }
+        unsafe {
+            let (w, h) = v.size_range().clamp(*width, *height);
+            *width = w;
+            *height = h;
+        }
+        1
+    }
+
+    /// `op_editor_resize`. 1 if the size is inside the editor's bounds and the
+    /// editor and its view now have it; 0, and no change, if not.
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`].
+    pub unsafe fn resize(editor: *mut c_void, width: u32, height: u32) -> u32 {
+        match unsafe { view(editor) } {
+            Some(v) if v.size_range().contains(width, height) => {
+                v.resize(width, height);
+                1
+            }
+            _ => 0,
+        }
+    }
+
+    /// `op_editor_set_request_resize`. A null `request` removes it.
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`]. `request` stays valid, with
+    /// `context`, until it is replaced or [`destroy`].
+    pub unsafe fn set_request_resize(editor: *mut c_void, context: *mut c_void, request: Option<RequestResize>) {
+        if let Some(h) = unsafe { (editor as *mut Handle).as_mut() } {
+            h.request.set(request.map(|f| (context as usize, f)));
+        }
     }
 
     /// `op_editor_view`.
@@ -155,7 +264,7 @@ pub mod editor {
     /// `editor` is null or from [`create`], and not used again.
     pub unsafe fn destroy(editor: *mut c_void) {
         if !editor.is_null() {
-            drop(unsafe { Box::from_raw(editor as *mut EditorView) });
+            drop(unsafe { Box::from_raw(editor as *mut Handle) });
         }
     }
 }
@@ -203,6 +312,47 @@ macro_rules! export_shell {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_set_plain(editor: *mut ::std::ffi::c_void, index: u32, plain: f32) {
             $crate::shell::editor::set_plain(editor, index, plain)
+        }
+
+        #[cfg(target_os = "macos")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_size_range(
+            min_w: *mut u32,
+            min_h: *mut u32,
+            max_w: *mut u32,
+            max_h: *mut u32,
+            aspect_w: *mut u32,
+            aspect_h: *mut u32,
+        ) -> u32 {
+            unsafe { $crate::shell::editor::size_range($editor, min_w, min_h, max_w, max_h, aspect_w, aspect_h) }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_get_size(editor: *mut ::std::ffi::c_void, width: *mut u32, height: *mut u32) -> u32 {
+            unsafe { $crate::shell::editor::get_size(editor, width, height) }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_adjust_size(editor: *mut ::std::ffi::c_void, width: *mut u32, height: *mut u32) -> u32 {
+            unsafe { $crate::shell::editor::adjust_size(editor, width, height) }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_resize(editor: *mut ::std::ffi::c_void, width: u32, height: u32) -> u32 {
+            unsafe { $crate::shell::editor::resize(editor, width, height) }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_set_request_resize(
+            editor: *mut ::std::ffi::c_void,
+            context: *mut ::std::ffi::c_void,
+            request: ::std::option::Option<$crate::shell::editor::RequestResize>,
+        ) {
+            unsafe { $crate::shell::editor::set_request_resize(editor, context, request) }
         }
 
         #[cfg(target_os = "macos")]
