@@ -42,4 +42,5 @@ The adapter links an AAX SDK that stays outside this repository. The SDK is not 
 - Master bypass copies the dry buffer. It does not delay that copy by the reported latency.
 - Without `-DOP_EDITOR=ON` the view is an empty rectangle. With it, the view hosts the plugin's editor ([EDITOR.md](EDITOR.md)).
 - Manufacturer, product, and plug-in IDs are a hash of the plugin id, documented in [SHELL.md](SHELL.md). Set fixed codes with `Plugin::aax_ids` before a release. A page table (`-DOP_AAX_PAGES=ON`) needs them.
-- `aax_process_proof` calls the process callback. `aax_bundle_proof` checks the seven ACF exports and `ACFGetSDKVersion`. Neither test is a Pro Tools session.
+- State is one versioned chunk holding every parameter value and the master bypass. A malformed or wrong-length chunk is refused and changes nothing. See [SHELL.md](SHELL.md).
+- `aax_process_proof` calls the process callback. `aax_state_proof` saves and loads the chunk. `aax_alloc_proof` checks that the callback does not allocate. `aax_bundle_proof` checks the seven ACF exports and `ACFGetSDKVersion`. None is a Pro Tools session, and none runs in CI because the Avid SDK is not redistributable.
