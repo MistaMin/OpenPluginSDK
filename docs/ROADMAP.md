@@ -16,6 +16,14 @@ The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin
 | Proofs | Unit tests, a main-thread editor test through CLAP, LV2 and the shell ABI, `VST3EditorProof`, `lv2_validate`, a render through lilv's `lv2apply`, and `clap-validator` with one failure (the 8 kHz minimum rate). |
 | Not claimed | Any session in Logic, Cubase, Pro Tools, Bitwig or REAPER. Windows and Linux. |
 
+## Minimum Rust version
+
+The SDK builds and is tested on current stable Rust. `rust-version` in `Cargo.toml` is the oldest Rust a plugin may use to depend on it, and CI checks the workspace on exactly that version on every push. It is 1.85: the oldest Rust that builds the dependency tree.
+
+- Raise it only when a dependency needs a newer Rust, or when a language or library feature fixes a real problem in the SDK. Not to follow stable.
+- Keep it at or below the Rust that the current Debian stable release ships, so the Linux milestone can build with distribution packages.
+- Raise it only in a minor release, and say so in the release notes with the reason.
+
 ## 0.3.x: harden what exists
 
 - **Generic shell proofs.** `vst3_proof`, `au_proof` and `aax_process_proof` check FreEQ's parameters and pass only for FreEQ. Replace them with proofs over the SDK's example that check the contract: parameters, state round-trip, tail, latency and bypass.
