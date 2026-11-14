@@ -6,8 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/openplugin-core"
+readme = "README.md"
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true, optional = true }
-log = { workspace = true }

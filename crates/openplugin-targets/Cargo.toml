@@ -6,13 +6,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/openplugin-targets"
+readme = "README.md"
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 openplugin-core = { workspace = true }
 openplugin-dri = { workspace = true }
 openplugin-ffi = { workspace = true }
-raw-window-handle = { workspace = true }
-cpal = { workspace = true, optional = true }
 log = { workspace = true }
 
 [dev-dependencies]
@@ -24,4 +28,5 @@ clap = []
 vst3 = []
 au = []
 aax = []
-standalone = ["dep:cpal"]
+# No device I/O yet: the runner has no audio backend, so the feature gates no extra dependency.
+standalone = []
