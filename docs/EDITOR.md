@@ -58,3 +58,9 @@ Everything those shells call is Rust: the audio contract (`op_shell_*`), the tai
 - `VST3EditorProof` (`native/vst3/editor_host.mm`, built with `-DOP_EDITOR=ON`): loads the VST3 bundle in process and opens the view. It re-creates the engine with the view open. If `OP_EDITOR_PROOF_CLICK` is `x;y;param`, it clicks there and checks the paired edits.
 
 None of these is a session in Logic, Cubase, Pro Tools, Bitwig or Reaper.
+
+## Hit testing
+
+An editor does not have to hand-code hit rectangles. `openplugin_dri::ControlSet` holds knobs, faders, toggles, momentary buttons and key banks, each with a hit area, a parameter index and its `ParamInfo`. The editor forwards `mouse_down`, `mouse_move`, `mouse_up`, `wheel`, `modifiers_changed` and `param_changed` to it. The set turns the mouse into `begin`, `perform` and `end` gestures through the `EditorHost`: relative drags, a fine adjustment with Shift or Command, double-click to reset, wheel steps, snapping for stepped and choice parameters, and a clamp so that only in-range values reach the host. A value from the host updates a control without sending a gesture back. The set also keeps hover and pressed state, and iterating it gives what to draw. `examples/editor` is written this way; see [DRI_GUIDE.md](DRI_GUIDE.md#controls-and-hit-testing) for the rules.
+
+`Editor::modifiers_changed(Modifiers)` is the one addition to the contract: optional, empty by default, so existing editors are unaffected. The macOS view does not call it yet.
