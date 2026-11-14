@@ -173,6 +173,13 @@ if(OP_BUILD_AU)
   op_link_rust(AUProof)
   add_dependencies(AUProof OpenPluginAU)
   add_test(NAME au_proof COMMAND AUProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
+  add_library(OpenPluginAllocHook SHARED au/alloc_hook.cpp)
+  add_executable(AUAllocProof au/alloc_host.cpp)
+  target_include_directories(AUAllocProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/au")
+  target_link_libraries(AUAllocProof PRIVATE OpenPluginAllocHook "-framework AudioToolbox" "-framework CoreFoundation")
+  op_link_rust(AUAllocProof)
+  add_dependencies(AUAllocProof OpenPluginAU)
+  add_test(NAME au_alloc_proof COMMAND AUAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
   if(NOT OP_EDITOR)
     # The same shell source over a C++ stand-in plugin that reports 37 samples of
     # latency, which the SDK example (latency 0) cannot exercise. Test only.
@@ -201,6 +208,9 @@ if(OP_BUILD_AU)
     target_link_libraries(AUBypassProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
     add_dependencies(AUBypassProof OpenPluginAULatency)
     add_test(NAME au_bypass_proof COMMAND AUBypassProof "$<TARGET_BUNDLE_DIR:OpenPluginAULatency>")
+    # Allocation with a non-zero latency: the delay line runs.
+    add_test(NAME au_alloc_latency_proof COMMAND AUAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginAULatency>")
+    set_tests_properties(au_alloc_latency_proof PROPERTIES DEPENDS au_bypass_proof)
   endif()
 endif()
 
