@@ -1,0 +1,7 @@
+GoodLookinUI design version 1
+id,parameter,label,style,colour,x,y,width,height,font size
+input,gain,Input,Brit,#CE9435,16,14,76,84,10
+tone,tone,Tone,Chk,#E8E4D8,104,14,76,84,10
+drive,drive,Drive,Mtl,#B83A2E,192,14,36,150,10
+warm,warm,Warm,Lvr,#E08030,16,114,56,64,10
+mode,mode,Mode,Sq,#4A90D0,84,122,96,34,10
