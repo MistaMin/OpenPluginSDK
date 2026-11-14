@@ -7,13 +7,14 @@
 //! `native/include/op_editor.h` (`op_editor_*`, macOS), written here in Rust
 //! over [`openplugin_dri::cocoa::EditorView`]. Build the shells with
 //! `-DOP_EDITOR=ON` for it. Both forms export `op_shell_tail_seconds` from
-//! [`Plugin::tail`](crate::PluginForExport::tail), for `-DOP_TAIL=ON`.
+//! [`Plugin::tail`](crate::PluginForExport::tail), for `-DOP_TAIL=ON`, and
+//! `op_shell_save_state` / `op_shell_load_state` for the whole plugin state.
 
 pub use openplugin_ffi::shell::{
-    create, destroy, editor_state, get_normalized, get_plain, latency, process, reset,
-    set_normalized, set_plain, tail_seconds, to_normalized, to_plain, trace, write_info,
+    create, destroy, editor_state, get_normalized, get_plain, latency, load_state, process,
+    reset, save_state, set_normalized, set_plain, tail_seconds, to_normalized, to_plain, trace, write_info,
     write_param, OpParamDesc, OpShellInfo, ShellInstance, ABI, AAX_MAX_PARAMS, PARAM_AUTOMATABLE,
-    PARAM_DISCRETE, PARAM_LOG,
+    PARAM_DISCRETE, PARAM_LOG, STATE_MAX, STATE_OK, STATE_TOO_SMALL,
 };
 
 #[cfg(target_os = "macos")]
@@ -300,6 +301,34 @@ macro_rules! export_shell {
             index: u32,
         ) -> f32 {
             $crate::shell::get_normalized(instance as *const $crate::shell::ShellInstance, index)
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_save_state(
+            instance: *mut ::std::ffi::c_void,
+            out: *mut u8,
+            capacity: u32,
+            needed: *mut u32,
+        ) -> u32 {
+            unsafe {
+                $crate::shell::save_state(
+                    instance as *mut $crate::shell::ShellInstance,
+                    out,
+                    capacity,
+                    needed,
+                )
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_load_state(
+            instance: *mut ::std::ffi::c_void,
+            data: *const u8,
+            length: u32,
+        ) -> u32 {
+            unsafe {
+                $crate::shell::load_state(instance as *mut $crate::shell::ShellInstance, data, length)
+            }
         }
 
         #[unsafe(no_mangle)]

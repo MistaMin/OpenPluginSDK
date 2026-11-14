@@ -405,6 +405,70 @@ pub unsafe fn get_normalized(ptr: *const ShellInstance, index: u32) -> f32 {
     }
 }
 
+/// [`save_state`] result: the state was written.
+pub const STATE_OK: u32 = 1;
+/// [`save_state`] result: the buffer is too small; `needed` holds the size.
+pub const STATE_TOO_SMALL: u32 = 2;
+/// Largest state a call hands across the ABI (sizes are `u32`).
+pub const STATE_MAX: usize = u32::MAX as usize;
+
+/// Save the whole plugin state (an OPCH session: parameters plus the
+/// plugin's own chunk) into `out`.
+///
+/// Returns [`STATE_OK`] with the length in `*needed` after writing that many
+/// bytes at `out`; [`STATE_TOO_SMALL`] with the required length in `*needed`
+/// and nothing written when `capacity` is short (a null `out` with capacity 0
+/// is the size query); 0 for a null instance, a null `out` with capacity above
+/// 0, a plugin that panics, a state above 4 GiB, or a block that did not finish
+/// within [`crate::STATE_WAIT`]. `needed` may be null.
+///
+/// Main thread. Allocates. Waits at most [`crate::STATE_WAIT`] for a block in
+/// flight; blocks that start meanwhile are skipped (dry). The state can change
+/// between a size query and the copy: loop until the call returns OK.
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`]. `out` is null or writable for
+/// `capacity` bytes. `needed` is null or writable.
+pub unsafe fn save_state(ptr: *mut ShellInstance, out: *mut u8, capacity: u32, needed: *mut u32) -> u32 {
+    if ptr.is_null() || (out.is_null() && capacity > 0) {
+        return 0;
+    }
+    let saved = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.try_save_bytes() }));
+    let Ok(Some(bytes)) = saved else { return 0 };
+    if bytes.len() > STATE_MAX {
+        return 0;
+    }
+    let length = bytes.len() as u32;
+    if !needed.is_null() {
+        unsafe { *needed = length };
+    }
+    if length > capacity {
+        return STATE_TOO_SMALL;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len()) };
+    STATE_OK
+}
+
+/// Restore a state written by [`save_state`] (or a bare OPST parameter
+/// plane). Returns 1 on success. Returns 0 and changes nothing for a null
+/// instance, a null `data`, a zero `length`, a corrupt, truncated or foreign
+/// blob, a chunk the plugin refuses, or a block that did not finish within
+/// [`crate::STATE_WAIT`].
+///
+/// Main thread. Allocates. Same threading rule as [`save_state`].
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`]. `data` is null or readable for
+/// `length` bytes.
+pub unsafe fn load_state(ptr: *mut ShellInstance, data: *const u8, length: u32) -> u32 {
+    if ptr.is_null() || data.is_null() || length == 0 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, length as usize) };
+    let loaded = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.load_bytes(bytes) }));
+    u32::from(matches!(loaded, Ok(true)))
+}
+
 /// # Safety
 /// Pointers are null or address `frames` floats. An input may alias an output.
 /// A null right pointer is mono. `ptr` is a live [`ShellInstance`].
