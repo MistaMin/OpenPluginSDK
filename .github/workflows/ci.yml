@@ -68,3 +68,78 @@ jobs:
       - name: Check the workspace on the minimum Rust version
         working-directory: OpenPluginSDK
         run: cargo +1.85.0 check --workspace --all-targets --locked
+
+  clap-validator:
+    name: CLAP validator (examples/editor)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      # clap-validator 0.4.1 (build 127-g152b982), the release the local
+      # checks use. The zip holds a tar.gz with the single `clap-validator`
+      # binary. The checksum is the SHA-256 of the zip, from the release page.
+      CLAP_VALIDATOR_URL: https://github.com/free-audio/clap-validator/releases/download/0.4.1/clap-validator-0.4.1-127-g152b982-macos-15-aarch64.zip
+      CLAP_VALIDATOR_SHA256: 719a0248ea431718bb7c92c8a0b9a78afa0bb23d692cf452e80973fe8b89282d
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      # The SDK has a path dependency on ../GoodLookinDri. Pinned, so a push to
+      # GoodLookinDri cannot change this build; move the pin in the same commit
+      # that adapts the SDK to a newer GoodLookinDri.
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      # Nothing from the download runs unless the checksum matches.
+      - name: Download clap-validator and verify its checksum
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/clap-validator"
+          cd "$RUNNER_TEMP/clap-validator"
+          curl --fail --silent --show-error --location --output clap-validator.zip "$CLAP_VALIDATOR_URL"
+          echo "$CLAP_VALIDATOR_SHA256  clap-validator.zip" | shasum -a 256 -c -
+          unzip -q clap-validator.zip
+          tar -xzf clap-validator-*.tar.gz clap-validator
+          chmod +x clap-validator
+          ./clap-validator --version
+      - name: Build examples/editor
+        working-directory: OpenPluginSDK
+        run: cargo build --release -p example-editor
+      - name: Bundle the example as a .clap
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/bundle/Editor.clap"
+          rm -rf "$RUNNER_TEMP/bundle"
+          mkdir -p "$bundle/Contents/MacOS"
+          cp target/release/libexample_editor.dylib "$bundle/Contents/MacOS/Editor"
+          cat > "$bundle/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleExecutable</key>
+            <string>Editor</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.opengrid.example.editor</string>
+            <key>CFBundleName</key>
+            <string>Editor</string>
+            <key>CFBundlePackageType</key>
+            <string>BNDL</string>
+            <key>CFBundleVersion</key>
+            <string>1</string>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --sign - "$bundle"
+          codesign --verify --verbose "$bundle"
+      # clap-validator exits non-zero when any test fails.
+      - name: Validate the bundle
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/clap-validator/clap-validator" validate "$RUNNER_TEMP/bundle/Editor.clap"
