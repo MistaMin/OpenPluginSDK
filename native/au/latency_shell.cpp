@@ -65,6 +65,22 @@ uint32_t op_shell_process(void* instance, const float* in_left, const float* in_
     }
     return 1;
 }
+// State: the gain as four bytes, no chunk. The shell calls these for ClassInfo.
+uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, uint32_t* needed) {
+    if (!instance || (!out && capacity > 0)) return OP_STATE_FAILED;
+    if (needed) *needed = sizeof(float);
+    if (!out || capacity < sizeof(float)) return OP_STATE_TOO_SMALL;
+    std::memcpy(out, &static_cast<Engine*>(instance)->gain, sizeof(float));
+    return OP_STATE_OK;
+}
+uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t length) {
+    if (!instance || !data || length != sizeof(float)) return 0;
+    float gain;
+    std::memcpy(&gain, data, sizeof(float));
+    if (!(gain >= 0.0f && gain <= 4.0f)) return 0;
+    static_cast<Engine*>(instance)->gain = gain;
+    return 1;
+}
 #if OP_HAS_TAIL
 double op_shell_tail_seconds(void*) { return 0.0; }
 #endif
