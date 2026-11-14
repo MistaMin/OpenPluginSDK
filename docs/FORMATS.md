@@ -17,6 +17,22 @@ OpenPluginSDK's target crates line up with the five formats:
 | **AAX** | macOS | In-process process callback and ACF exports. A Pro Tools load is not claimed | `native/aax` linked to an external AAX SDK. Native mono and stereo. Editor view with `-DOP_EDITOR=ON` |
 | **Standalone**| Windows, macOS, Linux | Live performance, test harnesses | CPAL audio driver + window runner |
 
+## Sample rates
+
+Every format bridge accepts a finite sample rate from **1 000 Hz to 768 000 Hz** inclusive. The bounds live in `openplugin_core::MIN_SAMPLE_RATE` and `openplugin_core::MAX_SAMPLE_RATE`; `openplugin_core::sample_rate_supported` is the shared predicate.
+
+- **CLAP.** `clap_plugin::activate` returns false outside the range, or when the plugin's own `Plugin::accepts_sample_rate` refuses the rate.
+- **LV2.** `instantiate` returns null outside the range. The exception is `0.0`, which an LV2 host passes when it does not know the rate yet; the instance then prepares at 48 kHz. An accepted rate is prepared as given.
+- **VST3, AU and AAX.** The native adapters call `op_shell_create`, which returns null for an out-of-range rate or a rate the plugin refuses.
+- **Rust hosts.** `FfiInstance::prepare` returns false outside the range. `FfiInstance::new` cannot fail, so it uses 48 kHz for an invalid rate.
+- **Plugins.** `Plugin::accepts_sample_rate` defaults to the range and a plugin may narrow it. A plugin cannot widen it: the format bridge checks the range first.
+
+**Why 1 kHz.** `clap-validator`'s `process-varying-sample-rates` test activates and processes at 1 234.5678 Hz, and its fuzzer draws rates from 1 000 Hz. The old 8 kHz floor made that test fail. 1 kHz is also the floor the SDK's DSP assumes: biquads, dynamics and meters clamp their coefficients to 1 kHz, and below that filter coefficients no longer describe audio.
+
+**Why 768 kHz.** It is 16 x 48 kHz, the top rate `clap-validator` tries, and above every PCM host rate. A wider upper bound would admit only rates no host uses.
+
+Some `openplugin-dsp` helpers that are designed around studio rates (K-weighting loudness, gain compensation, block meters, bypass and delta smoothing) keep an internal 8 kHz floor. Between 1 kHz and 8 kHz they are approximate. The format contract above promises activation and finite processing there, not calibrated DSP.
+
 ## AAX
 
 The adapter links an AAX SDK that stays outside this repository. The SDK is not copied into the tree. The built bundle is not an MIT-only artifact. The build copies the SDK license into the bundle resources. Nothing in the build signs the bundle or copies it into a plug-in folder.

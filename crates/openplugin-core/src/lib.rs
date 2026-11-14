@@ -380,6 +380,29 @@ pub struct Transport {
     pub bar_number: i64,
 }
 
+/// Lowest sample rate a format bridge accepts, in hertz.
+///
+/// 1 kHz is the floor the SDK's DSP assumes: biquads, dynamics and meters clamp
+/// their coefficients to it. `clap-validator`'s varying-sample-rates test also
+/// runs at 1234.5678 Hz, so the old 8 kHz floor failed validation.
+pub const MIN_SAMPLE_RATE: f32 = 1_000.0;
+
+/// Highest sample rate a format bridge accepts, in hertz: 16 x 48 kHz.
+///
+/// That is the top rate `clap-validator` tries and higher than any PCM host rate.
+pub const MAX_SAMPLE_RATE: f32 = 768_000.0;
+
+/// Whether `sample_rate` is a finite rate in [`MIN_SAMPLE_RATE`]..=[`MAX_SAMPLE_RATE`].
+///
+/// CLAP and LV2 hand the rate to the bridge as an `f64`; [`Plugin::accepts_sample_rate`]
+/// is the plugin's own `f32` predicate, which defaults to this range. A format
+/// bridge checks this range first, so a plugin can narrow the decision but not widen it.
+pub fn sample_rate_supported(sample_rate: f64) -> bool {
+    sample_rate.is_finite()
+        && sample_rate >= f64::from(MIN_SAMPLE_RATE)
+        && sample_rate <= f64::from(MAX_SAMPLE_RATE)
+}
+
 /// Core Plugin Trait.
 ///
 /// Guaranteed contracts:
@@ -500,9 +523,11 @@ pub trait Plugin: Send + 'static {
         BusMeters::SILENT
     }
 
-    /// False rejects the rate at activate. The default accepts 8 kHz through 768 kHz.
+    /// False rejects the rate at activate. The default accepts
+    /// [`MIN_SAMPLE_RATE`] through [`MAX_SAMPLE_RATE`], the range every format
+    /// bridge enforces. A plugin may narrow it.
     fn accepts_sample_rate(&self, sample_rate: f32) -> bool {
-        sample_rate.is_finite() && (8_000.0..=768_000.0).contains(&sample_rate)
+        sample_rate_supported(f64::from(sample_rate))
     }
 
     /// Metering: current gain reduction in dB (e.g. for compressor VU meters).
