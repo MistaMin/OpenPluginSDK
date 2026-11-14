@@ -60,7 +60,7 @@ struct Instance {
         AAX_CTypeID id = 0;
         require(params->GetChunkIDFromIndex(0, &id) == AAX_SUCCESS && id == state::kChunkId, "chunk id");
         uint32_t size = 0;
-        require(params->GetChunkSize(id, &size) == AAX_SUCCESS && size == state::encodedSize() && size > 0, "chunk size");
+        require(params->GetChunkSize(id, &size) == AAX_SUCCESS && size > state::encodedSizeV1(), "chunk size is version 1 plus the plugin blob");
         Chunk chunk(size);
         chunk.get()->fChunkID = id;
         require(params->GetChunk(id, chunk.get()) == AAX_SUCCESS, "GetChunk");
@@ -118,9 +118,11 @@ int main() {
         Chunk chunk = probe.save();
         const unsigned char* d = chunk.data();
         require(d[0] == 'O' && d[1] == 'P' && d[2] == 'S' && d[3] == 'T', "chunk magic bytes");
-        require(d[4] == 1 && d[5] == 0 && d[6] == 0 && d[7] == 0, "chunk payload version 1, little-endian");
+        require(d[4] == 2 && d[5] == 0 && d[6] == 0 && d[7] == 0, "chunk payload version 2, little-endian");
         require(d[8] == info.param_count && d[9] == 0 && d[10] == 0 && d[11] == 0, "chunk parameter count");
-        require(static_cast<size_t>(chunk.get()->fSize) == 20 + 4 * static_cast<size_t>(info.param_count), "chunk length is header plus one float per parameter");
+        const size_t fixed = 20 + 4 * static_cast<size_t>(info.param_count);
+        const size_t blobLength = static_cast<size_t>(d[fixed]) | static_cast<size_t>(d[fixed + 1]) << 8 | static_cast<size_t>(d[fixed + 2]) << 16 | static_cast<size_t>(d[fixed + 3]) << 24;
+        require(blobLength > 0 && static_cast<size_t>(chunk.get()->fSize) == fixed + 4 + blobLength, "chunk length is header, one float per parameter, a blob length and the blob");
         // Wrong id and index are refused.
         AAX_CTypeID id = 7;
         require(probe.params->GetChunkIDFromIndex(1, &id) == AAX_ERROR_INVALID_CHUNK_INDEX && id == 0, "chunk index 1 refused");
@@ -157,6 +159,24 @@ int main() {
         require(again.get()->fSize == saved.get()->fSize && std::memcmp(again.data(), saved.data(), static_cast<size_t>(saved.get()->fSize)) == 0,
                 "saving the restored instance gives the same bytes");
 
+        // A version 1 chunk (what earlier releases wrote) still loads: same values, same bypass.
+        {
+            state::Values v1{};
+            v1.count = changed.count();
+            v1.bypass = changed.get()->bypass != 0;
+            for (uint32_t i = 0; i < v1.count; ++i) v1.plain[i] = changed.plain()[i];
+            Chunk old(state::encodedSizeV1());
+            old.get()->fChunkID = state::kChunkId;
+            old.get()->fVersion = 1;
+            old.get()->fSize = static_cast<int32_t>(state::encodedSizeV1());
+            require(state::encodeV1(v1, old.data(), state::encodedSizeV1()), "encode version 1");
+            Instance legacy(channels);
+            require(legacy.params->SetChunk(state::kChunkId, old.get()) == AAX_SUCCESS, "a version 1 chunk loads");
+            require(same(legacy.packet(), changed), "a version 1 chunk restores the same values");
+            AAX_CBoolean eq = false;
+            require(legacy.params->CompareActiveChunk(old.get(), &eq) == AAX_SUCCESS && eq, "a version 1 chunk compares equal on values");
+        }
+
         ProcessState a, b;
         require(a.prepare(48000.0, channels) && b.prepare(48000.0, channels), "prepare");
         std::vector<float> rightA, rightB;
@@ -185,12 +205,16 @@ int main() {
             {"one byte short", [&](Chunk& c) { c.get()->fSize = static_cast<int32_t>(size - 1); }},
             {"one float short", [&](Chunk& c) { c.get()->fSize = static_cast<int32_t>(size - 4); }},
             {"header only", [&](Chunk& c) { c.get()->fSize = 20; }},
+            {"floats only, no blob length", [&](Chunk& c) { c.get()->fSize = static_cast<int32_t>(20 + 4 * info.param_count); }},
+            {"blob length larger than the data", [&](Chunk& c) { c.data()[20 + 4 * info.param_count + 3] = 0x7f; }},
+            {"blob length zero", [&](Chunk& c) { std::memset(c.data() + 20 + 4 * info.param_count, 0, 4); c.get()->fSize = static_cast<int32_t>(20 + 4 * info.param_count + 4); }},
+            {"blob damaged", [&](Chunk& c) { std::memset(c.data() + 24 + 4 * info.param_count, 0xA5, 8); }},
             {"one float long", [&](Chunk& c) { c.get()->fSize = static_cast<int32_t>(size + 4); }},
             {"one byte long", [&](Chunk& c) { c.get()->fSize = static_cast<int32_t>(size + 1); }},
             {"wrong magic", [&](Chunk& c) { c.data()[0] ^= 0xff; }},
-            {"newer payload version", [&](Chunk& c) { c.data()[4] = 2; c.get()->fVersion = 2; }},
+            {"newer payload version", [&](Chunk& c) { c.data()[4] = 3; c.get()->fVersion = 3; }},
             {"version zero", [&](Chunk& c) { c.data()[4] = 0; c.get()->fVersion = 0; }},
-            {"header version differs from fVersion", [&](Chunk& c) { c.get()->fVersion = 2; }},
+            {"header version differs from fVersion", [&](Chunk& c) { c.get()->fVersion = 1; }},
             {"parameter count too large", [&](Chunk& c) { c.data()[8] = static_cast<unsigned char>(info.param_count + 1); }},
             {"parameter count zero", [&](Chunk& c) { c.data()[8] = 0; }},
             {"layout hash changed", [&](Chunk& c) { c.data()[12] ^= 0x01; }},

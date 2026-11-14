@@ -9,6 +9,7 @@
 #include "AAX_CNumberDisplayDelegate.h"
 #include "AAX_CParameter.h"
 #include "AAX_Errors.h"
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -118,13 +119,21 @@ public:
         *id = state::kChunkId;
         return AAX_SUCCESS;
     }
+    // The chunk carries the engine's own state blob, whose length the plugin decides. The
+    // host sizes its buffer from this answer, so GetChunk may never write more than the
+    // last answer: it refuses a state that grew since (a plugin's state can change between
+    // the two calls) rather than overrun the host's buffer.
     AAX_Result GetChunkSize(AAX_CTypeID id, uint32_t* size) const override {
         if (!size) return AAX_ERROR_NULL_ARGUMENT;
         *size = 0;
         if (id != state::kChunkId) return AAX_ERROR_INVALID_CHUNK_ID;
-        const size_t bytes = state::encodedSize();
-        if (bytes == 0 || ids_.empty()) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
-        *size = static_cast<uint32_t>(bytes);
+        if (ids_.empty() || !state_.engine) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        uint32_t needed = 0;
+        if (op_shell_save_state(state_.engine, nullptr, 0, &needed) != OP_STATE_TOO_SMALL || needed == 0) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        const size_t bytes = state::encodedSize(needed);
+        if (bytes == 0 || bytes > INT32_MAX) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        reserved_ = static_cast<uint32_t>(bytes);
+        *size = reserved_;
         return AAX_SUCCESS;
     }
     AAX_Result GetChunk(AAX_CTypeID id, AAX_SPlugInChunk* chunk) const override {
@@ -132,8 +141,11 @@ public:
         if (id != state::kChunkId) return AAX_ERROR_INVALID_CHUNK_ID;
         state::Values values{};
         if (!collect(values)) return AAX_ERROR_INVALID_PARAMETER_ID;
-        const size_t bytes = state::encodedSize();
-        if (bytes == 0 || !state::encode(values, reinterpret_cast<uint8_t*>(chunk->fData), bytes)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        std::vector<uint8_t> blob;
+        if (!saveBlob(values, blob)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        const size_t bytes = state::encodedSize(blob.size());
+        if (bytes == 0 || bytes > reserved_) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        if (!state::encode(values, blob.data(), blob.size(), reinterpret_cast<uint8_t*>(chunk->fData), bytes)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         chunk->fSize = static_cast<int32_t>(bytes);
         chunk->fVersion = static_cast<int32_t>(state::kVersion);
         std::memset(chunk->fName, 0, sizeof chunk->fName);
@@ -159,6 +171,11 @@ public:
         if (!parse(chunk, stored) || !collect(current)) return AAX_SUCCESS;
         bool same = stored.bypass == current.bypass && stored.count == current.count;
         for (uint32_t i = 0; same && i < current.count; ++i) same = stored.plain[i] == current.plain[i];
+        // A version 2 chunk also names the plugin's own state; a version 1 chunk has none to compare.
+        if (same && stored.version == state::kVersion) {
+            std::vector<uint8_t> blob;
+            same = saveBlob(current, blob) && blob.size() == stored.blobSize && std::memcmp(blob.data(), stored.blob, blob.size()) == 0;
+        }
         *equal = same;
         return AAX_SUCCESS;
     }
@@ -218,6 +235,32 @@ public:
         return AAX_SUCCESS;
     }
 private:
+    mutable std::atomic<uint32_t> reserved_{0};  // bytes the last GetChunkSize promised
+    // Saves the engine's state through the size-query protocol: ask for the size, allocate,
+    // save, and ask again if the state grew in between. The engine first receives the
+    // parameter values this object holds, so the blob matches the values saved beside it
+    // even before any block has carried them. Main thread only: it allocates.
+    bool saveBlob(const state::Values& values, std::vector<uint8_t>& blob) const {
+        void* engine = state_.engine;
+        if (!engine) return false;
+        for (uint32_t i = 0; i < values.count; ++i)
+            if (!op_shell_set_plain(engine, i, values.plain[i])) return false;
+        uint32_t needed = 0;
+        if (op_shell_save_state(engine, nullptr, 0, &needed) != OP_STATE_TOO_SMALL) return false;
+        for (int attempt = 0; attempt < 8 && needed > 0; ++attempt) {
+            blob.assign(needed, 0);
+            uint32_t written = 0;
+            const uint32_t result = op_shell_save_state(engine, blob.data(), static_cast<uint32_t>(blob.size()), &written);
+            if (result == OP_STATE_OK) {
+                if (written == 0 || written > blob.size()) return false;
+                blob.resize(written);
+                return true;
+            }
+            if (result != OP_STATE_TOO_SMALL) return false;
+            needed = written;
+        }
+        return false;
+    }
     // Reads every parameter into `out`, which is resized to the parameter count.
     AAX_Result fill(PacketBuffer& out) const {
         PacketBuffer next(static_cast<uint32_t>(ids_.size()));
@@ -244,11 +287,15 @@ private:
         return true;
     }
     static bool parse(const AAX_SPlugInChunk* chunk, state::Values& out) {
-        if (chunk->fSize < 0 || chunk->fVersion != static_cast<int32_t>(state::kVersion)) return false;
-        return state::decode(reinterpret_cast<const uint8_t*>(chunk->fData), static_cast<size_t>(chunk->fSize), out) == state::Status::ok;
+        if (chunk->fSize < 0) return false;
+        if (state::decode(reinterpret_cast<const uint8_t*>(chunk->fData), static_cast<size_t>(chunk->fSize), out) != state::Status::ok) return false;
+        // The header version and the payload's own version must agree.
+        return chunk->fVersion == static_cast<int32_t>(out.version);
     }
-    // `values` is already validated, so the only thing left to check is that every
-    // parameter exists. Nothing is written until they all do.
+    // `values` is already validated. Everything that can still fail is checked before
+    // anything changes: every parameter exists. Then the plugin's blob (version 2) is
+    // applied; the plugin refuses a bad blob without changing anything, and then no
+    // parameter is touched either. Only then are the AAX parameters written, which cannot fail.
     AAX_Result apply(const state::Values& values) {
         if (values.count != ids_.size()) return AAX_ERROR_MALFORMED_CHUNK;
         std::vector<AAX_IParameter*> targets(values.count, nullptr);
@@ -258,6 +305,13 @@ private:
         }
         AAX_IParameter* bypass = mParameterManager.GetParameterByID(cDefaultMasterBypassID);
         if (!bypass) return AAX_ERROR_INVALID_PARAMETER_ID;
+        if (values.version == state::kVersion) {
+            if (!state_.engine || values.blobSize > UINT32_MAX ||
+                !op_shell_load_state(state_.engine, values.blob, static_cast<uint32_t>(values.blobSize)))
+                return AAX_ERROR_MALFORMED_CHUNK;
+            // The chunk's values are the ones the host sees; give them to the engine too.
+            for (uint32_t i = 0; i < values.count; ++i) op_shell_set_plain(state_.engine, i, values.plain[i]);
+        }
         for (uint32_t i = 0; i < values.count; ++i) targets[i]->SetValueWithFloat(values.plain[i]);
         bypass->SetValueWithBool(values.bypass);
         dirty_ = true;

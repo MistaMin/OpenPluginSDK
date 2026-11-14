@@ -108,7 +108,7 @@ int main() {
         int32_t chunks = 0;
         require(params->GetNumberOfChunks(&chunks) == AAX_SUCCESS && chunks == 1, "one chunk");
         uint32_t size = 0;
-        require(params->GetChunkSize(state::kChunkId, &size) == AAX_SUCCESS && size == 20 + 4 * n, "chunk is header plus 200 floats");
+        require(params->GetChunkSize(state::kChunkId, &size) == AAX_SUCCESS && size == state::encodedSize(12 + 4 * n), "chunk is header, 200 floats and the stub blob (12 + 4 * 200 bytes)");
         std::vector<unsigned char> storage(sizeof(AAX_SPlugInChunk) + size + 8, 0);
         auto* chunk = reinterpret_cast<AAX_SPlugInChunk*>(storage.data());
         chunk->fChunkID = state::kChunkId;
