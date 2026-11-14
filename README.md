@@ -5,7 +5,7 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
-[![Version](https://img.shields.io/badge/version-0.3.0%20Beta-orange.svg)](#)
+[![Version](https://img.shields.io/badge/version-0.3.1%20Beta-orange.svg)](#)
 
 ---
 
@@ -94,7 +94,7 @@ Add `openplugin` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-openplugin = "0.3.0-beta"
+openplugin = "0.3.1-beta"
 ```
 
 ---
@@ -237,7 +237,7 @@ Desktop application executable powered by `cpal` for zero-friction testing and l
 
 ## Roadmap
 
-What comes after 0.3.0 Beta, from hardening on macOS to Windows, Linux and a stable 1.0: [docs/ROADMAP.md](docs/ROADMAP.md).
+What comes after 0.3.1 Beta, from hardening on macOS to Windows, Linux and a stable 1.0: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 

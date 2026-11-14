@@ -12,7 +12,7 @@
 #     -DOP_AU_SDK=/path/to/AudioUnitSDK \
 #     -DOP_AAX_SDK=/path/to/aax-sdk \
 #     -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
-#     -DOP_VERSION=0.3.0 -DOP_MANUFACTURER=OpenGrid \
+#     -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid \
 #     -DOP_AU_SUBTYPE=ExGn -DOP_AU_MANUFACTURER=OpGd \
 #     -DOP_TAIL=ON -DOP_EDITOR=OFF
 #   cmake --build build-shell -j 2

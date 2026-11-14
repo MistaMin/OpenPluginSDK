@@ -6,14 +6,14 @@ Each milestone makes the SDK more stable. None of them depends on a product plug
 
 The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin/GoodLookinDri), which the SDK draws with: 0.3 interaction, 0.4 host polish, 0.5 qualification.
 
-## Where 0.3.0 Beta stands
+## Where 0.3.1 Beta stands
 
 | Area | State |
 |---|---|
 | Formats | CLAP and LV2 are Rust entries. VST3, Audio Unit and AAX are C++ shells over the Rust `op_shell_*` ABI. macOS only for the shells. |
 | Editor | One Rust `Editor` in every format, hosted in a Rust `NSView`. macOS only. Fixed size. |
 | Drawing | GoodLookin DRI 0.2: lit knobs by default, `SceneCanvas` with a cached plate layer. |
-| Proofs | Unit tests, a main-thread editor test through CLAP, LV2 and the shell ABI, `VST3EditorProof`, `lv2_validate`, a render through lilv's `lv2apply`, and `clap-validator` with one failure (the 8 kHz minimum rate). |
+| Proofs | Unit tests, hostile-input and no-allocation suites, a main-thread editor test through CLAP, LV2 and the shell ABI, generic VST3, AU and AAX shell proofs, `VST3EditorProof`, `lv2_validate`, a render through lilv's `lv2apply`, and `clap-validator` with no failures (34 passed, 10 skipped). |
 | Not claimed | Any session in Logic, Cubase, Pro Tools, Bitwig or REAPER. Windows and Linux. |
 
 ## Minimum Rust version
@@ -72,5 +72,5 @@ Open:
 ## 1.0: stable and publishable
 
 - A frozen public API and a written policy for breaking changes.
-- Publishable on crates.io. The SDK depends on GoodLookin DRI by local path today, so `openplugin = "0.3.0-beta"` from crates.io does not resolve.
+- Publishable on crates.io. The SDK depends on GoodLookin DRI by local path today, so `openplugin = "0.3.1-beta"` from crates.io does not resolve.
 - Complete API documentation, and a changelog from 1.0 on.

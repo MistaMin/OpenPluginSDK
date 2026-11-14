@@ -1,5 +1,5 @@
 //! Helpers for a plugin's `build.rs`. Add the SDK as a build dependency
-//! (`[build-dependencies] openplugin-core = "0.3.0-beta"`).
+//! (`[build-dependencies] openplugin-core = "0.3.1-beta"`).
 //!
 //! ```ignore
 //! // build.rs

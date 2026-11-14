@@ -2,7 +2,7 @@
 
 ## Summary
 
-This is the 0.3.0 Beta host contract. `export_shell!` exports one plugin as a C ABI named `op_shell_*`. A thin native adapter calls that ABI. The same symbols feed VST3, Audio Unit, and AAX. The Rust layouts in `openplugin-targets` are not loadable. The adapters are `native/vst3`, `native/au`, and `native/aax`. The adapters in this release are macOS.
+This is the 0.3.1 Beta host contract. `export_shell!` exports one plugin as a C ABI named `op_shell_*`. A thin native adapter calls that ABI. The same symbols feed VST3, Audio Unit, and AAX. The Rust layouts in `openplugin-targets` are not loadable. The adapters are `native/vst3`, `native/au`, and `native/aax`. The adapters in this release are macOS.
 
 `create` allocates the plugin and its scratch. `set_plain`, `set_normalized`, and `process` do not allocate. The audio thread applies the parameter plane inside `process`. `new` is not used from the audio thread.
 
@@ -82,7 +82,7 @@ cmake -S native -B build-shell -DCMAKE_BUILD_TYPE=Release \
   -DOP_AU_SDK=/path/to/AudioUnitSDK \
   -DOP_AAX_SDK=/path/to/aax-sdk \
   -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
-  -DOP_VERSION=0.3.0 -DOP_MANUFACTURER=OpenGrid \
+  -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid \
   -DOP_AU_SUBTYPE=ExGn -DOP_AU_MANUFACTURER=OpGd \
   -DOP_TAIL=ON -DOP_EDITOR=OFF
 cmake --build build-shell -j 2
