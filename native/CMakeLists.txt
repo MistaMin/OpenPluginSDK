@@ -50,6 +50,14 @@ function(op_link_rust target_name)
     "-framework Security"
     "-framework SystemConfiguration"
     "-liconv")
+  if(OP_EDITOR)
+    # The Rust editor view (openplugin-dri cocoa.rs) draws with these. A
+    # static library does not carry its framework links, so name them here.
+    target_link_libraries(${target_name} PRIVATE
+      "-framework AppKit"
+      "-framework CoreGraphics"
+      "-lobjc")
+  endif()
 endfunction()
 
 enable_testing()
@@ -91,6 +99,18 @@ if(OP_BUILD_VST3)
   target_link_libraries(VST3Proof PRIVATE sdk "-framework CoreFoundation")
   add_dependencies(VST3Proof OpenPluginVST3)
   add_test(NAME vst3_proof COMMAND VST3Proof "$<TARGET_BUNDLE_DIR:OpenPluginVST3>")
+  if(OP_EDITOR)
+    # The editor in the VST3 shell. OP_EDITOR_PROOF_CLICK is "x;y;param":
+    # a point (points from the top left) whose click edits that parameter.
+    set(OP_EDITOR_PROOF_CLICK "" CACHE STRING "x;y;param for VST3EditorProof, or empty")
+    enable_language(OBJCXX)
+    add_executable(VST3EditorProof vst3/editor_host.mm
+      "${OP_VST3_SDK}/public.sdk/source/vst/vstinitiids.cpp")
+    set_source_files_properties(vst3/editor_host.mm PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
+    target_link_libraries(VST3EditorProof PRIVATE sdk "-framework Cocoa")
+    add_dependencies(VST3EditorProof OpenPluginVST3)
+    add_test(NAME vst3_editor_proof COMMAND VST3EditorProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3>" ${OP_EDITOR_PROOF_CLICK})
+  endif()
 endif()
 
 if(OP_BUILD_AU)

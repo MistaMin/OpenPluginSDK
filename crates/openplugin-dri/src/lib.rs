@@ -4,8 +4,13 @@
 //! switches, and the spectrum. This crate does not reimplement them and it does not use JUCE.
 //! [`DrawList`] keeps a [`goodlookindri::scene::Scene`] plus a flat command list for hosts
 //! that only replay simple shapes.
+//!
+//! On macOS, [`cocoa::EditorView`] hosts an [`openplugin_core::Editor`] in an `NSView`;
+//! every format bridge uses it.
 
 pub mod canvas;
+#[cfg(target_os = "macos")]
+pub mod cocoa;
 pub mod controls;
 pub mod styles;
 pub mod window;

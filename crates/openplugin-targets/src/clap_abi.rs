@@ -35,6 +35,8 @@ pub const AMBISONIC_NORMALIZATION_SN3D: u32 = 1;
 pub const EVENT_NOTE_ON: u16 = 0;
 pub const EVENT_NOTE_OFF: u16 = 1;
 pub const EVENT_PARAM_VALUE: u16 = 5;
+pub const EVENT_PARAM_GESTURE_BEGIN: u16 = 6;
+pub const EVENT_PARAM_GESTURE_END: u16 = 7;
 pub const EVENT_MIDI: u16 = 10;
 
 pub const EXT_AUDIO_PORTS: &[u8] = b"clap.audio-ports\0";
@@ -53,6 +55,8 @@ pub const EXT_SURROUND_COMPAT: &[u8] = b"clap.surround.draft/4\0";
 pub const EXT_AMBISONIC: &[u8] = b"clap.ambisonic/3\0";
 pub const EXT_AMBISONIC_COMPAT: &[u8] = b"clap.ambisonic.draft/3\0";
 pub const FACTORY_ID: &[u8] = b"clap.plugin-factory\0";
+pub const EXT_GUI: &[u8] = b"clap.gui\0";
+pub const WINDOW_API_COCOA: &[u8] = b"cocoa\0";
 
 pub static PORT_MONO: &[u8] = b"mono\0";
 pub static PORT_STEREO: &[u8] = b"stereo\0";
@@ -391,4 +395,45 @@ pub struct clap_event_transport {
     pub bar_number: i32,
     pub tsig_num: u16,
     pub tsig_denom: u16,
+}
+
+#[repr(C)]
+pub struct clap_event_param_gesture {
+    pub header: clap_event_header,
+    pub param_id: u32,
+}
+
+#[repr(C)]
+pub struct clap_window {
+    pub api: *const c_char,
+    /// `NSView` on macOS (a union of handles in the CLAP header).
+    pub ptr: *mut c_void,
+}
+
+#[repr(C)]
+pub struct clap_gui_resize_hints {
+    pub can_resize_horizontally: bool,
+    pub can_resize_vertically: bool,
+    pub preserve_aspect_ratio: bool,
+    pub aspect_ratio_width: u32,
+    pub aspect_ratio_height: u32,
+}
+
+#[repr(C)]
+pub struct clap_plugin_gui {
+    pub is_api_supported: Option<unsafe extern "C" fn(plugin: *const clap_plugin, api: *const c_char, is_floating: bool) -> bool>,
+    pub get_preferred_api: Option<unsafe extern "C" fn(plugin: *const clap_plugin, api: *mut *const c_char, is_floating: *mut bool) -> bool>,
+    pub create: Option<unsafe extern "C" fn(plugin: *const clap_plugin, api: *const c_char, is_floating: bool) -> bool>,
+    pub destroy: Option<unsafe extern "C" fn(plugin: *const clap_plugin)>,
+    pub set_scale: Option<unsafe extern "C" fn(plugin: *const clap_plugin, scale: f64) -> bool>,
+    pub get_size: Option<unsafe extern "C" fn(plugin: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool>,
+    pub can_resize: Option<unsafe extern "C" fn(plugin: *const clap_plugin) -> bool>,
+    pub get_resize_hints: Option<unsafe extern "C" fn(plugin: *const clap_plugin, hints: *mut clap_gui_resize_hints) -> bool>,
+    pub adjust_size: Option<unsafe extern "C" fn(plugin: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool>,
+    pub set_size: Option<unsafe extern "C" fn(plugin: *const clap_plugin, width: u32, height: u32) -> bool>,
+    pub set_parent: Option<unsafe extern "C" fn(plugin: *const clap_plugin, window: *const clap_window) -> bool>,
+    pub set_transient: Option<unsafe extern "C" fn(plugin: *const clap_plugin, window: *const clap_window) -> bool>,
+    pub suggest_title: Option<unsafe extern "C" fn(plugin: *const clap_plugin, title: *const c_char)>,
+    pub show: Option<unsafe extern "C" fn(plugin: *const clap_plugin) -> bool>,
+    pub hide: Option<unsafe extern "C" fn(plugin: *const clap_plugin) -> bool>,
 }

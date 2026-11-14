@@ -5,7 +5,7 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
-[![Version](https://img.shields.io/badge/version-0.2.0%20Beta-orange.svg)](#)
+[![Version](https://img.shields.io/badge/version-0.3.0%20Beta-orange.svg)](#)
 
 ---
 
@@ -15,9 +15,10 @@
 
 It combines:
 1. **Realtime-safe DSP core:** Zero-allocation processing loop (`process()`), hostile parameter sanitization, and no panics.
-2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, overlap-save convolution for impulses up to 1024 taps (`BlockConvolver`), log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, and ANSI standard ballistic VU meters.
+2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, overlap-save convolution for impulses up to 1024 taps (`BlockConvolver`), log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, ANSI standard ballistic VU meters, BS.1770-4 loudness (`Loudness`), loudness-matched auto gain (`LoudnessMatch`), and Delta listening (`Delta`).
 3. **GoodLookin Direct Rendering Interface (DRI):** Procedural 3D hardware rendering (47 authentic knob styles, 40 faceplate finishes, illuminated needle VU meters) running directly on GPU/platform window contexts (`HWND`, `NSView`, `X11`) without requiring a JUCE dependency or license.
 4. **Format bridges:** CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX are macOS native shells over `export_shell!`. Standalone is a CPAL window. The shell contract is [docs/SHELL.md](docs/SHELL.md).
+5. **One editor in every format:** a plugin writes one `Editor` and passes `editor = make_editor` to the export macros. CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), VST3, Audio Unit and AAX all host it in a Rust `NSView`. See [docs/EDITOR.md](docs/EDITOR.md) and [`examples/editor`](examples/editor).
 
 ---
 
@@ -78,10 +79,10 @@ It combines:
 | Crate | Role |
 |---|---|
 | [`openplugin`](crates/openplugin) | Top-level facade and prelude |
-| [`openplugin-core`](crates/openplugin-core) | Core `Plugin` trait, `ParamInfo`, tapers, transport, and MIDI |
+| [`openplugin-core`](crates/openplugin-core) | Core `Plugin` trait, `ParamInfo` (format and parse), tapers, transport, MIDI, the `Editor` contract, and text presets (`PresetBank`, `build::embed_files`) |
 | [`openplugin-dsp`](crates/openplugin-dsp) | Realtime-safe DSP: RBJ biquads, `BlockConvolver`, dynamics, saturation, VU metering. See [docs/CONVOLVE.md](docs/CONVOLVE.md) |
-| [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knobs, faceplates, meters). Drawing lives in GoodLookinDri |
-| [`openplugin-targets`](crates/openplugin-targets) | CLAP and LV2 entries, plus `export_shell!`. See [docs/SHELL.md](docs/SHELL.md) |
+| [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knobs, faceplates, meters), and the macOS `EditorView`. Drawing lives in GoodLookinDri |
+| [`openplugin-targets`](crates/openplugin-targets) | CLAP and LV2 entries with their editors, the LV2 `.ttl` writer, and `export_shell!` with `op_editor_*`. See [docs/SHELL.md](docs/SHELL.md) |
 | [`openplugin-ffi`](crates/openplugin-ffi) | Rust host session and the `op_shell_*` ABI: parameter plane, scratch render, presets, OPST snapshot |
 
 ---
@@ -92,7 +93,7 @@ Add `openplugin` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-openplugin = "0.2.0-beta"
+openplugin = "0.3.0-beta"
 ```
 
 ---
@@ -206,16 +207,19 @@ impl SaturatorPlugin {
 ## Target Format Support
 
 ### CLAP
-Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. Exposes standard C ABI via `openplugin_targets::clap`.
+Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. Exposes standard C ABI via `openplugin_targets::clap`. With `export_clap!(P, editor = make_editor)` it also offers `clap.gui` on macOS. `text_to_value` reads choice names, On/Off and units (`ParamInfo::parse`).
+
+### LV2
+`export_lv2!` gives two stereo audio ports each way and one control port per parameter. `editor = make_editor` adds a `ui:CocoaUI`. `lv2::write_bundle` writes `manifest.ttl` and the plugin `.ttl` from the parameter table. `Plugin::lv2_uri` sets a fixed URI.
 
 ### VST3
-A thin native factory in `native/vst3` calls the `op_shell_*` ABI from `export_shell!`. It implements the processor and the edit controller. It does not open an editor view. See [docs/SHELL.md](docs/SHELL.md).
+A thin native factory in `native/vst3` calls the `op_shell_*` ABI from `export_shell!`. It implements the processor and the edit controller. With `-DOP_EDITOR=ON` and `export_shell!(P, editor = make_editor)` it hosts the plugin's editor. See [docs/SHELL.md](docs/SHELL.md).
 
 ### Audio Unit (macOS)
 A thin `AUEffectBase` adapter in `native/au` calls the same ABI. The proof loads the component in-process. It does not install it.
 
 ### Avid AAX (Pro Tools)
-An unsigned native adapter in `native/aax` links an external Avid SDK and calls the same ABI. The proof runs the process callback and checks the ACF exports. It is not a Pro Tools session, and the build does not sign or install the bundle. Replace the derived development IDs before a signed release.
+An unsigned native adapter in `native/aax` links an external Avid SDK and calls the same ABI. The proof runs the process callback and checks the ACF exports. It is not a Pro Tools session, and the build does not sign or install the bundle. Set fixed IDs with `Plugin::aax_ids` before a release.
 
 ### Standalone
 Desktop application executable powered by `cpal` for zero-friction testing and live hardware performance.

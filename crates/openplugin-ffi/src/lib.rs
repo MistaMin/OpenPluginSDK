@@ -12,11 +12,12 @@
 #![allow(unsafe_code)]
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 use openplugin_core::{
-    decode_session, encode_session, release_momentary, BusMeters, MeterFrame, ParamCursor,
-    ParamFlags, ParamInfo, ParamPlane, PluginInfo, Seqlock, Taper, Unit, MAX_AUDIO_CHANNELS,
+    decode_session, encode_session, release_momentary, BusMeters, EditorState, MeterFrame,
+    ParamCursor, ParamFlags, ParamInfo, ParamPlane, PluginInfo, Seqlock, Tail, Taper, Unit,
+    MAX_AUDIO_CHANNELS,
 };
 
 pub use openplugin_core::Plugin;
@@ -89,6 +90,16 @@ struct Audio {
     channels: usize,
     side_channels: usize,
     max_block: usize,
+    rate: f32,
+}
+
+/// A tail in seconds: infinity for an endless tail, zero for none or unknown.
+fn tail_seconds_of(tail: Tail, rate: f32) -> f64 {
+    match tail {
+        Tail::Infinite => f64::INFINITY,
+        Tail::Finite(samples) => f64::from(samples) / f64::from(rate.max(1.0)),
+        Tail::None | Tail::Unknown => 0.0,
+    }
 }
 
 /// One host instance. Message-thread calls use the plane and the atomics.
@@ -103,6 +114,10 @@ pub struct FfiInstance {
     preset: AtomicI32,
     info: &'static PluginInfo,
     presets: Vec<PresetEntry>,
+    /// [`Plugin::editor_state`], taken once at creation.
+    editor_state: Option<EditorState>,
+    /// Seconds of tail as `f64` bits, refreshed after every block.
+    tail: AtomicU64,
 }
 
 unsafe impl Send for FfiInstance {}
@@ -117,6 +132,7 @@ impl FfiInstance {
     ) -> Self {
         let info = plugin.info();
         let presets = collect_presets(plugin.as_ref());
+        let editor_state = plugin.editor_state();
         let plane = ParamPlane::new(info);
         plane.seed_from(plugin.as_ref());
         let max_block = max_block.clamp(1, 65_536);
@@ -133,6 +149,7 @@ impl FfiInstance {
         let mut cursor = ParamCursor::new(plane.len());
         cursor.pull(&plane, plugin.as_mut());
         let latency = plugin.latency() as u32;
+        let tail = tail_seconds_of(plugin.tail(), rate);
         Self {
             audio: UnsafeCell::new(Audio {
                 inner: plugin,
@@ -143,6 +160,7 @@ impl FfiInstance {
                 channels,
                 side_channels,
                 max_block,
+                rate,
             }),
             plane,
             meters: Seqlock::new(MeterFrame::SILENT),
@@ -152,7 +170,20 @@ impl FfiInstance {
             preset: AtomicI32::new(-1),
             info,
             presets,
+            editor_state,
+            tail: AtomicU64::new(tail.to_bits()),
         }
+    }
+
+    /// What the engine shares with its editor ([`Plugin::editor_state`]).
+    pub fn editor_state(&self) -> Option<EditorState> {
+        self.editor_state.clone()
+    }
+
+    /// How long the output rings after the input stops, in seconds, as of
+    /// the last block. Infinity for an endless tail. Any thread; never blocks.
+    pub fn tail_seconds(&self) -> f64 {
+        f64::from_bits(self.tail.load(Ordering::Acquire))
     }
 
     pub fn name(&self) -> &'static str {
@@ -267,10 +298,13 @@ impl FfiInstance {
         audio.channels = channels;
         audio.side_channels = side_channels;
         audio.max_block = max_block;
+        audio.rate = rate;
         audio.cursor.invalidate();
         audio.cursor.pull(&self.plane, audio.inner.as_mut());
         self.latency
             .store(audio.inner.latency() as u32, Ordering::Release);
+        self.tail
+            .store(tail_seconds_of(audio.inner.tail(), rate).to_bits(), Ordering::Release);
         true
     }
 
@@ -506,6 +540,8 @@ impl FfiInstance {
             inner.process_buses(&mut buffers[..channels], side, frames);
             (inner.latency(), inner.meters(), inner.bus_meters())
         };
+        let tail = tail_seconds_of(audio.inner.tail(), audio.rate);
+        self.tail.store(tail.to_bits(), Ordering::Release);
         self.latency.store(latency as u32, Ordering::Release);
         self.meters.publish(meters);
         self.bus_meters.publish(bus);

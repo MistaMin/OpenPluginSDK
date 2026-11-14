@@ -11,9 +11,12 @@
 #![deny(unsafe_code)]
 
 pub mod automation;
+pub mod build;
+pub mod editor;
 pub mod layout;
 pub mod midi;
 pub mod plane;
+pub mod preset;
 pub mod ramp;
 pub mod seqlock;
 pub mod smooth;
@@ -27,7 +30,11 @@ pub use layout::{
     BusMeters, IoConfig, NotePorts, ParamFlags, PortKind, SpeakerLayout, Tail, STEREO_LAYOUTS,
     BUS_METER_CHANNELS, MAX_AUDIO_CHANNELS,
 };
+pub use editor::{
+    Editor, EditorFactory, EditorHost, EditorState, Frame, Gesture, GestureQueue, ValueMirror,
+};
 pub use plane::{ParamCursor, ParamPlane};
+pub use preset::{Preset, PresetBank};
 pub use ramp::SampleRamp;
 pub use seqlock::Seqlock;
 pub use smooth::OnePole;
@@ -235,6 +242,71 @@ impl ParamInfo {
             _ => self.min + (self.max - self.min) * t,
         };
         self.clamp(v)
+    }
+
+    /// Reads a value a user typed, or one [`Self::format`] printed, back into
+    /// plain units. It accepts a choice name or its index, `On`/`Off` (also
+    /// `yes`/`no`, `true`/`false`), `-inf`, and a number with an optional
+    /// unit: `kHz`/`Hz`, `ms`/`s`, `dB`, `%`, `:1`, `st`, `ct`. A unit that
+    /// scales converts to the parameter's own unit (`1.5 kHz` is 1500 for a
+    /// Hz parameter, `250 ms` is 0.25 for a seconds parameter). The result is
+    /// clamped like [`Self::clamp`]. `None` when the text is not a value.
+    pub fn parse(&self, text: &str) -> Option<f32> {
+        let t = text.trim();
+        if t.is_empty() {
+            return None;
+        }
+        // `format` names a choice by its value, so the position is the value.
+        if let Some(i) = self.choices.iter().position(|c| c.trim().eq_ignore_ascii_case(t)) {
+            return Some(self.clamp(i as f32));
+        }
+        let lower = t.to_ascii_lowercase();
+        let switch = match lower.as_str() {
+            "on" | "yes" | "true" => Some(1.0),
+            "off" | "no" | "false" => Some(0.0),
+            _ => None,
+        };
+        if let Some(v) = switch {
+            if matches!(self.unit, Unit::Toggle) || (self.min <= v && v <= self.max) {
+                return Some(self.clamp(v));
+            }
+        }
+        if lower.starts_with("-inf") {
+            return Some(self.min);
+        }
+        let end = lower
+            .char_indices()
+            .find(|&(i, c)| {
+                !(c.is_ascii_digit()
+                    || c == '.'
+                    || ((c == '-' || c == '+') && i == 0)
+                    || (c == 'e' && i > 0 && lower[i + 1..].starts_with(|n: char| n.is_ascii_digit() || n == '-' || n == '+')))
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(lower.len());
+        let number: f32 = lower[..end].parse().ok()?;
+        if !number.is_finite() {
+            return None;
+        }
+        let suffix = lower[end..].trim();
+        let value = match (suffix, self.unit) {
+            ("khz", Unit::Hz) => number * 1000.0,
+            ("hz", Unit::Hz) => number,
+            ("ms", Unit::Seconds) => number / 1000.0,
+            ("s" | "sec", Unit::Ms) => number * 1000.0,
+            ("", _)
+            | ("hz", _)
+            | ("khz", _)
+            | ("ms", _)
+            | ("s" | "sec", _)
+            | ("db", _)
+            | ("%", _)
+            | (":1", _)
+            | ("st", _)
+            | ("ct", _) => number,
+            _ => return None,
+        };
+        Some(self.clamp(value))
     }
 
     /// Formats a parameter value for display with appropriate units.
@@ -468,6 +540,26 @@ pub trait Plugin: Send + 'static {
         None
     }
 
+    /// What this engine shares with its editor ([`editor`]). Called once on
+    /// the message thread right after the plugin is made, before any audio.
+    /// The default shares nothing, and the editor shows host values alone.
+    fn editor_state(&self) -> Option<EditorState> {
+        None
+    }
+
+    /// Fixed AAX identifiers. Pro Tools finds a plugin in a session by them,
+    /// so once released they never change. `None` uses development IDs
+    /// hashed from the plugin id, which cannot go in an AAX page table.
+    fn aax_ids(&self) -> Option<AaxIds> {
+        None
+    }
+
+    /// The LV2 URI. Saved LV2 sessions find the plugin by it, so once
+    /// released it never changes. `None` uses [`PluginInfo::id`].
+    fn lv2_uri(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Serializes plugin state into an opaque byte buffer.
     fn save_state(&mut self) -> Option<Vec<u8>> {
         None
@@ -476,6 +568,25 @@ pub trait Plugin: Send + 'static {
     /// Deserializes and restores state from an opaque byte buffer.
     fn load_state(&mut self, _data: &[u8]) -> bool {
         false
+    }
+}
+
+/// The four AAX codes: manufacturer, product, and the mono and stereo plug-in
+/// types. Each is four printable ASCII characters, such as `*b"OpGd"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AaxIds {
+    pub manufacturer: [u8; 4],
+    pub product: [u8; 4],
+    pub mono: [u8; 4],
+    pub stereo: [u8; 4],
+}
+
+impl AaxIds {
+    /// True when every code is four printable characters and the two
+    /// plug-in types differ.
+    pub fn is_valid(&self) -> bool {
+        let printable = |code: &[u8; 4]| code.iter().all(|b| (0x20..0x7f).contains(b));
+        [self.manufacturer, self.product, self.mono, self.stereo].iter().all(printable) && self.mono != self.stereo
     }
 }
 
@@ -493,6 +604,45 @@ pub fn release_momentary(plugin: &mut dyn Plugin) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_reads_what_format_prints() {
+        static MODES: [&str; 3] = ["Room", "Hall", "Plate"];
+        let mode = ParamInfo::new("mode", "Mode", 0.0, 2.0, 0.0, Unit::None).with_choices(&MODES);
+        let toggle = ParamInfo::new("freeze", "Freeze", 0.0, 1.0, 0.0, Unit::Toggle);
+        let freq = ParamInfo::new("freq", "Freq", 20.0, 20_000.0, 1_000.0, Unit::Hz);
+        let time = ParamInfo::new("time", "Time", 0.0, 10.0, 1.0, Unit::Seconds);
+        let delay = ParamInfo::new("delay", "Delay", 0.0, 2_000.0, 10.0, Unit::Ms);
+        let gain = ParamInfo::new("gain", "Gain", -96.0, 24.0, 0.0, Unit::Db);
+        for p in [&mode, &toggle, &freq, &time, &delay, &gain] {
+            for v in [p.min, p.default, p.max, 0.5 * (p.min + p.max)] {
+                let text = p.format(v);
+                let back = p.parse(&text).unwrap_or_else(|| panic!("{} did not read {text:?}", p.id));
+                let tolerance = (p.max - p.min) * 0.001;
+                assert!((back - p.clamp(v)).abs() <= tolerance, "{} {text:?} gave {back}", p.id);
+            }
+        }
+        assert_eq!(mode.parse("plate"), Some(2.0));
+        assert_eq!(mode.parse("1"), Some(1.0));
+        assert_eq!(toggle.parse("ON"), Some(1.0));
+        assert_eq!(freq.parse("1.5 kHz"), Some(1500.0));
+        assert_eq!(time.parse("250 ms"), Some(0.25));
+        assert_eq!(delay.parse("1.2 s"), Some(1200.0));
+        assert_eq!(gain.parse("-inf dB"), Some(-96.0));
+        assert_eq!(gain.parse("+3dB"), Some(3.0));
+        assert_eq!(gain.parse("1e1"), Some(10.0));
+        assert_eq!(gain.parse("loud"), None);
+        assert_eq!(gain.parse("3 parsecs"), None);
+        assert_eq!(gain.parse(""), None);
+    }
+
+    #[test]
+    fn aax_ids_must_be_printable_and_distinct() {
+        let ok = AaxIds { manufacturer: *b"OpGd", product: *b"Sp9v", mono: *b"Sp9M", stereo: *b"Sp9S" };
+        assert!(ok.is_valid());
+        assert!(!AaxIds { stereo: *b"Sp9M", ..ok }.is_valid());
+        assert!(!AaxIds { product: [0, 1, 2, 3], ..ok }.is_valid());
+    }
 
     #[test]
     fn discrete_steps_snap_and_continuous_values_do_not() {

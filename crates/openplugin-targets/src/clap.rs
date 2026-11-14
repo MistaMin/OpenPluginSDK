@@ -5,19 +5,26 @@
 //! `init` / `activate` / `process`, then the audio-ports, note-ports, latency, params,
 //! and state extensions. Parameter values are the plugin's real units. OpenGridder's
 //! shell talks to the offload client and draws a Cocoa editor; this one calls
-//! [`openplugin_core::Plugin`] and does not open a window.
+//! [`openplugin_core::Plugin`].
+//!
+//! With an editor (`export_clap!(P, editor = make_editor)`), the adapter also
+//! offers `clap.gui` on macOS. The editor's gestures store the value in the
+//! parameter plane at once (so the engine and `get_value` see it), and are
+//! reported to the host as gesture-begin, param-value and gesture-end events
+//! from the next `process` or `flush`, after a `request_flush`. Values that
+//! the host changes reach the editor from the plane, polled by the view.
 //!
 //! A host loads the `clap_entry` symbol from a cdylib that called [`export_clap!`].
 //! [`ClapAdapter`] builds the same instance in-process so a test can drive it.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use openplugin_core::{
-    encode_params, release_momentary, BusMeters, IoConfig, MeterFrame, ParamCursor, ParamFlags,
-    ParamInfo, ParamPlane, Plugin, PortKind, Seqlock, SpeakerLayout, Tail, Transport,
-    MAX_AUDIO_CHANNELS,
+    decode_params, encode_params, release_momentary, BusMeters, EditorFactory, EditorState, Gesture, GestureQueue,
+    IoConfig, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PortKind,
+    Seqlock, SpeakerLayout, Tail, Transport, MAX_AUDIO_CHANNELS,
 };
 
 use crate::clap_abi::*;
@@ -47,6 +54,23 @@ pub fn set_creator(create: CreateFn) {
 fn creator() -> Option<CreateFn> {
     *CREATOR.lock().expect("clap creator lock")
 }
+
+static EDITOR: Mutex<Option<EditorFactory>> = Mutex::new(None);
+
+/// Install the editor `clap.gui` will open. `export_clap!(P, editor = f)`
+/// does this from `clap_entry.init`.
+pub fn set_editor(factory: EditorFactory) {
+    if let Ok(mut slot) = EDITOR.lock() {
+        *slot = Some(factory);
+    }
+}
+
+fn editor_factory() -> Option<EditorFactory> {
+    EDITOR.lock().ok().and_then(|slot| *slot)
+}
+
+/// Gestures an editor can have waiting before the host collects them.
+const GESTURE_CAPACITY: usize = 1024;
 
 fn cstring(text: &str) -> CString {
     CString::new(text).unwrap_or_else(|_| CString::new("openplugin").expect("static cstring"))
@@ -147,8 +171,15 @@ struct Instance {
     strings: Vec<CString>,
     feature_ptrs: Vec<*const c_char>,
     inner: Box<dyn Plugin>,
-    plane: ParamPlane,
+    plane: Arc<ParamPlane>,
     cursor: ParamCursor,
+    /// Editor gestures waiting to be reported to the host.
+    gestures: Arc<GestureQueue>,
+    /// What the engine shares with its editor, taken once at creation.
+    editor_state: Option<EditorState>,
+    host_params: *const clap_host_params,
+    #[cfg(target_os = "macos")]
+    gui: Option<gui::Gui>,
     meters: Seqlock<MeterFrame>,
     bus_meters: Seqlock<BusMeters>,
     sched: [Sched; MAX_SCHED],
@@ -407,7 +438,9 @@ fn render_block(
 }
 
 unsafe extern "C" fn plugin_init(plugin: *const clap_plugin) -> bool {
-    instance(plugin).is_some()
+    let Some(instance) = instance(plugin) else { return false };
+    instance.host_params = host_call(instance.host, EXT_PARAMS) as *const clap_host_params;
+    true
 }
 
 unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
@@ -416,7 +449,13 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
     }
     let data = unsafe { (*plugin).plugin_data };
     if !data.is_null() {
-        drop(unsafe { Box::from_raw(data as *mut Instance) });
+        let mut instance = unsafe { Box::from_raw(data as *mut Instance) };
+        // The view goes before the engine whose state it shows.
+        #[cfg(target_os = "macos")]
+        {
+            instance.gui = None;
+        }
+        drop(instance);
     }
 }
 
@@ -471,6 +510,7 @@ unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const 
     }
     let process = unsafe { &*process };
     collect_events(instance, process.in_events);
+    report_gestures(instance, process.out_events);
     apply_transport(instance, process.transport, process.steady_time);
     if process.frames_count == 0 || process.audio_outputs_count == 0 {
         if instance.sched_count > 0 {
@@ -686,19 +726,66 @@ unsafe extern "C" fn params_value_to_text(plugin: *const clap_plugin, param_id: 
     true
 }
 
-unsafe extern "C" fn params_text_to_value(_plugin: *const clap_plugin, _param_id: u32, text: *const c_char, out_value: *mut f64) -> bool {
+unsafe extern "C" fn params_text_to_value(plugin: *const clap_plugin, param_id: u32, text: *const c_char, out_value: *mut f64) -> bool {
     if text.is_null() || out_value.is_null() {
         return false;
     }
+    let Some(instance) = instance(plugin) else { return false };
+    let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
     let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
-    let Ok(value) = text.trim().parse::<f64>() else { return false };
-    unsafe { *out_value = value };
+    let Some(value) = param.parse(&text) else { return false };
+    unsafe { *out_value = value as f64 };
     true
 }
 
-unsafe extern "C" fn params_flush(plugin: *const clap_plugin, input: *const clap_input_events, _output: *const clap_output_events) {
+fn event_header(kind: u16, size: usize) -> clap_event_header {
+    clap_event_header { size: size as u32, time: 0, space_id: 0, type_: kind, flags: 0 }
+}
+
+/// Hand the editor's gestures to the host: begin, value and end events in
+/// the order the editor made them. The values are already in the plane.
+fn report_gestures(instance: &Instance, out: *const clap_output_events) {
+    if instance.gestures.is_empty() {
+        return;
+    }
+    let push = if out.is_null() { None } else { unsafe { (*out).try_push } };
+    let infos = instance.plane.infos();
+    while let Some(gesture) = instance.gestures.pop() {
+        let Some(push) = push else { continue };
+        match gesture {
+            Gesture::Begin(id) | Gesture::End(id) => {
+                if id as usize >= infos.len() {
+                    continue;
+                }
+                let kind = if matches!(gesture, Gesture::Begin(_)) { EVENT_PARAM_GESTURE_BEGIN } else { EVENT_PARAM_GESTURE_END };
+                let event = clap_event_param_gesture {
+                    header: event_header(kind, std::mem::size_of::<clap_event_param_gesture>()),
+                    param_id: id,
+                };
+                unsafe { push(out, &event.header) };
+            }
+            Gesture::Perform(id, value) => {
+                let Some(info) = infos.get(id as usize) else { continue };
+                let event = clap_event_param_value {
+                    header: event_header(EVENT_PARAM_VALUE, std::mem::size_of::<clap_event_param_value>()),
+                    param_id: id,
+                    cookie: std::ptr::null_mut(),
+                    note_id: -1,
+                    port_index: -1,
+                    channel: -1,
+                    key: -1,
+                    value: info.clamp(value) as f64,
+                };
+                unsafe { push(out, &event.header) };
+            }
+        }
+    }
+}
+
+unsafe extern "C" fn params_flush(plugin: *const clap_plugin, input: *const clap_input_events, output: *const clap_output_events) {
     if let Some(instance) = instance(plugin) {
         collect_events(instance, input);
+        report_gestures(instance, output);
         if instance.sched_count > 0 {
             let count = instance.sched_count;
             apply_group(instance, 0, count);
@@ -759,13 +846,26 @@ unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_
         }
         bytes.extend_from_slice(&chunk[..n as usize]);
     }
-    if bytes.is_empty() || !instance.inner.load_state(&bytes) {
+    if bytes.is_empty() {
         return false;
     }
-    // The host reads parameters from the plane. A state chunk changes the plugin
-    // directly, so republish the loaded values or the host would keep the old ones.
-    instance.plane.seed_from(instance.inner.as_ref());
-    instance.cursor.invalidate();
+    if instance.inner.load_state(&bytes) {
+        // The host reads parameters from the plane. A state chunk changes the plugin
+        // directly, so republish the loaded values or the host would keep the old ones.
+        instance.plane.seed_from(instance.inner.as_ref());
+        instance.cursor.invalidate();
+    } else {
+        // `save` wrote the parameter snapshot because the plugin has no state
+        // of its own. The plane takes it, and the engine pulls it before the
+        // next block.
+        let Some(values) = decode_params(instance.inner.info(), &bytes) else { return false };
+        if values.len() != instance.plane.len() || values.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        for (index, value) in values.iter().enumerate() {
+            instance.plane.store(index, *value);
+        }
+    }
     notify_params_rescan(instance);
     true
 }
@@ -1183,6 +1283,10 @@ unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_c
     if id == EXT_AMBISONIC || id == EXT_AMBISONIC_COMPAT {
         return &AMBISONIC as *const clap_plugin_ambisonic as *const c_void;
     }
+    #[cfg(target_os = "macos")]
+    if id == EXT_GUI && editor_factory().is_some() {
+        return &gui::GUI as *const clap_plugin_gui as *const c_void;
+    }
     std::ptr::null()
 }
 
@@ -1232,9 +1336,10 @@ fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
     for label in labels {
         strings.push(cstring(label));
     }
-    let plane = ParamPlane::new(info);
+    let plane = Arc::new(ParamPlane::new(info));
     plane.seed_from(inner.as_ref());
     let cursor = ParamCursor::new(plane.len());
+    let editor_state = inner.editor_state();
     let instance = Box::new(Instance {
         plugin: clap_plugin {
             desc: std::ptr::null(),
@@ -1267,6 +1372,11 @@ fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
         inner,
         plane,
         cursor,
+        gestures: Arc::new(GestureQueue::new(GESTURE_CAPACITY)),
+        editor_state,
+        host_params: std::ptr::null(),
+        #[cfg(target_os = "macos")]
+        gui: None,
         meters: Seqlock::new(MeterFrame::SILENT),
         bus_meters: Seqlock::new(BusMeters::SILENT),
         sched: [Sched::empty(); MAX_SCHED],
@@ -1335,6 +1445,22 @@ impl<P: Plugin + 'static> ClapAdapter<P> {
         instance(self.raw).map(|inst| inst.bus_meters.read()).unwrap_or(BusMeters::SILENT)
     }
 
+    /// What the engine shares with its editor ([`Plugin::editor_state`]).
+    pub fn editor_state(&self) -> Option<EditorState> {
+        instance(self.raw).and_then(|inst| inst.editor_state.clone())
+    }
+
+    /// The plugin's parameter plane, as the host and the editor see it.
+    pub fn plane(&self) -> Option<Arc<ParamPlane>> {
+        instance(self.raw).map(|inst| inst.plane.clone())
+    }
+
+    /// The host side of an editor: gestures go where `clap.gui` would send
+    /// them. For tests that drive an editor without a window.
+    pub fn editor_host(&self) -> Option<openplugin_core::EditorHost> {
+        instance(self.raw).map(|inst| editor_host_for(inst))
+    }
+
     pub fn activate(&mut self, sample_rate: f64, min_frames: u32, max_frames: u32) -> bool {
         unsafe {
             (*self.raw).activate.map(|activate| activate(self.raw, sample_rate, min_frames, max_frames)).unwrap_or(false)
@@ -1401,11 +1527,206 @@ pub unsafe extern "C" fn entry_get_factory(factory_id: *const c_char) -> *const 
 
 pub unsafe extern "C" fn entry_deinit() {}
 
+/// What an editor's gestures do in CLAP: store the value in the plane, queue
+/// the gesture for the host, and ask the host to collect it.
+fn editor_host_for(instance: &Instance) -> openplugin_core::EditorHost {
+    #[derive(Clone, Copy)]
+    struct Link(*const clap_host, *const clap_host_params);
+    let link = Link(instance.host, instance.host_params);
+    let plane = instance.plane.clone();
+    let queue = instance.gestures.clone();
+    openplugin_core::EditorHost::new(move |gesture| {
+        let link = link;
+        if let Gesture::Perform(id, value) = gesture {
+            if !plane.store(id as usize, value) {
+                return;
+            }
+        }
+        queue.push(gesture);
+        // `request_flush` is for any thread but the audio thread; this is the main thread.
+        if let Some(params) = unsafe { link.1.as_ref() } {
+            if let Some(flush) = params.request_flush {
+                unsafe { flush(link.0) };
+            }
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+mod gui {
+    //! `clap.gui` on macOS: the editor in an `NSView`, embedded, fixed size.
+    use super::*;
+    use openplugin_core::{Editor, ValueMirror};
+    use openplugin_dri::cocoa::EditorView;
+
+    pub(super) struct Gui {
+        view: EditorView,
+    }
+
+    fn is_cocoa(api: *const c_char, floating: bool) -> bool {
+        !api.is_null() && !floating && unsafe { CStr::from_ptr(api) }.to_bytes_with_nul() == WINDOW_API_COCOA
+    }
+
+    unsafe extern "C" fn is_api_supported(_plugin: *const clap_plugin, api: *const c_char, floating: bool) -> bool {
+        is_cocoa(api, floating)
+    }
+
+    unsafe extern "C" fn get_preferred_api(_plugin: *const clap_plugin, api: *mut *const c_char, floating: *mut bool) -> bool {
+        if api.is_null() || floating.is_null() {
+            return false;
+        }
+        unsafe {
+            *api = WINDOW_API_COCOA.as_ptr() as *const c_char;
+            *floating = false;
+        }
+        true
+    }
+
+    unsafe extern "C" fn create(plugin: *const clap_plugin, api: *const c_char, floating: bool) -> bool {
+        if !is_cocoa(api, floating) {
+            return false;
+        }
+        let Some(instance) = instance(plugin) else { return false };
+        let Some(factory) = editor_factory() else { return false };
+        instance.gui = None;
+        let Some(mut editor) = factory(editor_host_for(instance)) else { return false };
+        editor.bind(instance.editor_state.clone());
+        let plane = instance.plane.clone();
+        let mut mirror = ValueMirror::new(plane.len());
+        // The current values before the first frame, then whatever changes.
+        mirror.update(editor.as_mut(), |i| plane.load(i));
+        let poll = Box::new(move |editor: &mut dyn Editor| mirror.update(editor, |i| plane.load(i)));
+        match EditorView::new(editor, Some(poll)) {
+            Some(view) => {
+                instance.gui = Some(Gui { view });
+                true
+            }
+            None => false,
+        }
+    }
+
+    unsafe extern "C" fn destroy(plugin: *const clap_plugin) {
+        if let Some(instance) = instance(plugin) {
+            instance.gui = None;
+        }
+    }
+
+    unsafe extern "C" fn set_scale(_plugin: *const clap_plugin, _scale: f64) -> bool {
+        // Cocoa works in points; the view reads the backing scale itself.
+        false
+    }
+
+    fn size(plugin: *const clap_plugin) -> Option<(u32, u32)> {
+        instance(plugin).and_then(|inst| inst.gui.as_ref()).map(|gui| gui.view.size())
+    }
+
+    unsafe extern "C" fn get_size(plugin: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool {
+        let Some((w, h)) = size(plugin) else { return false };
+        if width.is_null() || height.is_null() {
+            return false;
+        }
+        unsafe {
+            *width = w;
+            *height = h;
+        }
+        true
+    }
+
+    unsafe extern "C" fn can_resize(_plugin: *const clap_plugin) -> bool {
+        false
+    }
+
+    unsafe extern "C" fn get_resize_hints(_plugin: *const clap_plugin, _hints: *mut clap_gui_resize_hints) -> bool {
+        false
+    }
+
+    unsafe extern "C" fn adjust_size(plugin: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool {
+        unsafe { get_size(plugin, width, height) }
+    }
+
+    unsafe extern "C" fn set_size(plugin: *const clap_plugin, width: u32, height: u32) -> bool {
+        size(plugin) == Some((width, height))
+    }
+
+    unsafe extern "C" fn set_parent(plugin: *const clap_plugin, window: *const clap_window) -> bool {
+        let Some(gui) = instance(plugin).and_then(|inst| inst.gui.as_ref()) else { return false };
+        if window.is_null() {
+            return false;
+        }
+        unsafe { gui.view.attach((*window).ptr) }
+    }
+
+    unsafe extern "C" fn set_transient(_plugin: *const clap_plugin, _window: *const clap_window) -> bool {
+        false
+    }
+
+    unsafe extern "C" fn suggest_title(_plugin: *const clap_plugin, _title: *const c_char) {}
+
+    unsafe extern "C" fn show(plugin: *const clap_plugin) -> bool {
+        match instance(plugin).and_then(|inst| inst.gui.as_ref()) {
+            Some(gui) => {
+                gui.view.set_hidden(false);
+                true
+            }
+            None => false,
+        }
+    }
+
+    unsafe extern "C" fn hide(plugin: *const clap_plugin) -> bool {
+        match instance(plugin).and_then(|inst| inst.gui.as_ref()) {
+            Some(gui) => {
+                gui.view.set_hidden(true);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub(super) static GUI: clap_plugin_gui = clap_plugin_gui {
+        is_api_supported: Some(is_api_supported),
+        get_preferred_api: Some(get_preferred_api),
+        create: Some(create),
+        destroy: Some(destroy),
+        set_scale: Some(set_scale),
+        get_size: Some(get_size),
+        can_resize: Some(can_resize),
+        get_resize_hints: Some(get_resize_hints),
+        adjust_size: Some(adjust_size),
+        set_size: Some(set_size),
+        set_parent: Some(set_parent),
+        set_transient: Some(set_transient),
+        suggest_title: Some(suggest_title),
+        show: Some(show),
+        hide: Some(hide),
+    };
+}
+
 /// Export `clap_entry` from a cdylib. `$plugin` must implement [`Plugin`] and [`Default`].
 ///
 /// The host calls `clap_entry.init`, which registers the plugin, then `get_factory`.
+/// `export_clap!(P, editor = make_editor)` also offers `clap.gui` on macOS,
+/// with the editor `make_editor` ([`openplugin_core::EditorFactory`]) returns.
 #[macro_export]
 macro_rules! export_clap {
+    ($plugin:ty, editor = $editor:path) => {
+        fn __openplugin_clap_create() -> ::std::boxed::Box<dyn $crate::PluginForExport> {
+            ::std::boxed::Box::new(<$plugin as ::std::default::Default>::default())
+        }
+
+        unsafe extern "C" fn __openplugin_clap_init(_path: *const ::std::ffi::c_char) -> bool {
+            $crate::clap::set_creator(__openplugin_clap_create);
+            $crate::clap::set_editor($editor);
+            true
+        }
+
+        #[no_mangle]
+        pub static clap_entry: $crate::clap_abi::clap_plugin_entry = $crate::clap_abi::clap_plugin_entry {
+            clap_version: $crate::clap_abi::CLAP_VERSION,
+            init: Some(__openplugin_clap_init),
+            deinit: Some($crate::clap::entry_deinit),
+            get_factory: Some($crate::clap::entry_get_factory),
+        };
+    };
     ($plugin:ty) => {
         fn __openplugin_clap_create() -> ::std::boxed::Box<dyn $crate::PluginForExport> {
             ::std::boxed::Box::new(<$plugin as ::std::default::Default>::default())
@@ -1690,9 +2011,149 @@ mod tests {
         }
     }
 
+    struct Captured {
+        events: Vec<(u16, u32, f64)>,
+    }
+
+    unsafe extern "C" fn capture(list: *const clap_output_events, event: *const clap_event_header) -> bool {
+        let captured = unsafe { &mut *((*list).ctx as *mut Captured) };
+        let header = unsafe { &*event };
+        let entry = match header.type_ {
+            EVENT_PARAM_VALUE => {
+                let e = unsafe { &*(event as *const clap_event_param_value) };
+                (header.type_, e.param_id, e.value)
+            }
+            _ => {
+                let e = unsafe { &*(event as *const clap_event_param_gesture) };
+                (header.type_, e.param_id, 0.0)
+            }
+        };
+        captured.events.push(entry);
+        true
+    }
+
+    #[test]
+    fn editor_gestures_reach_the_plane_and_the_host_in_order() {
+        let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
+        let host = adapter.editor_host().expect("editor host");
+        host.begin(0);
+        host.perform(0, 6.0);
+        host.perform(0, 99.0); // clamped to the range
+        host.end(0);
+        host.set(7, 1.0); // no such parameter: dropped
+        let plane = adapter.plane().expect("plane");
+        assert_eq!(plane.load(0), Some(24.0));
+
+        let mut captured = Captured { events: Vec::new() };
+        let out = clap_output_events { ctx: &mut captured as *mut Captured as *mut c_void, try_push: Some(capture) };
+        let plugin = adapter.as_plugin();
+        unsafe {
+            let params = plugin_extension(plugin, EXT_PARAMS.as_ptr() as *const c_char) as *const clap_plugin_params;
+            (*params).flush.unwrap()(plugin, std::ptr::null(), &out);
+        }
+        assert_eq!(
+            captured.events,
+            vec![
+                (EVENT_PARAM_GESTURE_BEGIN, 0, 0.0),
+                (EVENT_PARAM_VALUE, 0, 6.0),
+                (EVENT_PARAM_VALUE, 0, 24.0),
+                (EVENT_PARAM_GESTURE_END, 0, 0.0),
+            ]
+        );
+        // Collected once only.
+        captured.events.clear();
+        unsafe {
+            let params = plugin_extension(plugin, EXT_PARAMS.as_ptr() as *const c_char) as *const clap_plugin_params;
+            (*params).flush.unwrap()(plugin, std::ptr::null(), &out);
+        }
+        assert!(captured.events.is_empty());
+    }
+
+    struct NoState {
+        db: f32,
+    }
+
+    impl Plugin for NoState {
+        fn info(&self) -> &'static PluginInfo { &INFO }
+        fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+        fn reset(&mut self) {}
+        fn set_param(&mut self, id: &str, value: f32) -> bool {
+            if id != "gain" { return false; }
+            self.db = PARAMS[0].clamp(value);
+            true
+        }
+        fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    }
+
+    struct Bytes {
+        data: Vec<u8>,
+        read: usize,
+    }
+
+    unsafe extern "C" fn write_bytes(stream: *const clap_ostream, buffer: *const c_void, size: u64) -> i64 {
+        let bytes = unsafe { &mut *((*stream).ctx as *mut Bytes) };
+        bytes.data.extend_from_slice(unsafe { std::slice::from_raw_parts(buffer as *const u8, size as usize) });
+        size as i64
+    }
+
+    unsafe extern "C" fn read_bytes(stream: *const clap_istream, buffer: *mut c_void, size: u64) -> i64 {
+        let bytes = unsafe { &mut *((*stream).ctx as *mut Bytes) };
+        let n = (bytes.data.len() - bytes.read).min(size as usize);
+        unsafe { std::ptr::copy_nonoverlapping(bytes.data[bytes.read..].as_ptr(), buffer as *mut u8, n) };
+        bytes.read += n;
+        n as i64
+    }
+
+    #[test]
+    fn state_without_a_plugin_chunk_restores_the_parameters() {
+        let first = ClapAdapter::new(NoState { db: 0.0 });
+        first.plane().unwrap().store(0, -7.5);
+        let mut bytes = Bytes { data: Vec::new(), read: 0 };
+        unsafe {
+            let state = plugin_extension(first.as_plugin(), EXT_STATE.as_ptr() as *const c_char) as *const clap_plugin_state;
+            let out = clap_ostream { ctx: &mut bytes as *mut Bytes as *mut c_void, write: Some(write_bytes) };
+            assert!((*state).save.unwrap()(first.as_plugin(), &out));
+            let second = ClapAdapter::new(NoState { db: 0.0 });
+            let input = clap_istream { ctx: &mut bytes as *mut Bytes as *mut c_void, read: Some(read_bytes) };
+            assert!((*state).load.unwrap()(second.as_plugin(), &input));
+            assert_eq!(second.plane().unwrap().load(0), Some(-7.5));
+            let mut junk = Bytes { data: vec![1, 2, 3], read: 0 };
+            let input = clap_istream { ctx: &mut junk as *mut Bytes as *mut c_void, read: Some(read_bytes) };
+            assert!(!(*state).load.unwrap()(second.as_plugin(), &input), "junk is refused");
+            assert_eq!(second.plane().unwrap().load(0), Some(-7.5), "and changes nothing");
+        }
+    }
+
+    #[test]
+    fn text_to_value_reads_units() {
+        let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
+        let plugin = adapter.as_plugin();
+        unsafe {
+            let params = plugin_extension(plugin, EXT_PARAMS.as_ptr() as *const c_char) as *const clap_plugin_params;
+            let mut value = 0.0f64;
+            assert!((*params).text_to_value.unwrap()(plugin, 0, c"+6.0 dB".as_ptr(), &mut value));
+            assert_eq!(value, 6.0);
+            assert!(!(*params).text_to_value.unwrap()(plugin, 0, c"loud".as_ptr(), &mut value));
+            assert!(!(*params).text_to_value.unwrap()(plugin, 3, c"1".as_ptr(), &mut value));
+        }
+    }
+
+    #[test]
+    fn no_gui_without_an_editor_factory() {
+        // This test binary never installs an editor.
+        let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
+        let ext = unsafe { plugin_extension(adapter.as_plugin(), EXT_GUI.as_ptr() as *const c_char) };
+        assert!(ext.is_null());
+    }
+
     /// Sizes measured with clang on this aarch64 macOS host against CLAP 1.2.
     #[test]
     fn clap_structs_match_the_host_abi() {
+        assert_eq!(std::mem::size_of::<clap_plugin_gui>(), 15 * std::mem::size_of::<usize>());
+        assert_eq!(std::mem::size_of::<clap_event_param_gesture>(), 20);
+        assert_eq!(std::mem::size_of::<clap_window>(), 2 * std::mem::size_of::<usize>());
+        assert_eq!(std::mem::size_of::<clap_gui_resize_hints>(), 12);
         use crate::clap_abi::{clap_audio_ports_config, clap_event_transport};
         assert_eq!(std::mem::size_of::<clap_event_transport>(), 104);
         assert_eq!(std::mem::offset_of!(clap_event_transport, bar_number), 96);

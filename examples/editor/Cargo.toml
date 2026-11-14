@@ -1,0 +1,21 @@
+[package]
+name = "example-editor"
+description = "A gain plugin with an editor in every format: CLAP, LV2, VST3, Audio Unit and AAX"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+openplugin = { workspace = true }
+
+[build-dependencies]
+openplugin-core = { workspace = true }
+
+# Runs on the main thread, which AppKit needs.
+[[test]]
+name = "cocoa"
+harness = false

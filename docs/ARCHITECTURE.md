@@ -2,7 +2,7 @@
 
 ## Summary
 
-OpenPluginSDK 0.2.0 Beta isolates DSP and parameter modelling from OS windowing and host plugin ABIs. CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX load through the native shells in [SHELL.md](SHELL.md).
+OpenPluginSDK 0.3.0 Beta isolates DSP and parameter modelling from OS windowing and host plugin ABIs. CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX load through the native shells in [SHELL.md](SHELL.md).
 
 ## Layer Model
 

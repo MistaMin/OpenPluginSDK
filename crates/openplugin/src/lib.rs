@@ -18,9 +18,10 @@ pub use openplugin_targets as targets;
 
 pub mod prelude {
     pub use openplugin_core::{
-        decode_params, decode_session, encode_params, encode_session, restore_params, AbCompare,
-        BusMeters, Category, IoConfig, MeterFrame, NotePorts, OnePole, ParamCursor, ParamFlags,
-        ParamInfo, ParamPlane, Plugin, PluginInfo, SampleRamp, Seqlock, SpeakerLayout, Tail,
+        decode_params, decode_session, encode_params, encode_session, restore_params, AaxIds,
+        AbCompare, BusMeters, Category, Editor, EditorFactory, EditorHost, EditorState, Frame,
+        Gesture, IoConfig, MeterFrame, NotePorts, OnePole, ParamCursor, ParamFlags, ParamInfo,
+        ParamPlane, Plugin, PluginInfo, PresetBank, SampleRamp, Seqlock, SpeakerLayout, Tail,
         Taper, Transport, Unit,
     };
     pub use openplugin_dri::{
@@ -34,7 +35,7 @@ pub mod prelude {
         samples_per_beat, saturate_sample, Adaa2Taylor, Biquad, BlockConvolver, Compressor,
         DelayLine, FilterType,
         correlation, BlockLevel, GainComp, LinearPhaseOversampler, MeterBank, MeterReadings,
-        Oscillator, OversampleFactor, SoftBypass,
+        Delta, KWeighting, Loudness, LoudnessMatch, Oscillator, OversampleFactor, SoftBypass,
         Oversampler2x, Polyphony, ResidualAdaa1, SampleVoice, SaturationMode, VuMeter, Wave,
         WindowRms,
     };

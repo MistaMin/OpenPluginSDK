@@ -5,9 +5,9 @@
 //! Parameter writes go to the plane. The audio thread applies them inside `process`.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
-use openplugin_core::{Category, ParamFlags, ParamInfo, PluginInfo, Taper, Unit};
+use openplugin_core::{AaxIds, Category, EditorState, ParamFlags, ParamInfo, PluginInfo, Taper, Unit};
 
 use crate::{FfiInstance, Plugin};
 
@@ -89,6 +89,56 @@ fn fourcc(bytes: &[u8]) -> u32 {
 fn plugin_info<P: Plugin + Default>() -> &'static PluginInfo {
     static SLOT: OnceLock<&'static PluginInfo> = OnceLock::new();
     SLOT.get_or_init(|| P::default().info())
+}
+
+/// [`Plugin::aax_ids`], when the plugin sets valid ones.
+fn plugin_aax_ids<P: Plugin + Default>() -> Option<AaxIds> {
+    static SLOT: OnceLock<Option<AaxIds>> = OnceLock::new();
+    *SLOT.get_or_init(|| P::default().aax_ids().filter(AaxIds::is_valid))
+}
+
+/// A four-character code the way AAX reads one (`'OpGd'`, first byte highest).
+fn code(bytes: [u8; 4]) -> u32 {
+    u32::from_be_bytes(bytes)
+}
+
+/// Live instances, by address, so an editor can tell a live instance from a
+/// destroyed one. Message thread.
+static LIVE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+/// Run `f` on the instance at `ptr` if it is live. The table stays locked
+/// while `f` runs, so [`destroy`] cannot free the instance meanwhile.
+fn with_live<T>(ptr: *const ShellInstance, f: impl FnOnce(&ShellInstance) -> T) -> Option<T> {
+    if ptr.is_null() {
+        return None;
+    }
+    let list = LIVE.lock().ok()?;
+    if !list.contains(&(ptr as usize)) {
+        return None;
+    }
+    // In the table and not destroyed: `destroy` takes the lock before it frees.
+    Some(f(unsafe { &*ptr }))
+}
+
+/// What the engine `ptr` shares with its editor, or `None` when `ptr` is
+/// null, not a live instance, or shares nothing. Message thread. Any pointer
+/// is accepted: it is only dereferenced once found in the live table.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
+pub fn editor_state(ptr: *const ShellInstance) -> Option<EditorState> {
+    with_live(ptr, |instance| instance.ffi.editor_state()).flatten()
+}
+
+/// Seconds of tail as of the last block; infinity for an endless tail. Any
+/// thread, never blocks.
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`].
+pub unsafe fn tail_seconds(ptr: *const ShellInstance) -> f64 {
+    if ptr.is_null() {
+        0.0
+    } else {
+        unsafe { (*ptr).ffi.tail_seconds() }
+    }
 }
 
 fn category_name(category: Category) -> &'static str {
@@ -181,15 +231,19 @@ pub fn write_info<P: Plugin + Default>(out: *mut OpShellInfo) -> u32 {
         if stereo == mono {
             stereo ^= 0x0100_0000;
         }
+        let (manufacturer_id, product_id, plugin_id_mono, plugin_id_stereo) = match plugin_aax_ids::<P>() {
+            Some(ids) => (code(ids.manufacturer), code(ids.product), code(ids.mono), code(ids.stereo)),
+            None => (fourcc(&mix(info.vendor, 3)), fourcc(&mix(info.id, 4)), mono, stereo),
+        };
         let header = OpShellInfo {
             abi: ABI,
             param_count: info.params.len().min(u32::MAX as usize) as u32,
             processor_cid: processor,
             controller_cid: controller,
-            manufacturer_id: fourcc(&mix(info.vendor, 3)),
-            product_id: fourcc(&mix(info.id, 4)),
-            plugin_id_mono: mono,
-            plugin_id_stereo: stereo,
+            manufacturer_id,
+            product_id,
+            plugin_id_mono,
+            plugin_id_stereo,
             name: [0; 64],
             vendor: [0; 64],
             version: [0; 32],
@@ -256,7 +310,13 @@ pub fn create<P: Plugin + Default>(rate: f64, max_block: u32, channels: u32) -> 
         Some(Box::into_raw(Box::new(ShellInstance { ffi })))
     }));
     match created {
-        Ok(Some(ptr)) => ptr,
+        Ok(Some(ptr)) => {
+            if let Ok(mut list) = LIVE.lock() {
+                list.push(ptr as usize);
+            }
+            trace::created(plugin_info::<P>(), ptr as usize);
+            ptr
+        }
         _ => std::ptr::null_mut(),
     }
 }
@@ -265,6 +325,10 @@ pub fn create<P: Plugin + Default>(rate: f64, max_block: u32, channels: u32) -> 
 /// `ptr` is null or a pointer returned by [`create`] that has not been destroyed.
 pub unsafe fn destroy(ptr: *mut ShellInstance) {
     if !ptr.is_null() {
+        if let Ok(mut list) = LIVE.lock() {
+            list.retain(|key| *key != ptr as usize);
+        }
+        trace::destroyed(ptr as usize);
         drop(unsafe { Box::from_raw(ptr) });
     }
 }
@@ -275,6 +339,7 @@ pub unsafe fn reset(ptr: *mut ShellInstance) {
     if ptr.is_null() {
         return;
     }
+    trace::reset();
     let _ = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.reset() }));
 }
 
@@ -340,6 +405,8 @@ pub unsafe fn process(
     if ptr.is_null() {
         return 0;
     }
+    let tracing = trace::on();
+    let input = if tracing { unsafe { trace::peak(in_left, frames).max(trace::peak(in_right, frames)) } } else { 0.0 };
     let ran = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
         (*ptr).ffi.process_io(
             in_left,
@@ -349,7 +416,147 @@ pub unsafe fn process(
             frames as usize,
         )
     }));
-    u32::from(matches!(ran, Ok(true)))
+    let ok = matches!(ran, Ok(true));
+    if tracing {
+        let output = unsafe { trace::peak(out_left, frames).max(trace::peak(out_right, frames)) };
+        trace::block(ptr as usize, frames, ok, input, output);
+    }
+    u32::from(ok)
+}
+
+/// A diagnostic trace of what a host does with the shell, for a host that
+/// goes silent and says nothing. Off unless the file `<name>-trace.on` is in
+/// the temporary folder when the first instance is created (`<name>` is the
+/// plugin name in lower case, spaces as dashes). When on, the audio thread
+/// only updates counters, and [`trace::write`] appends a line to
+/// `<name>-trace.log` there at most four times a second: creates, destroys,
+/// resets, blocks and failed blocks since the last line, the block size, the
+/// input and output peaks, and the first eight parameter values the engine
+/// holds. The editor shells call it from their main-thread value updates.
+pub mod trace {
+    use super::*;
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+
+    static STATE: AtomicU8 = AtomicU8::new(0); // 0 undecided, 1 off, 2 on
+    static CREATES: AtomicU32 = AtomicU32::new(0);
+    static DESTROYS: AtomicU32 = AtomicU32::new(0);
+    static RESETS: AtomicU32 = AtomicU32::new(0);
+    static BLOCKS: AtomicU32 = AtomicU32::new(0);
+    static FAILED: AtomicU32 = AtomicU32::new(0);
+    static FRAMES: AtomicU32 = AtomicU32::new(0);
+    static PEAK_IN: AtomicU32 = AtomicU32::new(0);
+    static PEAK_OUT: AtomicU32 = AtomicU32::new(0);
+    static INSTANCE: AtomicUsize = AtomicUsize::new(0);
+    static LAST_WRITE: AtomicU64 = AtomicU64::new(0);
+    static LOG: OnceLock<(PathBuf, &'static PluginInfo)> = OnceLock::new();
+
+    /// The file stem for a plugin: `My Plugin` is `my-plugin`.
+    pub fn stem(name: &str) -> String {
+        name.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+            .collect()
+    }
+
+    pub(super) fn created(info: &'static PluginInfo, instance: usize) {
+        if STATE.load(Ordering::Relaxed) == 0 {
+            let stem = stem(info.name);
+            let dir = std::env::temp_dir();
+            let found = dir.join(format!("{stem}-trace.on")).exists();
+            if found {
+                let _ = LOG.set((dir.join(format!("{stem}-trace.log")), info));
+            }
+            STATE.store(if found { 2 } else { 1 }, Ordering::Relaxed);
+        }
+        if on() {
+            CREATES.fetch_add(1, Ordering::Relaxed);
+            INSTANCE.store(instance, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn destroyed(instance: usize) {
+        if on() {
+            DESTROYS.fetch_add(1, Ordering::Relaxed);
+            let _ = INSTANCE.compare_exchange(instance, 0, Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn reset() {
+        if on() {
+            RESETS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// True when the trace file was there at the first create.
+    pub fn on() -> bool {
+        STATE.load(Ordering::Relaxed) == 2
+    }
+
+    /// # Safety
+    /// `p` is null or addresses `frames` floats.
+    pub(super) unsafe fn peak(p: *const f32, frames: u32) -> f32 {
+        if p.is_null() {
+            return 0.0;
+        }
+        let samples = unsafe { std::slice::from_raw_parts(p, frames as usize) };
+        samples.iter().fold(0.0f32, |m, v| if v.is_finite() { m.max(v.abs()) } else { f32::INFINITY })
+    }
+
+    fn raise(slot: &AtomicU32, v: f32) {
+        if v > f32::from_bits(slot.load(Ordering::Relaxed)) {
+            slot.store(v.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn block(instance: usize, frames: u32, ok: bool, input: f32, output: f32) {
+        BLOCKS.fetch_add(1, Ordering::Relaxed);
+        if !ok {
+            FAILED.fetch_add(1, Ordering::Relaxed);
+        }
+        FRAMES.store(frames, Ordering::Relaxed);
+        INSTANCE.store(instance, Ordering::Relaxed);
+        raise(&PEAK_IN, input);
+        raise(&PEAK_OUT, output);
+    }
+
+    /// Append one line if the trace is on and a quarter second has passed.
+    /// Message thread.
+    pub fn write(note: &str) {
+        if !on() {
+            return;
+        }
+        let Some((path, info)) = LOG.get() else { return };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        if now.saturating_sub(LAST_WRITE.load(Ordering::Relaxed)) < 250 {
+            return;
+        }
+        LAST_WRITE.store(now, Ordering::Relaxed);
+        let instance = INSTANCE.load(Ordering::Relaxed) as *const ShellInstance;
+        let mut line = format!(
+            "{now} {note} creates={} destroys={} resets={} blocks={} failed={} frames={} peak_in={:.5} peak_out={:.5}",
+            CREATES.load(Ordering::Relaxed),
+            DESTROYS.load(Ordering::Relaxed),
+            RESETS.load(Ordering::Relaxed),
+            BLOCKS.swap(0, Ordering::Relaxed),
+            FAILED.swap(0, Ordering::Relaxed),
+            FRAMES.load(Ordering::Relaxed),
+            f32::from_bits(PEAK_IN.swap(0, Ordering::Relaxed)),
+            f32::from_bits(PEAK_OUT.swap(0, Ordering::Relaxed)),
+        );
+        // What the engine holds, not what the host last reported.
+        for (index, param) in info.params.iter().take(8).enumerate() {
+            let value = with_live(instance, |live| live.ffi.load_param(index)).unwrap_or(f32::NAN);
+            line.push_str(&format!(" {}={value:.3}", param.id));
+        }
+        line.push('\n');
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
 }
 
 #[cfg(test)]
