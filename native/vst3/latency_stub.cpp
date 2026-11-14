@@ -69,6 +69,22 @@ uint32_t op_shell_process(void* instance, const float* in_left, const float* in_
         for (uint32_t i = 0; i < frames; ++i) out_right[i] = in_right[i] * level;
     return 1;
 }
+// The whole state is the level, four bytes. Whatever else is refused.
+uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, uint32_t* needed) {
+    if (!instance) return OP_STATE_FAILED;
+    if (needed) *needed = sizeof(float);
+    if (!out || capacity < sizeof(float)) return capacity > 0 && !out ? OP_STATE_FAILED : OP_STATE_TOO_SMALL;
+    std::memcpy(out, &static_cast<Stub*>(instance)->level, sizeof(float));
+    return OP_STATE_OK;
+}
+uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t length) {
+    if (!instance || !data || length != sizeof(float)) return 0;
+    float level = 0.0f;
+    std::memcpy(&level, data, sizeof(float));
+    if (!(level >= 0.0f && level <= 1.0f)) return 0;
+    static_cast<Stub*>(instance)->level = level;
+    return 1;
+}
 #if OP_HAS_TAIL
 double op_shell_tail_seconds(void*) { return 0.0; }
 #endif
