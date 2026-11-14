@@ -45,4 +45,10 @@ enum Field : AAX_CFieldIndex {
 void AAX_CALLBACK process(Context* const begin[], const void* end);
 AAX_CEffectParameters* AAX_CALLBACK createParameters();
 AAX_IEffectGUI* AAX_CALLBACK createGUI();
+// Hooks for the proofs, which have no AAX controller. They act on an object from
+// createParameters(). proofInit does what EffectInit does without the controller.
+bool proofInit(AAX_CEffectParameters* parameters, double rate, uint32_t channels);
+bool proofSetPlain(AAX_CEffectParameters* parameters, uint32_t index, float value);
+bool proofSetBypass(AAX_CEffectParameters* parameters, bool on);
+bool proofPacket(AAX_CEffectParameters* parameters, Packet* out);
 }

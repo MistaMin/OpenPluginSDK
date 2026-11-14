@@ -151,6 +151,6 @@ int main() {
     const Rendered oversized = render(stereo, packet, 2);
     require_silence(oversized.left, "oversized packet writes silence");
     packet.count = info.param_count;
-    std::puts("AAX proof: prepare, ABI parameter count and defaults, mono/stereo output against the shell, dry-copy bypass, non-finite and oversized packets. AAX state, tail and host latency reporting are format gaps documented in docs/SHELL.md. Not a Pro Tools test: PASS");
+    std::puts("AAX proof: prepare, ABI parameter count and defaults, mono/stereo output against the shell, dry-copy bypass, non-finite and oversized packets. State is checked by aax_state_proof; tail and host latency reporting are format gaps documented in docs/SHELL.md. Not a Pro Tools test: PASS");
     return 0;
 }
