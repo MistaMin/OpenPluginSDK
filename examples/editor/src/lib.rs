@@ -7,12 +7,16 @@
 //! and an LED ladder. Its changes go through [`EditorHost`] as gestures, and the host's
 //! values come back through [`Editor::param_changed`]. The same editor runs in
 //! CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), and the VST3, Audio Unit and AAX
-//! shells (`op_editor_*`). The factory presets are text files in `presets/`,
+//! shells (`op_editor_*`). It is resizable from 180 x 120 to 480 x 320 points,
+//! keeping its 3:2 shape: the layout is drawn from the constants below at the
+//! scale of the current size ([`layout`]). A double-click on the bare plate
+//! asks the host to switch between the opening size and a larger one. The factory presets are text files in `presets/`,
 //! embedded by `build.rs`.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use openplugin::core::editor::SizeRange;
 use openplugin::core::{Editor, EditorHost, EditorState, Frame, PresetBank};
 use openplugin::dri::goodlookindri::color::Color as GlColor;
 use openplugin::dri::goodlookindri::scene::{Rect, Scene};
@@ -137,14 +141,48 @@ impl Plugin for EditorGain {
     }
 }
 
+/// The size the editor opens at, and the size its layout constants are drawn for.
 pub const WIDTH: u32 = 240;
 pub const HEIGHT: u32 = 160;
-/// Hit areas in points (x, y, w, h): the knob, the toggle, the meter.
+/// The smallest and largest size, in points. The shape stays 3:2.
+pub const MIN_SIZE: (u32, u32) = (180, 120);
+pub const MAX_SIZE: (u32, u32) = (480, 320);
+/// The larger size a double-click on the plate asks for.
+pub const LARGE_SIZE: (u32, u32) = (360, 240);
+/// Hit areas at the opening size, in points (x, y, w, h): the knob, the toggle, the meter.
 pub const KNOB: (f32, f32, f32, f32) = (25.0, 38.0, 60.0, 60.0);
 pub const SWITCH: (f32, f32, f32, f32) = (118.0, 40.0, 34.0, 56.0);
 pub const METER: (f32, f32, f32, f32) = (190.0, 20.0, 18.0, 120.0);
 /// How far a drag moves the knob from end to end, in points.
 const DRAG_RANGE: f32 = 150.0;
+
+/// The hit areas at one size, in points. The layout constants are scaled by
+/// the largest factor that fits and centred, so any size has a valid layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    /// Points per point of the opening layout.
+    pub scale: f32,
+    pub knob: (f32, f32, f32, f32),
+    pub switch: (f32, f32, f32, f32),
+    pub meter: (f32, f32, f32, f32),
+    /// Where the "WARM" legend sits (centre x, baseline y).
+    pub legend: (f32, f32),
+}
+
+/// The layout for an editor of `width` x `height` points.
+pub fn layout(width: u32, height: u32) -> Layout {
+    let scale = (width as f32 / WIDTH as f32).min(height as f32 / HEIGHT as f32).max(0.01);
+    let ox = (width as f32 - WIDTH as f32 * scale) * 0.5;
+    let oy = (height as f32 - HEIGHT as f32 * scale) * 0.5;
+    let place = |r: (f32, f32, f32, f32)| (ox + r.0 * scale, oy + r.1 * scale, r.2 * scale, r.3 * scale);
+    Layout {
+        scale,
+        knob: place(KNOB),
+        switch: place(SWITCH),
+        meter: place(METER),
+        legend: (ox + (SWITCH.0 + SWITCH.2 * 0.5) * scale, oy + (SWITCH.1 + SWITCH.3 + 16.0) * scale),
+    }
+}
 
 fn inside(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
     x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
@@ -161,6 +199,7 @@ pub struct GainEditor {
     shared: Option<Arc<Shared>>,
     level: f32,
     drag: Option<(f32, f32)>,
+    size: (u32, u32),
     canvas: SceneCanvas,
 }
 
@@ -172,6 +211,7 @@ impl GainEditor {
             shared: None,
             level: 0.0,
             drag: None,
+            size: (WIDTH, HEIGHT),
             canvas: SceneCanvas::new(WIDTH as f32, HEIGHT as f32),
         }
     }
@@ -192,7 +232,16 @@ pub fn make_editor(host: EditorHost) -> Option<Box<dyn Editor>> {
 
 impl Editor for GainEditor {
     fn size(&self) -> (u32, u32) {
-        (WIDTH, HEIGHT)
+        self.size
+    }
+
+    fn size_range(&self) -> SizeRange {
+        SizeRange::between(MIN_SIZE, MAX_SIZE).with_aspect(WIDTH, HEIGHT)
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.size = self.size_range().clamp(width, height);
+        self.canvas.resize(self.size.0 as f32, self.size.1 as f32);
     }
 
     fn bind(&mut self, state: Option<EditorState>) {
@@ -217,27 +266,30 @@ impl Editor for GainEditor {
         let warm = self.values[1] > 0.5;
         let level_db = 20.0 * self.level.max(1e-6).log10();
         // The plate is static: painted once per scale, then reused under the moving parts.
-        let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, WIDTH as f32, HEIGHT as f32, "Navy");
+        let (width, height) = (self.size.0 as f32, self.size.1 as f32);
+        let lay = layout(self.size.0, self.size.1);
+        let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, width, height, "Navy");
         self.canvas.frame_layered(scale, 0, plate, |dl| {
-            let (x, y, w, h) = KNOB;
+            let (x, y, w, h) = lay.knob;
             let normalized = PARAMS[0].to_normalized(gain);
             draw_knob_code(dl, x + w * 0.5, y + h * 0.5, w * 0.5, normalized, "GAIN", &PARAMS[0].format(gain), "Brit", Color::BRIT_RED);
             let mut parts = Scene::new();
-            switches::draw_toggle(&mut parts, rect(SWITCH), warm, switches::ToggleStyle::Bat, GlColor(0xffe08030));
+            switches::draw_toggle(&mut parts, rect(lay.switch), warm, switches::ToggleStyle::Bat, GlColor(0xffe08030));
             parts.text(
-                openplugin::dri::goodlookindri::scene::Point::new(SWITCH.0 + SWITCH.2 * 0.5, SWITCH.1 + SWITCH.3 + 16.0),
+                openplugin::dri::goodlookindri::scene::Point::new(lay.legend.0, lay.legend.1),
                 "WARM",
                 GlColor(0xffffffff),
-                11.0,
+                11.0 * lay.scale,
                 true,
             );
-            meters::draw_led_ladder(&mut parts, rect(METER), false, level_db, level_db, 16);
+            meters::draw_led_ladder(&mut parts, rect(lay.meter), false, level_db, level_db, 16);
             dl.append(parts);
         })
     }
 
     fn mouse_down(&mut self, x: f32, y: f32, clicks: u32) {
-        if inside(KNOB, x, y) {
+        let lay = layout(self.size.0, self.size.1);
+        if inside(lay.knob, x, y) {
             if clicks >= 2 {
                 self.values[0] = PARAMS[0].default;
                 self.host.set(0, self.values[0]);
@@ -245,15 +297,19 @@ impl Editor for GainEditor {
             }
             self.host.begin(0);
             self.drag = Some((y, PARAMS[0].to_normalized(self.values[0])));
-        } else if inside(SWITCH, x, y) {
+        } else if inside(lay.switch, x, y) {
             self.values[1] = if self.values[1] > 0.5 { 0.0 } else { 1.0 };
             self.host.set(1, self.values[1]);
+        } else if clicks >= 2 && !inside(lay.meter, x, y) {
+            // The bare plate: ask the host to switch between the two sizes.
+            let (w, h) = if self.size.0 >= LARGE_SIZE.0 { (WIDTH, HEIGHT) } else { LARGE_SIZE };
+            self.host.request_resize(&self.size_range(), w, h);
         }
     }
 
     fn mouse_move(&mut self, _x: f32, y: f32) {
         if let Some((start_y, start)) = self.drag {
-            let t = (start + (start_y - y) / DRAG_RANGE).clamp(0.0, 1.0);
+            let t = (start + (start_y - y) / (DRAG_RANGE * layout(self.size.0, self.size.1).scale)).clamp(0.0, 1.0);
             let v = PARAMS[0].from_normalized(t);
             if v != self.values[0] {
                 self.values[0] = v;
