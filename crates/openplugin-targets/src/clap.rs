@@ -1564,9 +1564,13 @@ fn editor_host_for(instance: &Instance) -> openplugin_core::EditorHost {
 
 #[cfg(target_os = "macos")]
 mod gui {
-    //! `clap.gui` on macOS: the editor in an `NSView`, embedded, fixed size.
+    //! `clap.gui` on macOS: the editor in an `NSView`, embedded. The window
+    //! is as resizable as the editor says: `can_resize`, `get_resize_hints`,
+    //! `adjust_size` and `set_size` follow its `SizeRange`, and the editor can
+    //! ask the host for a size through `clap_host_gui::request_resize`.
     use super::*;
     use openplugin_core::{Editor, ValueMirror};
+    use openplugin_core::editor::SizeRange;
     use openplugin_dri::cocoa::EditorView;
 
     pub(super) struct Gui {
@@ -1599,7 +1603,17 @@ mod gui {
         let Some(instance) = instance(plugin) else { return false };
         let Some(factory) = editor_factory() else { return false };
         instance.gui = None;
-        let Some(mut editor) = factory(editor_host_for(instance)) else { return false };
+        // The host's gui extension, if any: how the editor asks for a size.
+        let host = instance.host;
+        let host_gui = host_call(host, EXT_GUI) as *const clap_host_gui;
+        let request = move |w: u32, h: u32| -> bool {
+            let Some(gui) = (unsafe { host_gui.as_ref() }) else { return false };
+            match gui.request_resize {
+                Some(f) => unsafe { f(host, w, h) },
+                None => false,
+            }
+        };
+        let Some(mut editor) = factory(editor_host_for(instance).with_resize(request)) else { return false };
         editor.bind(instance.editor_state.clone());
         let plane = instance.plane.clone();
         let mut mirror = ValueMirror::new(plane.len());
@@ -1642,20 +1656,57 @@ mod gui {
         true
     }
 
-    unsafe extern "C" fn can_resize(_plugin: *const clap_plugin) -> bool {
-        false
+    fn range(plugin: *const clap_plugin) -> Option<SizeRange> {
+        instance(plugin).and_then(|inst| inst.gui.as_ref()).map(|gui| gui.view.size_range())
     }
 
-    unsafe extern "C" fn get_resize_hints(_plugin: *const clap_plugin, _hints: *mut clap_gui_resize_hints) -> bool {
-        false
+    unsafe extern "C" fn can_resize(plugin: *const clap_plugin) -> bool {
+        range(plugin).is_some_and(|r| !r.is_fixed())
     }
 
+    unsafe extern "C" fn get_resize_hints(plugin: *const clap_plugin, hints: *mut clap_gui_resize_hints) -> bool {
+        let Some(r) = range(plugin) else { return false };
+        if hints.is_null() || r.is_fixed() {
+            return false;
+        }
+        let (aw, ah) = r.aspect_ratio().unwrap_or((0, 0));
+        unsafe {
+            *hints = clap_gui_resize_hints {
+                can_resize_horizontally: r.can_resize_horizontally(),
+                can_resize_vertically: r.can_resize_vertically(),
+                preserve_aspect_ratio: aw > 0,
+                aspect_ratio_width: aw,
+                aspect_ratio_height: ah,
+            };
+        }
+        true
+    }
+
+    /// The size nearest to the one proposed that the editor takes.
     unsafe extern "C" fn adjust_size(plugin: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool {
-        unsafe { get_size(plugin, width, height) }
+        let Some(r) = range(plugin) else { return false };
+        if width.is_null() || height.is_null() {
+            return false;
+        }
+        unsafe {
+            let (w, h) = r.clamp(*width, *height);
+            *width = w;
+            *height = h;
+        }
+        true
     }
 
+    /// Take a size inside the editor's bounds. A fixed editor takes its own
+    /// size only. The aspect is a hint (`adjust_size` gives sizes that keep
+    /// it), so a size inside the bounds with another shape is taken too.
     unsafe extern "C" fn set_size(plugin: *const clap_plugin, width: u32, height: u32) -> bool {
-        size(plugin) == Some((width, height))
+        let Some(inst) = instance(plugin) else { return false };
+        let Some(gui) = inst.gui.as_ref() else { return false };
+        if !gui.view.size_range().contains(width, height) {
+            return false;
+        }
+        gui.view.resize(width, height);
+        true
     }
 
     unsafe extern "C" fn set_parent(plugin: *const clap_plugin, window: *const clap_window) -> bool {
@@ -2164,6 +2215,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<clap_event_param_gesture>(), 20);
         assert_eq!(std::mem::size_of::<clap_window>(), 2 * std::mem::size_of::<usize>());
         assert_eq!(std::mem::size_of::<clap_gui_resize_hints>(), 12);
+        assert_eq!(std::mem::size_of::<clap_host_gui>(), 5 * std::mem::size_of::<usize>());
         use crate::clap_abi::{clap_audio_ports_config, clap_event_transport};
         assert_eq!(std::mem::size_of::<clap_event_transport>(), 104);
         assert_eq!(std::mem::offset_of!(clap_event_transport, bar_number), 96);

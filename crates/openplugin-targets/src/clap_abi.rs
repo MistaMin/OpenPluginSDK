@@ -437,3 +437,16 @@ pub struct clap_plugin_gui {
     pub show: Option<unsafe extern "C" fn(plugin: *const clap_plugin) -> bool>,
     pub hide: Option<unsafe extern "C" fn(plugin: *const clap_plugin) -> bool>,
 }
+
+/// `clap_host_gui`: what the host offers a plugin's window under `clap.gui`
+/// (the same id as the plugin side, `EXT_GUI`).
+#[repr(C)]
+pub struct clap_host_gui {
+    pub resize_hints_changed: Option<unsafe extern "C" fn(host: *const clap_host)>,
+    /// The plugin wants this size. If the host agrees it returns true and
+    /// then calls the plugin's `set_size`.
+    pub request_resize: Option<unsafe extern "C" fn(host: *const clap_host, width: u32, height: u32) -> bool>,
+    pub request_show: Option<unsafe extern "C" fn(host: *const clap_host) -> bool>,
+    pub request_hide: Option<unsafe extern "C" fn(host: *const clap_host) -> bool>,
+    pub closed: Option<unsafe extern "C" fn(host: *const clap_host, was_destroyed: bool)>,
+}
