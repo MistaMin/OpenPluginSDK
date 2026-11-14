@@ -38,7 +38,7 @@ Class IDs are 16 bytes from a 128-bit mix of the plugin id. VST3 prints them wit
 
 ## Plugin state
 
-`op_shell_save_state` and `op_shell_load_state` carry the whole plugin state across the ABI: the parameter plane and the plugin's own chunk (`Plugin::save_state` / `load_state`) in one opaque blob, the OPCH session of `openplugin_core::encode_session`. A shell stores the blob as its host state and hands it back later. The VST3 shell (see VST3 state) and the Audio Unit shell (see Audio Unit state) call them. The AAX shell does not yet and saves parameter values only.
+`op_shell_save_state` and `op_shell_load_state` carry the whole plugin state across the ABI: the parameter plane and the plugin's own chunk (`Plugin::save_state` / `load_state`) in one opaque blob, the OPCH session of `openplugin_core::encode_session`. A shell stores the blob as its host state and hands it back later. The VST3 shell (see VST3 state), the Audio Unit shell (see Audio Unit state) and the AAX shell (its state chunk, payload version 2) call them.
 
 ```c
 uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, uint32_t* needed);
