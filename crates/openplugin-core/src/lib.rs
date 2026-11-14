@@ -587,6 +587,31 @@ pub trait Plugin: Send + 'static {
         None
     }
 
+    /// Whether the plugin's whole state lives in its parameters.
+    ///
+    /// Return `true` only when [`Plugin::save_state`] always returns `None`
+    /// and [`Plugin::load_state`] is never needed: nothing outside the
+    /// parameter values has to be saved or restored. The default is `false`,
+    /// because the SDK cannot tell from outside whether a plugin overrides
+    /// the two state methods, and a wrong guess would silently drop a
+    /// plugin's chunk.
+    ///
+    /// The shells (VST3, Audio Unit, AAX) save and load state from a host
+    /// thread while the audio thread may be running. A plugin that answers
+    /// `false` has its state methods called on the plugin object, so a block
+    /// that starts during a save or load is passed through unprocessed (a
+    /// dry block). A plugin that answers `true` is never touched by a save
+    /// or load: the SDK reads and writes the parameter values it already
+    /// shares with the audio thread, so no block is skipped. The engine
+    /// picks up loaded values on its next block.
+    ///
+    /// With `true`, a chunk found in a saved session is ignored; the
+    /// parameter values are still restored. The answer must not change
+    /// during the plugin's life: it is read once, when the instance is built.
+    fn state_is_parameters_only(&self) -> bool {
+        false
+    }
+
     /// Serializes plugin state into an opaque byte buffer.
     fn save_state(&mut self) -> Option<Vec<u8>> {
         None

@@ -193,6 +193,10 @@ impl Plugin for Pair {
             }
         }
     }
+    // Declares its state is its parameters, so state calls must never reach it.
+    fn state_is_parameters_only(&self) -> bool {
+        true
+    }
     fn save_state(&mut self) -> Option<Vec<u8>> {
         PAIR_STATE_CALLS.fetch_add(1, Ordering::SeqCst);
         None

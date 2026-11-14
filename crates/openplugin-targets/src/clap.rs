@@ -182,8 +182,8 @@ struct Instance {
     gate: AtomicU32,
     /// Serialises state calls against each other (the host calls them on the main thread).
     state_lock: Mutex<()>,
-    /// `Plugin::save_state` returned a chunk when probed on the main thread. When false
-    /// the state is the parameters alone and state calls never touch `inner`.
+    /// The plugin may have a chunk: `!Plugin::state_is_parameters_only()`, read once.
+    /// When false the state is the parameters alone and state calls never touch `inner`.
     has_chunk: bool,
     info: &'static PluginInfo,
     cursor: ParamCursor,
@@ -491,7 +491,6 @@ unsafe extern "C" fn plugin_activate(plugin: *const clap_plugin, sample_rate: f6
     instance.buffers = vec![vec![0.0; max_block]; main];
     instance.sidechain = vec![vec![0.0; max_block]; side];
     instance.inner.prepare_layout(rate, max_block, layout);
-    instance.has_chunk = instance.inner.save_state().is_some();
     instance.cursor.invalidate();
     instance.cursor.pull(&instance.plane, instance.inner.as_mut());
     sync_bypass(instance);
@@ -1512,7 +1511,7 @@ fn feature_labels(plugin: &dyn Plugin) -> Vec<&'static str> {
     labels
 }
 
-fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
+fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
     let info = inner.info();
     let labels = feature_labels(inner.as_ref());
     let reported_latency = inner.latency().min(u32::MAX as usize) as u32;
@@ -1533,7 +1532,10 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
     let plane = Arc::new(ParamPlane::new(info));
     plane.seed_from(inner.as_ref());
     let cursor = ParamCursor::new(plane.len());
-    let has_chunk = inner.save_state().is_some();
+    // The same rule as the shells: only a plugin that declares its state is its
+    // parameters skips the gate. Probing `save_state` would miss a chunk that
+    // appears later.
+    let has_chunk = !inner.state_is_parameters_only();
     let editor_state = inner.editor_state();
     let instance = Box::new(Instance {
         plugin: clap_plugin {

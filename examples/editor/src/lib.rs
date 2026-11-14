@@ -81,6 +81,12 @@ impl Default for EditorGain {
 }
 
 impl Plugin for EditorGain {
+    // All of this plugin's state is its parameters: saves and loads never
+    // touch the engine, so a host saving during playback skips no block.
+    fn state_is_parameters_only(&self) -> bool {
+        true
+    }
+
     fn info(&self) -> &'static PluginInfo {
         &INFO
     }

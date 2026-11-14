@@ -165,6 +165,9 @@ pub struct FfiInstance {
     presets: Vec<PresetEntry>,
     /// [`Plugin::editor_state`], taken once at creation.
     editor_state: Option<EditorState>,
+    /// [`Plugin::state_is_parameters_only`], read once: save and load then use
+    /// the parameter plane alone and never take the gate.
+    state_in_params: bool,
     /// Seconds of tail as `f64` bits, refreshed after every block.
     tail: AtomicU64,
     /// `GATE_AUDIO` while a block runs, `GATE_STATE` while a state call holds
@@ -194,6 +197,7 @@ impl FfiInstance {
         let info = plugin.info();
         let presets = collect_presets(plugin.as_ref());
         let editor_state = plugin.editor_state();
+        let state_in_params = plugin.state_is_parameters_only();
         let plane = ParamPlane::new(info);
         plane.seed_from(plugin.as_ref());
         let max_block = max_block.clamp(1, 65_536);
@@ -232,6 +236,7 @@ impl FfiInstance {
             info,
             presets,
             editor_state,
+            state_in_params,
             tail: AtomicU64::new(tail.to_bits()),
             gate: AtomicU32::new(0),
             state_lock: Mutex::new(()),
@@ -450,6 +455,12 @@ impl FfiInstance {
     /// allocates; blocks at most [`STATE_WAIT`]. Safe beside the audio thread:
     /// blocks that start meanwhile are skipped (dry).
     pub fn try_save_bytes(&self) -> Option<Vec<u8>> {
+        if self.state_in_params {
+            // The whole state is the plane, which the audio thread only reads:
+            // no gate, so no block is skipped.
+            let values: Vec<f32> = (0..self.plane.len()).map(|index| self.load_param(index)).collect();
+            return Some(encode_session(self.info, &values, &[]));
+        }
         self.with_exclusive(|audio| {
             catch_unwind(AssertUnwindSafe(|| {
                 // The chunk should describe the values the plane holds now.
@@ -477,6 +488,15 @@ impl FfiInstance {
         let Some(session) = decode_session(self.info, bytes) else {
             return false;
         };
+        if self.state_in_params {
+            // Validated whole above; the engine pulls the new values on its
+            // next block. A chunk in the session is ignored: the plugin
+            // declared it has none.
+            for (index, value) in session.values.iter().enumerate() {
+                self.plane.store(index, *value);
+            }
+            return true;
+        }
         self.with_exclusive(|audio| {
             let applied = catch_unwind(AssertUnwindSafe(|| {
                 session.chunk.is_empty() || audio.inner.load_state(&session.chunk)
