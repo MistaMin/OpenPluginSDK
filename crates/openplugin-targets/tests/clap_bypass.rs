@@ -333,9 +333,9 @@ impl Host {
     /// absolute sample `n`.
     fn assert_last(&self, blocks: usize, what: &str, expected: fn(usize, usize) -> f32) {
         let end = self.position;
-        for ch in 0..2 {
-            for n in end - blocks * BLOCK..end {
-                let got = self.output[ch][n];
+        let start = end - blocks * BLOCK;
+        for (ch, channel) in self.output.iter().enumerate().take(2) {
+            for (n, &got) in channel.iter().enumerate().take(end).skip(start) {
                 let want = expected(ch, n);
                 assert!(
                     (got - want).abs() < 1e-5,
