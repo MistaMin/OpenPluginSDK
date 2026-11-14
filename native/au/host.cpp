@@ -153,6 +153,9 @@ int main(int argc, char** argv) {
         CFPropertyListRef saved = nullptr;
         UInt32 savedSize = sizeof(saved);
         CHECK(AudioUnitGetProperty(unit, kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global, 0, &saved, &savedSize) == noErr && saved);
+        // The shell's state blob rides in the dictionary beside the base keys.
+        CHECK(CFDictionaryGetValue(static_cast<CFDictionaryRef>(saved), CFSTR("OpenPluginState")) != nullptr);
+        CHECK(CFGetTypeID(CFDictionaryGetValue(static_cast<CFDictionaryRef>(saved), CFSTR("OpenPluginState"))) == CFDataGetTypeID());
         const double changedGain = std::fabs(gainDesc.min - testGain) > 0.5 ? gainDesc.min : gainDesc.max;
         CHECK(AudioUnitSetParameter(unit, gainId, kAudioUnitScope_Global, 0, static_cast<AudioUnitParameterValue>(changedGain), 0) == noErr);
         CHECK(AudioUnitSetParameter(unit, warmId, kAudioUnitScope_Global, 0, 1.0f, 0) == noErr);

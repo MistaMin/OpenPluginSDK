@@ -29,6 +29,16 @@ inline OSStatus proof_render_input(void*, AudioUnitRenderActionFlags*, const Aud
     return noErr;
 }
 
+/// The bundle proof_register_component loaded last, for proofs that call a test hook the
+/// bundle exports.
+inline CFBundleRef gProofBundle = nullptr;
+inline void* proof_bundle_symbol(const char* name) {
+    CFStringRef key = CFStringCreateWithCString(nullptr, name, kCFStringEncodingUTF8);
+    void* symbol = gProofBundle ? CFBundleGetFunctionPointerForName(gProofBundle, key) : nullptr;
+    CFRelease(key);
+    return symbol;
+}
+
 /// Registers the factory named in the bundle's plist, in this process only.
 inline AudioComponent proof_register_component(const char* bundle_path) {
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(bundle_path), static_cast<CFIndex>(std::strlen(bundle_path)), true);
@@ -36,6 +46,7 @@ inline AudioComponent proof_register_component(const char* bundle_path) {
     CFBundleRef bundle = CFBundleCreate(nullptr, url);
     CFRelease(url);
     CHECK(bundle && CFBundleLoadExecutable(bundle));
+    gProofBundle = bundle;
     CFDictionaryRef info = CFBundleGetInfoDictionary(bundle);
     CFArrayRef components = static_cast<CFArrayRef>(CFDictionaryGetValue(info, CFSTR("AudioComponents")));
     CHECK(components && CFArrayGetCount(components) == 1);
