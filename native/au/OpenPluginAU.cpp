@@ -3,6 +3,7 @@
 // Cocoa view (OpenPluginAUView.mm); without it a host shows its generic view.
 #include "op_shell.h"
 #include "OpenPluginAUBridge.h"
+#include <memory>
 #include <mutex>
 #include <AudioUnitSDK/AUEffectBase.h>
 #include <algorithm>
@@ -20,6 +21,12 @@ std::vector<void*> gLive;
 #endif
 struct CachedParam {
     OpParamDesc desc;
+};
+// The shell's own key in the kAudioUnitProperty_ClassInfo dictionary. The value is the
+// opaque blob of op_shell_save_state, as CFData. The base class's keys stay as they are.
+#define OP_AU_STATE_KEY CFSTR("OpenPluginState")
+struct EngineDeleter {
+    void operator()(void* engine) const { op_shell_destroy(engine); }
 };
 class OpenPluginAU final : public ausdk::AUEffectBase {
 public:
@@ -109,6 +116,13 @@ public:
         }
         op_shell_reset(engine_);
         resetPending_.store(false, std::memory_order_relaxed);
+        // A state restored while uninitialized (or kept over Uninitialize) goes in now. It was
+        // checked when it arrived, so a refusal here is not expected. The parameters need no
+        // sync: the unit's values are already the blob's, and the render thread pushes them.
+        if (!pending_.empty()) {
+            op_shell_load_state(engine_, pending_.data(), static_cast<uint32_t>(pending_.size()));
+            pending_.clear();
+        }
         // Bypass state is sized here, on the message thread, so the render thread never allocates.
         latency_ = op_shell_latency(engine_);
         delayPos_ = 0;
@@ -119,6 +133,12 @@ public:
         return noErr;
     }
     void Cleanup() override {
+        // Uninitialize drops the engine; keep its state for the next Initialize. Main thread,
+        // the host has stopped rendering.
+        if (engine_) {
+            std::vector<uint8_t> blob;
+            if (saveBlob(engine_, blob)) pending_ = std::move(blob);
+        }
         destroy();
         AUEffectBase::Cleanup();
     }
@@ -137,6 +157,63 @@ public:
             return noErr;
         }
         return AUEffectBase::SetProperty(id, scope, element, data, size);
+    }
+    // kAudioUnitProperty_ClassInfo: the base dictionary plus the plugin's whole state under
+    // OP_AU_STATE_KEY. Without an engine the state held since the last restore is written.
+    // If the plugin cannot save, the key is left out and the parameters still save.
+    OSStatus SaveState(CFPropertyListRef* out) override {
+        const OSStatus status = AUEffectBase::SaveState(out);
+        if (status != noErr) return status;
+        std::vector<uint8_t> blob;
+        bool have = false;
+        if (engine_) have = saveBlob(engine_, blob);
+        else if (!pending_.empty()) {
+            blob = pending_;
+            have = true;
+        }
+        if (have) {
+            CFDataRef data = CFDataCreate(nullptr, blob.data(), static_cast<CFIndex>(blob.size()));
+            if (data) {
+                CFDictionarySetValue(reinterpret_cast<CFMutableDictionaryRef>(const_cast<void*>(*out)), OP_AU_STATE_KEY, data);
+                CFRelease(data);
+            }
+        }
+        return noErr;
+    }
+    // Key present: the blob goes through op_shell_load_state first, and a refused blob
+    // refuses the whole dictionary (kAudioUnitErr_InvalidPropertyValue) and changes nothing,
+    // the base dictionary's parameters included. Accepted, the base keys are restored and
+    // then the parameters are read back from the engine, so the blob wins over the base
+    // dictionary. If the base class then fails, the previous state is put back.
+    // Key absent (an old preset): the base restore only; the plugin's chunk is left alone.
+    // Without an engine the blob is checked on a scratch engine, held until Initialize.
+    OSStatus RestoreState(CFPropertyListRef plist) override {
+        if (!plist || CFGetTypeID(plist) != CFDictionaryGetTypeID()) return AUEffectBase::RestoreState(plist);
+        const void* value = CFDictionaryGetValue(static_cast<CFDictionaryRef>(plist), OP_AU_STATE_KEY);
+        if (!value) return AUEffectBase::RestoreState(plist);
+        if (CFGetTypeID(value) != CFDataGetTypeID()) return kAudioUnitErr_InvalidPropertyValue;
+        const auto data = static_cast<CFDataRef>(value);
+        const CFIndex length = CFDataGetLength(data);
+        if (length <= 0 || static_cast<unsigned long long>(length) > 0xFFFFFFFFull) return kAudioUnitErr_InvalidPropertyValue;
+        const uint8_t* bytes = CFDataGetBytePtr(data);
+        const auto size = static_cast<uint32_t>(length);
+        if (engine_) {
+            std::vector<uint8_t> before;
+            const bool haveBefore = saveBlob(engine_, before);
+            if (!op_shell_load_state(engine_, bytes, size)) return kAudioUnitErr_InvalidPropertyValue;
+            const OSStatus status = AUEffectBase::RestoreState(plist);
+            if (status != noErr && haveBefore) op_shell_load_state(engine_, before.data(), static_cast<uint32_t>(before.size()));
+            syncParameters(engine_);
+            return status;
+        }
+        const double rate = GetSampleRate();
+        std::unique_ptr<void, EngineDeleter> scratch(op_shell_create(rate > 0.0 ? rate : 44100.0, 512, 2));
+        if (!scratch || !op_shell_load_state(scratch.get(), bytes, size)) return kAudioUnitErr_InvalidPropertyValue;
+        const OSStatus status = AUEffectBase::RestoreState(plist);
+        if (status != noErr) return status;
+        syncParameters(scratch.get());
+        pending_.assign(bytes, bytes + size);
+        return noErr;
     }
     OSStatus Reset(AudioUnitScope scope, AudioUnitElement element) override {
         // A host may call this from its main thread while the render thread is
@@ -287,6 +364,30 @@ private:
         }
         mix_ = mix;
     }
+    // The engine's whole state, by the size-query protocol: ask, allocate, copy, and ask again
+    // while the state grew in between. Main thread only.
+    // The unit's parameter values are the truth, and the engine only sees them at the next
+    // block, so they are stored first (set_plain is an atomic store, as the render thread's).
+    bool saveBlob(void* engine, std::vector<uint8_t>& blob) {
+        for (uint32_t i = 0; i < params_.size(); ++i) {
+            const float plain = GetParameter(i);
+            if (std::isfinite(plain)) op_shell_set_plain(engine, i, plain);
+        }
+        uint32_t needed = 0;
+        uint32_t result = op_shell_save_state(engine, nullptr, 0, &needed);
+        for (int attempt = 0; attempt < 8 && result == OP_STATE_TOO_SMALL; ++attempt) {
+            blob.assign(needed, 0);
+            result = op_shell_save_state(engine, blob.data(), needed, &needed);
+        }
+        if (result != OP_STATE_OK) return false;
+        blob.resize(needed);
+        return true;
+    }
+    // Makes the unit's parameter values the engine's. The render thread pushes the unit's
+    // values into the engine every block, so after a restore they must agree.
+    void syncParameters(void* engine) {
+        for (uint32_t i = 0; i < params_.size(); ++i) Globals()->SetParameter(i, op_shell_get_plain(engine, i));
+    }
     void destroy() {
         if (engine_) {
             op_shell_destroy(engine_);
@@ -306,6 +407,8 @@ private:
     std::vector<float> delay_;
     std::vector<float> dry_;
     std::vector<CachedParam> params_;
+    // A blob accepted while there was no engine, loaded at the next Initialize.
+    std::vector<uint8_t> pending_;
 };
 AUSDK_COMPONENT_ENTRY(ausdk::AUBaseFactory, OpenPluginAU)
 }

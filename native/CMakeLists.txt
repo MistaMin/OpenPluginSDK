@@ -265,6 +265,33 @@ if(OP_BUILD_AU)
     # Allocation with a non-zero latency: the delay line runs.
     add_test(NAME au_alloc_latency_proof COMMAND AUAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginAULatency>")
     set_tests_properties(au_alloc_latency_proof PROPERTIES DEPENDS au_bypass_proof)
+    # Plugin state through kAudioUnitProperty_ClassInfo, over a stand-in with a chunk of its own.
+    function(op_au_state_plist)
+      set(OP_PRODUCT "StateTest")
+      set(OP_BUNDLE_ID "com.opengrid.test.state")
+      set(OP_VERSION "1")
+      set(OP_MANUFACTURER "OpenPlugin")
+      set(OP_AU_SUBTYPE "StTs")
+      set(OP_AU_MANUFACTURER "OpTs")
+      configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-state-Info.plist" @ONLY)
+    endfunction()
+    op_au_state_plist()
+    add_library(OpenPluginAUState MODULE au/OpenPluginAU.cpp au/state_shell.cpp)
+    target_compile_features(OpenPluginAUState PRIVATE cxx_std_23)
+    target_include_directories(OpenPluginAUState PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+    set_target_properties(OpenPluginAUState PROPERTIES
+      OUTPUT_NAME "StateTest"
+      BUNDLE TRUE
+      BUNDLE_EXTENSION component
+      PREFIX ""
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-state-Info.plist")
+    target_link_libraries(OpenPluginAUState PRIVATE openplugin_au_sdk)
+    add_executable(AUStateProof au/state_host.cpp)
+    target_compile_features(AUStateProof PRIVATE cxx_std_23)
+    target_include_directories(AUStateProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(AUStateProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+    add_dependencies(AUStateProof OpenPluginAUState)
+    add_test(NAME au_state_proof COMMAND AUStateProof "$<TARGET_BUNDLE_DIR:OpenPluginAUState>")
   endif()
 endif()
 
