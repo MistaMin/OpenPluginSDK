@@ -6,9 +6,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/openplugin-dsp"
+readme = "README.md"
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 openplugin-core = { workspace = true }
-serde = { workspace = true }
 rustfft = { workspace = true }
-log = { workspace = true }
