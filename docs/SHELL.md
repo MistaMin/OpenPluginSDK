@@ -30,10 +30,37 @@ The crate type includes `staticlib`. The native build links that archive. It doe
 | `op_shell_destroy`, `op_shell_reset` | message, while inactive | `destroy` frees |
 | `op_shell_set_plain`, `op_shell_set_normalized` | audio | no |
 | `op_shell_process` | audio | no |
+| `op_shell_save_state`, `op_shell_load_state` | message, any time | yes (the blob) |
 
 `process` copies through scratch allocated in `create`, so an input pointer may be the output pointer. A null right pointer is mono. A block longer than the size passed to `create` fails. The adapters split a host block into that size. The prepared size is at most 65536 frames, and the AAX callback uses 2048.
 
 Class IDs are 16 bytes from a 128-bit mix of the plugin id. VST3 prints them with `FUID::toString`, 32 hex digits. The processor id and the controller id differ. AAX manufacturer, product, mono, and stereo ids are four-byte values from that mix with bit `0x20` set in each byte so none is zero.
+
+## Plugin state
+
+`op_shell_save_state` and `op_shell_load_state` carry the whole plugin state across the ABI: the parameter plane and the plugin's own chunk (`Plugin::save_state` / `load_state`) in one opaque blob, the OPCH session of `openplugin_core::encode_session`. A shell stores the blob as its host state and hands it back later. The shells do not call these yet; today they save parameter values only.
+
+```c
+uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, uint32_t* needed);
+uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t length);
+// op_shell_save_state results: OP_STATE_FAILED 0, OP_STATE_OK 1, OP_STATE_TOO_SMALL 2
+```
+
+- Save: `out` NULL with `capacity` 0 is a size query. The call returns `OP_STATE_TOO_SMALL` and writes the length to `*needed` (which may be NULL). Allocate that many bytes and call again. `OP_STATE_OK` means the blob is written and `*needed` is its length. If the state grew in between, the second call returns `OP_STATE_TOO_SMALL` again with the new size, so loop until OK. A short buffer is never written. `OP_STATE_FAILED` is a null instance, a null `out` with capacity above 0, a plugin that panics, a state over 4 GiB, or a timeout (below).
+- Load: returns 1 or 0. It is all or nothing. The envelope (magic, version, every length, the parameter count, finite values) is checked before the plugin is touched. A corrupt, truncated, extended or foreign blob, an empty one, a null pointer, or a chunk the plugin's `load_state` refuses returns 0 and leaves the parameters and the plugin as they were. A plugin whose `load_state` returns false must have changed nothing itself: the SDK cannot undo a plugin's partial write. A bare OPST parameter plane (what the shells wrote before) still loads, and leaves the plugin's chunk alone.
+- ABI: `OP_SHELL_ABI` stays 1. Nothing existing changed, and a shell that does not call the new symbols builds as before. Both are declared in `op_shell.h` without a guard; a plugin built with `export_shell!` always exports them.
+
+### Threading
+
+A host calls get and set state on the main thread while its audio thread may be inside `op_shell_process`. `Plugin::save_state` takes `&mut self`, so a state call needs the plugin object to itself. One atomic gate decides who has it, and the audio thread never waits:
+
+- `op_shell_process` (and `op_shell_reset`) enter the gate with one compare-exchange, no lock and no allocation. If a state call holds or has asked for the gate, the block is skipped: the input is copied to the output (a dry block, a null right input follows the left), the plugin is not entered, and `process` still returns 1. A `reset` that cannot enter is remembered and runs at the start of the next block, so the Audio Unit's render-thread reset is safe beside a state call.
+- A state call takes a mutex against other state calls, sets a request bit, and waits for a block already in flight to end. New blocks see the request bit and skip, so a busy audio thread cannot starve it. The wait is bounded at 2 seconds (`openplugin_ffi::STATE_WAIT`); after that the call fails and changes nothing. The wait happens on the calling (main) thread only.
+- Request bit and in-flight bit are one atomic word: for any block and any state call, either the block sees the request and skips, or the call sees the block and waits. No block runs against a half-restored plugin; a load applies the chunk and the plane before it releases the gate, so the next block sees both.
+
+Cost: a block is lost (replaced by dry audio) only when it starts during a call, for as long as `save_state` or `load_state` takes. A host that needs gap-free audio calls these while the transport is stopped or the unit is inactive, when no block is running. Never call them from the audio thread: they allocate and may wait. Before a save the gate holder applies the parameter plane to the plugin, so the chunk matches the values saved beside it; after a load every parameter is pushed to the plugin again on the next block.
+
+The tests are `crates/openplugin-ffi/tests/shell_state.rs` (round trip, size protocol, hostile blobs), `shell_state_threads.rs` (a block during a held save is dry, a save waits for a block in flight, the bounded timeout, and two threads alternating two states against a rendering thread: no torn block, no torn blob) and `shell_state_no_alloc.rs` (zero allocations and frees on the audio thread while a save or a load holds the gate and during repeated calls).
 
 ## Editor
 
@@ -126,7 +153,7 @@ Run one proof to see its lines: `build-shell/VST3Proof "build-shell/Example Gain
 - Without `OP_EDITOR` there is no editor view: hosts use a generic parameter list, and the AAX view is an empty rectangle. The editor ABI is macOS (`NSView`) only.
 - The AAX shell has a page table only with `-DOP_AAX_PAGES=ON`: the build runs `OpenPluginAAXPages`, which writes `<Product>Pages.xml` into the bundle with the parameters in declared order. It needs manufacturer, product and plug-in IDs of four printable characters, so the plugin must set them; the hashed development IDs are refused. Without the option AAX Validator's `test.page_table.load` fails with "Failed to load page tables library".
 - AAX has no tail report. The tail contract is checked for VST3 and the Audio Unit only.
-- AAX state is one shell chunk (id `OpSt`, payload version 1; layout in `native/aax/OpenPluginAAXState.h`). It holds every parameter value and the master bypass, replaces the SDK's default chunk, and a chunk with the wrong length, magic, version, parameter layout, a non-finite or out-of-range value is refused without changing any parameter. It stores parameter values only: a plugin-owned state blob through the ABI is not part of it (a cross-format task). `aax_state_proof` drives the real chunk calls on parameter objects built without an AAX controller; Pro Tools itself does not take part.
+- AAX state is one shell chunk (id `OpSt`, payload version 1; layout in `native/aax/OpenPluginAAXState.h`). It holds every parameter value and the master bypass, replaces the SDK's default chunk, and a chunk with the wrong length, magic, version, parameter layout, a non-finite or out-of-range value is refused without changing any parameter. It stores parameter values only: the plugin-owned state the ABI now carries (see Plugin state) is not wired into it yet. `aax_state_proof` drives the real chunk calls on parameter objects built without an AAX controller; Pro Tools itself does not take part.
 - The AAX process callback allocates nothing; `aax_alloc_proof` checks it. The proof covers the callback and the Rust engine it calls, not `EffectInit` or `ResetFieldData`.
 - The AAX proofs (`aax_process_proof`, `aax_state_proof`, `aax_alloc_proof`, `aax_bundle_proof`) cannot run in CI. They link the Avid AAX SDK, which is not redistributable, so they run only on a machine that has the SDK checked out (`-DOP_AAX_SDK`).
 - AAX host latency is published by `AAX_CEffectParameters::EffectInit` through `SetSignalLatency`, which needs an AAX host controller. `aax_process_proof` checks that the process engine's `op_shell_latency` matches the ABI; it does not instantiate the AAX controller.
