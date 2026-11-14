@@ -204,15 +204,25 @@ export MACOSX_DEPLOYMENT_TARGET="$DEPLOY"
 # No build path in a binary. The unit separator is how cargo splits flags.
 SEP="$(printf '\037')"
 MANIFEST_DIR="$(dirname "$MANIFEST")"
+# Path dependencies usually sit next to the workspace, so its parent folder is
+# remapped too.
+WS_MANIFEST="$(cargo locate-project --workspace --message-format plain --manifest-path "$MANIFEST" 2>/dev/null || true)"
+if [ -n "$WS_MANIFEST" ]; then WS_ROOT="$(dirname "$WS_MANIFEST")"; else WS_ROOT="$MANIFEST_DIR"; fi
+WS_PARENT="$(dirname "$WS_ROOT")"
+if [ "$WS_PARENT" = / ]; then WS_PARENT="$WS_ROOT"; fi
+CARGO_DIR="${CARGO_HOME:-$HOME/.cargo}"
 # The last matching prefix wins, so the general ones come first.
-RF="--remap-path-prefix=$HOME=home${SEP}--remap-path-prefix=$SDK_ROOT=openplugin-sdk"
-RF="$RF${SEP}--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=cargo"
-RF="$RF${SEP}--remap-path-prefix=$MANIFEST_DIR=src${SEP}--remap-path-prefix=$WORK=build"
-export CARGO_ENCODED_RUSTFLAGS="$RF"
-FMAP=""
-for p in "$HOME=home" "$SDK_ROOT=openplugin-sdk" "$MANIFEST_DIR=src" "$WORK=build" "$VST3_SDK=vst3sdk" "$AU_SDK=ausdk" "$AAX_SDK=aaxsdk"; do
-  if [ -n "${p%%=*}" ]; then FMAP="$FMAP -ffile-prefix-map='${p%%=*}'=${p#*=}"; fi
+REMAPS=("$HOME=home" "$WS_PARENT=deps" "$SDK_ROOT=openplugin-sdk" "$CARGO_DIR=cargo" "$WS_ROOT=workspace"
+        "$MANIFEST_DIR=plugin" "$WORK=build")
+for sdk in "$VST3_SDK=vst3sdk" "$AU_SDK=ausdk" "$AAX_SDK=aaxsdk"; do
+  if [ -n "${sdk%%=*}" ]; then REMAPS+=("$sdk"); fi
 done
+RF=""; FMAP=""
+for r in "${REMAPS[@]}"; do
+  RF="${RF:+$RF$SEP}--remap-path-prefix=$r"
+  FMAP="$FMAP -ffile-prefix-map='${r%%=*}'=${r#*=}"
+done
+export CARGO_ENCODED_RUSTFLAGS="$RF"
 
 CARGO_FEATURES=()
 if [ -n "$FEATURES" ]; then CARGO_FEATURES=(--features "$FEATURES"); fi
@@ -294,7 +304,7 @@ fi
 
 if has_format lv2; then
   note "LV2"
-  B="$OUT/$NAME.lv2"
+  B="$OUT/$STEM.lv2"
   run rm -rf "$B"
   run mkdir -p "$B"
   run cp "$DYLIB" "$B/$STEM.dylib"
@@ -372,12 +382,14 @@ if [ -n "${NOTARY_PROFILE:-}" ]; then
   note "notarisation (notarytool profile from NOTARY_PROFILE)"
   run mkdir -p "$WORK/notary"
   for b in ${BUNDLES[@]+"${BUNDLES[@]}"}; do
+    # The LV2 library is submitted inside its folder, with the description files.
+    case "$b" in *.dylib) b="$(dirname "$b")" ;; esac
     z="$WORK/notary/$(basename "$b").zip"
     run rm -f "$z"
     run ditto -c -k --keepParent "$b" "$z"
     run xcrun notarytool submit "$z" --keychain-profile "$NOTARY_PROFILE" --wait
     case "$b" in
-      *.dylib) echo "(a bare library cannot hold a ticket; Gatekeeper checks it online)" ;;
+      *.lv2) echo "(an LV2 folder cannot hold a ticket; Gatekeeper checks it online)" ;;
       *) run xcrun stapler staple "$b" ;;
     esac
   done
@@ -394,7 +406,7 @@ if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
   # No build path in a shipped binary.
   for b in ${BUNDLES[@]+"${BUNDLES[@]}"}; do
     while IFS= read -r f; do
-      for p in "$WORK" "$MANIFEST_DIR" "$SDK_ROOT" "$HOME"; do
+      for p in "$WORK" "$WS_PARENT" "$MANIFEST_DIR" "$SDK_ROOT" "$HOME"; do
         if strings -a "$f" | grep -qF "$p"; then echo "path leak: $f contains $p"; leaks=1; fi
       done
     done < <(find "$b" -type f \( -perm -u+x -o -name '*.dylib' \))
