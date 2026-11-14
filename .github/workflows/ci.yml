@@ -247,3 +247,224 @@ jobs:
       - name: Run the Audio Unit proofs
         working-directory: OpenPluginSDK
         run: ctest --test-dir build-shell -R '^au_' --output-on-failure
+
+  # Third-party validators against the example. The Audio Unit is installed
+  # into the runner's own Components folder, which only a CI runner may do.
+  shell-validators:
+    name: auval and pluginval (VST3 and Audio Unit shells)
+    runs-on: macos-latest
+    timeout-minutes: 50
+    env:
+      # VST3 SDK v3.8.0_build_66, as in the vst3-shell job.
+      VST3_SDK_REF: v3.8.0_build_66
+      # pluginval 1.0.4, the latest release that is not a prerelease. The
+      # checksum is the SHA-256 of pluginval_macOS.zip, computed from the
+      # download itself; the release page publishes none for 1.0.4.
+      PLUGINVAL_URL: https://github.com/Tracktion/pluginval/releases/download/v1.0.4/pluginval_macOS.zip
+      PLUGINVAL_SHA256: 3c4c533bda0c5059eea3ddaea752d757ee2025041f0f47e6bcb0e87f6082b29f
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      # Pinned like GoodLookinDri in the other jobs.
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Check out the public VST3 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: steinbergmedia/vst3sdk
+          ref: ${{ env.VST3_SDK_REF }}
+          submodules: recursive
+          path: vst3sdk
+      - name: Check out AudioUnitSDK
+        uses: actions/checkout@v4
+        with:
+          repository: apple/AudioUnitSDK
+          ref: ${{ env.AUDIOUNITSDK_REF }}
+          path: AudioUnitSDK
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      # Nothing from the download runs unless the checksum matches.
+      - name: Download pluginval and verify its checksum
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pluginval"
+          cd "$RUNNER_TEMP/pluginval"
+          curl --fail --silent --show-error --location --output pluginval.zip "$PLUGINVAL_URL"
+          echo "$PLUGINVAL_SHA256  pluginval.zip" | shasum -a 256 -c -
+          unzip -q pluginval.zip
+          ./pluginval.app/Contents/MacOS/pluginval --version
+      - name: Build the example plugin as a static library
+        working-directory: OpenPluginSDK
+        run: cargo build --release --lib -p example-editor
+      # VST3 and Audio Unit shells, product "Example Gain" (AU aufx ExGn OpGd).
+      - name: Configure the shells
+        working-directory: OpenPluginSDK
+        run: >
+          cmake -S native -B build-shell -DCMAKE_BUILD_TYPE=Release
+          -DOP_RUST_LIB="$PWD/target/release/libexample_editor.a"
+          -DOP_VST3_SDK="$GITHUB_WORKSPACE/vst3sdk"
+          -DOP_AU_SDK="$GITHUB_WORKSPACE/AudioUnitSDK"
+          -DOP_BUILD_AAX=OFF
+          -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example
+          -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid
+          -DOP_AU_SUBTYPE=ExGn -DOP_AU_MANUFACTURER=OpGd
+          -DOP_TAIL=ON -DOP_EDITOR=OFF
+      - name: Build the shells
+        working-directory: OpenPluginSDK
+        run: cmake --build build-shell -j 2
+      # The build folder also holds test stand-ins (LatencyTest.component,
+      # Latency Stub.vst3). Only "Example Gain" is installed.
+      - name: Install the Audio Unit on the runner
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          dir="$HOME/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$dir"
+          rm -rf "$dir/Example Gain.component"
+          ditto "build-shell/Example Gain.component" "$dir/Example Gain.component"
+          codesign --verify --verbose "$dir/Example Gain.component"
+          # Make the system notice the new component, then wait until the
+          # registry lists it (aufx ExGn OpGd).
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          for i in $(seq 1 30); do
+            if auval -a | grep -q 'aufx ExGn OpGd'; then
+              echo "registered after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Example Gain was not registered within 30 s" >&2
+          auval -a >&2 || true
+          exit 1
+      # auval exits non-zero on a failed test. The log is also searched, so a
+      # run that prints a failure never passes on the exit code alone.
+      - name: auval
+        run: |
+          set -euo pipefail
+          auval -v aufx ExGn OpGd 2>&1 | tee "$RUNNER_TEMP/auval.log"
+          grep -q 'AU VALIDATION SUCCEEDED' "$RUNNER_TEMP/auval.log"
+          if grep -q 'FAIL' "$RUNNER_TEMP/auval.log"; then exit 1; fi
+      - name: auval -strict
+        run: |
+          set -euo pipefail
+          auval -strict -v aufx ExGn OpGd 2>&1 | tee "$RUNNER_TEMP/auval-strict.log"
+          grep -q 'AU VALIDATION SUCCEEDED' "$RUNNER_TEMP/auval-strict.log"
+          if grep -q 'FAIL' "$RUNNER_TEMP/auval-strict.log"; then exit 1; fi
+      # Strictness 10 is pluginval's maximum (it adds the long process, fuzz
+      # and multi-rate, multi-block-size runs on top of the host-compatibility
+      # level 5). The example passes it as a VST3 bundle, so nothing lower is
+      # worth asserting. --skip-gui-tests: the runner has no display and the
+      # shells here are built without an editor. pluginval exits non-zero when
+      # any test fails.
+      - name: pluginval on the VST3 bundle
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/pluginval/pluginval.app/Contents/MacOS/pluginval" \
+            --strictness-level 10 --skip-gui-tests \
+            --output-dir "$RUNNER_TEMP/pluginval-vst3" \
+            "OpenPluginSDK/build-shell/Example Gain.vst3"
+      # An Audio Unit is found through the installed component.
+      - name: pluginval on the Audio Unit
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/pluginval/pluginval.app/Contents/MacOS/pluginval" \
+            --strictness-level 10 --skip-gui-tests \
+            --output-dir "$RUNNER_TEMP/pluginval-au" \
+            "$HOME/Library/Audio/Plug-Ins/Components/Example Gain.component"
+      - name: Keep the validator logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validator-logs
+          path: |
+            ${{ runner.temp }}/pluginval-vst3
+            ${{ runner.temp }}/pluginval-au
+            ${{ runner.temp }}/auval.log
+            ${{ runner.temp }}/auval-strict.log
+          if-no-files-found: ignore
+
+  lv2-validate:
+    name: lv2_validate and lv2apply (examples/editor)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      # lv2 has lv2_validate and the specifications; lilv has lv2apply, lv2ls
+      # and the library a host loads plug-ins with.
+      - name: Install the LV2 tools
+        run: |
+          set -euo pipefail
+          brew install lv2 lilv
+          command -v lv2_validate lv2apply lv2ls
+      - name: Build the example and its LV2 description writer
+        working-directory: OpenPluginSDK
+        run: cargo build --release -p example-editor --lib --bin lv2_ttl
+      - name: Assemble the LV2 bundle
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/lv2/example_editor.lv2"
+          rm -rf "$RUNNER_TEMP/lv2"
+          mkdir -p "$bundle"
+          cp target/release/libexample_editor.dylib "$bundle/"
+          target/release/lv2_ttl "$bundle" libexample_editor
+          ls -l "$bundle"
+      # lv2_validate takes the TTL files by name, so it runs inside the bundle.
+      # It skips a file it cannot open and still prints "0 errors", so a
+      # skipped bundle file fails the step too.
+      - name: lv2_validate
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/lv2/example_editor.lv2"
+          lv2_validate manifest.ttl libexample_editor.ttl 2>&1 | tee "$RUNNER_TEMP/lv2_validate.log"
+          grep -q '^Found 0 errors' "$RUNNER_TEMP/lv2_validate.log"
+          if grep -Eq '^error|Skipping file .*example_editor' "$RUNNER_TEMP/lv2_validate.log"; then exit 1; fi
+      # Loads the dylib through lilv, instantiates the plugin and runs it. Gain
+      # +6 dB must roughly double a sine, which shows the audio went through.
+      - name: lv2apply
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lv2-audio"
+          cd "$RUNNER_TEMP/lv2-audio"
+          python3 -I - <<'PY'
+          import math, struct, wave
+          w = wave.open("in.wav", "wb")
+          w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
+          w.writeframes(b"".join(struct.pack("<hh", *(int(8000 * math.sin(i * 0.05)),) * 2) for i in range(4800)))
+          w.close()
+          PY
+          export LV2_PATH="$RUNNER_TEMP/lv2"
+          uri="$(lv2ls | grep 'examples/editor-gain$')"
+          test -n "$uri"
+          echo "plugin: $uri"
+          lv2apply -i in.wav -o out.wav -c gain 6 "$uri"
+          python3 -I - <<'PY'
+          import struct, wave
+          def peak(name):
+              w = wave.open(name)
+              frames = w.getnframes()
+              data = struct.unpack("<%dh" % (frames * w.getnchannels()), w.readframes(frames))
+              return frames, max(abs(s) for s in data)
+          frames_in, peak_in = peak("in.wav")
+          frames_out, peak_out = peak("out.wav")
+          print("in", frames_in, peak_in, "out", frames_out, peak_out)
+          assert frames_out == frames_in, "frame count changed"
+          assert 1.9 * peak_in <= peak_out <= 2.1 * peak_in, "+6 dB did not double the peak"
+          PY
