@@ -1,6 +1,24 @@
 # SPDX-License-Identifier: MIT
 # Thin VST3, Audio Unit, and AAX shells over a Rust staticlib that exports op_shell_*.
 # Does not sign, install, or copy an SDK into this tree.
+#
+# The proofs load the SDK example (examples/editor, "Editor Gain"). Build and
+# run them from the repository root; the SDK checkouts stay outside this tree:
+#
+#   CARGO_BUILD_JOBS=2 cargo build --release --lib -p example-editor
+#   cmake -S native -B build-shell -DCMAKE_BUILD_TYPE=Release \
+#     -DOP_RUST_LIB="$PWD/target/release/libexample_editor.a" \
+#     -DOP_VST3_SDK=/path/to/vst3sdk \
+#     -DOP_AU_SDK=/path/to/AudioUnitSDK \
+#     -DOP_AAX_SDK=/path/to/aax-sdk \
+#     -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
+#     -DOP_VERSION=0.3.0 -DOP_MANUFACTURER=OpenGrid \
+#     -DOP_AU_SUBTYPE=ExGn -DOP_AU_MANUFACTURER=OpGd \
+#     -DOP_TAIL=ON -DOP_EDITOR=OFF
+#   cmake --build build-shell -j 2
+#   ctest --test-dir build-shell --output-on-failure
+#
+# OP_TAIL=ON is what makes vst3_proof and au_proof exercise the tail report.
 cmake_minimum_required(VERSION 3.20)
 project(OpenPluginShell LANGUAGES C CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 17)
@@ -50,14 +68,15 @@ function(op_link_rust target_name)
     "-framework Security"
     "-framework SystemConfiguration"
     "-liconv")
-  if(OP_EDITOR)
-    # The Rust editor view (openplugin-dri cocoa.rs) draws with these. A
-    # static library does not carry its framework links, so name them here.
-    target_link_libraries(${target_name} PRIVATE
-      "-framework AppKit"
-      "-framework CoreGraphics"
-      "-lobjc")
-  endif()
+  # A static library does not carry its framework links. The example always
+  # exports the editor ABI, so the archive references AppKit, CoreGraphics and
+  # libobjc even when the shell is built with -DOP_EDITOR=OFF. OP_EDITOR only
+  # decides whether the shell hosts the view; name the frameworks for every
+  # target that links the archive, proofs included.
+  target_link_libraries(${target_name} PRIVATE
+    "-framework AppKit"
+    "-framework CoreGraphics"
+    "-lobjc")
 endfunction()
 
 enable_testing()
@@ -97,6 +116,7 @@ if(OP_BUILD_VST3)
     "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp")
   target_include_directories(VST3Proof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(VST3Proof PRIVATE sdk "-framework CoreFoundation")
+  op_link_rust(VST3Proof)
   add_dependencies(VST3Proof OpenPluginVST3)
   add_test(NAME vst3_proof COMMAND VST3Proof "$<TARGET_BUNDLE_DIR:OpenPluginVST3>")
   if(OP_EDITOR)
@@ -150,6 +170,7 @@ if(OP_BUILD_AU)
   add_executable(AUProof au/host.cpp)
   target_include_directories(AUProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(AUProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+  op_link_rust(AUProof)
   add_dependencies(AUProof OpenPluginAU)
   add_test(NAME au_proof COMMAND AUProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
 endif()

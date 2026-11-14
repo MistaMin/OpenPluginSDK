@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
-// In-process VST3 host for the FreEQ shell. Does not install or scan a plug-in folder.
+// In-process VST3 host for the SDK example shell. Does not install or scan a
+// plug-in folder. The expected parameter metadata, latency, tail and audio come
+// from the op_shell_* C ABI, not from one plugin's constants.
+//
+// Run from the native build (see native/CMakeLists.txt):
+//   ctest --test-dir build-shell -R vst3_proof --output-on-failure
 #include "op_shell.h"
-#include "proof_eq.h"
+#include "proof_shell.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include "pluginterfaces/base/funknown.h"
 #include "pluginterfaces/base/ipluginbase.h"
@@ -11,88 +16,127 @@
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 using namespace Steinberg;
 using namespace Steinberg::Vst;
-#define CHECK(cond) do { if (!(cond)) { std::fprintf(stderr, "VST3 proof failed line %d: %s\n", __LINE__, #cond); return 1; } } while (0)
+#define CHECK(cond) do { if (!(cond)) { std::fprintf(stderr, "VST3 proof failed line %d: %s\n", __LINE__, #cond); std::exit(1); } } while (0)
 static void change(ParameterChanges& changes, ParamID id, double value) {
     int32 index = 0;
     auto* queue = changes.addParameterData(id, index);
     queue->addPoint(0, value, index);
 }
-static std::string title_of(const ParameterInfo& info) {
+static std::string ascii_of(const TChar* text) {
     char buffer[128] = {};
-    UString(const_cast<TChar*>(info.title), 128).toAscii(buffer, 128);
+    UString(const_cast<TChar*>(text), 128).toAscii(buffer, 128);
     return buffer;
 }
-static int find_param(IEditController* controller, const char* name) {
-    const int32 count = controller->getParameterCount();
-    for (int32 i = 0; i < count; ++i) {
-        ParameterInfo info{};
-        if (controller->getParameterInfo(i, info) != kResultOk) continue;
-        if (title_of(info) == name) return static_cast<int>(info.id);
+static uint32_t find_shell_param(const char* name) {
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        OpParamDesc desc{};
+        CHECK(op_shell_param(i, &desc) != 0);
+        if (std::strcmp(desc.name, name) == 0) return i;
     }
-    return -1;
+    std::fprintf(stderr, "VST3 proof: the shell has no parameter named %s\n", name);
+    std::exit(1);
 }
-static bool hex32(const char* text) {
-    if (std::strlen(text) != 32) return false;
-    for (int i = 0; i < 32; ++i) {
-        const char c = text[i];
-        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f'))) return false;
+static std::vector<float> shell_defaults() {
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
+    std::vector<float> values(info.param_count);
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        OpParamDesc desc{};
+        CHECK(op_shell_param(i, &desc) != 0);
+        values[i] = static_cast<float>(desc.default_plain);
     }
-    return true;
+    return values;
 }
-static int render_gain(IAudioProcessor* processor, IComponent* component, int channels, const std::vector<std::pair<ParamID, double>>& normalized, double* measured) {
+// Every parameter the host exposes must describe the same parameter the shell
+// declares: same id, name, unit, default, step count and automation flag, and
+// the same plain <-> normalized mapping at the ends and at the default.
+static void check_parameters(IEditController* controller) {
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
+    CHECK(info.abi == OP_SHELL_ABI);
+    CHECK(controller->getParameterCount() == static_cast<int32>(info.param_count));
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        OpParamDesc desc{};
+        CHECK(op_shell_param(i, &desc) != 0);
+        ParameterInfo host{};
+        CHECK(controller->getParameterInfo(static_cast<int32>(i), host) == kResultOk);
+        CHECK(host.id == static_cast<ParamID>(i));
+        CHECK(ascii_of(host.title) == desc.name);
+        CHECK(ascii_of(host.units) == desc.unit);
+        CHECK(std::fabs(host.defaultNormalizedValue - desc.default_normalized) < 1e-9);
+        const int32 steps = desc.steps > 1 ? static_cast<int32>(desc.steps - 1) : 0;
+        CHECK(host.stepCount == steps);
+        CHECK(((host.flags & ParameterInfo::kCanAutomate) != 0) == ((desc.flags & OP_PARAM_AUTOMATABLE) != 0));
+        const ParamID id = static_cast<ParamID>(i);
+        CHECK(std::fabs(controller->normalizedParamToPlain(id, 0.0) - desc.min) < 1e-9);
+        CHECK(std::fabs(controller->normalizedParamToPlain(id, 1.0) - desc.max) < 1e-9);
+        CHECK(std::fabs(controller->plainParamToNormalized(id, desc.default_plain) - desc.default_normalized) < 1e-9);
+        CHECK(std::fabs(controller->normalizedParamToPlain(id, desc.default_normalized) - desc.default_plain) < 1e-9);
+    }
+}
+static std::vector<std::pair<ParamID, double>> normalized_values(const std::vector<float>& plain) {
+    std::vector<std::pair<ParamID, double>> result;
+    for (uint32_t i = 0; i < plain.size(); ++i)
+        result.push_back({static_cast<ParamID>(i), op_shell_to_normalized(i, plain[i])});
+    return result;
+}
+// Render through the VST3 shell. An empty change list leaves the processor on
+// the values it already holds, which is what a host does after setState.
+static std::vector<float> render_host(IAudioProcessor* processor, int channels, int blocks,
+                                      const std::vector<std::pair<ParamID, double>>& normalized,
+                                      bool in_place) {
     constexpr int kFrames = 512;
-    constexpr int kBlocks = 12;
-    std::vector<float> left(kFrames), right(kFrames), outL(kFrames), outR(kFrames), dry(kFrames);
-    float* inPtrs[] = {left.data(), right.data()};
-    float* outPtrs[] = {outL.data(), outR.data()};
-    AudioBusBuffers in{};
-    in.numChannels = channels;
-    in.channelBuffers32 = inPtrs;
-    AudioBusBuffers out{};
-    out.numChannels = channels;
-    out.channelBuffers32 = outPtrs;
+    std::vector<float> inL(kFrames), inR(kFrames), outL(kFrames), outR(kFrames);
     ParameterChanges changes;
     for (auto [id, value] : normalized) change(changes, id, value);
-    for (int block = 0; block < kBlocks; ++block) {
-        fill_sine(left.data(), kFrames, 48000.0, 1000.0, 0.25, block * kFrames);
-        if (channels > 1) fill_sine(right.data(), kFrames, 48000.0, 1000.0, 0.25, block * kFrames);
-        dry = left;
+    for (int block = 0; block < blocks; ++block) {
+        fill_sine(inL.data(), kFrames, 48000.0, 1000.0, 0.25, block * kFrames);
+        if (channels > 1) fill_sine(inR.data(), kFrames, 48000.0, 1000.0, 0.25, block * kFrames);
+        float* inPtrs[] = {inL.data(), inR.data()};
+        float* outPtrs[] = {in_place ? inL.data() : outL.data(), in_place ? inR.data() : outR.data()};
+        AudioBusBuffers input{};
+        input.numChannels = channels;
+        input.channelBuffers32 = inPtrs;
+        AudioBusBuffers output{};
+        output.numChannels = channels;
+        output.channelBuffers32 = outPtrs;
         ProcessData data{};
         data.processMode = kOffline;
         data.symbolicSampleSize = kSample32;
         data.numSamples = kFrames;
         data.numInputs = data.numOutputs = 1;
-        data.inputs = &in;
-        data.outputs = &out;
-        data.inputParameterChanges = &changes;
-        if (processor->process(data) != kResultOk) return 1;
-        for (int i = 0; i < kFrames; ++i) if (!std::isfinite(outL[i])) return 1;
-        if (block + 1 == kBlocks) *measured = gain_db(dry.data(), outL.data(), 256, 256);
+        data.inputs = &input;
+        data.outputs = &output;
+        data.inputParameterChanges = normalized.empty() ? nullptr : &changes;
+        CHECK(processor->process(data) == kResultOk);
+        const std::vector<float>& produced = in_place ? inL : outL;
+        for (float sample : produced) CHECK(std::isfinite(sample));
+        if (channels > 1) for (float sample : (in_place ? inR : outR)) CHECK(std::isfinite(sample));
+        if (block + 1 == blocks) return produced;
     }
-    out.channelBuffers32 = inPtrs;
-    fill_sine(left.data(), kFrames, 48000.0, 1000.0, 0.25, 0);
-    dry = left;
-    ProcessData inplace{};
-    inplace.processMode = kOffline;
-    inplace.symbolicSampleSize = kSample32;
-    inplace.numSamples = kFrames;
-    inplace.numInputs = inplace.numOutputs = 1;
-    inplace.inputs = &in;
-    inplace.outputs = &out;
-    inplace.inputParameterChanges = &changes;
-    if (processor->process(inplace) != kResultOk) return 1;
-    const double inplaceDb = gain_db(dry.data(), left.data(), 256, 256);
-    if (std::fabs(inplaceDb - *measured) > 0.35) return 1;
-    (void)component;
-    return 0;
+    return {};
 }
+#if OP_HAS_TAIL
+// Mirror the contract the VST3 shell documents: zero seconds is kNoTail, a
+// finite value is truncated to samples, and anything that is not below the
+// kInfiniteTail sample bound is infinite.
+static uint32 expected_tail(void* instance, double rate) {
+    const double samples = op_shell_tail_seconds(instance) * rate;
+    if (!(samples < 4.0e9)) return kInfiniteTail;
+    return samples > 0.0 ? static_cast<uint32>(samples) : kNoTail;
+}
+#endif
 int main(int argc, char** argv) {
     CHECK(argc == 2);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(argv[1]), static_cast<CFIndex>(std::strlen(argv[1])), true);
@@ -106,23 +150,44 @@ int main(int argc, char** argv) {
     CHECK(entry && exitFn && getFactory && entry(bundle));
     IPluginFactory* factory = getFactory();
     CHECK(factory && factory->countClasses() == 2);
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
     PClassInfo effect{};
+    PClassInfo other{};
     bool found = false;
+    bool foundOther = false;
     char ids[2][33] = {};
     for (int32 i = 0; i < factory->countClasses(); ++i) {
-        PClassInfo info{};
-        CHECK(factory->getClassInfo(i, &info) == kResultOk);
-        FUID uid = FUID::fromTUID(info.cid);
+        PClassInfo classInfo{};
+        CHECK(factory->getClassInfo(i, &classInfo) == kResultOk);
+        FUID uid = FUID::fromTUID(classInfo.cid);
         uid.toString(ids[i]);
-        CHECK(hex32(ids[i]));
-        if (std::strcmp(info.category, kVstAudioEffectClass) == 0) {
-            effect = info;
+        CHECK(std::strlen(ids[i]) == 32);
+        for (int c = 0; c < 32; ++c) {
+            const char hex = ids[i][c];
+            CHECK((hex >= '0' && hex <= '9') || (hex >= 'A' && hex <= 'F') || (hex >= 'a' && hex <= 'f'));
+        }
+        if (std::strcmp(classInfo.category, kVstAudioEffectClass) == 0) {
+            effect = classInfo;
             found = true;
+        } else {
+            other = classInfo;
+            foundOther = true;
         }
     }
-    CHECK(found);
+    CHECK(found && foundOther);
     CHECK(std::strcmp(ids[0], ids[1]) != 0);
+    CHECK(std::memcmp(effect.cid, info.processor_cid, 16) == 0);
+    CHECK(std::memcmp(other.cid, info.controller_cid, 16) == 0);
+    const uint32_t gain = find_shell_param("Gain");
+    const uint32_t warm = find_shell_param("Warm");
+    OpParamDesc gainDesc{};
+    OpParamDesc warmDesc{};
+    CHECK(op_shell_param(gain, &gainDesc) != 0);
+    CHECK(op_shell_param(warm, &warmDesc) != 0);
     for (int channels : {1, 2}) {
+        ReferenceShell reference(static_cast<uint32_t>(channels));
+        CHECK(reference.instance);
         IComponent* component = nullptr;
         CHECK(factory->createInstance(effect.cid, IComponent::iid, reinterpret_cast<void**>(&component)) == kResultOk && component);
         CHECK(component->initialize(nullptr) == kResultOk);
@@ -133,7 +198,7 @@ int main(int argc, char** argv) {
         IEditController* controller = nullptr;
         CHECK(factory->createInstance(controllerId, IEditController::iid, reinterpret_cast<void**>(&controller)) == kResultOk && controller);
         CHECK(controller->initialize(nullptr) == kResultOk);
-        CHECK(controller->getParameterCount() == 26);
+        check_parameters(controller);
         CHECK(processor->canProcessSampleSize(kSample64) == kResultFalse);
         SpeakerArrangement arrangement = channels == 1 ? SpeakerArr::kMono : SpeakerArr::kStereo;
         CHECK(processor->setBusArrangements(&arrangement, 1, &arrangement, 1) == kResultOk);
@@ -143,61 +208,65 @@ int main(int argc, char** argv) {
         CHECK(processor->setupProcessing(setup) == kResultOk);
         CHECK(component->setActive(true) == kResultOk);
         CHECK(processor->setProcessing(true) == kResultOk);
-        CHECK(processor->getLatencySamples() == 0);
-        auto id = [&](const char* name) -> ParamID {
-            const int foundId = find_param(controller, name);
-            if (foundId < 0) {
-                std::fprintf(stderr, "VST3 proof missing parameter %s\n", name);
-                std::exit(1);
-            }
-            return static_cast<ParamID>(foundId);
-        };
-        auto plain = [&](const char* name, double value) {
-            const ParamID param = id(name);
-            return std::pair<ParamID, double>{param, controller->plainParamToNormalized(param, value)};
-        };
-        std::vector<std::pair<ParamID, double>> flat;
-        std::vector<std::pair<ParamID, double>> boosted;
-        for (int band = 1; band <= 6; ++band) {
-            char typeName[32];
-            char gainName[32];
-            std::snprintf(typeName, sizeof(typeName), "Band %d Type", band);
-            std::snprintf(gainName, sizeof(gainName), "Band %d Gain", band);
-            flat.push_back(plain(typeName, 0.0));
-            flat.push_back(plain(gainName, 0.0));
-            boosted.push_back(plain(typeName, 0.0));
-            boosted.push_back(plain(gainName, band == 4 ? 6.0 : 0.0));
-        }
-        boosted.push_back(plain("Band 4 Freq", 1000.0));
-        boosted.push_back(plain("Band 4 Q", 1.0));
-        for (const char* name : {"Phase", "Trim"}) {
-            flat.push_back(plain(name, 0.0));
-            boosted.push_back(plain(name, 0.0));
-        }
-        double unity = 99.0;
-        CHECK(render_gain(processor, component, channels, flat, &unity) == 0);
-        CHECK(std::fabs(unity) < 0.05);
-        double bell = 0.0;
-        CHECK(render_gain(processor, component, channels, boosted, &bell) == 0);
-        std::printf("VST3 %s Band 4 at 1 kHz: %.2f dB\n", channels == 1 ? "mono" : "stereo", bell);
-        CHECK(std::fabs(bell - 6.0) < 0.2);
+        const char* label = channels == 1 ? "mono" : "stereo";
+        CHECK(processor->getLatencySamples() == op_shell_latency(reference.instance));
+        std::printf("VST3 %s latency: host %u samples, ABI %u\n", label, processor->getLatencySamples(), op_shell_latency(reference.instance));
+#if OP_HAS_TAIL
+        CHECK(processor->getTailSamples() == expected_tail(reference.instance, 48000.0));
+        std::printf("VST3 %s tail: host %u samples, ABI %.6f s\n", label, processor->getTailSamples(), op_shell_tail_seconds(reference.instance));
+#else
+        std::printf("VST3 %s tail: not built (OP_TAIL=OFF)\n", label);
+#endif
+        const std::vector<float> defaults = shell_defaults();
+        op_shell_reset(reference.instance);
+        const auto hostDefault = render_host(processor, channels, 4, {}, false);
+        const auto shellDefault = render_shell(reference.instance, channels, 4, defaults);
+        std::printf("VST3 %s default output against the shell: max difference %.3g\n", label, max_difference(shellDefault, hostDefault));
+        CHECK(max_difference(shellDefault, hostDefault) <= 1e-6);
+        const double testGain = std::clamp(6.0, gainDesc.min, gainDesc.max);
+        std::vector<float> plain = defaults;
+        plain[gain] = static_cast<float>(testGain);
+        plain[warm] = 0.0f;
+        op_shell_reset(reference.instance);
+        const auto shellGain = render_shell(reference.instance, channels, 8, plain);
+        const auto hostGain = render_host(processor, channels, 8, normalized_values(plain), false);
+        std::printf("VST3 %s gain %.2f dB against the shell: max difference %.3g\n", label, testGain, max_difference(shellGain, hostGain));
+        CHECK(max_difference(shellGain, hostGain) <= 1e-6);
+        const auto hostGainInPlace = render_host(processor, channels, 8, normalized_values(plain), true);
+        std::printf("VST3 %s in-place against out-of-place: max difference %.3g\n", label, max_difference(hostGain, hostGainInPlace));
+        CHECK(max_difference(hostGain, hostGainInPlace) <= 1e-6);
+        std::vector<float> dry(512);
+        fill_sine(dry.data(), 512, 48000.0, 1000.0, 0.25, 7 * 512);
+        const double measured = gain_db(dry.data(), hostGain.data(), 128, 256);
+        std::printf("VST3 %s measured gain: %.3f dB\n", label, measured);
+        CHECK(std::fabs(measured - testGain) < 0.05);
         MemoryStream saved;
         CHECK(component->getState(&saved) == kResultOk);
-        double back = 99.0;
-        CHECK(render_gain(processor, component, channels, flat, &back) == 0);
-        CHECK(std::fabs(back) < 0.05);
+        std::vector<float> changedPlain = plain;
+        changedPlain[gain] = static_cast<float>(std::fabs(gainDesc.min - testGain) > 0.5 ? gainDesc.min : gainDesc.max);
+        changedPlain[warm] = plain[warm] > 0.5f ? 0.0f : 1.0f;
+        const auto hostChanged = render_host(processor, channels, 8, normalized_values(changedPlain), false);
+        std::printf("VST3 %s changed state against saved state: max difference %.3g\n", label, max_difference(hostGain, hostChanged));
+        CHECK(max_difference(hostGain, hostChanged) > 0.01);
         saved.seek(0, IBStream::kIBSeekSet, nullptr);
         CHECK(component->setState(&saved) == kResultOk);
         saved.seek(0, IBStream::kIBSeekSet, nullptr);
         CHECK(controller->setComponentState(&saved) == kResultOk);
-        double restored = 0.0;
-        CHECK(render_gain(processor, component, channels, {}, &restored) == 0);
-        CHECK(std::fabs(restored - 6.0) < 0.2);
-        MemoryStream invalid;
+        CHECK(std::fabs(controller->getParamNormalized(gain) - op_shell_to_normalized(gain, testGain)) < 1e-9);
+        CHECK(std::fabs(controller->getParamNormalized(warm) - 0.0) < 1e-9);
+        const auto hostRestored = render_host(processor, channels, 8, {}, false);
+        std::printf("VST3 %s restored against saved state: max difference %.3g\n", label, max_difference(hostGain, hostRestored));
+        CHECK(max_difference(hostGain, hostRestored) <= 1e-6);
+        MemoryStream truncated;
         char bad[4] = {};
-        CHECK(invalid.write(bad, 4, nullptr) == kResultOk);
-        invalid.seek(0, IBStream::kIBSeekSet, nullptr);
-        CHECK(component->setState(&invalid) != kResultOk);
+        CHECK(truncated.write(bad, 4, nullptr) == kResultOk);
+        truncated.seek(0, IBStream::kIBSeekSet, nullptr);
+        CHECK(component->setState(&truncated) != kResultOk);
+        MemoryStream wrongCount;
+        int32_t words[2] = {1, static_cast<int32_t>(info.param_count) + 1};
+        CHECK(wrongCount.write(words, sizeof(words), nullptr) == kResultOk);
+        wrongCount.seek(0, IBStream::kIBSeekSet, nullptr);
+        CHECK(component->setState(&wrongCount) != kResultOk);
         CHECK(processor->setProcessing(false) == kResultOk);
         CHECK(component->setActive(false) == kResultOk);
         processor->release();
@@ -209,6 +278,10 @@ int main(int argc, char** argv) {
     factory->release();
     CHECK(exitFn());
     CFRelease(bundle);
-    std::puts("VST3 proof: factory, 32-hex class IDs, 26 parameters, mono/stereo, unity, +6 dB, state, in-place: PASS");
+#if OP_HAS_TAIL
+    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, tail, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state: PASS");
+#else
+    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, tail not built (OP_TAIL=OFF): PASS");
+#endif
     return 0;
 }
