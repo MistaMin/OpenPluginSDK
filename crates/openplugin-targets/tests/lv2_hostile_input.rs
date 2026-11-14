@@ -33,7 +33,7 @@ const ITERATIONS: usize = 2_048;
 thread_local! {
     /// Sample rate the plugin's `prepare` saw last on this thread. Each test
     /// instantiates synchronously on its own thread, so this needs no lock.
-    static PREPARED_RATE: Cell<f32> = Cell::new(f32::NAN);
+    static PREPARED_RATE: Cell<f32> = const { Cell::new(f32::NAN) };
 }
 
 static PARAMS: [ParamInfo; 2] = [

@@ -415,6 +415,8 @@ fn param_event(
     }
 }
 
+// One argument per CLAP note-event field keeps the fuzz constructors direct.
+#[allow(clippy::too_many_arguments)]
 fn note_event(
     type_: u16,
     size: u32,
@@ -497,7 +499,7 @@ fn hostile_value(rng: &mut Rng) -> f64 {
 fn hostile_param_id(rng: &mut Rng) -> u32 {
     match rng.below(6) {
         // Duplicate ids, including several writes to the same slot in one block.
-        0 | 1 | 2 => 0,
+        0..=2 => 0,
         3 => rng.pick(PARAM_IDS),
         _ => rng.next_u64() as u32,
     }
