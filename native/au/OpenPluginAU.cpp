@@ -90,7 +90,11 @@ public:
     }
     OSStatus Initialize() override {
         const OSStatus status = AUEffectBase::Initialize();
-        if (status != noErr) return status;
+        if (status != noErr) {
+            // The base class refused the stream formats. The unit stays uninitialized and silent.
+            lastError_.store(status, std::memory_order_relaxed);
+            return status;
+        }
         destroy();
         const double rate = GetSampleRate();
         const UInt32 channels = GetNumberOfChannels();
@@ -160,6 +164,12 @@ public:
         }
         return AUEffectBase::SetParameter(id, scope, element, value, offset);
     }
+    // Covers what happens before ProcessBufferLists: no input connection, a failed input pull.
+    OSStatus Render(AudioUnitRenderActionFlags& flags, const AudioTimeStamp& time, UInt32 frames) AUSDK_RTSAFE override {
+        const OSStatus status = AUEffectBase::Render(flags, time, frames);
+        if (status != noErr) lastError_.store(status, std::memory_order_relaxed);
+        return status;
+    }
     OSStatus ProcessBufferLists(AudioUnitRenderActionFlags& flags, const AudioBufferList& input, AudioBufferList& output, UInt32 frames) override {
         const OSStatus status = render(flags, input, output, frames);
         // A host renders silence for a failed block and says nothing. Keep the
@@ -168,7 +178,14 @@ public:
         return status;
     }
 #if OP_HAS_EDITOR
-    OSStatus takeLastError() { return lastError_.exchange(noErr, std::memory_order_relaxed); }
+    OSStatus takeLastError() {
+        // The base class keeps the first error of any render call, including the ones
+        // it rejects before Render: an uninitialized unit, or more frames than the maximum.
+        OSStatus base = noErr;
+        if (DispatchGetProperty(kAudioUnitProperty_LastRenderError, kAudioUnitScope_Global, 0, &base) != noErr) base = noErr;
+        const OSStatus own = lastError_.exchange(noErr, std::memory_order_relaxed);
+        return own != noErr ? own : base;
+    }
 #endif
 
 private:

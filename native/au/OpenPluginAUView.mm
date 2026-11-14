@@ -81,6 +81,9 @@ void endEdit(void* context, uint32_t index) {
 - (void)sync {
     if (!editor_) return;
     void* engine = op_au_engine(instance_);
+    // An Audio Unit with no engine is uninitialized: a host that renders it gets silence.
+    if (!engine && engine_) NSLog(@"%s: the Audio Unit has no engine (uninitialized)", OP_AU_VIEW_CLASS_NAME);
+    if (engine && !engine_ && editor_) NSLog(@"%s: the Audio Unit has an engine again", OP_AU_VIEW_CLASS_NAME);
     if (engine != engine_) {
         engine_ = engine;
         op_editor_bind(editor_, engine_);
