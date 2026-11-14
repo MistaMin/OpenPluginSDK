@@ -317,8 +317,8 @@ impl Host {
         self.log.lock().unwrap().frames_this_block = 0;
         let result = unsafe { ((*self.plugin()).process.unwrap())(self.plugin(), &process) };
         assert_eq!(result, PROCESS_CONTINUE);
-        for ch in 0..2 {
-            self.output[ch].extend_from_slice(&output[ch]);
+        for (kept, block) in self.output.iter_mut().zip(&output) {
+            kept.extend_from_slice(block);
         }
         self.position += BLOCK;
     }
