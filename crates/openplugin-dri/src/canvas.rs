@@ -1,4 +1,4 @@
-//! 2D canvas. [`DrawList::scene`] is the GoodLookinDri command list. `commands` is a
+//! 2D canvas. [`DrawList::scene`] is the GoodLookin DRI command list. `commands` is a
 //! flattened copy for hosts that only draw rectangles, ellipses, lines, arcs, and text.
 
 use goodlookindri::scene::Scene;
@@ -21,7 +21,7 @@ pub enum DrawCmd {
 #[derive(Debug, Default, Clone)]
 pub struct DrawList {
     pub commands: Vec<DrawCmd>,
-    /// Full GoodLookinDri scene. This is the drawing the knob and plate styles actually produce.
+    /// Full GoodLookin DRI scene. This is the drawing the knob and plate styles actually produce.
     pub scene: Scene,
 }
 

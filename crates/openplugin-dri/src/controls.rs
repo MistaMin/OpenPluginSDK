@@ -1,4 +1,4 @@
-//! Hardware controls. Geometry is drawn by GoodLookinDri. The names on [`crate::KnobStyle`]
+//! Hardware controls. Geometry is drawn by GoodLookin DRI. The names on [`crate::KnobStyle`]
 //! and [`crate::FaceplateStyle`] pick a GoodLookin style. Every other style is available
 //! through [`draw_knob_code`] and [`draw_faceplate_code`].
 

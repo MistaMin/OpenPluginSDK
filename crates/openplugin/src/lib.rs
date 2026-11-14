@@ -1,7 +1,7 @@
 //! # OpenPluginSDK
 //!
 //! A zero-allocation, panic-free digital audio plugin development framework with GoodLookin DRI
-//! (Direct Rendering Interface), targeting **CLAP**, **VST3**, **Audio Unit (AU)**, and **Avid AAX**.
+//! (Design Rust Interface), targeting **CLAP**, **VST3**, **Audio Unit (AU)**, and **Avid AAX**.
 //!
 //! ## Modules
 //! - [`core`]: Plugin trait, parameter descriptors, normalization, and transport.

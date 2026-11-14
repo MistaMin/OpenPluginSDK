@@ -1,6 +1,6 @@
 # OpenPluginSDK
 
-> **Universal, zero-allocation digital audio plugin development framework with GoodLookin Direct Rendering Interface (DRI).**  
+> **Universal, zero-allocation digital audio plugin development framework with GoodLookin Design Rust Interface (DRI).**  
 > Targets **CLAP**, **VST3**, **Audio Unit (AU)**, **Avid AAX**, and **Standalone**.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
@@ -16,7 +16,7 @@
 It combines:
 1. **Realtime-safe DSP core:** Zero-allocation processing loop (`process()`), hostile parameter sanitization, and no panics.
 2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, overlap-save convolution for impulses up to 1024 taps (`BlockConvolver`), log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, ANSI standard ballistic VU meters, BS.1770-4 loudness (`Loudness`), loudness-matched auto gain (`LoudnessMatch`), and Delta listening (`Delta`).
-3. **GoodLookin Direct Rendering Interface (DRI):** Procedural 3D hardware rendering (47 authentic knob styles, 40 faceplate finishes, illuminated needle VU meters) running directly on GPU/platform window contexts (`HWND`, `NSView`, `X11`) without requiring a JUCE dependency or license.
+3. **GoodLookin Design Rust Interface (DRI):** Procedural 3D hardware rendering (47 authentic knob styles, 40 faceplate finishes, illuminated needle VU meters) running directly on GPU/platform window contexts (`HWND`, `NSView`, `X11`) without requiring a JUCE dependency or license.
 4. **Format bridges:** CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX are macOS native shells over `export_shell!`. Standalone is a CPAL window. The shell contract is [docs/SHELL.md](docs/SHELL.md).
 5. **One editor in every format:** a plugin writes one `Editor` and passes `editor = make_editor` to the export macros. CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), VST3, Audio Unit and AAX all host it in a Rust `NSView`. See [docs/EDITOR.md](docs/EDITOR.md) and [`examples/editor`](examples/editor).
 
@@ -81,7 +81,7 @@ It combines:
 | [`openplugin`](crates/openplugin) | Top-level facade and prelude |
 | [`openplugin-core`](crates/openplugin-core) | Core `Plugin` trait, `ParamInfo` (format and parse), tapers, transport, MIDI, the `Editor` contract, and text presets (`PresetBank`, `build::embed_files`) |
 | [`openplugin-dsp`](crates/openplugin-dsp) | Realtime-safe DSP: RBJ biquads, `BlockConvolver`, dynamics, saturation, VU metering. See [docs/CONVOLVE.md](docs/CONVOLVE.md) |
-| [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knobs, faceplates, meters), and the macOS `EditorView`. Drawing lives in GoodLookinDri |
+| [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knobs, faceplates, meters), and the macOS `EditorView`. Drawing lives in GoodLookin DRI |
 | [`openplugin-targets`](crates/openplugin-targets) | CLAP and LV2 entries with their editors, the LV2 `.ttl` writer, and `export_shell!` with `op_editor_*`. See [docs/SHELL.md](docs/SHELL.md) |
 | [`openplugin-ffi`](crates/openplugin-ffi) | Rust host session and the `op_shell_*` ABI: parameter plane, scratch render, presets, OPST snapshot |
 

@@ -21,8 +21,8 @@ L1: Algorithms & DSP (openplugin-dsp)
     - Polyphase Half-Band Resamplers (2x, 4x Oversampling)
     - Linear-phase 1x/2x/4x oversampler (64-sample latency at 2x and 4x), dry delay, slow RMS gain comp
     - Note-to-Hz, samples-per-beat, phase oscillator, sample voice, fixed polyphony
-L2: Direct Rendering Interface (openplugin-dri)
-    - Calls GoodLookinDri for the 47 knob styles, 40 plates, meters, faders, and switches
+L2: Design Rust Interface (openplugin-dri)
+    - Calls GoodLookin DRI for the 47 knob styles, 40 plates, meters, faders, and switches
 L3: Target Format Adapters (openplugin-targets)
     - CLAP instantiates a Plugin, pulls the parameter plane, honours event sample offsets, and can select a surround or ambisonic layout with an optional sidechain. It publishes tail, asks the host to restart when latency changes, and passes transport into `set_transport`
     - LV2 descriptor: ports 0 and 1 in, 2 and 3 out, same parameter plane

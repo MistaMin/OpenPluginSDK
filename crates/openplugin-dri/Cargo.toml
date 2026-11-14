@@ -1,6 +1,6 @@
 [package]
 name = "openplugin-dri"
-description = "GoodLookin Direct Rendering Interface (DRI) - Pure procedural hardware UI engine without JUCE"
+description = "GoodLookin Design Rust Interface (DRI) - Pure procedural hardware UI engine without JUCE"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

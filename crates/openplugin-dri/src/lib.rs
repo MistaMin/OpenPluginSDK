@@ -1,4 +1,4 @@
-//! GoodLookin Direct Rendering Interface (DRI).
+//! GoodLookin Design Rust Interface (DRI).
 //!
 //! Drawing comes from [`goodlookindri`]: 47 knob styles, 40 faceplates, meters, faders,
 //! switches, and the spectrum. This crate does not reimplement them and it does not use JUCE.

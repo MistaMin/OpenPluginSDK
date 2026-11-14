@@ -1,4 +1,4 @@
-//! Direct Rendering Interface (DRI) native window attachment.
+//! Design Rust Interface (DRI) native window attachment.
 
 use raw_window_handle::RawWindowHandle;
 use crate::canvas::DrawList;
