@@ -1127,7 +1127,7 @@ fn activation_rejects_hostile_rates_and_zero_is_a_one_frame_block() {
         -1.0,
         0.0,
         1.0e-300,
-        7_999.0,
+        999.0,
         768_001.0,
         1.0e12,
     ] {
@@ -1137,8 +1137,12 @@ fn activation_rejects_hostile_rates_and_zero_is_a_one_frame_block() {
         );
     }
     assert!(
-        activate(plugin, 8_000.0, 0, 0),
-        "the default range includes 8 kHz"
+        activate(plugin, 1_000.0, 0, 0),
+        "the shared range includes 1 kHz"
+    );
+    assert!(
+        activate(plugin, 7_999.0, 0, 0),
+        "the widened range includes 7.999 kHz"
     );
     assert_clean_gain(plugin, params_extension(plugin), 2, 0.0);
 
