@@ -321,7 +321,7 @@ mod tests {
     static INFO: PluginInfo = PluginInfo {
         id: "urn:openplugin:test-gain",
         name: "Test Gain",
-        vendor: "MistaMin",
+        vendor: "OpenGrid",
         url: "https://github.com/MistaMin/OpenPluginSDK",
         email: "contact@mistamin.com",
         version: "0.1.0-beta.1",

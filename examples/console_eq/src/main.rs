@@ -8,9 +8,9 @@ static PARAMS: [ParamInfo; 4] = [
 ];
 
 static INFO: PluginInfo = PluginInfo {
-    id: "com.mistamin.example.console_eq",
+    id: "com.opengrid.example.console_eq",
     name: "Console EQ 70",
-    vendor: "MistaMin",
+    vendor: "OpenGrid",
     url: "https://github.com/MistaMin/OpenPluginSDK",
     email: "contact@mistamin.com",
     version: "0.2.0-beta",

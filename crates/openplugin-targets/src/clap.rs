@@ -1439,9 +1439,9 @@ mod tests {
     static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db).with_taper(Taper::Linear)];
 
     static INFO: PluginInfo = PluginInfo {
-        id: "com.mistamin.test.gain",
+        id: "com.opengrid.test.gain",
         name: "Test Gain",
-        vendor: "MistaMin",
+        vendor: "OpenGrid",
         url: "https://github.com/MistaMin/OpenPluginSDK",
         email: "contact@mistamin.com",
         version: "0.1.0-beta.1",
@@ -1498,7 +1498,7 @@ mod tests {
             assert_eq!((*factory).get_plugin_count.unwrap()(factory), 1);
             let desc = (*factory).get_plugin_descriptor.unwrap()(factory, 0);
             assert!(!desc.is_null());
-            assert_eq!(CStr::from_ptr((*desc).id), c"com.mistamin.test.gain");
+            assert_eq!(CStr::from_ptr((*desc).id), c"com.opengrid.test.gain");
             assert!((*factory).create_plugin.unwrap()(factory, std::ptr::null(), c"nope".as_ptr()).is_null());
             let plugin = (*factory).create_plugin.unwrap()(factory, std::ptr::null(), (*desc).id);
             assert!(!plugin.is_null());

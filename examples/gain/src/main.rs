@@ -6,9 +6,9 @@ static PARAMS: [ParamInfo; 2] = [
 ];
 
 static INFO: PluginInfo = PluginInfo {
-    id: "com.mistamin.example.gain",
+    id: "com.opengrid.example.gain",
     name: "OpenPlugin Gain",
-    vendor: "MistaMin",
+    vendor: "OpenGrid",
     url: "https://github.com/MistaMin/OpenPluginSDK",
     email: "contact@mistamin.com",
     version: "0.2.0-beta",
