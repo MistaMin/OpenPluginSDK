@@ -21,7 +21,7 @@ pub use editor::OpEditorHost;
 
 /// The editor ABI (`op_editor.h`). The functions take the plugin's
 /// [`EditorFactory`](openplugin_core::EditorFactory); `export_shell!` wraps
-/// them in the `#[no_mangle]` symbols the shells link.
+/// them in the `#[unsafe(no_mangle)]` symbols the shells link.
 #[cfg(target_os = "macos")]
 pub mod editor {
     use super::ShellInstance;
@@ -169,59 +169,59 @@ macro_rules! export_shell {
         $crate::export_shell!($plugin);
 
         #[cfg(target_os = "macos")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_size(width: *mut u32, height: *mut u32) -> u32 {
             $crate::shell::editor::size($editor, width, height)
         }
 
         #[cfg(target_os = "macos")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_create(host: *const $crate::shell::OpEditorHost) -> *mut ::std::ffi::c_void {
             $crate::shell::editor::create($editor, host)
         }
 
         #[cfg(target_os = "macos")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_view(editor: *mut ::std::ffi::c_void) -> *mut ::std::ffi::c_void {
             $crate::shell::editor::raw_view(editor)
         }
 
         #[cfg(target_os = "macos")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_attach(editor: *mut ::std::ffi::c_void, parent: *mut ::std::ffi::c_void) -> u32 {
             $crate::shell::editor::attach(editor, parent)
         }
 
         #[cfg(target_os = "macos")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_bind(editor: *mut ::std::ffi::c_void, instance: *mut ::std::ffi::c_void) {
             $crate::shell::editor::bind(editor, instance)
         }
 
         #[cfg(target_os = "macos")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_set_plain(editor: *mut ::std::ffi::c_void, index: u32, plain: f32) {
             $crate::shell::editor::set_plain(editor, index, plain)
         }
 
         #[cfg(target_os = "macos")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_destroy(editor: *mut ::std::ffi::c_void) {
             $crate::shell::editor::destroy(editor)
         }
     };
     ($plugin:ty) => {
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_tail_seconds(instance: *mut ::std::ffi::c_void) -> f64 {
             $crate::shell::tail_seconds(instance as *const $crate::shell::ShellInstance)
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_info(out: *mut $crate::shell::OpShellInfo) -> u32 {
             unsafe { $crate::shell::write_info::<$plugin>(out) }
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_param(
             index: u32,
             out: *mut $crate::shell::OpParamDesc,
@@ -229,17 +229,17 @@ macro_rules! export_shell {
             unsafe { $crate::shell::write_param::<$plugin>(index, out) }
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_to_plain(index: u32, normalized: f64) -> f64 {
             $crate::shell::to_plain::<$plugin>(index, normalized)
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_to_normalized(index: u32, plain: f64) -> f64 {
             $crate::shell::to_normalized::<$plugin>(index, plain)
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_create(
             sample_rate: f64,
             max_block: u32,
@@ -249,22 +249,22 @@ macro_rules! export_shell {
                 as *mut ::std::ffi::c_void
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_destroy(instance: *mut ::std::ffi::c_void) {
             $crate::shell::destroy(instance as *mut $crate::shell::ShellInstance);
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_reset(instance: *mut ::std::ffi::c_void) {
             $crate::shell::reset(instance as *mut $crate::shell::ShellInstance);
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_latency(instance: *const ::std::ffi::c_void) -> u32 {
             $crate::shell::latency(instance as *const $crate::shell::ShellInstance)
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_set_plain(
             instance: *mut ::std::ffi::c_void,
             index: u32,
@@ -273,7 +273,7 @@ macro_rules! export_shell {
             $crate::shell::set_plain(instance as *mut $crate::shell::ShellInstance, index, plain)
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_get_plain(
             instance: *const ::std::ffi::c_void,
             index: u32,
@@ -281,7 +281,7 @@ macro_rules! export_shell {
             $crate::shell::get_plain(instance as *const $crate::shell::ShellInstance, index)
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_set_normalized(
             instance: *mut ::std::ffi::c_void,
             index: u32,
@@ -294,7 +294,7 @@ macro_rules! export_shell {
             )
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_get_normalized(
             instance: *const ::std::ffi::c_void,
             index: u32,
@@ -302,7 +302,7 @@ macro_rules! export_shell {
             $crate::shell::get_normalized(instance as *const $crate::shell::ShellInstance, index)
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_process(
             instance: *mut ::std::ffi::c_void,
             in_left: *const f32,

@@ -23,6 +23,7 @@ The SDK builds and is tested on current stable Rust. `rust-version` in `Cargo.to
 - Raise it only when a dependency needs a newer Rust, or when a language or library feature fixes a real problem in the SDK. Not to follow stable.
 - Keep it at or below the Rust that the current Debian stable release ships, so the Linux milestone can build with distribution packages.
 - Raise it only in a minor release, and say so in the release notes with the reason.
+- The SDK is written in edition 2024, so every unsafe operation inside an `unsafe fn` sits in its own `unsafe` block. Plugins may stay on edition 2021: the export macros write `#[unsafe(no_mangle)]`, which any edition accepts from Rust 1.82.
 
 ## 0.3.x: harden what exists
 

@@ -47,7 +47,7 @@ struct CGRect {
 }
 
 #[link(name = "objc")]
-extern "C" {
+unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Class;
     fn sel_registerName(name: *const c_char) -> Sel;
     fn objc_msgSend();
@@ -62,15 +62,15 @@ extern "C" {
 }
 
 #[link(name = "AppKit", kind = "framework")]
-extern "C" {}
+unsafe extern "C" {}
 
 #[link(name = "Foundation", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     static NSRunLoopCommonModes: Id;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
-extern "C" {
+unsafe extern "C" {
     fn CGColorSpaceCreateDeviceRGB() -> *mut c_void;
     fn CGColorSpaceRelease(space: *mut c_void);
     fn CGDataProviderCreateWithData(info: *mut c_void, data: *const c_void, size: usize, release: *const c_void) -> *mut c_void;
@@ -108,14 +108,14 @@ fn class(name: &[u8]) -> Class {
 
 /// `send!(Ret, receiver, b"selector:\0", ArgType = value, ...)`
 macro_rules! send {
-    ($ret:ty, $obj:expr, $sel:expr $(, $t:ty = $a:expr)*) => {{
+    ($ret:ty, $obj:expr_2021, $sel:expr_2021 $(, $t:ty = $a:expr_2021)*) => {{
         let f: unsafe extern "C" fn(Id, Sel $(, $t)*) -> $ret =
             std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         f($obj, sel($sel) $(, $a)*)
     }};
 }
 
-unsafe fn send_rect(obj: Id, name: &[u8]) -> CGRect {
+unsafe fn send_rect(obj: Id, name: &[u8]) -> CGRect { unsafe {
     #[cfg(target_arch = "x86_64")]
     {
         let f: unsafe extern "C" fn(*mut CGRect, Id, Sel) = std::mem::transmute(objc_msgSend_stret as unsafe extern "C" fn());
@@ -128,12 +128,12 @@ unsafe fn send_rect(obj: Id, name: &[u8]) -> CGRect {
         let f: unsafe extern "C" fn(Id, Sel) -> CGRect = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
         f(obj, sel(name))
     }
-}
+}}
 
-unsafe fn ns_string(text: &str) -> Id {
+unsafe fn ns_string(text: &str) -> Id { unsafe {
     let c = CString::new(text.replace('\0', "")).unwrap_or_default();
     send!(Id, class(b"NSString\0") as Id, b"stringWithUTF8String:\0", *const c_char = c.as_ptr())
-}
+}}
 
 const IVAR: &[u8] = b"openpluginState\0";
 
@@ -148,13 +148,13 @@ struct State {
     last: Instant,
 }
 
-unsafe fn state<'a>(this: Id) -> Option<&'a mut State> {
+unsafe fn state<'a>(this: Id) -> Option<&'a mut State> { unsafe {
     let mut p: *mut c_void = null_mut();
     object_getInstanceVariable(this, IVAR.as_ptr() as *const c_char, &mut p);
     (p as *mut State).as_mut()
-}
+}}
 
-unsafe fn backing_scale(view: Id) -> f32 {
+unsafe fn backing_scale(view: Id) -> f32 { unsafe {
     let window = send!(Id, view, b"window\0");
     if !window.is_null() {
         let scale = send!(f64, window, b"backingScaleFactor\0");
@@ -163,7 +163,7 @@ unsafe fn backing_scale(view: Id) -> f32 {
         }
     }
     2.0
-}
+}}
 
 extern "C" fn draw_rect(this: Id, _cmd: Sel, _dirty: CGRect) {
     unsafe {
@@ -203,18 +203,18 @@ extern "C" fn draw_rect(this: Id, _cmd: Sel, _dirty: CGRect) {
 }
 
 /// The event position in editor points (a host may show the view at another size).
-unsafe fn local(this: Id, size: (u32, u32), event: Id) -> (f32, f32) {
+unsafe fn local(this: Id, size: (u32, u32), event: Id) -> (f32, f32) { unsafe {
     let p = send!(CGPoint, event, b"locationInWindow\0");
     let q = send!(CGPoint, this, b"convertPoint:fromView:\0", CGPoint = p, Id = null_mut());
     let b = send_rect(this, b"bounds\0");
     let sx = if b.size.w > 1.0 { size.0 as f64 / b.size.w } else { 1.0 };
     let sy = if b.size.h > 1.0 { size.1 as f64 / b.size.h } else { 1.0 };
     ((q.x * sx) as f32, (q.y * sy) as f32)
-}
+}}
 
-unsafe fn redraw(this: Id) {
+unsafe fn redraw(this: Id) { unsafe {
     send!((), this, b"setNeedsDisplay:\0", i8 = 1);
-}
+}}
 
 extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
     unsafe {
@@ -282,7 +282,7 @@ fn class_name() -> CString {
     CString::new(format!("OpenPluginEditorView_{:x}", &MARKER as *const u8 as usize)).unwrap_or_default()
 }
 
-unsafe fn view_class() -> Class {
+unsafe fn view_class() -> Class { unsafe {
     let name = class_name();
     let existing = objc_getClass(name.as_ptr());
     if !existing.is_null() {
@@ -309,7 +309,7 @@ unsafe fn view_class() -> Class {
     add(b"openpluginTick:\0", tick as *const c_void, b"v@:@\0");
     objc_registerClassPair(cls);
     cls
-}
+}}
 
 /// An editor in an `NSView`. Dropping it stops the timer, removes the view
 /// from its parent, and drops the editor. Main thread only.
@@ -385,13 +385,13 @@ impl EditorView {
     ///
     /// # Safety
     /// `parent` is null or a live `NSView`.
-    pub unsafe fn attach(&self, parent: Id) -> bool {
+    pub unsafe fn attach(&self, parent: Id) -> bool { unsafe {
         if parent.is_null() {
             return false;
         }
         send!((), parent, b"addSubview:\0", Id = self.view);
         true
-    }
+    }}
 
     pub fn set_hidden(&self, hidden: bool) {
         unsafe { send!((), self.view, b"setHidden:\0", i8 = hidden as i8) }

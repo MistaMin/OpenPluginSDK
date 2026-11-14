@@ -10,7 +10,7 @@ pub trait DriHostWindow {
 
 #[cfg(target_os = "macos")]
 pub fn on_main_thread() -> bool {
-    extern "C" {
+    unsafe extern "C" {
         fn pthread_main_np() -> i32;
     }
     unsafe { pthread_main_np() == 1 }

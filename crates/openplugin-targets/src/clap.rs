@@ -1729,7 +1729,7 @@ macro_rules! export_clap {
             true
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub static clap_entry: $crate::clap_abi::clap_plugin_entry = $crate::clap_abi::clap_plugin_entry {
             clap_version: $crate::clap_abi::CLAP_VERSION,
             init: Some(__openplugin_clap_init),
@@ -1747,7 +1747,7 @@ macro_rules! export_clap {
             true
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub static clap_entry: $crate::clap_abi::clap_plugin_entry = $crate::clap_abi::clap_plugin_entry {
             clap_version: $crate::clap_abi::CLAP_VERSION,
             init: Some(__openplugin_clap_init),

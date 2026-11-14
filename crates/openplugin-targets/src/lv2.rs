@@ -759,7 +759,7 @@ macro_rules! export_lv2 {
         $crate::export_lv2!($plugin);
 
         #[cfg(target_os = "macos")]
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn lv2ui_descriptor(index: u32) -> *const $crate::lv2::Lv2UiDescriptor {
             $crate::lv2::set_creator(__openplugin_lv2_create);
             $crate::lv2::set_editor($editor);
@@ -771,7 +771,7 @@ macro_rules! export_lv2 {
             ::std::boxed::Box::new(<$plugin as ::std::default::Default>::default())
         }
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn lv2_descriptor(index: u32) -> *const $crate::lv2::Lv2Descriptor {
             $crate::lv2::set_creator(__openplugin_lv2_create);
             $crate::lv2::descriptor(index)

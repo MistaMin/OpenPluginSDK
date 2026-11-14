@@ -52,13 +52,13 @@ mod mac {
     }
 
     #[link(name = "objc")]
-    extern "C" {
+    unsafe extern "C" {
         fn objc_getClass(name: *const c_char) -> Id;
         fn sel_registerName(name: *const c_char) -> Sel;
         fn objc_msgSend();
     }
     #[link(name = "AppKit", kind = "framework")]
-    extern "C" {}
+    unsafe extern "C" {}
 
     fn sel(name: &CStr) -> Sel {
         unsafe { sel_registerName(name.as_ptr()) }
@@ -68,14 +68,14 @@ mod mac {
     }
 
     macro_rules! send {
-        ($ret:ty, $obj:expr, $sel:expr $(, $t:ty = $a:expr)*) => {{
+        ($ret:ty, $obj:expr_2021, $sel:expr_2021 $(, $t:ty = $a:expr_2021)*) => {{
             let f: unsafe extern "C" fn(Id, Sel $(, $t)*) -> $ret =
                 std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
             f($obj, sel($sel) $(, $a)*)
         }};
     }
 
-    extern "C" {
+    unsafe extern "C" {
         fn op_editor_size(width: *mut u32, height: *mut u32) -> u32;
         fn op_editor_create(host: *const OpEditorHost) -> Id;
         fn op_editor_view(editor: Id) -> Id;
@@ -87,20 +87,20 @@ mod mac {
         fn op_shell_destroy(instance: Id);
     }
 
-    unsafe fn new_view(w: f64, h: f64) -> Id {
+    unsafe fn new_view(w: f64, h: f64) -> Id { unsafe {
         let frame = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { w, h } };
         send!(Id, send!(Id, class(c"NSView"), c"alloc"), c"initWithFrame:", CGRect = frame)
-    }
+    }}
 
     /// Pump the main run loop so timers fire.
-    unsafe fn run_loop(seconds: f64) {
+    unsafe fn run_loop(seconds: f64) { unsafe {
         let date = send!(Id, class(c"NSDate"), c"dateWithTimeIntervalSinceNow:", f64 = seconds);
         let run_loop = send!(Id, class(c"NSRunLoop"), c"currentRunLoop");
         send!((), run_loop, c"runUntilDate:", Id = date);
-    }
+    }}
 
     /// A left mouse button event at a point in window coordinates (y up).
-    unsafe fn mouse(kind: usize, x: f64, y: f64) -> Id {
+    unsafe fn mouse(kind: usize, x: f64, y: f64) -> Id { unsafe {
         send!(
             Id,
             class(c"NSEvent"),
@@ -115,10 +115,10 @@ mod mac {
             isize = 1,
             f32 = 1.0
         )
-    }
+    }}
 
     /// The view's pixel at a point in editor coordinates (y down), as 0xRRGGBB.
-    unsafe fn pixel(view: Id, x: f64, y: f64) -> u32 {
+    unsafe fn pixel(view: Id, x: f64, y: f64) -> u32 { unsafe {
         let bounds = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { w: WIDTH as f64, h: HEIGHT as f64 } };
         let rep = send!(Id, view, c"bitmapImageRepForCachingDisplayInRect:", CGRect = bounds);
         send!((), view, c"cacheDisplayInRect:toBitmapImageRep:", CGRect = bounds, Id = rep);
@@ -128,10 +128,10 @@ mod mac {
         let color = send!(Id, color, c"colorUsingColorSpace:", Id = srgb);
         let c = |name: &CStr| (send!(f64, color, name) * 255.0).round() as u32;
         (c(c"redComponent") << 16) | (c(c"greenComponent") << 8) | c(c"blueComponent")
-    }
+    }}
 
     /// Pixels on a ring inside the knob, where the pointer sweeps.
-    unsafe fn knob_ring(view: Id) -> Vec<u32> {
+    unsafe fn knob_ring(view: Id) -> Vec<u32> { unsafe {
         let (x, y, w, h) = KNOB;
         let (cx, cy, r) = (x + w * 0.5, y + h * 0.5, w * 0.25);
         (0..24)
@@ -140,10 +140,10 @@ mod mac {
                 pixel(view, (cx + r * a.sin()) as f64, (cy - r * a.cos()) as f64)
             })
             .collect()
-    }
+    }}
 
     /// A grid of pixels over the toggle.
-    unsafe fn switch_area(view: Id) -> Vec<u32> {
+    unsafe fn switch_area(view: Id) -> Vec<u32> { unsafe {
         let (x, y, w, h) = SWITCH;
         let mut out = Vec::new();
         for j in 1..8 {
@@ -152,7 +152,7 @@ mod mac {
             }
         }
         out
-    }
+    }}
 
     fn green(p: u32) -> bool {
         let (r, g, b) = ((p >> 16) & 255, (p >> 8) & 255, p & 255);
@@ -237,13 +237,13 @@ mod mac {
         FLUSHES.fetch_add(1, Ordering::Relaxed);
     }
     static HOST_PARAMS: clap_host_params = clap_host_params { rescan: Some(host_rescan), clear: Some(host_clear), request_flush: Some(host_flush) };
-    unsafe extern "C" fn host_extension(_h: *const clap_host, id: *const c_char) -> *const c_void {
+    unsafe extern "C" fn host_extension(_h: *const clap_host, id: *const c_char) -> *const c_void { unsafe {
         if CStr::from_ptr(id).to_bytes_with_nul() == EXT_PARAMS {
             &HOST_PARAMS as *const clap_host_params as *const c_void
         } else {
             std::ptr::null()
         }
-    }
+    }}
     unsafe extern "C" fn host_noop(_h: *const clap_host) {}
 
     pub fn clap_gui_lifecycle() {
@@ -299,9 +299,9 @@ mod mac {
             unsafe extern "C" fn one_size(_l: *const clap_input_events) -> u32 {
                 1
             }
-            unsafe extern "C" fn one_get(l: *const clap_input_events, _i: u32) -> *const clap_event_header {
+            unsafe extern "C" fn one_get(l: *const clap_input_events, _i: u32) -> *const clap_event_header { unsafe {
                 &(*((*l).ctx as *const One)).event.header
-            }
+            }}
             let one = One {
                 event: clap_event_param_value {
                     header: clap_event_header { size: std::mem::size_of::<clap_event_param_value>() as u32, time: 0, space_id: 0, type_: EVENT_PARAM_VALUE, flags: 0 },
@@ -359,11 +359,11 @@ mod mac {
             ];
             let list = [&features[0] as *const Lv2Feature, &features[1], std::ptr::null()];
             static WRITES: AtomicU32 = AtomicU32::new(0);
-            unsafe extern "C" fn write(_c: *mut c_void, port: u32, size: u32, protocol: u32, buffer: *const c_void) {
+            unsafe extern "C" fn write(_c: *mut c_void, port: u32, size: u32, protocol: u32, buffer: *const c_void) { unsafe {
                 assert_eq!((port, size, protocol), (AUDIO_PORTS + 1, 4, 0));
                 assert_eq!(*(buffer as *const f32), 1.0);
                 WRITES.fetch_add(1, Ordering::Relaxed);
-            }
+            }}
             let mut widget: Id = std::ptr::null_mut();
             let handle = (ui.instantiate)(ui, desc.uri, c"".as_ptr(), Some(write), std::ptr::null_mut(), &mut widget, list.as_ptr());
             assert!(!handle.is_null());
