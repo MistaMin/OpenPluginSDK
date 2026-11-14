@@ -139,8 +139,7 @@ static void change(ParameterChanges& changes, ParamID id, double value) {
 }
 
 // One process() call. All buffers and parameter queues exist before arming.
-static long process_counted(IAudioProcessor* processor, int channels, bool in_place, ParameterChanges* changes, int blocks) {
-    constexpr int kFrames = 512;
+static long process_counted(IAudioProcessor* processor, int channels, bool in_place, ParameterChanges* changes, int blocks, int kFrames = 512) {
     std::vector<float> inL(kFrames), inR(kFrames), outL(kFrames), outR(kFrames);
     long total = 0;
     for (int block = 0; block < blocks; ++block) {
@@ -273,10 +272,37 @@ int main(int argc, char** argv) {
         ParameterChanges bypassOff;
         change(bypassOff, bypass, 0.0);
 
+        // Dense automation: every plugin parameter and the bypass get a point
+        // every `stride` samples. The 512-sample block stays under the shell's
+        // scratch capacity; the 4096-sample block carries three times its 4096
+        // points and goes through the thinning path.
+        auto dense = [&](ParameterChanges& target, int frames, int stride) {
+            for (int32 i = 0; i < controller->getParameterCount(); ++i) {
+                ParameterInfo host{};
+                CHECK(controller->getParameterInfo(i, host) == kResultOk);
+                int32 index = 0;
+                auto* queue = target.addParameterData(host.id, index);
+                int n = 0;
+                for (int at = 0; at < frames; at += stride, ++n) {
+                    const double value = (host.flags & ParameterInfo::kIsBypass) ? ((n / 4) % 2 ? 0.0 : 1.0) : 0.1 + 0.8 * (n % 17) / 16.0;
+                    queue->addPoint(at, value, index);
+                }
+            }
+        };
+        ParameterChanges ramps;
+        dense(ramps, 512, 1);
+        ParameterChanges rampsSparse;
+        dense(rampsSparse, 512, 37);
+        ParameterChanges overflow;
+        dense(overflow, 4096, 1);
+        ParameterChanges settle;
+        change(settle, bypass, 0.0);
+
         struct Step {
             const char* name;
             bool in_place;
             ParameterChanges* changes;
+            int frames = 512;
         };
         const Step steps[] = {
             {"separate buffers", false, nullptr},
@@ -288,9 +314,15 @@ int main(int argc, char** argv) {
             {"bypassed in place", true, nullptr},
             {"bypass off (switch block, fading)", false, &bypassOff},
             {"processed again", true, nullptr},
+            {"ramps, a point every 37 samples in every queue", false, &rampsSparse},
+            {"ramps, a point at every sample in every queue", false, &ramps},
+            {"ramps at every sample, in place", true, &ramps},
+            {"more points than the scratch holds (3 x 4096)", false, &overflow, 4096},
+            {"more points than the scratch holds, in place", true, &overflow, 4096},
+            {"settle bypass off", false, &settle},
         };
         for (const Step& step : steps) {
-            const long allocations = process_counted(processor, channels, step.in_place, step.changes, 6);
+            const long allocations = process_counted(processor, channels, step.in_place, step.changes, 6, step.frames);
             std::printf("VST3 no-alloc %s, %s: %ld allocations in process\n", channels == 1 ? "mono" : "stereo", step.name, allocations);
             grand_total += allocations;
             ++cases;
@@ -307,6 +339,6 @@ int main(int argc, char** argv) {
     CHECK(exitFn());
     CFRelease(bundle);
     CHECK(grand_total == 0);
-    std::printf("VST3 no-alloc proof (%s): %d cases (mono and stereo, separate and in-place buffers, parameter changes, bypass on and off), 0 allocations in process: PASS\n", argv[1], cases);
+    std::printf("VST3 no-alloc proof (%s): %d cases (mono and stereo, separate and in-place buffers, parameter changes, dense per-sample ramps, blocks with more points than the scratch holds, bypass on and off), 0 allocations in process: PASS\n", argv[1], cases);
     return 0;
 }
