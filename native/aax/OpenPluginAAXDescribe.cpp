@@ -20,7 +20,7 @@ AAX_Result describe(AAX_IEffectDescriptor& effect, AAX_EStemFormat stem, int32_t
     check(component->AddAudioIn(inputField));
     check(component->AddAudioOut(outputField));
     check(component->AddAudioBufferLength(framesField));
-    check(component->AddDataInPort(controlsField, sizeof(Packet)));
+    check(component->AddDataInPort(controlsField, static_cast<uint32_t>(packetBytes(info.param_count))));
     check(component->AddPrivateData(stateField, sizeof(ProcessState*)));
     auto* properties = component->NewPropertyMap();
     if (!properties) return AAX_ERROR_NULL_OBJECT;

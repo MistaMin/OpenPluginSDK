@@ -92,7 +92,7 @@ Counts disarm() {
 // The armed region holds only the callback. Everything else is set up before.
 struct Fixture {
     openplugin_aax::ProcessState state;
-    openplugin_aax::Packet packet{};
+    openplugin_aax::PacketBuffer packet;
     std::vector<float> inL, inR, outL, outR;
     int32_t frames = 0;
     float* input[2] = {nullptr, nullptr};
@@ -115,16 +115,16 @@ struct Fixture {
         output[1] = channels > 1 ? outR.data() : nullptr;
         OpShellInfo info{};
         require(op_shell_info(&info) != 0 && info.param_count > 0 && info.param_count <= openplugin_aax::kMaxParams, "shell info");
-        packet.count = info.param_count;
+        packet = openplugin_aax::PacketBuffer(info.param_count);
         for (uint32_t i = 0; i < info.param_count; ++i) {
             OpParamDesc desc{};
             require(op_shell_param(i, &desc) != 0, "shell param");
-            packet.plain[i] = static_cast<float>(desc.default_plain);
+            packet.plain()[i] = static_cast<float>(desc.default_plain);
             lo.push_back(static_cast<float>(desc.min));
             hi.push_back(static_cast<float>(desc.max));
         }
         statePtr = &state;
-        context = {input, output, &frames, &packet, &statePtr};
+        context = {input, output, &frames, packet.get(), &statePtr};
         contexts[0] = &context;
     }
     std::vector<float> lo, hi;
@@ -208,36 +208,59 @@ int main() {
                 const float t = static_cast<float>(step) / 63.f;
                 for (uint32_t p = 0; p < info.param_count; ++p) {
                     const float phase = (p % 2 == 0) ? t : 1.f - t;
-                    rig.packet.plain[p] = rig.lo[p] + (rig.hi[p] - rig.lo[p]) * phase;
+                    rig.packet.plain()[p] = rig.lo[p] + (rig.hi[p] - rig.lo[p]) * phase;
                 }
                 expect_clean(rig.call(), what);
             }
 
             // Bypass on, off, on, off, with and without changing parameters.
             for (int i = 0; i < 6; ++i) {
-                rig.packet.bypass = (i % 2 == 0) ? 1u : 0u;
-                for (uint32_t p = 0; p < info.param_count; ++p) rig.packet.plain[p] = (i % 3 == 0) ? rig.lo[p] : rig.hi[p];
-                std::snprintf(what, sizeof what, "%s %d frames, bypass %s", layout, blockFrames, rig.packet.bypass ? "on" : "off");
+                rig.packet.get()->bypass = (i % 2 == 0) ? 1u : 0u;
+                for (uint32_t p = 0; p < info.param_count; ++p) rig.packet.plain()[p] = (i % 3 == 0) ? rig.lo[p] : rig.hi[p];
+                std::snprintf(what, sizeof what, "%s %d frames, bypass %s", layout, blockFrames, rig.packet.get()->bypass ? "on" : "off");
                 expect_clean(rig.call(), what);
             }
-            rig.packet.bypass = 0;
+            // Switching both ways with a crossfade (480 samples) that spans several
+            // calls: the delay line, the dry buffer and the mix all run while armed.
+            for (int i = 0; i < 24; ++i) {
+                rig.packet.get()->bypass = ((i / 4) % 2 == 0) ? 1u : 0u;
+                if (i % 5 == 4) rig.packet.get()->bypass ^= 1u;
+                std::snprintf(what, sizeof what, "%s %d frames, bypass crossfade %d", layout, blockFrames, i);
+                expect_clean(rig.call(), what);
+            }
+            // A refused packet while bypassed still outputs the dry path.
+            rig.packet.get()->bypass = 1;
+            const float keep = rig.packet.plain()[0];
+            rig.packet.plain()[0] = std::numeric_limits<float>::quiet_NaN();
+            std::snprintf(what, sizeof what, "%s %d frames, bypassed non-finite packet", layout, blockFrames);
+            expect_clean(rig.call(), what);
+            rig.packet.plain()[0] = keep;
+            rig.packet.get()->count = info.param_count + 1;
+            std::snprintf(what, sizeof what, "%s %d frames, bypassed oversized packet", layout, blockFrames);
+            expect_clean(rig.call(), what);
+            rig.packet.get()->count = info.param_count;
+            rig.packet.get()->bypass = 0;
 
             // Refused packets take the silence path, which must not allocate either.
-            const float saved = rig.packet.plain[0];
-            rig.packet.plain[0] = std::numeric_limits<float>::quiet_NaN();
+            const float saved = rig.packet.plain()[0];
+            rig.packet.plain()[0] = std::numeric_limits<float>::quiet_NaN();
             std::snprintf(what, sizeof what, "%s %d frames, non-finite packet", layout, blockFrames);
             expect_clean(rig.call(), what);
-            rig.packet.plain[0] = saved;
-            rig.packet.count = kMaxParams + 1;
+            rig.packet.plain()[0] = saved;
+            rig.packet.get()->count = info.param_count + 1;
             std::snprintf(what, sizeof what, "%s %d frames, oversized packet", layout, blockFrames);
             expect_clean(rig.call(), what);
-            rig.packet.count = info.param_count;
+            rig.packet.get()->count = info.param_count;
             expect_clean(rig.call(), what);
         }
     }
 
     malloc_logger = nullptr;
     require(g_total == 0, "allocation total is not zero");
-    std::printf("AAX allocation proof: %lu armed process calls (mono and stereo; 1, 512 and 3000 frames; default, changing and non-finite packets; bypass on and off), 0 allocations by operator new and by malloc: PASS\n", g_calls);
+    {
+        Fixture probe(1, 1);
+        std::printf("AAX allocation proof: reported latency %u samples, %u parameters\n", op_shell_latency(probe.state.engine), info.param_count);
+    }
+    std::printf("AAX allocation proof: %lu armed process calls (mono and stereo; 1, 512 and 3000 frames; default, changing, non-finite and oversized packets; bypass on and off, crossfades across calls, bypassed refused packets), 0 allocations by operator new and by malloc: PASS\n", g_calls);
     return 0;
 }
