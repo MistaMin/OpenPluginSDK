@@ -11,7 +11,7 @@ permissions:
 
 env:
   CARGO_BUILD_JOBS: "2"
-  # GoodLookinDri c9773b6: 0.2 lit rendering, Rust 1.80 compatible.
+  # GoodLookinDri c9773b6: 0.2 lit rendering.
   GOODLOOKINDRI_REF: c9773b6a44cf5bf9b4b3c207d51a2db5fb464ae1
   CARGO_TERM_COLOR: always
 
@@ -46,7 +46,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   msrv:
-    name: MSRV check (Rust 1.80.0)
+    name: MSRV check (Rust 1.85.0)
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
@@ -63,8 +63,8 @@ jobs:
           repository: MistaMin/GoodLookinDri
           ref: ${{ env.GOODLOOKINDRI_REF }}
           path: GoodLookinDri
-      - name: Install Rust 1.80.0
-        uses: dtolnay/rust-toolchain@1.80.0
+      - name: Install Rust 1.85.0
+        uses: dtolnay/rust-toolchain@1.85.0
       - name: Check the workspace on the minimum Rust version
         working-directory: OpenPluginSDK
-        run: cargo +1.80.0 check --workspace --all-targets --locked
+        run: cargo +1.85.0 check --workspace --all-targets --locked

@@ -331,7 +331,7 @@ impl Bus {
         for channel in 0..real_channels {
             let mut data = Vec::with_capacity(frames + GUARD);
             data.extend((0..frames).map(|index| sample(signal, index + channel)));
-            data.extend(std::iter::repeat(guard).take(GUARD));
+            data.extend(std::iter::repeat_n(guard, GUARD));
             channels.push(data);
         }
         // A hostile channel_count can exceed the buffers the host allocated;

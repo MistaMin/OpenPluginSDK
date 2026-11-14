@@ -22,11 +22,11 @@ The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin
 - **Clippy clean.** `write_info` and `write_param` dereference raw pointers in safe functions. Make them `unsafe`, or validate the pointers first.
 - **Sample-rate range.** The default `accepts_sample_rate` refuses rates below 8 kHz, which `clap-validator` reports. Widen it, or document why not.
 - **Hostile input everywhere.** Fuzz CLAP events, LV2 ports, `op_shell_*` and state loading with garbage, NaN and out-of-range values. Test that the audio path does not allocate in every format, not only in the FFI session.
-- **CI on macOS.** The workspace tests, the main-thread Cocoa test, and the minimum Rust version (1.80) on every push.
+- **CI on macOS.** The workspace tests, the main-thread Cocoa test, and the minimum Rust version on every push.
 
 ### Status
 
-Done: generic shell proofs over `examples/editor`; clippy clean with warnings as errors, checked in CI; rates from 1 kHz to 768 kHz in every bridge, with every DSP block computing for the real rate (`effective_rate`, `tests/low_rates.rs`); hostile-input suites for CLAP, LV2, the shell ABI and state loading; no-allocation tests for CLAP, LV2 and the shell; macOS CI with the Rust 1.80 check, GoodLookinDri pinned to a commit.
+Done: generic shell proofs over `examples/editor`; clippy clean with warnings as errors, checked in CI; rates from 1 kHz to 768 kHz in every bridge, with every DSP block computing for the real rate (`effective_rate`, `tests/low_rates.rs`); hostile-input suites for CLAP, LV2, the shell ABI and state loading; no-allocation tests for CLAP, LV2 and the shell; macOS CI with the minimum-Rust check, GoodLookinDri pinned to a commit. The minimum is Rust 1.85, the first release that reads the edition-2024 crates in the dependency tree (`coreaudio-sys` through `cpal`); 1.84 cannot build it. It was 1.80, with no recorded reason.
 
 Open:
 

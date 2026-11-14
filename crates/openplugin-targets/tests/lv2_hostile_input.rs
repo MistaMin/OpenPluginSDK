@@ -192,8 +192,6 @@ const AUDIO_MODES: [Audio; 8] = [
 ];
 
 fn fill_audio(buffer: &mut [f32], mode: Audio) {
-    // A local, not a const: `f32::from_bits` is const only from Rust 1.83 and
-    // this workspace keeps a 1.80 minimum.
     let mixed = [
         f32::NAN,
         0.75,
@@ -335,9 +333,7 @@ fn randomized_hostile_values_and_lifecycle_orders_survive() {
     const BLOCKS: [usize; 8] = [0, 1, 7, 64, 257, 1_024, PREPARED_MAX, PREPARED_MAX + 37];
     // Explicit hostile control values, plus arbitrary bit patterns further
     // down: NaN, both infinities, far outside the -24..24 / 0..1 ranges, -0.0,
-    // a subnormal, and ordinary values. This is a local, not a const, because
-    // `f32::from_bits` is const only from Rust 1.83 (the workspace minimum is
-    // 1.80).
+    // a subnormal, and ordinary values.
     let specials = [
         f32::NAN,
         f32::INFINITY,

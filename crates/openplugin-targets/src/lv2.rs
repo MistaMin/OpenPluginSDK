@@ -530,7 +530,7 @@ fn number(v: f32) -> String {
 /// A port symbol: letters, digits and underscores, not starting with a digit.
 pub fn symbol(id: &str) -> String {
     let mut s: String = id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    if s.chars().next().map_or(true, |c| c.is_ascii_digit()) {
+    if s.chars().next().is_none_or(|c| c.is_ascii_digit()) {
         s.insert(0, '_');
     }
     s
