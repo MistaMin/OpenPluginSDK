@@ -162,6 +162,264 @@ static uint32 expected_tail(void* instance, double rate) {
     return samples > 0.0 ? static_cast<uint32>(samples) : kNoTail;
 }
 #endif
+
+// ---- Sample-accurate parameter changes and bypass --------------------------
+// A change point: a parameter (or the bypass, index < 0) takes `value`
+// (normalized) from sample `offset` of the block.
+struct ChangePoint {
+    int offset;
+    int index;
+    double value;
+};
+struct Stereo {
+    std::vector<float> left;
+    std::vector<float> right;
+};
+static void make_input(Stereo& in, int frames) {
+    in.left.resize(frames);
+    in.right.resize(frames);
+    fill_sine(in.left.data(), frames, 48000.0, 1000.0, 0.25, 0);
+    fill_sine(in.right.data(), frames, 48000.0, 1300.0, 0.2, 0);
+}
+// Put the processor and the reference on the same values, not bypassed, with a
+// fresh engine: values go in through a zero-sample block, as a host may send.
+static void prime(IAudioProcessor* processor, void* reference, const std::vector<double>& normalized, ParamID bypass) {
+    ParameterChanges changes;
+    for (uint32_t i = 0; i < normalized.size(); ++i) change(changes, static_cast<ParamID>(i), normalized[i]);
+    change(changes, bypass, 0.0);
+    ProcessData data{};
+    data.processMode = kRealtime;
+    data.symbolicSampleSize = kSample32;
+    data.numSamples = 0;
+    data.inputParameterChanges = &changes;
+    CHECK(processor->process(data) == kResultOk);
+    CHECK(processor->setProcessing(false) == kResultOk);
+    CHECK(processor->setProcessing(true) == kResultOk);
+    for (uint32_t i = 0; i < normalized.size(); ++i) CHECK(op_shell_set_normalized(reference, i, static_cast<float>(normalized[i])) != 0);
+    op_shell_reset(reference);
+}
+// One block through the VST3 shell with the points as parameter queues.
+static Stereo host_block(IAudioProcessor* processor, int channels, const Stereo& in, const std::vector<ChangePoint>& points, ParamID bypass, bool in_place) {
+    const int frames = static_cast<int>(in.left.size());
+    Stereo work = in;
+    Stereo out;
+    out.left.assign(frames, 0.0f);
+    out.right.assign(frames, 0.0f);
+    float* inPtrs[] = {work.left.data(), work.right.data()};
+    float* outPtrs[] = {in_place ? work.left.data() : out.left.data(), in_place ? work.right.data() : out.right.data()};
+    AudioBusBuffers input{};
+    input.numChannels = channels;
+    input.channelBuffers32 = inPtrs;
+    AudioBusBuffers output{};
+    output.numChannels = channels;
+    output.channelBuffers32 = outPtrs;
+    ParameterChanges changes;
+    for (const ChangePoint& point : points) {
+        int32 index = 0;
+        auto* queue = changes.addParameterData(point.index < 0 ? bypass : static_cast<ParamID>(point.index), index);
+        queue->addPoint(point.offset, point.value, index);
+    }
+    ProcessData data{};
+    data.processMode = kRealtime;
+    data.symbolicSampleSize = kSample32;
+    data.numSamples = frames;
+    data.numInputs = data.numOutputs = 1;
+    data.inputs = &input;
+    data.outputs = &output;
+    data.inputParameterChanges = points.empty() ? nullptr : &changes;
+    CHECK(processor->process(data) == kResultOk);
+    return in_place ? work : out;
+}
+// The same block straight through the C ABI: split at the change offsets (and at
+// `limit` frames), set the values that change at each start, then process.
+// Bypass points are skipped here; bypass_model applies them.
+static Stereo abi_block(void* reference, int channels, const Stereo& in, std::vector<ChangePoint> points, int limit) {
+    const int frames = static_cast<int>(in.left.size());
+    Stereo out;
+    out.left.assign(frames, 0.0f);
+    out.right.assign(frames, 0.0f);
+    points.erase(std::remove_if(points.begin(), points.end(), [](const ChangePoint& p) { return p.index < 0; }), points.end());
+    std::stable_sort(points.begin(), points.end(), [](const ChangePoint& a, const ChangePoint& b) { return a.offset < b.offset; });
+    size_t next = 0;
+    int pos = 0;
+    while (pos < frames) {
+        while (next < points.size() && points[next].offset <= pos) {
+            CHECK(op_shell_set_normalized(reference, static_cast<uint32_t>(points[next].index), static_cast<float>(points[next].value)) != 0);
+            ++next;
+        }
+        int end = frames;
+        if (next < points.size()) end = std::min(end, points[next].offset);
+        const int n = std::min(limit, end - pos);
+        CHECK(op_shell_process(reference, in.left.data() + pos, channels > 1 ? in.right.data() + pos : nullptr,
+                               out.left.data() + pos, channels > 1 ? out.right.data() + pos : nullptr, static_cast<uint32_t>(n)) != 0);
+        pos += n;
+    }
+    return out;
+}
+static double stereo_difference(const Stereo& a, const Stereo& b, int channels) {
+    double worst = max_difference(a.left, b.left);
+    if (channels > 1) worst = std::max(worst, max_difference(a.right, b.right));
+    return worst;
+}
+// First sample at which two blocks differ, or -1.
+static int first_difference(const Stereo& a, const Stereo& b) {
+    for (size_t i = 0; i < a.left.size(); ++i)
+        if (a.left[i] != b.left[i]) return static_cast<int>(i);
+    return -1;
+}
+// The shell's bypass, written out: the mix moves towards its target by one step
+// per sample, starting at the sample where the target changes. dry is the
+// input delayed by `latency`.
+static Stereo bypass_model(const Stereo& processed, const Stereo& in, int channels, int latency, const std::vector<ChangePoint>& points) {
+    const int frames = static_cast<int>(in.left.size());
+    const float step = static_cast<float>(1.0 / std::max(1.0, 0.010 * 48000.0));
+    Stereo out = processed;
+    float mix = 0.0f;
+    float target = 0.0f;
+    size_t next = 0;
+    for (int i = 0; i < frames; ++i) {
+        for (; next < points.size(); ++next) {
+            if (points[next].offset > i) break;
+            if (points[next].index < 0) target = points[next].value >= 0.5 ? 1.0f : 0.0f;
+        }
+        if (mix < target) mix = std::min(target, mix + step);
+        else if (mix > target) mix = std::max(target, mix - step);
+        for (int c = 0; c < channels; ++c) {
+            const std::vector<float>& src = c ? in.right : in.left;
+            std::vector<float>& dst = c ? out.right : out.left;
+            const float dry = i - latency >= 0 ? src[i - latency] : 0.0f;
+            dst[i] = mix >= 1.0f ? dry : dst[i] + (dry - dst[i]) * mix;
+        }
+    }
+    return out;
+}
+static void check_sample_accurate(IComponent* component, IAudioProcessor* processor, void* reference, int channels, uint32_t gain, uint32_t warm, ParamID bypass, int maxBlock) {
+    const char* label = channels == 1 ? "mono" : "stereo";
+    std::vector<double> initial;
+    {
+        const std::vector<float> defaults = shell_defaults();
+        for (uint32_t i = 0; i < defaults.size(); ++i) initial.push_back(op_shell_to_normalized(i, defaults[i]));
+    }
+    initial[gain] = 0.5;
+    initial[warm] = 0.0;
+    const int latency = static_cast<int>(processor->getLatencySamples());
+    struct Case {
+        const char* name;
+        int frames;
+        std::vector<ChangePoint> points;
+    };
+    const int g = static_cast<int>(gain);
+    const int w = static_cast<int>(warm);
+    std::vector<ChangePoint> ramp;
+    for (int k = 0; k < 24; ++k) ramp.push_back({100 + k * 37, g, 0.55 + 0.35 * k / 23.0});
+    const Case cases[] = {
+        {"one change at offset 300", 1024, {{300, g, 0.9}}},
+        {"change at the last sample", 1024, {{1023, g, 0.9}}},
+        {"24-point ramp in one queue", 1024, ramp},
+        {"two queues, different offsets", 1024, {{200, g, 0.8}, {640, w, 1.0}, {900, g, 0.3}}},
+        {"two queues, same offset", 1024, {{500, g, 0.2}, {500, w, 1.0}}},
+        {"block larger than the prepared size", 3 * maxBlock + 1234, {{maxBlock - 1, g, 0.9}, {maxBlock + 5, w, 1.0}, {2 * maxBlock + 77, g, 0.1}}},
+    };
+    for (const Case& c : cases) {
+        Stereo in;
+        make_input(in, c.frames);
+        for (bool in_place : {false, true}) {
+            prime(processor, reference, initial, bypass);
+            const Stereo hostOut = host_block(processor, channels, in, c.points, bypass, in_place);
+            prime(processor, reference, initial, bypass);
+            const Stereo abiOut = abi_block(reference, channels, in, c.points, maxBlock);
+            const double diff = stereo_difference(hostOut, abiOut, channels);
+            std::printf("VST3 %s%s, %s: max difference from the ABI split at the same offsets %.3g\n", label, in_place ? " in place" : "", c.name, diff);
+            CHECK(diff == 0.0);
+        }
+        // The change lands at its sample: the output is the unchanged render up
+        // to the first change point and differs from it at that very sample.
+        int firstPoint = c.frames;
+        for (const ChangePoint& p : c.points) firstPoint = std::min(firstPoint, p.offset);
+        prime(processor, reference, initial, bypass);
+        const Stereo unchanged = abi_block(reference, channels, in, {}, maxBlock);
+        prime(processor, reference, initial, bypass);
+        const Stereo hostOut = host_block(processor, channels, in, c.points, bypass, false);
+        const int firstChange = first_difference(unchanged, hostOut);
+        std::printf("VST3 %s, %s: first sample that differs from the unchanged render: %d (first change point %d)\n", label, c.name, firstChange, firstPoint);
+        CHECK(firstChange == firstPoint);
+        // And it is not a block-level change: every value at sample 0 gives another block.
+        std::vector<ChangePoint> early = c.points;
+        for (ChangePoint& p : early) p.offset = 0;
+        prime(processor, reference, initial, bypass);
+        const Stereo blockLevel = abi_block(reference, channels, in, early, maxBlock);
+        CHECK(stereo_difference(hostOut, blockLevel, channels) > 1e-3);
+    }
+    // Bypass mid-block: the crossfade starts at the sample of the change.
+    struct BypassCase {
+        const char* name;
+        std::vector<ChangePoint> points;
+    };
+    const BypassCase bypassCases[] = {
+        {"bypass on at 300", {{300, -1, 1.0}}},
+        {"bypass on at 100, off at 700", {{100, -1, 1.0}, {700, -1, 0.0}}},
+        {"bypass on at 250 with a gain change at 600", {{250, -1, 1.0}, {600, g, 0.2}}},
+    };
+    // The default gain is near unity, which would make the processed and the dry
+    // signal alike; start the bypass cases at a clearly audible gain.
+    initial[gain] = 0.85;
+    for (const BypassCase& c : bypassCases) {
+        Stereo in;
+        make_input(in, 1536);
+        for (bool in_place : {false, true}) {
+            prime(processor, reference, initial, bypass);
+            const Stereo hostOut = host_block(processor, channels, in, c.points, bypass, in_place);
+            prime(processor, reference, initial, bypass);
+            const Stereo processed = abi_block(reference, channels, in, c.points, maxBlock);
+            const Stereo expected = bypass_model(processed, in, channels, latency, c.points);
+            const double diff = stereo_difference(hostOut, expected, channels);
+            std::printf("VST3 %s%s, %s: max difference from the crossfade model %.3g\n", label, in_place ? " in place" : "", c.name, diff);
+            CHECK(diff <= 1e-6);
+        }
+        // Before the first bypass point the output is the processed signal exactly,
+        // and at that sample it starts to move.
+        prime(processor, reference, initial, bypass);
+        const Stereo hostOut = host_block(processor, channels, in, c.points, bypass, false);
+        prime(processor, reference, initial, bypass);
+        const Stereo processed = abi_block(reference, channels, in, c.points, maxBlock);
+        const int first = c.points[0].offset;
+        for (int i = 0; i < first; ++i) CHECK(hostOut.left[i] == processed.left[i]);
+        CHECK(hostOut.left[first] != processed.left[first]);
+    }
+    // More points than the shell's scratch holds (3 queues x 4096 points in one
+    // 4096-sample block): the queues are thinned, but the last value of every
+    // queue is kept, so the state after the block is the last point of each.
+    {
+        Stereo in;
+        make_input(in, 4096);
+        prime(processor, reference, initial, bypass);
+        std::vector<ChangePoint> dense;
+        for (int i = 0; i < 4096; ++i) {
+            dense.push_back({i, g, 0.2 + 0.6 * (i % 11) / 10.0});
+            dense.push_back({i, w, (i / 3) % 2 ? 1.0 : 0.0});
+            dense.push_back({i, -1, (i / 5) % 2 ? 1.0 : 0.0});
+        }
+        dense[3 * 4095] = {4095, g, 0.3125};
+        dense[3 * 4095 + 1] = {4095, w, 1.0};
+        dense[3 * 4095 + 2] = {4095, -1, 1.0};
+        const Stereo out = host_block(processor, channels, in, dense, bypass, false);
+        for (float sample : out.left) CHECK(std::isfinite(sample));
+        MemoryStream state;
+        CHECK(component->getState(&state) == kResultOk);
+        const char* bytes = state.getData();
+        const int64 size = state.getSize();
+        CHECK(size >= static_cast<int64>(8 + 8 * initial.size() + 4));
+        double held[8] = {};
+        CHECK(initial.size() <= 8);
+        std::memcpy(held, bytes + 8, 8 * initial.size());
+        int32_t bypassed = 0;
+        std::memcpy(&bypassed, bytes + 8 + 8 * initial.size(), 4);
+        std::printf("VST3 %s, 3 x 4096 points in one block: the last values are kept (gain %.4f, warm %.0f, bypass %d)\n", label, held[gain], held[warm], bypassed);
+        CHECK(held[gain] == static_cast<double>(0.3125));
+        CHECK(held[warm] == 1.0);
+        CHECK(bypassed == 1);
+    }
+}
 int main(int argc, char** argv) {
     CHECK(argc == 2);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(argv[1]), static_cast<CFIndex>(std::strlen(argv[1])), true);
@@ -340,6 +598,8 @@ int main(int argc, char** argv) {
         CHECK(wrongCount.write(words, sizeof(words), nullptr) == kResultOk);
         wrongCount.seek(0, IBStream::kIBSeekSet, nullptr);
         CHECK(component->setState(&wrongCount) != kResultOk);
+        // Parameter changes and bypass at their sample offsets.
+        check_sample_accurate(component, processor, reference.instance, channels, gain, warm, bypass, 4096);
         CHECK(processor->setProcessing(false) == kResultOk);
         CHECK(component->setActive(false) == kResultOk);
         processor->release();
@@ -352,9 +612,9 @@ int main(int argc, char** argv) {
     CHECK(exitFn());
     CFRelease(bundle);
 #if OP_HAS_TAIL
-    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, tail, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass (flag, delayed dry output, restore, state, legacy state): PASS");
+    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, tail, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass (flag, delayed dry output, restore, state, legacy state), sample-accurate parameter changes and bypass: PASS");
 #else
-    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass, tail not built (OP_TAIL=OFF): PASS");
+    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass, sample-accurate parameter changes and bypass, tail not built (OP_TAIL=OFF): PASS");
 #endif
     return 0;
 }

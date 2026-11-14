@@ -116,6 +116,8 @@ public:
         if (active && engine_) {
             op_shell_reset(engine_);
             clearBypassLine();
+            // A fresh start has nothing to fade from.
+            mix_ = bypass_.load() ? 1.0f : 0.0f;
         }
         return kResultOk;
     }
@@ -156,23 +158,22 @@ public:
         if (!writer.writeInt32(bypass_.load() ? 1 : 0)) return kResultFalse;
         return kResultOk;
     }
+    // Parameter changes are sample-accurate. Every point of every input queue
+    // (the bypass parameter included) is collected and ordered by sample offset.
+    // The block is then rendered in segments between change points: the values
+    // that change at a segment's start are set before op_shell_process for that
+    // segment, so a value applies from the segment's first sample. Bypass starts
+    // its crossfade at the sample of its change. Nothing here allocates: the
+    // scratch is sized in setActive. A block with more points than the scratch
+    // holds is thinned per queue (see collectChanges).
     tresult PLUGIN_API process(ProcessData& data) SMTG_OVERRIDE {
-        if (data.inputParameterChanges) {
-            int32 queues = data.inputParameterChanges->getParameterCount();
-            for (int32 i = 0; i < queues; ++i) {
-                auto* queue = data.inputParameterChanges->getParameterData(i);
-                if (!queue || queue->getPointCount() < 1) continue;
-                ParamID id = queue->getParameterId();
-                if (id >= count_ && id != kBypassId) continue;
-                int32 offset = 0;
-                ParamValue value = 0.0;
-                if (queue->getPoint(queue->getPointCount() - 1, offset, value) == kResultTrue && std::isfinite(value)) {
-                    if (id == kBypassId) bypass_.store(value >= 0.5);
-                    else values_[id].store(std::clamp(value, 0.0, 1.0));
-                }
-            }
+        const int32 numSamples = std::max<int32>(data.numSamples, 0);
+        const uint32_t pending = collectChanges(data.inputParameterChanges, numSamples);
+        uint32_t next = 0;
+        if (data.numSamples == 0) {
+            applyDue(next, pending, 0, true);
+            return kResultOk;
         }
-        if (data.numSamples == 0) return kResultOk;
         if (!engine_ || data.symbolicSampleSize != kSample32 || data.numSamples < 0 || data.numInputs != 1 || data.numOutputs != 1 || !data.inputs || !data.outputs)
             return kResultFalse;
         auto& input = data.inputs[0];
@@ -180,13 +181,20 @@ public:
         int32 channels = input.numChannels;
         if ((channels != 1 && channels != 2) || output.numChannels != channels || !input.channelBuffers32 || !output.channelBuffers32)
             return kResultFalse;
+        // Start from the values held at the end of the previous block.
         for (uint32_t i = 0; i < count_; ++i) {
             if (!op_shell_set_normalized(engine_, i, static_cast<float>(values_[i].load()))) return kResultFalse;
         }
         const int32 limit = processSetup.maxSamplesPerBlock > 0 ? processSetup.maxSamplesPerBlock : data.numSamples;
-        const float target = bypass_.load() ? 1.0f : 0.0f;
-        for (int32 offset = 0; offset < data.numSamples;) {
-            uint32_t frames = static_cast<uint32_t>(std::min(limit, data.numSamples - offset));
+        int32 offset = 0;
+        while (offset < data.numSamples) {
+            if (!applyDue(next, pending, offset, false)) return kResultFalse;
+            // The segment runs to the next change point, the end of the block, or
+            // the prepared block size, whichever comes first.
+            int32 end = data.numSamples;
+            if (next < pending) end = std::min(end, changes_[next].offset);
+            const uint32_t frames = static_cast<uint32_t>(std::min(limit, end - offset));
+            const float target = bypass_.load() ? 1.0f : 0.0f;
             const float* inLeft = input.channelBuffers32[0] + offset;
             const float* inRight = channels > 1 ? input.channelBuffers32[1] + offset : nullptr;
             float* outLeft = output.channelBuffers32[0] + offset;
@@ -198,11 +206,88 @@ public:
             applyBypass(outLeft, outRight, channels, frames, target);
             offset += static_cast<int32>(frames);
         }
+        // Points at the very end of the block hold for the next one.
+        if (!applyDue(next, pending, data.numSamples, true)) return kResultFalse;
         output.silenceFlags = 0;
         return kResultOk;
     }
 
 private:
+    struct Change {
+        int32 offset;
+        uint32_t order;
+        ParamID id;
+        double value;
+    };
+    // Room for this many points per block. A block never allocates; if it
+    // carries more, collectChanges thins each queue. One point per parameter
+    // always fits.
+    static constexpr uint32_t kMinChangeCapacity = 4096;
+    bool relevant(ParamID id) const { return id < count_ || id == kBypassId; }
+    // Gathers the points of every queue into changes_, ordered by (offset,
+    // arrival). Returns how many it kept. Offsets are clamped into the block.
+    // If the queues carry more points than changes_ holds, each queue keeps an
+    // even share of its own points (first, last and evenly spaced between), so
+    // the final value of every parameter is always kept and the ramp shape is
+    // approximated; a queue beyond the capacity is ignored. Hosts send one queue
+    // per parameter, so that last case does not occur in practice.
+    uint32_t collectChanges(IParameterChanges* queues, int32 numSamples) {
+        if (!queues || changes_.empty()) return 0;
+        const uint32_t capacity = static_cast<uint32_t>(changes_.size());
+        const int32 queueCount = queues->getParameterCount();
+        uint64_t total = 0;
+        uint32_t used = 0;
+        for (int32 q = 0; q < queueCount; ++q) {
+            IParamValueQueue* queue = queues->getParameterData(q);
+            if (!queue || !relevant(queue->getParameterId())) continue;
+            const int32 points = queue->getPointCount();
+            if (points < 1) continue;
+            total += static_cast<uint64_t>(points);
+            ++used;
+        }
+        if (used == 0) return 0;
+        const bool thin = total > capacity;
+        const uint32_t share = thin ? std::max<uint32_t>(capacity / used, 1) : 0;
+        uint32_t count = 0;
+        uint32_t order = 0;
+        for (int32 q = 0; q < queueCount && count < capacity; ++q) {
+            IParamValueQueue* queue = queues->getParameterData(q);
+            if (!queue) continue;
+            const ParamID id = queue->getParameterId();
+            if (!relevant(id)) continue;
+            const int32 points = queue->getPointCount();
+            if (points < 1) continue;
+            const uint32_t keep = thin ? std::min<uint32_t>(share, static_cast<uint32_t>(points)) : static_cast<uint32_t>(points);
+            for (uint32_t k = 0; k < keep && count < capacity; ++k) {
+                int32 index = static_cast<int32>(k);
+                if (keep < static_cast<uint32_t>(points))
+                    index = keep == 1 ? points - 1 : static_cast<int32>(static_cast<uint64_t>(k) * static_cast<uint64_t>(points - 1) / (keep - 1));
+                int32 at = 0;
+                ParamValue value = 0.0;
+                if (queue->getPoint(index, at, value) != kResultTrue || !std::isfinite(value)) continue;
+                changes_[count++] = Change{std::clamp(at, 0, numSamples), order++, id, value};
+            }
+        }
+        auto before = [](const Change& a, const Change& b) { return a.offset != b.offset ? a.offset < b.offset : a.order < b.order; };
+        if (!std::is_sorted(changes_.begin(), changes_.begin() + count, before))
+            std::sort(changes_.begin(), changes_.begin() + count, before);
+        return count;
+    }
+    // Applies every change whose offset is at or before `offset` (all of them
+    // when `all`), in order. The plugin sees each value on its next process.
+    bool applyDue(uint32_t& next, uint32_t pending, int32 offset, bool all) {
+        while (next < pending && (all || changes_[next].offset <= offset)) {
+            const Change& change = changes_[next++];
+            if (change.id == kBypassId) {
+                bypass_.store(change.value >= 0.5);
+                continue;
+            }
+            const double clamped = std::clamp(change.value, 0.0, 1.0);
+            values_[change.id].store(clamped);
+            if (engine_ && !op_shell_set_normalized(engine_, change.id, static_cast<float>(clamped))) return false;
+        }
+        return true;
+    }
     // Pushes the input through a delay of the reported latency into dry_, so a
     // bypassed signal stays aligned with what the host compensates for. The
     // line always runs, so switching never starts from stale audio.
@@ -245,6 +330,7 @@ private:
     void prepareBypass() {
         delay_ = engine_ ? op_shell_latency(engine_) : 0;
         const size_t block = static_cast<size_t>(std::max(processSetup.maxSamplesPerBlock, 1));
+        changes_.assign(std::max<size_t>(kMinChangeCapacity, static_cast<size_t>(count_) + 1), Change{0, 0, 0, 0.0});
         for (int c = 0; c < 2; ++c) {
             dry_[c].assign(block, 0.0f);
             line_[c].assign(delay_, 0.0f);
@@ -282,6 +368,7 @@ private:
     std::unique_ptr<std::atomic<double>[]> values_;
     std::atomic<bool> bypass_{false};
     // Bypass state, touched only by the audio thread after setActive.
+    std::vector<Change> changes_;
     std::vector<float> dry_[2];
     std::vector<float> line_[2];
     size_t delay_ = 0;
