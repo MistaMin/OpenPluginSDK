@@ -38,6 +38,7 @@ It combines:
   - [Avid AAX (Pro Tools)](#avid-aax-pro-tools)
   - [Standalone](#standalone)
 - [Quality Guarantees](#quality-guarantees)
+- [Roadmap](#roadmap)
 - [License](#license)
 
 ---
@@ -231,6 +232,12 @@ Desktop application executable powered by `cpal` for zero-friction testing and l
 - **No Panics:** Production code avoids unhandled crashes and enforces safe math.
 - **Hostile Input Hardened:** Parameter values and transport commands from hostile DAW hosts are sanitized.
 - **Pure Vector Assets:** All controls are procedural vector code with zero external bitmap dependencies.
+
+---
+
+## Roadmap
+
+What comes after 0.3.0 Beta, from hardening on macOS to Windows, Linux and a stable 1.0: [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ---
 
