@@ -7,6 +7,12 @@ pub struct Compressor {
     gain_reduction_db: f32,
 }
 
+impl Default for Compressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Compressor {
     pub fn new() -> Self {
         Self {
@@ -30,6 +36,7 @@ impl Compressor {
     }
 
     /// Process a block with threshold (dB), ratio, attack (ms), release (ms), knee (dB), makeup (dB).
+    #[allow(clippy::too_many_arguments)] // public API; grouping would break callers
     pub fn process_block(
         &mut self,
         io: &mut [Vec<f32>],

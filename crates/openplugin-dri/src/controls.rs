@@ -81,6 +81,7 @@ pub fn draw_faceplate_code(dl: &mut DrawList, w: f32, h: f32, code: &str) {
     commit(dl, scene);
 }
 
+#[allow(clippy::too_many_arguments)] // public drawing API; grouping would break callers
 pub fn draw_knob(
     dl: &mut DrawList,
     cx: f32,
@@ -96,6 +97,7 @@ pub fn draw_knob(
 }
 
 /// Draws any GoodLookin knob by style code (`"Brit"`, `"Chk"`, `"Rck"`, ...).
+#[allow(clippy::too_many_arguments)] // public drawing API; grouping would break callers
 pub fn draw_knob_code(
     dl: &mut DrawList,
     cx: f32,

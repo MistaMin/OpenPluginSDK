@@ -218,7 +218,7 @@ macro_rules! export_shell {
 
         #[no_mangle]
         pub unsafe extern "C" fn op_shell_info(out: *mut $crate::shell::OpShellInfo) -> u32 {
-            $crate::shell::write_info::<$plugin>(out)
+            unsafe { $crate::shell::write_info::<$plugin>(out) }
         }
 
         #[no_mangle]
@@ -226,7 +226,7 @@ macro_rules! export_shell {
             index: u32,
             out: *mut $crate::shell::OpParamDesc,
         ) -> u32 {
-            $crate::shell::write_param::<$plugin>(index, out)
+            unsafe { $crate::shell::write_param::<$plugin>(index, out) }
         }
 
         #[no_mangle]
