@@ -210,6 +210,45 @@ if(OP_BUILD_AU)
   op_link_rust(AUProof)
   add_dependencies(AUProof OpenPluginAU)
   add_test(NAME au_proof COMMAND AUProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
+  add_library(OpenPluginAllocHook SHARED au/alloc_hook.cpp)
+  add_executable(AUAllocProof au/alloc_host.cpp)
+  target_include_directories(AUAllocProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/au")
+  target_link_libraries(AUAllocProof PRIVATE OpenPluginAllocHook "-framework AudioToolbox" "-framework CoreFoundation")
+  op_link_rust(AUAllocProof)
+  add_dependencies(AUAllocProof OpenPluginAU)
+  add_test(NAME au_alloc_proof COMMAND AUAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
+  if(NOT OP_EDITOR)
+    # The same shell source over a C++ stand-in plugin that reports 37 samples of
+    # latency, which the SDK example (latency 0) cannot exercise. Test only.
+    function(op_au_latency_plist)
+      set(OP_PRODUCT "LatencyTest")
+      set(OP_BUNDLE_ID "com.opengrid.test.latency")
+      set(OP_VERSION "1")
+      set(OP_MANUFACTURER "OpenPlugin")
+      set(OP_AU_SUBTYPE "LtTs")
+      set(OP_AU_MANUFACTURER "OpTs")
+      configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-latency-Info.plist" @ONLY)
+    endfunction()
+    op_au_latency_plist()
+    add_library(OpenPluginAULatency MODULE au/OpenPluginAU.cpp au/latency_shell.cpp)
+    target_compile_features(OpenPluginAULatency PRIVATE cxx_std_23)
+    target_include_directories(OpenPluginAULatency PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+    set_target_properties(OpenPluginAULatency PROPERTIES
+      OUTPUT_NAME "LatencyTest"
+      BUNDLE TRUE
+      BUNDLE_EXTENSION component
+      PREFIX ""
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-latency-Info.plist")
+    target_link_libraries(OpenPluginAULatency PRIVATE openplugin_au_sdk)
+    add_executable(AUBypassProof au/bypass_host.cpp)
+    target_include_directories(AUBypassProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(AUBypassProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+    add_dependencies(AUBypassProof OpenPluginAULatency)
+    add_test(NAME au_bypass_proof COMMAND AUBypassProof "$<TARGET_BUNDLE_DIR:OpenPluginAULatency>")
+    # Allocation with a non-zero latency: the delay line runs.
+    add_test(NAME au_alloc_latency_proof COMMAND AUAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginAULatency>")
+    set_tests_properties(au_alloc_latency_proof PROPERTIES DEPENDS au_bypass_proof)
+  endif()
 endif()
 
 if(OP_BUILD_AAX)
