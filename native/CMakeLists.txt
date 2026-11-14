@@ -119,6 +119,43 @@ if(OP_BUILD_VST3)
   op_link_rust(VST3Proof)
   add_dependencies(VST3Proof OpenPluginVST3)
   add_test(NAME vst3_proof COMMAND VST3Proof "$<TARGET_BUNDLE_DIR:OpenPluginVST3>")
+  # process() must not allocate: counted through operator new and libmalloc's malloc_logger hook.
+  # Needs no plugin ABI of its own; it reads the effect class from the bundle.
+  add_executable(VST3NoAllocProof vst3/noalloc.cpp
+    "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp")
+  target_include_directories(VST3NoAllocProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(VST3NoAllocProof PRIVATE sdk "-framework CoreFoundation")
+  add_dependencies(VST3NoAllocProof OpenPluginVST3)
+  add_test(NAME vst3_noalloc_proof COMMAND VST3NoAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3>")
+  if(NOT OP_EDITOR)
+    # The same shell over a stub ABI that reports 37 samples of latency, because
+    # the SDK examples report none and cannot show the bypass delay. The stub
+    # does not export the editor ABI, so this is built without OP_EDITOR only.
+    set(OP_PRODUCT_SAVED "${OP_PRODUCT}")
+    set(OP_PRODUCT "Latency Stub")
+    configure_file(vst3/Info.plist.in "${CMAKE_BINARY_DIR}/vst3-latency-Info.plist" @ONLY)
+    set(OP_PRODUCT "${OP_PRODUCT_SAVED}")
+    add_library(OpenPluginVST3Latency MODULE
+      vst3/OpenPluginVST3.cpp
+      vst3/latency_stub.cpp
+      "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
+    target_include_directories(OpenPluginVST3Latency PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    set_target_properties(OpenPluginVST3Latency PROPERTIES
+      OUTPUT_NAME "Latency Stub"
+      BUNDLE TRUE
+      BUNDLE_EXTENSION vst3
+      PREFIX ""
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-latency-Info.plist")
+    target_link_libraries(OpenPluginVST3Latency PRIVATE sdk "-framework CoreFoundation")
+    add_executable(VST3BypassLatencyProof vst3/bypass_latency.cpp
+      "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp")
+    target_include_directories(VST3BypassLatencyProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(VST3BypassLatencyProof PRIVATE sdk "-framework CoreFoundation")
+    add_dependencies(VST3BypassLatencyProof OpenPluginVST3Latency)
+    add_test(NAME vst3_bypass_latency_proof COMMAND VST3BypassLatencyProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Latency>")
+    add_dependencies(VST3NoAllocProof OpenPluginVST3Latency)
+    add_test(NAME vst3_noalloc_latency_proof COMMAND VST3NoAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Latency>")
+  endif()
   if(OP_EDITOR)
     # The editor in the VST3 shell. OP_EDITOR_PROOF_CLICK is "x;y;param":
     # a point (points from the top left) whose click edits that parameter.
