@@ -325,11 +325,37 @@ if(OP_BUILD_AAX)
     "${OP_AAX_SDK}/Interfaces"
     "${OP_AAX_SDK}/Interfaces/ACF")
   op_link_rust(AAXAllocProof)
+  # Stand-in ABI proofs (aax/proof_stub.cpp, no Rust library): the SDK example reports
+  # no latency and has two parameters, so these show the delayed bypass and a large
+  # packet. AAXBypassProof: 1 parameter, 37 samples of latency, the process callback.
+  # AAXParamsProof: 200 parameters through the real AAX_CEffectParameters and chunk.
+  # AAXAllocLatencyProof: aax_alloc_proof over the 200-parameter stub, so the delay
+  # line, the crossfade and a large packet run while the allocation counters are armed.
+  set(OP_AAX_PROOF_INCLUDES
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/aax"
+    "${OP_AAX_SDK}/Interfaces"
+    "${OP_AAX_SDK}/Interfaces/ACF"
+    "${OP_AAX_SDK}/Libs/AAXLibrary/include")
+  add_executable(AAXBypassProof aax/host_bypass.cpp aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXBypassProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXBypassProof PRIVATE OP_STUB_PARAMS=1 OP_STUB_LATENCY=37)
+  add_executable(AAXParamsProof aax/host_params.cpp aax/OpenPluginAAXParameters.cpp aax/OpenPluginAAXState.cpp
+    aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXParamsProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXParamsProof PRIVATE OP_STUB_PARAMS=200 OP_STUB_LATENCY=37)
+  target_link_libraries(AAXParamsProof PRIVATE openplugin_aax_sdk)
+  add_executable(AAXAllocLatencyProof aax/host_alloc.cpp aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXAllocLatencyProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXAllocLatencyProof PRIVATE OP_STUB_PARAMS=200 OP_STUB_LATENCY=37)
   add_executable(AAXBundleProof aax/host_bundle.cpp)
   target_link_libraries(AAXBundleProof PRIVATE "-framework CoreFoundation")
   add_dependencies(AAXBundleProof OpenPluginAAX)
   add_test(NAME aax_process_proof COMMAND AAXProof)
   add_test(NAME aax_state_proof COMMAND AAXStateProof)
   add_test(NAME aax_alloc_proof COMMAND AAXAllocProof)
+  add_test(NAME aax_bypass_proof COMMAND AAXBypassProof)
+  add_test(NAME aax_params_proof COMMAND AAXParamsProof)
+  add_test(NAME aax_alloc_latency_proof COMMAND AAXAllocLatencyProof)
   add_test(NAME aax_bundle_proof COMMAND AAXBundleProof "$<TARGET_BUNDLE_DIR:OpenPluginAAX>")
 endif()

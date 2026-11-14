@@ -48,8 +48,8 @@ struct Instance {
     explicit Instance(uint32_t channels) : params(createParameters()) {
         require(params && proofInit(params.get(), 48000.0, channels), "parameters build without a controller");
     }
-    Packet packet() const {
-        Packet out{};
+    PacketBuffer packet() const {
+        PacketBuffer out;
         require(proofPacket(params.get(), &out), "read packet");
         return out;
     }
@@ -70,14 +70,14 @@ struct Instance {
     }
 };
 
-static bool same(const Packet& a, const Packet& b) {
-    if (a.count != b.count || a.bypass != b.bypass) return false;
-    for (uint32_t i = 0; i < a.count; ++i)
-        if (a.plain[i] != b.plain[i]) return false;
+static bool same(const PacketBuffer& a, const PacketBuffer& b) {
+    if (a.count() != b.count() || a.get()->bypass != b.get()->bypass) return false;
+    for (uint32_t i = 0; i < a.count(); ++i)
+        if (a.plain()[i] != b.plain()[i]) return false;
     return true;
 }
 
-static std::vector<float> render(ProcessState& state, Packet packet, int channels, int blocks, std::vector<float>* dry = nullptr,
+static std::vector<float> render(ProcessState& state, PacketBuffer packet, int channels, int blocks, std::vector<float>* dry = nullptr,
                                  std::vector<float>* rightOut = nullptr) {
     constexpr int kFrames = 512;
     std::vector<float> inL(kFrames), inR(kFrames), outL(kFrames), outR(kFrames);
@@ -85,7 +85,7 @@ static std::vector<float> render(ProcessState& state, Packet packet, int channel
     float* output[] = {outL.data(), channels > 1 ? outR.data() : nullptr};
     int32_t frames = kFrames;
     auto* statePtr = &state;
-    Context context{input, output, &frames, &packet, &statePtr};
+    Context context{input, output, &frames, packet.get(), &statePtr};
     Context* contexts[] = {&context};
     for (int block = 0; block < blocks; ++block) {
         fill_sine(inL.data(), kFrames, 48000.0, 1000.0, 0.25, block * kFrames);
@@ -133,11 +133,11 @@ int main() {
     // Round trip. Values: a gain that is not a default, Warm on, through each channel layout.
     for (uint32_t channels = 1; channels <= 2; ++channels) {
         Instance original(channels);
-        const Packet defaults = original.packet();
+        const PacketBuffer defaults = original.packet();
         const float testGain = static_cast<float>(std::fmax(descs[gain].min, std::fmin(descs[gain].max, 6.0)));
         require(proofSetPlain(original.params.get(), gain, testGain), "set gain");
         require(proofSetPlain(original.params.get(), warm, 1.0f), "set warm");
-        const Packet changed = original.packet();
+        const PacketBuffer changed = original.packet();
         require(!same(changed, defaults), "the changed set differs from the defaults");
 
         Chunk saved = original.save();
@@ -146,10 +146,10 @@ int main() {
         AAX_CBoolean equal = true;
         require(fresh.params->CompareActiveChunk(saved.get(), &equal) == AAX_SUCCESS && !equal, "a fresh instance differs from the saved chunk");
         require(fresh.params->SetChunk(state::kChunkId, saved.get()) == AAX_SUCCESS, "SetChunk");
-        const Packet restored = fresh.packet();
+        const PacketBuffer restored = fresh.packet();
         require(same(restored, changed), "restored values equal the saved values");
         for (uint32_t i = 0; i < info.param_count; ++i)
-            require(restored.plain[i] == changed.plain[i], "every restored value is bit-identical");
+            require(restored.plain()[i] == changed.plain()[i], "every restored value is bit-identical");
         require(fresh.params->CompareActiveChunk(saved.get(), &equal) == AAX_SUCCESS && equal, "the restored instance compares equal");
         require(original.params->CompareActiveChunk(saved.get(), &equal) == AAX_SUCCESS && equal, "the original compares equal to its own chunk");
         // A second save of the restored instance is byte-identical.
@@ -209,7 +209,7 @@ int main() {
             Instance target(channels);
             require(proofSetPlain(target.params.get(), gain, static_cast<float>(descs[gain].min)), "set target gain");
             require(proofSetBypass(target.params.get(), true), "set target bypass");
-            const Packet before = target.packet();
+            const PacketBuffer before = target.packet();
             const AAX_Result result = target.params->SetChunk(state::kChunkId, bad.get());
             if (result == AAX_SUCCESS) {
                 std::fprintf(stderr, "AAX state proof failed: a %s chunk was accepted\n", test.name);
@@ -240,10 +240,10 @@ int main() {
         require(proofSetBypass(original.params.get(), true), "set bypass");
         Chunk saved = original.save();
         Instance fresh(channels);
-        require(fresh.packet().bypass == 0, "a fresh instance is not bypassed");
+        require(fresh.packet().get()->bypass == 0, "a fresh instance is not bypassed");
         require(fresh.params->SetChunk(state::kChunkId, saved.get()) == AAX_SUCCESS, "SetChunk with bypass");
-        const Packet bypassed = fresh.packet();
-        require(bypassed.bypass == 1, "bypass restored from the chunk");
+        const PacketBuffer bypassed = fresh.packet();
+        require(bypassed.get()->bypass == 1, "bypass restored from the chunk");
         ProcessState state;
         require(state.prepare(48000.0, channels), "prepare");
         std::vector<float> dry, right;
@@ -251,8 +251,8 @@ int main() {
         require(max_difference(left, dry) == 0.0, "bypass copies the dry left buffer exactly");
         if (channels > 1) require(max_difference(right, dry) == 0.0, "bypass copies the dry right buffer exactly");
         // And with bypass off the same values process.
-        Packet active = bypassed;
-        active.bypass = 0;
+        PacketBuffer active = bypassed;
+        active.get()->bypass = 0;
         ProcessState state2;
         require(state2.prepare(48000.0, channels), "prepare");
         const auto processed = render(state2, active, static_cast<int>(channels), 3, &dry);

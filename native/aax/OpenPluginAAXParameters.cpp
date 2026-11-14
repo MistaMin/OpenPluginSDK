@@ -12,17 +12,17 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 namespace openplugin_aax {
 namespace {
-Packet defaults() {
-    Packet packet{};
+PacketBuffer defaults() {
     OpShellInfo info{};
-    if (!op_shell_info(&info)) return packet;
-    packet.count = info.param_count;
-    for (uint32_t i = 0; i < info.param_count && i < kMaxParams; ++i) {
+    if (!op_shell_info(&info) || info.param_count > kMaxParams) return PacketBuffer(0);
+    PacketBuffer packet(info.param_count);
+    for (uint32_t i = 0; i < info.param_count; ++i) {
         OpParamDesc desc{};
-        if (op_shell_param(i, &desc)) packet.plain[i] = static_cast<float>(desc.default_plain);
+        if (op_shell_param(i, &desc)) packet.plain()[i] = static_cast<float>(desc.default_plain);
     }
     return packet;
 }
@@ -30,6 +30,12 @@ Packet defaults() {
 class Parameters final : public AAX_CEffectParameters {
     mutable ProcessState state_;
     std::vector<std::string> ids_;
+    // The controls packet is posted by this class, not by AAX_CPacketDispatcher,
+    // because its size follows the parameter count and a dispatcher packet has a
+    // compile-time size. Parameter updates only set the flag; the host's
+    // GenerateCoefficients call posts, as AAX requires.
+    mutable PacketBuffer posted_;
+    bool dirty_ = true;
 public:
     static AAX_CEffectParameters* AAX_CALLBACK create() { return new Parameters; }
     AAX_Result EffectInit() override {
@@ -43,12 +49,7 @@ public:
         const uint32_t channels = format == AAX_eStemFormat_Mono ? 1u : format == AAX_eStemFormat_Stereo ? 2u : 0u;
         result = build(rate, channels);
         if (result != AAX_SUCCESS) return result;
-        for (const std::string& id : ids_) {
-            result = mPacketDispatcher.RegisterPacket(id.c_str(), controlsField, this, &Parameters::packet);
-            if (result != AAX_SUCCESS) return result;
-        }
-        result = mPacketDispatcher.RegisterPacket(cDefaultMasterBypassID, controlsField, this, &Parameters::packet);
-        if (result != AAX_SUCCESS) return result;
+        dirty_ = true;
         return Controller()->SetSignalLatency(static_cast<int32_t>(op_shell_latency(state_.engine)));
     }
     // Everything EffectInit does that does not need an AAX controller.
@@ -58,7 +59,8 @@ public:
             return AAX_ERROR_INVALID_ARGUMENT;
         AAX_Result result = AAX_SUCCESS;
         if (!state_.prepare(rate, channels)) return AAX_ERROR_INVALID_ARGUMENT;
-        ids_.resize(info.param_count);
+        ids_.assign(info.param_count, std::string());
+        posted_ = PacketBuffer(info.param_count);
         for (uint32_t i = 0; i < info.param_count; ++i) {
             OpParamDesc desc{};
             if (!op_shell_param(i, &desc) || desc.id[0] == '\0') return AAX_ERROR_INVALID_PARAMETER_ID;
@@ -169,17 +171,41 @@ public:
         auto* parameter = mParameterManager.GetParameterByID(cDefaultMasterBypassID);
         return parameter && parameter->SetValueWithBool(on);
     }
-    bool proofPacket(Packet* out) const { return out && fill(*out) == AAX_SUCCESS; }
+    bool proofPacket(PacketBuffer* out) const { return out && fill(*out) == AAX_SUCCESS; }
+    AAX_Result UpdateParameterNormalizedValue(AAX_CParamID id, double value, AAX_EUpdateSource source) override {
+        const AAX_Result result = AAX_CEffectParameters::UpdateParameterNormalizedValue(id, value, source);
+        dirty_ = true;
+        return result;
+    }
+    // Posts the whole packet when any value or the bypass changed.
+    AAX_Result GenerateCoefficients() override {
+        if (!dirty_) return AAX_SUCCESS;
+        dirty_ = false;
+        const AAX_Result result = fill(posted_);
+        if (result != AAX_SUCCESS || !Controller()) return result;
+        return Controller()->PostPacket(controlsField, posted_.get(), static_cast<uint32_t>(posted_.bytes()));
+    }
+    // What GenerateCoefficients would post, without a controller: false if nothing changed.
+    bool proofTakePacket(PacketBuffer* out) {
+        if (!out || !dirty_) return false;
+        dirty_ = false;
+        return fill(*out) == AAX_SUCCESS;
+    }
+    bool proofUpdate(uint32_t index, double normalized) {
+        const char* id = index == kProofBypass ? cDefaultMasterBypassID : index < ids_.size() ? ids_[index].c_str() : nullptr;
+        return id && UpdateParameterNormalizedValue(id, normalized, AAX_eUpdateSource_Unspecified) == AAX_SUCCESS;
+    }
     AAX_Result ResetFieldData(AAX_CFieldIndex field, void* destination, uint32_t size) const override {
         if (field == stateField) {
             if (!destination || size != sizeof(ProcessState*)) return AAX_ERROR_INVALID_ARGUMENT;
-            if (state_.engine) op_shell_reset(state_.engine);
+            state_.reset();
             *static_cast<ProcessState**>(destination) = &state_;
             return AAX_SUCCESS;
         }
         if (field == controlsField) {
-            if (!destination || size != sizeof(Packet)) return AAX_ERROR_INVALID_ARGUMENT;
-            *static_cast<Packet*>(destination) = defaults();
+            const PacketBuffer initial = defaults();
+            if (!destination || initial.count() == 0 || size != initial.bytes()) return AAX_ERROR_INVALID_ARGUMENT;
+            std::memcpy(destination, initial.get(), size);
             return AAX_SUCCESS;
         }
         return AAX_CEffectParameters::ResetFieldData(field, destination, size);
@@ -191,37 +217,30 @@ public:
         *written = sizeof(void*);
         return AAX_SUCCESS;
     }
-    AAX_Result packet(AAX_CPacket& destination) {
-        Packet next{};
-        const AAX_Result result = fill(next);
-        if (result != AAX_SUCCESS) return result;
-        *destination.GetPtr<Packet>() = next;
-        return AAX_SUCCESS;
-    }
 private:
-    AAX_Result fill(Packet& out) const {
-        Packet next = defaults();
+    // Reads every parameter into `out`, which is resized to the parameter count.
+    AAX_Result fill(PacketBuffer& out) const {
+        PacketBuffer next(static_cast<uint32_t>(ids_.size()));
         for (uint32_t i = 0; i < ids_.size(); ++i) {
             const auto* parameter = mParameterManager.GetParameterByID(ids_[i].c_str());
             float value = 0.f;
             if (!parameter || !parameter->GetValueAsFloat(&value)) return AAX_ERROR_INVALID_PARAMETER_ID;
-            next.plain[i] = value;
+            next.plain()[i] = value;
         }
         bool bypass = false;
         if (const auto* parameter = mParameterManager.GetParameterByID(cDefaultMasterBypassID))
             parameter->GetValueAsBool(&bypass);
-        next.bypass = bypass ? 1u : 0u;
-        next.count = static_cast<uint32_t>(ids_.size());
-        out = next;
+        next.get()->bypass = bypass ? 1u : 0u;
+        out = std::move(next);
         return AAX_SUCCESS;
     }
     bool collect(state::Values& out) const {
-        Packet current{};
+        PacketBuffer current;
         if (ids_.empty() || fill(current) != AAX_SUCCESS) return false;
         out = {};
-        out.count = current.count;
-        out.bypass = current.bypass != 0;
-        for (uint32_t i = 0; i < current.count; ++i) out.plain[i] = current.plain[i];
+        out.count = current.count();
+        out.bypass = current.get()->bypass != 0;
+        for (uint32_t i = 0; i < current.count(); ++i) out.plain[i] = current.plain()[i];
         return true;
     }
     static bool parse(const AAX_SPlugInChunk* chunk, state::Values& out) {
@@ -232,7 +251,7 @@ private:
     // parameter exists. Nothing is written until they all do.
     AAX_Result apply(const state::Values& values) {
         if (values.count != ids_.size()) return AAX_ERROR_MALFORMED_CHUNK;
-        AAX_IParameter* targets[kMaxParams] = {};
+        std::vector<AAX_IParameter*> targets(values.count, nullptr);
         for (uint32_t i = 0; i < values.count; ++i) {
             targets[i] = mParameterManager.GetParameterByID(ids_[i].c_str());
             if (!targets[i]) return AAX_ERROR_INVALID_PARAMETER_ID;
@@ -241,6 +260,7 @@ private:
         if (!bypass) return AAX_ERROR_INVALID_PARAMETER_ID;
         for (uint32_t i = 0; i < values.count; ++i) targets[i]->SetValueWithFloat(values.plain[i]);
         bypass->SetValueWithBool(values.bypass);
+        dirty_ = true;
         return AAX_SUCCESS;
     }
 };
@@ -248,5 +268,7 @@ AAX_CEffectParameters* AAX_CALLBACK createParameters() { return Parameters::crea
 bool proofInit(AAX_CEffectParameters* p, double rate, uint32_t channels) { return static_cast<Parameters*>(p)->build(rate, channels) == AAX_SUCCESS; }
 bool proofSetPlain(AAX_CEffectParameters* p, uint32_t index, float value) { return static_cast<Parameters*>(p)->proofSetPlain(index, value); }
 bool proofSetBypass(AAX_CEffectParameters* p, bool on) { return static_cast<Parameters*>(p)->proofSetBypass(on); }
-bool proofPacket(AAX_CEffectParameters* p, Packet* out) { return static_cast<Parameters*>(p)->proofPacket(out); }
+bool proofTakePacket(AAX_CEffectParameters* p, PacketBuffer* out) { return static_cast<Parameters*>(p)->proofTakePacket(out); }
+bool proofUpdate(AAX_CEffectParameters* p, uint32_t index, double normalized) { return static_cast<Parameters*>(p)->proofUpdate(index, normalized); }
+bool proofPacket(AAX_CEffectParameters* p, PacketBuffer* out) { return static_cast<Parameters*>(p)->proofPacket(out); }
 }
