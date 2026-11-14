@@ -49,6 +49,12 @@ private:
     ParamID index_;
 };
 
+// The host bypass parameter. Its ID is far outside 0..n-1 so the plugin's own
+// parameter IDs are the ABI indices, unshifted.
+constexpr ParamID kBypassId = 0x42595053;
+// Length of the switch between processed and bypassed audio.
+constexpr double kBypassFadeSeconds = 0.010;
+
 #if OP_HAS_EDITOR
 constexpr const char* kEngineMessage = "openplugin.engine";
 #endif
@@ -102,11 +108,15 @@ public:
         destroy();
         engine_ = next;
         op_shell_reset(engine_);
+        prepareBypass();
         announce(engine_);
         return AudioEffect::setActive(active);
     }
     tresult PLUGIN_API setProcessing(TBool active) SMTG_OVERRIDE {
-        if (active && engine_) op_shell_reset(engine_);
+        if (active && engine_) {
+            op_shell_reset(engine_);
+            clearBypassLine();
+        }
         return kResultOk;
     }
     uint32 PLUGIN_API getLatencySamples() SMTG_OVERRIDE { return engine_ ? op_shell_latency(engine_) : 0; }
@@ -124,11 +134,16 @@ public:
         int32 version = 0;
         int32 count = 0;
         if (!reader.readInt32(version) || version != 1 || !reader.readInt32(count) || count != static_cast<int32>(count_)) return kResultFalse;
+        std::vector<double> loaded(count_);
         for (uint32_t i = 0; i < count_; ++i) {
-            double value = 0.0;
-            if (!reader.readDouble(value) || !std::isfinite(value) || value < 0.0 || value > 1.0) return kResultFalse;
-            values_[i].store(value);
+            if (!reader.readDouble(loaded[i]) || !std::isfinite(loaded[i]) || loaded[i] < 0.0 || loaded[i] > 1.0) return kResultFalse;
         }
+        // Bypass follows the parameters. A state written before bypass existed
+        // ends here, which means not bypassed.
+        int32 bypass = 0;
+        if (!reader.readInt32(bypass)) bypass = 0;
+        for (uint32_t i = 0; i < count_; ++i) values_[i].store(loaded[i]);
+        bypass_.store(bypass != 0);
         return kResultOk;
     }
     tresult PLUGIN_API getState(IBStream* stream) SMTG_OVERRIDE {
@@ -138,6 +153,7 @@ public:
         for (uint32_t i = 0; i < count_; ++i) {
             if (!writer.writeDouble(values_[i].load())) return kResultFalse;
         }
+        if (!writer.writeInt32(bypass_.load() ? 1 : 0)) return kResultFalse;
         return kResultOk;
     }
     tresult PLUGIN_API process(ProcessData& data) SMTG_OVERRIDE {
@@ -147,11 +163,13 @@ public:
                 auto* queue = data.inputParameterChanges->getParameterData(i);
                 if (!queue || queue->getPointCount() < 1) continue;
                 ParamID id = queue->getParameterId();
-                if (id >= count_) continue;
+                if (id >= count_ && id != kBypassId) continue;
                 int32 offset = 0;
                 ParamValue value = 0.0;
-                if (queue->getPoint(queue->getPointCount() - 1, offset, value) == kResultTrue && std::isfinite(value))
-                    values_[id].store(std::clamp(value, 0.0, 1.0));
+                if (queue->getPoint(queue->getPointCount() - 1, offset, value) == kResultTrue && std::isfinite(value)) {
+                    if (id == kBypassId) bypass_.store(value >= 0.5);
+                    else values_[id].store(std::clamp(value, 0.0, 1.0));
+                }
             }
         }
         if (data.numSamples == 0) return kResultOk;
@@ -166,13 +184,18 @@ public:
             if (!op_shell_set_normalized(engine_, i, static_cast<float>(values_[i].load()))) return kResultFalse;
         }
         const int32 limit = processSetup.maxSamplesPerBlock > 0 ? processSetup.maxSamplesPerBlock : data.numSamples;
+        const float target = bypass_.load() ? 1.0f : 0.0f;
         for (int32 offset = 0; offset < data.numSamples;) {
             uint32_t frames = static_cast<uint32_t>(std::min(limit, data.numSamples - offset));
             const float* inLeft = input.channelBuffers32[0] + offset;
             const float* inRight = channels > 1 ? input.channelBuffers32[1] + offset : nullptr;
             float* outLeft = output.channelBuffers32[0] + offset;
             float* outRight = channels > 1 ? output.channelBuffers32[1] + offset : nullptr;
+            // The delayed dry signal is taken before the engine runs, because the
+            // host may have given the same buffer for input and output.
+            captureDry(inLeft, inRight, channels, frames);
             if (!op_shell_process(engine_, inLeft, inRight, outLeft, outRight, frames)) return kResultFalse;
+            applyBypass(outLeft, outRight, channels, frames, target);
             offset += static_cast<int32>(frames);
         }
         output.silenceFlags = 0;
@@ -180,6 +203,60 @@ public:
     }
 
 private:
+    // Pushes the input through a delay of the reported latency into dry_, so a
+    // bypassed signal stays aligned with what the host compensates for. The
+    // line always runs, so switching never starts from stale audio.
+    void captureDry(const float* left, const float* right, int32 channels, uint32_t frames) {
+        const float* in[2] = {left, right};
+        for (int32 c = 0; c < channels; ++c) {
+            float* dry = dry_[c].data();
+            if (delay_ == 0) {
+                std::memcpy(dry, in[c], frames * sizeof(float));
+                continue;
+            }
+            float* line = line_[c].data();
+            size_t pos = linePos_;
+            for (uint32_t i = 0; i < frames; ++i) {
+                dry[i] = line[pos];
+                line[pos] = in[c][i];
+                if (++pos == delay_) pos = 0;
+            }
+        }
+        if (delay_ != 0) linePos_ = (linePos_ + frames) % delay_;
+    }
+    // Crossfades the engine output towards the dry signal (or back). Fully
+    // bypassed output is the dry signal exactly.
+    void applyBypass(float* left, float* right, int32 channels, uint32_t frames, float target) {
+        float* out[2] = {left, right};
+        if (mix_ == target) {
+            if (target == 0.0f) return;
+            for (int32 c = 0; c < channels; ++c) std::memcpy(out[c], dry_[c].data(), frames * sizeof(float));
+            return;
+        }
+        float mix = mix_;
+        for (uint32_t i = 0; i < frames; ++i) {
+            if (mix < target) mix = std::min(target, mix + mixStep_);
+            else if (mix > target) mix = std::max(target, mix - mixStep_);
+            for (int32 c = 0; c < channels; ++c) out[c][i] = mix >= 1.0f ? dry_[c][i] : out[c][i] + (dry_[c][i] - out[c][i]) * mix;
+        }
+        mix_ = mix;
+    }
+    // Allocates everything the bypass needs; process never allocates.
+    void prepareBypass() {
+        delay_ = engine_ ? op_shell_latency(engine_) : 0;
+        const size_t block = static_cast<size_t>(std::max(processSetup.maxSamplesPerBlock, 1));
+        for (int c = 0; c < 2; ++c) {
+            dry_[c].assign(block, 0.0f);
+            line_[c].assign(delay_, 0.0f);
+        }
+        linePos_ = 0;
+        mixStep_ = static_cast<float>(1.0 / std::max(1.0, kBypassFadeSeconds * processSetup.sampleRate));
+        mix_ = bypass_.load() ? 1.0f : 0.0f;
+    }
+    void clearBypassLine() {
+        for (auto& line : line_) std::fill(line.begin(), line.end(), 0.0f);
+        linePos_ = 0;
+    }
     // Tells the controller which engine an open editor should show. The pointer
     // only means something in this process, and the editor checks it is live.
     void announce(void* engine) {
@@ -203,6 +280,14 @@ private:
     uint32_t count_ = 0;
     uint32_t channels_ = 2;
     std::unique_ptr<std::atomic<double>[]> values_;
+    std::atomic<bool> bypass_{false};
+    // Bypass state, touched only by the audio thread after setActive.
+    std::vector<float> dry_[2];
+    std::vector<float> line_[2];
+    size_t delay_ = 0;
+    size_t linePos_ = 0;
+    float mix_ = 0.0f;
+    float mixStep_ = 1.0f;
 };
 
 class Controller final : public EditController {
@@ -224,6 +309,8 @@ public:
             int32 flags = (desc.flags & OP_PARAM_AUTOMATABLE) ? ParameterInfo::kCanAutomate : 0;
             parameters.addParameter(new ShellParameter(title, unit, i, desc.default_normalized, steps, flags));
         }
+        count_ = info.param_count;
+        parameters.addParameter(STR16("Bypass"), nullptr, 1, 0.0, ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass, kBypassId);
         return kResultOk;
     }
     tresult PLUGIN_API setComponentState(IBStream* stream) SMTG_OVERRIDE {
@@ -231,12 +318,15 @@ public:
         IBStreamer reader(stream, kLittleEndian);
         int32 version = 0;
         int32 count = 0;
-        if (!reader.readInt32(version) || version != 1 || !reader.readInt32(count) || count != parameters.getParameterCount()) return kResultFalse;
+        if (!reader.readInt32(version) || version != 1 || !reader.readInt32(count) || count != static_cast<int32>(count_)) return kResultFalse;
         for (int32 i = 0; i < count; ++i) {
             double value = 0.0;
             if (!reader.readDouble(value) || !std::isfinite(value)) return kResultFalse;
             setParamNormalized(static_cast<ParamID>(i), value);
         }
+        int32 bypass = 0;
+        if (!reader.readInt32(bypass)) bypass = 0;
+        setParamNormalized(kBypassId, bypass != 0 ? 1.0 : 0.0);
         return kResultOk;
     }
 #if OP_HAS_EDITOR
@@ -254,7 +344,7 @@ public:
     }
     tresult PLUGIN_API setParamNormalized(ParamID tag, ParamValue value) SMTG_OVERRIDE {
         const tresult result = EditController::setParamNormalized(tag, value);
-        if (editor_ && result == kResultOk) op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, value)));
+        if (editor_ && result == kResultOk && tag < count_) op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, value)));
         return result;
     }
     // Called by the view.
@@ -263,7 +353,7 @@ public:
         OpEditorHost host{this, hostBegin, hostPerform, hostEnd};
         editor_ = op_editor_create(&host);
         if (!editor_) return nullptr;
-        for (int32 i = 0; i < parameters.getParameterCount(); ++i) {
+        for (uint32_t i = 0; i < count_; ++i) {
             const ParamID tag = static_cast<ParamID>(i);
             op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, getParamNormalized(tag))));
         }
@@ -292,6 +382,9 @@ private:
 #else
     IPlugView* PLUGIN_API createView(FIDString) SMTG_OVERRIDE { return nullptr; }
 #endif
+
+private:
+    uint32_t count_ = 0;
 };
 
 #if OP_HAS_EDITOR

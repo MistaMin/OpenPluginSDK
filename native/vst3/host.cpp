@@ -65,7 +65,8 @@ static void check_parameters(IEditController* controller) {
     OpShellInfo info{};
     CHECK(op_shell_info(&info) != 0);
     CHECK(info.abi == OP_SHELL_ABI);
-    CHECK(controller->getParameterCount() == static_cast<int32>(info.param_count));
+    // The plugin's parameters, then the host bypass parameter.
+    CHECK(controller->getParameterCount() == static_cast<int32>(info.param_count) + 1);
     for (uint32_t i = 0; i < info.param_count; ++i) {
         OpParamDesc desc{};
         CHECK(op_shell_param(i, &desc) != 0);
@@ -84,6 +85,30 @@ static void check_parameters(IEditController* controller) {
         CHECK(std::fabs(controller->plainParamToNormalized(id, desc.default_plain) - desc.default_normalized) < 1e-9);
         CHECK(std::fabs(controller->normalizedParamToPlain(id, desc.default_normalized) - desc.default_plain) < 1e-9);
     }
+}
+// The bypass parameter: found by its flag, not by an assumed id. It must be
+// automatable, a two-state switch off by default, and outside 0..n-1 so the
+// plugin's own ids stay the ABI indices.
+static ParamID check_bypass_parameter(IEditController* controller) {
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
+    int found = 0;
+    ParamID id = 0;
+    for (int32 i = 0; i < controller->getParameterCount(); ++i) {
+        ParameterInfo host{};
+        CHECK(controller->getParameterInfo(i, host) == kResultOk);
+        if ((host.flags & ParameterInfo::kIsBypass) == 0) continue;
+        ++found;
+        id = host.id;
+        CHECK((host.flags & ParameterInfo::kCanAutomate) != 0);
+        CHECK(host.stepCount == 1);
+        CHECK(host.defaultNormalizedValue == 0.0);
+        CHECK(host.id >= info.param_count);
+        CHECK(ascii_of(host.title) == "Bypass");
+    }
+    CHECK(found == 1);
+    CHECK(controller->getParamNormalized(id) == 0.0);
+    return id;
 }
 static std::vector<std::pair<ParamID, double>> normalized_values(const std::vector<float>& plain) {
     std::vector<std::pair<ParamID, double>> result;
@@ -257,6 +282,54 @@ int main(int argc, char** argv) {
         const auto hostRestored = render_host(processor, channels, 8, {}, false);
         std::printf("VST3 %s restored against saved state: max difference %.3g\n", label, max_difference(hostGain, hostRestored));
         CHECK(max_difference(hostGain, hostRestored) <= 1e-6);
+        // Bypass. The id is found by kIsBypass; the output while bypassed is
+        // the input delayed by the reported latency, and leaving bypass
+        // restores the processed signal.
+        const ParamID bypass = check_bypass_parameter(controller);
+        const uint32_t latency = processor->getLatencySamples();
+        CHECK(latency < 7 * 512);
+        std::vector<float> delayed(512);
+        fill_sine(delayed.data(), 512, 48000.0, 1000.0, 0.25, 7 * 512 - static_cast<double>(latency));
+        const auto hostBypassed = render_host(processor, channels, 8, {{bypass, 1.0}}, false);
+        std::printf("VST3 %s bypassed output against the input delayed by %u samples: max difference %.3g\n", label, latency, max_difference(delayed, hostBypassed));
+        CHECK(max_difference(delayed, hostBypassed) == 0.0);
+        const auto hostBypassedInPlace = render_host(processor, channels, 8, {}, true);
+        CHECK(max_difference(delayed, hostBypassedInPlace) == 0.0);
+        MemoryStream bypassSaved;
+        CHECK(component->getState(&bypassSaved) == kResultOk);
+        const auto hostUnbypassed = render_host(processor, channels, 8, {{bypass, 0.0}}, false);
+        std::printf("VST3 %s processed again after bypass: max difference %.3g\n", label, max_difference(hostGain, hostUnbypassed));
+        CHECK(max_difference(hostGain, hostUnbypassed) <= 1e-6);
+        // The saved bypassed state brings bypass back.
+        bypassSaved.seek(0, IBStream::kIBSeekSet, nullptr);
+        CHECK(component->setState(&bypassSaved) == kResultOk);
+        bypassSaved.seek(0, IBStream::kIBSeekSet, nullptr);
+        CHECK(controller->setComponentState(&bypassSaved) == kResultOk);
+        CHECK(controller->getParamNormalized(bypass) == 1.0);
+        const auto hostBypassRestored = render_host(processor, channels, 8, {}, false);
+        CHECK(max_difference(delayed, hostBypassRestored) == 0.0);
+        MemoryStream bypassAgain;
+        CHECK(component->getState(&bypassAgain) == kResultOk);
+        CHECK(bypassAgain.getSize() == bypassSaved.getSize());
+        // A state written before bypass existed (no trailing flag) loads, and
+        // means not bypassed.
+        MemoryStream legacy;
+        {
+            int32_t header[2] = {1, static_cast<int32_t>(info.param_count)};
+            CHECK(legacy.write(header, sizeof(header), nullptr) == kResultOk);
+            for (uint32_t i = 0; i < info.param_count; ++i) {
+                double value = op_shell_to_normalized(i, plain[i]);
+                CHECK(legacy.write(&value, sizeof(value), nullptr) == kResultOk);
+            }
+        }
+        legacy.seek(0, IBStream::kIBSeekSet, nullptr);
+        CHECK(component->setState(&legacy) == kResultOk);
+        legacy.seek(0, IBStream::kIBSeekSet, nullptr);
+        CHECK(controller->setComponentState(&legacy) == kResultOk);
+        CHECK(controller->getParamNormalized(bypass) == 0.0);
+        const auto hostLegacy = render_host(processor, channels, 8, {}, false);
+        std::printf("VST3 %s state without a bypass flag: max difference %.3g\n", label, max_difference(hostGain, hostLegacy));
+        CHECK(max_difference(hostGain, hostLegacy) <= 1e-6);
         MemoryStream truncated;
         char bad[4] = {};
         CHECK(truncated.write(bad, 4, nullptr) == kResultOk);
@@ -279,9 +352,9 @@ int main(int argc, char** argv) {
     CHECK(exitFn());
     CFRelease(bundle);
 #if OP_HAS_TAIL
-    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, tail, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state: PASS");
+    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, tail, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass (flag, delayed dry output, restore, state, legacy state): PASS");
 #else
-    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, tail not built (OP_TAIL=OFF): PASS");
+    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass, tail not built (OP_TAIL=OFF): PASS");
 #endif
     return 0;
 }
