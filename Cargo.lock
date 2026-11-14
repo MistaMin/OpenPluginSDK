@@ -645,6 +645,7 @@ dependencies = [
  "log",
  "openplugin-core",
  "openplugin-dri",
+ "openplugin-dsp",
  "openplugin-ffi",
  "raw-window-handle",
 ]

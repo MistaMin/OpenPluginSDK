@@ -15,6 +15,9 @@ raw-window-handle = { workspace = true }
 cpal = { workspace = true, optional = true }
 log = { workspace = true }
 
+[dev-dependencies]
+openplugin-dsp = { workspace = true }
+
 [features]
 default = ["clap", "vst3", "au", "aax", "standalone"]
 clap = []
