@@ -108,6 +108,8 @@ For a host that goes silent and says nothing. Create `<name>-trace.on` in the te
 
 ## Build
 
+To build a plugin's bundles in every format, with optional signing and notarisation, use `scripts/build_plugin.sh` ([BUILD.md](BUILD.md)). The commands below are what it runs for the shells, and what the proofs use.
+
 The SDK checkouts stay outside this repository. The proofs build `examples/editor`, the `EditorGain` example. Its two parameters are `Gain` (dB) and `Warm` (toggle), and every expected value in the proofs comes from `op_shell_info`, `op_shell_param`, `op_shell_latency` and `op_shell_tail_seconds`, not from constants in the proof.
 
 ```bash
