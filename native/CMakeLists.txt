@@ -217,6 +217,18 @@ if(OP_BUILD_AU)
   op_link_rust(AUAllocProof)
   add_dependencies(AUAllocProof OpenPluginAU)
   add_test(NAME au_alloc_proof COMMAND AUAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
+  if(OP_EDITOR)
+    # The editor in the Audio Unit shell. Same OP_EDITOR_PROOF_CLICK ("x;y;param")
+    # as the VST3 proof; empty clicks the Warm toggle of examples/editor.
+    set(OP_EDITOR_PROOF_CLICK "" CACHE STRING "x;y;param for VST3EditorProof and AUEditorProof, or empty")
+    enable_language(OBJCXX)
+    add_executable(AUEditorProof au/editor_host.mm)
+    set_source_files_properties(au/editor_host.mm PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
+    target_include_directories(AUEditorProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(AUEditorProof PRIVATE "-framework Cocoa" "-framework AudioToolbox" "-framework AudioUnit" "-framework CoreFoundation")
+    add_dependencies(AUEditorProof OpenPluginAU)
+    add_test(NAME au_editor_proof COMMAND AUEditorProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>" ${OP_EDITOR_PROOF_CLICK})
+  endif()
   if(NOT OP_EDITOR)
     # The same shell source over a C++ stand-in plugin that reports 37 samples of
     # latency, which the SDK example (latency 0) cannot exercise. Test only.
