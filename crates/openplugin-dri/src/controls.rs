@@ -1,10 +1,15 @@
 //! Hardware controls. Geometry is drawn by GoodLookin DRI. The names on [`crate::KnobStyle`]
 //! and [`crate::FaceplateStyle`] pick a GoodLookin style. Every other style is available
 //! through [`draw_knob_code`] and [`draw_faceplate_code`].
+//!
+//! Knobs are drawn in [`DrawList::knob_tier`]: the lit tier of GoodLookin DRI 0.2 unless
+//! the editor chooses the classic or flat one. A faceplate records its colour as the floor
+//! the lit knobs reflect.
 
 use goodlookindri::color::Color as GlColor;
-use goodlookindri::scene::{Cmd, Point, Rect, Scene};
-use goodlookindri::{design, hardware, knobs, meters};
+use goodlookindri::draw::{self as gl_draw, KnobMode};
+use goodlookindri::scene::{Point, Rect, Scene};
+use goodlookindri::{design, hardware, meters};
 
 use crate::canvas::DrawList;
 use crate::styles::{Color, FaceplateStyle, KnobStyle, MeterStyle};
@@ -18,52 +23,8 @@ fn gl_color(color: Color) -> GlColor {
     )
 }
 
-fn sdk_color(color: GlColor) -> Color {
-    Color::rgba(
-        color.r() as f32 / 255.0,
-        color.g() as f32 / 255.0,
-        color.b() as f32 / 255.0,
-        color.a() as f32 / 255.0,
-    )
-}
-
 fn commit(dl: &mut DrawList, scene: Scene) {
-    for cmd in &scene.cmds {
-        match cmd {
-            Cmd::FillEllipse { rect, top, .. } => {
-                let center = rect.center();
-                dl.fill_circle(center.x, center.y, rect.w.min(rect.h) * 0.5, sdk_color(*top));
-            }
-            Cmd::StrokeEllipse { rect, color, width } => {
-                let center = rect.center();
-                dl.stroke_circle(center.x, center.y, rect.w.min(rect.h) * 0.5, sdk_color(*color), *width);
-            }
-            Cmd::FillRoundRect { rect, radius, top, .. } => {
-                dl.fill_rounded_rect(rect.x, rect.y, rect.w, rect.h, *radius, sdk_color(*top));
-            }
-            Cmd::FillRect { rect, top, .. } => {
-                dl.fill_rect(rect.x, rect.y, rect.w, rect.h, sdk_color(*top));
-            }
-            Cmd::StrokeRoundRect { rect, radius, color, width } => {
-                dl.stroke_rounded_rect(rect.x, rect.y, rect.w, rect.h, *radius, sdk_color(*color), *width);
-            }
-            Cmd::Line { a, b, color, width } => dl.line(a.x, a.y, b.x, b.y, sdk_color(*color), *width),
-            Cmd::StrokeArc { center, radius, from, to, color, width } => {
-                dl.arc(center.x, center.y, *radius, *from, *to, sdk_color(*color), *width);
-            }
-            Cmd::Text { at, text, color, size, center } => {
-                dl.text(text.clone(), at.x, at.y, *size, sdk_color(*color), *center);
-            }
-            Cmd::FillPoly { pts, top, .. } if pts.len() >= 2 => {
-                dl.line(pts[0].x, pts[0].y, pts[1].x, pts[1].y, sdk_color(*top), 1.0);
-            }
-            Cmd::StrokePoly { pts, color, width, .. } if pts.len() >= 2 => {
-                dl.line(pts[0].x, pts[0].y, pts[1].x, pts[1].y, sdk_color(*color), *width);
-            }
-            _ => {}
-        }
-    }
-    dl.scene.cmds.extend(scene.cmds);
+    dl.append(scene);
 }
 
 fn knob_code(style: KnobStyle) -> &'static str {
@@ -91,9 +52,11 @@ fn plate_code(style: FaceplateStyle) -> &'static str {
     }
 }
 
-/// Travel for a rotary control. 0 is the start of the sweep, 0.5 points up, 1 is the end.
-fn travel_angle(normalized: f32) -> f32 {
-    (-135.0 + normalized.clamp(0.0, 1.0) * 270.0).to_radians()
+/// Pointer angle for a rotary control, in radians from straight up: GoodLookin's sweep of
+/// ±0.8π, the one design files use. 0 is the start, 0.5 points up, 1 is the end.
+pub fn knob_angle(normalized: f32) -> f32 {
+    let t = if normalized.is_nan() { 0.0 } else { normalized.clamp(0.0, 1.0) };
+    (t * 1.6 - 0.8) * std::f32::consts::PI
 }
 
 pub fn draw_faceplate(dl: &mut DrawList, w: f32, h: f32, style: FaceplateStyle) {
@@ -103,6 +66,10 @@ pub fn draw_faceplate(dl: &mut DrawList, w: f32, h: f32, style: FaceplateStyle) 
 /// Draws one of the 40 GoodLookin faceplates by its code (`"Navy"`, `"Walnut"`, `"Cyber"`, ...).
 pub fn draw_faceplate_code(dl: &mut DrawList, w: f32, h: f32, code: &str) {
     let Some(plate) = design::find_faceplate(code) else { return };
+    // The lit knobs reflect the plate they sit on: its middle colour.
+    let floor = GlColor(plate.bg_top).mix(GlColor(plate.bg_bottom), 0.5);
+    dl.floor = Some(floor.0);
+    gl_draw::set_knob_floor(floor);
     let mut scene = Scene::new();
     hardware::draw_panel(
         &mut scene,
@@ -140,25 +107,29 @@ pub fn draw_knob_code(
     style_code: &str,
     cap_color: Color,
 ) {
+    let tier = dl.knob_tier;
+    let angle = knob_angle(normalized);
+    let accent = gl_color(cap_color);
+    let center = Point::new(cx, cy);
+    if let Some(floor) = dl.floor {
+        gl_draw::set_knob_floor(GlColor(floor));
+    }
     let mut scene = Scene::new();
-    knobs::draw_style(
-        &mut scene,
-        style_code,
-        Point::new(cx, cy),
-        radius,
-        travel_angle(normalized),
-        gl_color(cap_color),
-        false,
-    );
-    scene.text(Point::new(cx, cy + radius + 14.0), label, GlColor(0xffffffff), 11.0, true);
-    scene.text(
-        Point::new(cx, cy + radius + 26.0),
-        value_text,
-        GlColor(0xffb3cccc),
-        10.0,
-        true,
-    );
-    commit(dl, scene);
+    gl_draw::knob_named_mode(&mut scene, style_code, center, radius, angle, accent, false, tier);
+    let label_y = cy + radius + 14.0;
+    let mut legend = Scene::new();
+    legend.text(Point::new(cx, label_y), label, GlColor(0xffffffff), 11.0, true);
+    legend.text(Point::new(cx, label_y + 12.0), value_text, GlColor(0xffb3cccc), 10.0, true);
+    // A host without images gets the classic drawing in `commands`.
+    let mut basic = Scene::new();
+    if tier == KnobMode::Lit || style_code.starts_with("lit_") {
+        let code = style_code.trim_start_matches("lit_");
+        gl_draw::knob_named_mode(&mut basic, code, center, radius, angle, accent, false, KnobMode::Classic);
+    } else {
+        basic = scene.clone();
+    }
+    dl.append_with_basic(scene, &basic);
+    dl.append(legend);
 }
 
 pub fn draw_vu_meter(dl: &mut DrawList, x: f32, y: f32, w: f32, h: f32, level_db: f32, style: MeterStyle) {
@@ -211,13 +182,9 @@ pub fn fader_db_to_pos(db: f32) -> f32 {
 pub fn draw_fader(dl: &mut DrawList, cx: f32, y: f32, height: f32, db: f32, label: &str) {
     let mut scene = Scene::new();
     let travel = height.max(36.0);
-    meters::draw_slot_fader(
-        &mut scene,
-        Rect::new(cx - travel * 0.5, y, travel, 40.0),
-        fader_db_to_pos(db),
-        meters::FaderCap::Console,
-        GlColor(0xffb8bcc0),
-    );
+    let r = Rect::new(cx - travel * 0.5, y, travel, 40.0);
+    let panel = GlColor(dl.floor.unwrap_or(0xff14181b));
+    meters::draw_fader_on(&mut scene, r, fader_db_to_pos(db), meters::FaderCap::Console, GlColor(0xffb8bcc0), r.h > r.w, true, panel);
     scene.text(Point::new(cx, y + 52.0), label, GlColor(0xffffffff), 10.0, true);
     let readout = if db <= -90.0 { "-inf dB".to_string() } else { format!("{db:.1} dB") };
     scene.text(Point::new(cx, y + 66.0), readout, GlColor(0xffb3cccc), 9.0, true);
@@ -226,13 +193,9 @@ pub fn draw_fader(dl: &mut DrawList, cx: f32, y: f32, height: f32, db: f32, labe
 
 pub fn draw_slider(dl: &mut DrawList, x: f32, y: f32, w: f32, normalized: f32, label: &str, value_text: &str) {
     let mut scene = Scene::new();
-    meters::draw_slot_fader(
-        &mut scene,
-        Rect::new(x, y, w, 28.0),
-        normalized,
-        meters::FaderCap::Oval,
-        GlColor(0xffe6eaee),
-    );
+    let r = Rect::new(x, y, w, 28.0);
+    let panel = GlColor(dl.floor.unwrap_or(0xff14181b));
+    meters::draw_fader_on(&mut scene, r, normalized, meters::FaderCap::Oval, GlColor(0xffe6eaee), r.h > r.w, true, panel);
     scene.text(Point::new(x, y - 10.0), label, GlColor(0xffffffff), 10.0, false);
     scene.text(Point::new(x + w, y - 10.0), value_text, GlColor(0xffb3cccc), 10.0, false);
     commit(dl, scene);
@@ -270,6 +233,7 @@ mod tests {
 
     #[test]
     fn test_fader_taper_roundtrip() {
+        let _paint = crate::render::paint_lock();
         for db in [12.0, 6.0, 0.0, -6.0, -12.0, -24.0, -48.0, -96.0] {
             let pos = fader_db_to_pos(db);
             let recovered = fader_pos_to_db(pos);
@@ -281,7 +245,9 @@ mod tests {
 
     #[test]
     fn brit_knob_uses_goodlookin_geometry() {
+        let _paint = crate::render::paint_lock();
         let mut dl = DrawList::new();
+        dl.knob_tier = KnobMode::Classic;
         draw_knob(&mut dl, 80.0, 80.0, 32.0, 0.5, "GAIN", "0.0 dB", KnobStyle::Brit, Color::BRIT_RED);
         assert!(dl.scene.cmds.len() > 20, "Brit drawer produced {} commands", dl.scene.cmds.len());
         assert!(dl.commands.len() > 10);
@@ -289,6 +255,7 @@ mod tests {
 
     #[test]
     fn catalog_is_the_goodlookin_set() {
+        let _paint = crate::render::paint_lock();
         assert_eq!(design::KNOB_STYLES.len(), 47);
         assert_eq!(design::FACEPLATES.len(), 40);
         let mut dl = DrawList::new();
@@ -298,7 +265,33 @@ mod tests {
     }
 
     #[test]
+    fn knobs_are_lit_by_default_and_the_old_tiers_remain() {
+        let _paint = crate::render::paint_lock();
+        use goodlookindri::scene::Cmd;
+        let images = |dl: &DrawList| dl.scene.cmds.iter().filter(|c| matches!(c, Cmd::Image { .. })).count();
+        let mut dl = DrawList::new();
+        draw_knob(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", KnobStyle::Metal, Color::WHITE);
+        assert_eq!(images(&dl), 1, "lit sprite");
+        assert!(dl.commands.len() > 5, "basic hosts get the classic drawing");
+        for tier in [KnobMode::Classic, KnobMode::Flat] {
+            let mut dl = DrawList::new();
+            dl.knob_tier = tier;
+            draw_knob(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", KnobStyle::Metal, Color::WHITE);
+            assert_eq!(images(&dl), 0, "{tier:?}");
+            assert!(!dl.scene.cmds.is_empty());
+        }
+        // A prefix picks a tier for one knob.
+        let mut dl = DrawList::new();
+        dl.knob_tier = KnobMode::Classic;
+        draw_knob_code(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", "lit_Chk", Color::WHITE);
+        assert_eq!(images(&dl), 1);
+        assert!((knob_angle(0.5)).abs() < 1e-6);
+        assert!((knob_angle(1.0) - 0.8 * std::f32::consts::PI).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_draw_fader_and_slider() {
+        let _paint = crate::render::paint_lock();
         let mut dl = DrawList::new();
         draw_fader(&mut dl, 50.0, 10.0, 140.0, 0.0, "MASTER");
         draw_slider(&mut dl, 100.0, 50.0, 120.0, 0.75, "DRIVE", "75%");

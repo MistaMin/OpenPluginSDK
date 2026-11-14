@@ -4,7 +4,7 @@
 
 A plugin writes one editor and the SDK hosts it in every format: CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), and the VST3, Audio Unit and AAX shells (`op_editor_*`). The editor and its hosting are Rust. The view is an `NSView` made through the Objective-C runtime (`openplugin_dri::cocoa`), so the editor is macOS only in this release. No JUCE code or JUCE dependency is involved.
 
-The working example is [`examples/editor`](../examples/editor): a fader, a switch, a meter, two text presets, and every format exported.
+The working example is [`examples/editor`](../examples/editor): a Navy plate, a lit Brit knob, a bat toggle, an LED ladder, two text presets, and every format exported. It is drawn with GoodLookin DRI 0.2 and rasterised by `openplugin_dri::SceneCanvas` ([DRI_GUIDE.md](DRI_GUIDE.md)). An editor may also fill its pixels any other way.
 
 ## The contract
 

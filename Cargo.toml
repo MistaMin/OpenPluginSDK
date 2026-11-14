@@ -31,6 +31,7 @@ openplugin-targets = { path = "crates/openplugin-targets", version = "0.3.0-beta
 openplugin-ffi = { path = "crates/openplugin-ffi", version = "0.3.0-beta" }
 openplugin = { path = "crates/openplugin", version = "0.3.0-beta" }
 goodlookindri = { path = "../GoodLookinDri" }
+goodlookindri-shell = { path = "../GoodLookinDri/shell" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -1,7 +1,12 @@
-//! 2D canvas. [`DrawList::scene`] is the GoodLookin DRI command list. `commands` is a
-//! flattened copy for hosts that only draw rectangles, ellipses, lines, arcs, and text.
+//! 2D canvas. [`DrawList::scene`] is the GoodLookin DRI command list: every command,
+//! including the gradients, shadows and lit-knob images of GoodLookin DRI 0.2. Replay it
+//! with [`crate::SceneCanvas`]. `commands` is a flattened copy for hosts that only draw
+//! rectangles, ellipses, lines, arcs, and text: GoodLookin DRI's `Scene::lower_basic`,
+//! with each lit knob drawn again in the classic tier, since a basic host has no images.
 
-use goodlookindri::scene::Scene;
+use goodlookindri::color::Color as GlColor;
+use goodlookindri::draw::KnobMode;
+use goodlookindri::scene::{Cmd, Scene};
 
 use crate::styles::Color;
 
@@ -18,21 +23,108 @@ pub enum DrawCmd {
     Text { text: String, x: f32, y: f32, size: f32, color: Color, align_center: bool },
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct DrawList {
     pub commands: Vec<DrawCmd>,
     /// Full GoodLookin DRI scene. This is the drawing the knob and plate styles actually produce.
     pub scene: Scene,
+    /// The tier knobs are drawn in: [`KnobMode::Lit`] (the default, per-pixel shaded),
+    /// [`KnobMode::Classic`] (the vector drawing of GoodLookin DRI 0.1) or [`KnobMode::Flat`].
+    /// A `lit_`, `flat_` style prefix still overrides it for one knob.
+    pub knob_tier: KnobMode,
+    /// The colour the knobs stand on, for the lit tier's reflections. A faceplate sets it.
+    pub floor: Option<u32>,
+}
+
+impl Default for DrawList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn sdk_color(color: GlColor) -> Color {
+    Color::rgba(
+        color.r() as f32 / 255.0,
+        color.g() as f32 / 255.0,
+        color.b() as f32 / 255.0,
+        color.a() as f32 / 255.0,
+    )
 }
 
 impl DrawList {
     pub fn new() -> Self {
-        Self { commands: Vec::with_capacity(512), scene: Scene::new() }
+        Self { commands: Vec::with_capacity(512), scene: Scene::new(), knob_tier: KnobMode::Lit, floor: None }
     }
 
+    /// Empty the lists. The tier and the floor colour stay.
     pub fn clear(&mut self) {
         self.commands.clear();
         self.scene.clear();
+    }
+
+    /// Append a GoodLookin DRI scene: all of it to [`Self::scene`], and its basic
+    /// lowering to [`Self::commands`].
+    pub fn append(&mut self, scene: Scene) {
+        self.flatten(&scene.lower_basic());
+        self.scene.cmds.extend(scene.cmds);
+    }
+
+    /// [`Self::append`], with `basic` standing in for `scene` in [`Self::commands`]
+    /// (a lit knob, whose image a basic host cannot draw, as its classic drawing).
+    pub fn append_with_basic(&mut self, scene: Scene, basic: &Scene) {
+        let has_image = scene.cmds.iter().any(|c| matches!(c, Cmd::Image { .. }));
+        if has_image {
+            self.flatten(&basic.lower_basic());
+        } else {
+            self.flatten(&scene.lower_basic());
+        }
+        self.scene.cmds.extend(scene.cmds);
+    }
+
+    fn flatten(&mut self, scene: &Scene) {
+        for cmd in &scene.cmds {
+            match cmd {
+                Cmd::FillEllipse { rect, top, .. } => {
+                    let center = rect.center();
+                    self.fill_circle(center.x, center.y, rect.w.min(rect.h) * 0.5, sdk_color(*top));
+                }
+                Cmd::StrokeEllipse { rect, color, width } => {
+                    let center = rect.center();
+                    self.stroke_circle(center.x, center.y, rect.w.min(rect.h) * 0.5, sdk_color(*color), *width);
+                }
+                Cmd::FillRoundRect { rect, radius, top, .. } => {
+                    self.fill_rounded_rect(rect.x, rect.y, rect.w, rect.h, *radius, sdk_color(*top));
+                }
+                Cmd::FillRect { rect, top, .. } => self.fill_rect(rect.x, rect.y, rect.w, rect.h, sdk_color(*top)),
+                Cmd::StrokeRoundRect { rect, radius, color, width } => {
+                    self.stroke_rounded_rect(rect.x, rect.y, rect.w, rect.h, *radius, sdk_color(*color), *width);
+                }
+                Cmd::Line { a, b, color, width } => self.line(a.x, a.y, b.x, b.y, sdk_color(*color), *width),
+                Cmd::StrokeArc { center, radius, from, to, color, width } => {
+                    self.arc(center.x, center.y, *radius, *from, *to, sdk_color(*color), *width);
+                }
+                Cmd::Text { at, text, color, size, center } => {
+                    self.text(text.clone(), at.x, at.y, *size, sdk_color(*color), *center);
+                }
+                Cmd::StrokePoly { pts, color, width, closed } => {
+                    for pair in pts.windows(2) {
+                        self.line(pair[0].x, pair[0].y, pair[1].x, pair[1].y, sdk_color(*color), *width);
+                    }
+                    if *closed && pts.len() > 2 {
+                        let (a, b) = (pts[pts.len() - 1], pts[0]);
+                        self.line(a.x, a.y, b.x, b.y, sdk_color(*color), *width);
+                    }
+                }
+                Cmd::FillPoly { pts, top, .. } if pts.len() >= 3 => {
+                    // No polygon fill in the basic set: its outline.
+                    for i in 0..pts.len() {
+                        let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                        self.line(a.x, a.y, b.x, b.y, sdk_color(*top), 1.0);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     pub fn fill_rect(&mut self, x: f32, y: f32, w: f32, h: f32, color: Color) {

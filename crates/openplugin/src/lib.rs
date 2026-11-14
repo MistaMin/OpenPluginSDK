@@ -26,8 +26,8 @@ pub mod prelude {
     };
     pub use openplugin_dri::{
         draw_faceplate, draw_faceplate_code, draw_fader, draw_knob, draw_knob_code, draw_pan_knob,
-        draw_slider, draw_vu_meter, fader_db_to_pos, fader_pos_to_db, Color, DrawList,
-        FaceplateStyle, KnobStyle, MeterStyle,
+        draw_slider, draw_vu_meter, fader_db_to_pos, fader_pos_to_db, knob_angle, Color, DrawList,
+        FaceplateStyle, KnobStyle, KnobTier, MeterStyle, SceneCanvas,
     };
     pub use openplugin_dsp::{
         f32_to_i16, f32_to_i32, hann, hz_from_midi, i16_to_f32, i32_to_f32, lerp, midi_from_hz,

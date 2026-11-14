@@ -130,8 +130,39 @@ mod mac {
         (c(c"redComponent") << 16) | (c(c"greenComponent") << 8) | c(c"blueComponent")
     }
 
-    fn near(a: u32, b: u32) -> bool {
-        (0..3).all(|i| (((a >> (i * 8)) & 255) as i32 - ((b >> (i * 8)) & 255) as i32).abs() <= 3)
+    /// Pixels on a ring inside the knob, where the pointer sweeps.
+    unsafe fn knob_ring(view: Id) -> Vec<u32> {
+        let (x, y, w, h) = KNOB;
+        let (cx, cy, r) = (x + w * 0.5, y + h * 0.5, w * 0.25);
+        (0..24)
+            .map(|i| {
+                let a = i as f32 / 24.0 * std::f32::consts::TAU;
+                pixel(view, (cx + r * a.sin()) as f64, (cy - r * a.cos()) as f64)
+            })
+            .collect()
+    }
+
+    /// A grid of pixels over the toggle.
+    unsafe fn switch_area(view: Id) -> Vec<u32> {
+        let (x, y, w, h) = SWITCH;
+        let mut out = Vec::new();
+        for j in 1..8 {
+            for i in 1..5 {
+                out.push(pixel(view, (x + w * i as f32 / 5.0) as f64, (y + h * j as f32 / 8.0) as f64));
+            }
+        }
+        out
+    }
+
+    fn green(p: u32) -> bool {
+        let (r, g, b) = ((p >> 16) & 255, (p >> 8) & 255, p & 255);
+        g > r + 60 && g > b + 60
+    }
+
+    /// The point to click the toggle at, in window coordinates (y up).
+    fn switch_click() -> (f64, f64) {
+        let (x, y, w, h) = SWITCH;
+        ((x + w * 0.5) as f64, HEIGHT as f64 - (y + h * 0.5) as f64)
     }
 
     thread_local! {
@@ -169,23 +200,27 @@ mod mac {
             op_editor_bind(editor, engine);
             op_editor_bind(editor, 0x10 as Id);
 
-            // +24 dB from the host fills the fader to the top.
+            // A value from the host turns the lit knob.
             op_editor_set_plain(editor, 0, 24.0);
-            assert!(near(pixel(view, 40.0, 25.0), 0x40a0e0), "fader top {:06x}", pixel(view, 40.0, 25.0));
-            // -24 dB empties it; the top row is the editor's first row.
+            let high = knob_ring(view);
             op_editor_set_plain(editor, 0, -24.0);
-            assert!(near(pixel(view, 40.0, 25.0), 0x383c44), "fader top {:06x}", pixel(view, 40.0, 25.0));
-            assert!(near(pixel(view, 5.0, 5.0), 0x202428), "background {:06x}", pixel(view, 5.0, 5.0));
-            assert!(near(pixel(view, 120.0, 35.0), 0x505560), "switch off");
+            let low = knob_ring(view);
+            let moved = high.iter().zip(&low).filter(|(a, b)| a != b).count();
+            assert!(moved >= 2, "the pointer moved ({moved} ring pixels changed)");
+            // The image is upright: the LED ladder's bottom lamp is the lit one.
+            let (mx, my, mw, mh) = METER;
+            let bottom = pixel(view, (mx + mw * 0.5) as f64, (my + mh - 4.0) as f64);
+            let top = pixel(view, (mx + mw * 0.5) as f64, (my + 4.0) as f64);
+            assert!(green(bottom) && !green(top), "bottom {bottom:06x}, top {top:06x}");
 
-            // Click the Warm switch: editor y 35 is window y 160 - 35 (y up).
-            let down = mouse(1, 120.0, HEIGHT as f64 - 35.0);
-            let up = mouse(2, 120.0, HEIGHT as f64 - 35.0);
-            send!((), view, c"mouseDown:", Id = down);
-            send!((), view, c"mouseUp:", Id = up);
+            // Click the Warm toggle.
+            let off = switch_area(view);
+            let (cx, cy) = switch_click();
+            send!((), view, c"mouseDown:", Id = mouse(1, cx, cy));
+            send!((), view, c"mouseUp:", Id = mouse(2, cx, cy));
             let log = LOG.with(|l| l.borrow().clone());
             assert_eq!(log, vec!["begin 1", "perform 1 1", "end 1"], "gestures");
-            assert!(near(pixel(view, 120.0, 35.0), 0xe08030), "switch on {:06x}", pixel(view, 120.0, 35.0));
+            assert_ne!(switch_area(view), off, "the toggle is drawn on");
 
             op_editor_destroy(editor);
             assert!(send!(Id, parent, c"subviews").is_null() || send!(usize, send!(Id, parent, c"subviews"), c"count") == 0);
@@ -280,13 +315,16 @@ mod mac {
                 },
             };
             let input = clap_input_events { ctx: &one as *const One as *mut c_void, size: Some(one_size), get: Some(one_get) };
+            run_loop(0.1);
+            let before = knob_ring(view);
             (*params).flush.unwrap()(plugin, &input, std::ptr::null());
             run_loop(0.2);
-            assert!(near(pixel(view, 40.0, 25.0), 0x40a0e0), "polled +24 dB: {:06x}", pixel(view, 40.0, 25.0));
+            assert_ne!(knob_ring(view), before, "polled +24 dB turned the knob");
 
             // A click on the switch asks the host to flush, and the plane has it.
             let before = FLUSHES.load(Ordering::Relaxed);
-            send!((), view, c"mouseDown:", Id = mouse(1, 120.0, HEIGHT as f64 - 35.0));
+            let (cx, cy) = switch_click();
+            send!((), view, c"mouseDown:", Id = mouse(1, cx, cy));
             assert!(FLUSHES.load(Ordering::Relaxed) > before, "request_flush");
             let mut value = 0.0f64;
             assert!((*params).get_value.unwrap()(plugin, 1, &mut value));
@@ -331,10 +369,12 @@ mod mac {
             assert!(!handle.is_null());
             assert!(!widget.is_null());
             assert_eq!(send!(Id, widget, c"superview"), parent);
+            let before = knob_ring(widget);
             let full = 24.0f32;
             (ui.port_event)(handle, AUDIO_PORTS, 4, 0, &full as *const f32 as *const c_void);
-            assert!(near(pixel(widget, 40.0, 25.0), 0x40a0e0), "port_event reached the editor");
-            send!((), widget, c"mouseDown:", Id = mouse(1, 120.0, HEIGHT as f64 - 35.0));
+            assert_ne!(knob_ring(widget), before, "port_event reached the editor");
+            let (cx, cy) = switch_click();
+            send!((), widget, c"mouseDown:", Id = mouse(1, cx, cy));
             assert_eq!(WRITES.load(Ordering::Relaxed), 1, "the click wrote the Warm port");
             (ui.cleanup)(handle);
             assert_eq!(send!(usize, send!(Id, parent, c"subviews"), c"count"), 0);

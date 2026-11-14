@@ -1,9 +1,10 @@
 //! A gain plugin with an editor, exported in every format the SDK has.
 //!
 //! The engine shares a peak meter with its editor through
-//! [`Plugin::editor_state`]. The editor draws its own pixels: a fader for the
-//! gain (drag it; double-click resets), a switch for Warm (click it), and the
-//! meter. Its changes go through [`EditorHost`] as gestures, and the host's
+//! [`Plugin::editor_state`]. The editor is drawn with GoodLookin DRI 0.2 and
+//! rasterised by [`SceneCanvas`]: a Navy plate, a lit Brit knob for the gain
+//! (drag it up or down; double-click resets), a bat toggle for Warm (click it),
+//! and an LED ladder. Its changes go through [`EditorHost`] as gestures, and the host's
 //! values come back through [`Editor::param_changed`]. The same editor runs in
 //! CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), and the VST3, Audio Unit and AAX
 //! shells (`op_editor_*`). The factory presets are text files in `presets/`,
@@ -13,6 +14,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use openplugin::core::{Editor, EditorHost, EditorState, Frame, PresetBank};
+use openplugin::dri::goodlookindri::color::Color as GlColor;
+use openplugin::dri::goodlookindri::scene::{Rect, Scene};
+use openplugin::dri::goodlookindri::{meters, switches};
+use openplugin::dri::{draw_faceplate_code, draw_knob_code, SceneCanvas};
 use openplugin::prelude::*;
 
 static PARAMS: [ParamInfo; 2] = [
@@ -134,24 +139,29 @@ impl Plugin for EditorGain {
 
 pub const WIDTH: u32 = 240;
 pub const HEIGHT: u32 = 160;
-const FADER: (f32, f32, f32, f32) = (20.0, 20.0, 40.0, 120.0); // x, y, w, h
-const SWITCH: (f32, f32, f32, f32) = (90.0, 20.0, 60.0, 30.0);
-const METER: (f32, f32, f32, f32) = (180.0, 20.0, 20.0, 120.0);
+/// Hit areas in points (x, y, w, h): the knob, the toggle, the meter.
+pub const KNOB: (f32, f32, f32, f32) = (25.0, 38.0, 60.0, 60.0);
+pub const SWITCH: (f32, f32, f32, f32) = (118.0, 40.0, 34.0, 56.0);
+pub const METER: (f32, f32, f32, f32) = (190.0, 20.0, 18.0, 120.0);
+/// How far a drag moves the knob from end to end, in points.
+const DRAG_RANGE: f32 = 150.0;
 
 fn inside(r: (f32, f32, f32, f32), x: f32, y: f32) -> bool {
     x >= r.0 && x < r.0 + r.2 && y >= r.1 && y < r.1 + r.3
 }
 
-/// The editor: three controls drawn straight into a pixel buffer.
+fn rect(r: (f32, f32, f32, f32)) -> Rect {
+    Rect::new(r.0, r.1, r.2, r.3)
+}
+
+/// The editor: GoodLookin DRI parts on a [`SceneCanvas`].
 pub struct GainEditor {
     host: EditorHost,
     values: [f32; 2],
     shared: Option<Arc<Shared>>,
     level: f32,
     drag: Option<(f32, f32)>,
-    pixels: Vec<u32>,
-    width: usize,
-    height: usize,
+    canvas: SceneCanvas,
 }
 
 impl GainEditor {
@@ -162,9 +172,7 @@ impl GainEditor {
             shared: None,
             level: 0.0,
             drag: None,
-            pixels: Vec::new(),
-            width: 0,
-            height: 0,
+            canvas: SceneCanvas::new(WIDTH as f32, HEIGHT as f32),
         }
     }
 
@@ -174,16 +182,6 @@ impl GainEditor {
 
     pub fn is_bound(&self) -> bool {
         self.shared.is_some()
-    }
-
-    fn fill(&mut self, r: (f32, f32, f32, f32), scale: f32, color: u32) {
-        let x0 = (r.0 * scale) as usize;
-        let y0 = (r.1 * scale) as usize;
-        let x1 = (((r.0 + r.2) * scale) as usize).min(self.width);
-        let y1 = (((r.1 + r.3) * scale) as usize).min(self.height);
-        for y in y0..y1 {
-            self.pixels[y * self.width + x0.min(x1)..y * self.width + x1].fill(color);
-        }
     }
 }
 
@@ -215,26 +213,31 @@ impl Editor for GainEditor {
     }
 
     fn render(&mut self, scale: f32) -> Frame<'_> {
-        self.width = (WIDTH as f32 * scale) as usize;
-        self.height = (HEIGHT as f32 * scale) as usize;
-        self.pixels.resize(self.width * self.height, 0);
-        self.pixels.fill(0x0020_2428);
-        self.fill(FADER, scale, 0x0038_3c44);
-        let t = PARAMS[0].to_normalized(self.values[0]);
-        let (x, y, w, h) = FADER;
-        self.fill((x, y + h * (1.0 - t), w, h * t), scale, 0x0040_a0e0);
-        let warm = if self.values[1] > 0.5 { 0x00e0_8030 } else { 0x0050_5560 };
-        self.fill(SWITCH, scale, warm);
-        self.fill(METER, scale, 0x0010_1214);
-        let db = 20.0 * self.level.max(1e-6).log10();
-        let m = ((db + 60.0) / 66.0).clamp(0.0, 1.0);
-        let (x, y, w, h) = METER;
-        self.fill((x, y + h * (1.0 - m), w, h * m), scale, 0x0060_d070);
-        Frame { pixels: &self.pixels, width: self.width, height: self.height }
+        let gain = self.values[0];
+        let warm = self.values[1] > 0.5;
+        let level_db = 20.0 * self.level.max(1e-6).log10();
+        // The plate is static: painted once per scale, then reused under the moving parts.
+        let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, WIDTH as f32, HEIGHT as f32, "Navy");
+        self.canvas.frame_layered(scale, 0, plate, |dl| {
+            let (x, y, w, h) = KNOB;
+            let normalized = PARAMS[0].to_normalized(gain);
+            draw_knob_code(dl, x + w * 0.5, y + h * 0.5, w * 0.5, normalized, "GAIN", &PARAMS[0].format(gain), "Brit", Color::BRIT_RED);
+            let mut parts = Scene::new();
+            switches::draw_toggle(&mut parts, rect(SWITCH), warm, switches::ToggleStyle::Bat, GlColor(0xffe08030));
+            parts.text(
+                openplugin::dri::goodlookindri::scene::Point::new(SWITCH.0 + SWITCH.2 * 0.5, SWITCH.1 + SWITCH.3 + 16.0),
+                "WARM",
+                GlColor(0xffffffff),
+                11.0,
+                true,
+            );
+            meters::draw_led_ladder(&mut parts, rect(METER), false, level_db, level_db, 16);
+            dl.append(parts);
+        })
     }
 
     fn mouse_down(&mut self, x: f32, y: f32, clicks: u32) {
-        if inside(FADER, x, y) {
+        if inside(KNOB, x, y) {
             if clicks >= 2 {
                 self.values[0] = PARAMS[0].default;
                 self.host.set(0, self.values[0]);
@@ -250,7 +253,7 @@ impl Editor for GainEditor {
 
     fn mouse_move(&mut self, _x: f32, y: f32) {
         if let Some((start_y, start)) = self.drag {
-            let t = (start + (start_y - y) / FADER.3).clamp(0.0, 1.0);
+            let t = (start + (start_y - y) / DRAG_RANGE).clamp(0.0, 1.0);
             let v = PARAMS[0].from_normalized(t);
             if v != self.values[0] {
                 self.values[0] = v;
