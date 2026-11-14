@@ -71,7 +71,8 @@ public:
                     ids_[i].c_str(), AAX_CString(desc.name), initial,
                     AAX_CLinearTaperDelegate<float>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
                     AAX_CNumberDisplayDelegate<float>(), true);
-                parameter->SetNumberOfSteps(10001);
+                // The step count stays at the AAX default for a continuous parameter.
+                // The AAX Validator rejects 10001 ("Number of parameter steps exceeds limit").
                 parameter->SetType(AAX_eParameterType_Continuous);
             }
             mParameterManager.AddParameter(parameter.release());
@@ -101,6 +102,13 @@ public:
             return AAX_SUCCESS;
         }
         return AAX_CEffectParameters::ResetFieldData(field, destination, size);
+    }
+    AAX_Result GetCustomData(AAX_CTypeID id, uint32_t size, void* data, uint32_t* written) const override {
+        if (id != kEngineData) return AAX_CEffectParameters::GetCustomData(id, size, data, written);
+        if (!data || !written || size != sizeof(void*)) return AAX_ERROR_INVALID_ARGUMENT;
+        *static_cast<void**>(data) = state_.engine;
+        *written = sizeof(void*);
+        return AAX_SUCCESS;
     }
     AAX_Result packet(AAX_CPacket& destination) {
         Packet next = defaults();

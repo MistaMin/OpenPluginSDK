@@ -51,6 +51,12 @@ float op_shell_get_plain(void* instance, uint32_t index);
 uint32_t op_shell_set_normalized(void* instance, uint32_t index, float normalized);
 float op_shell_get_normalized(void* instance, uint32_t index);
 uint32_t op_shell_process(void* instance, const float* in_left, const float* in_right, float* out_left, float* out_right, uint32_t frames);
+#if OP_HAS_TAIL
+// Optional, with -DOP_TAIL=ON: how long the output rings after the input
+// stops, in seconds. Infinity means it never ends. Safe to call from any
+// thread while the instance exists.
+double op_shell_tail_seconds(void* instance);
+#endif
 #ifdef __cplusplus
 }
 #endif

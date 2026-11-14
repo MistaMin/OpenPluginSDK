@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Thin VST3 adapter. The plugin is the Rust op_shell_* ABI. This file does not
-// contain DSP. The editor view is not implemented; a host shows its generic controls.
+// contain DSP. With OP_HAS_EDITOR the controller hosts the plugin's op_editor_* view;
+// without it a host shows its generic controls.
 #include "op_shell.h"
+#if OP_HAS_EDITOR
+#include "op_editor.h"
+#include "public.sdk/source/common/pluginview.h"
+#include "pluginterfaces/vst/ivstmessage.h"
+#endif
 #include "public.sdk/source/main/pluginfactory.h"
 #include "public.sdk/source/vst/vstaudioeffect.h"
 #include "public.sdk/source/vst/vsteditcontroller.h"
@@ -43,6 +49,10 @@ private:
     ParamID index_;
 };
 
+#if OP_HAS_EDITOR
+constexpr const char* kEngineMessage = "openplugin.engine";
+#endif
+
 class Processor final : public AudioEffect {
 public:
     Processor() {
@@ -82,6 +92,7 @@ public:
     }
     tresult PLUGIN_API setActive(TBool active) SMTG_OVERRIDE {
         if (!active) {
+            announce(nullptr);
             destroy();
             return AudioEffect::setActive(active);
         }
@@ -91,6 +102,7 @@ public:
         destroy();
         engine_ = next;
         op_shell_reset(engine_);
+        announce(engine_);
         return AudioEffect::setActive(active);
     }
     tresult PLUGIN_API setProcessing(TBool active) SMTG_OVERRIDE {
@@ -98,6 +110,14 @@ public:
         return kResultOk;
     }
     uint32 PLUGIN_API getLatencySamples() SMTG_OVERRIDE { return engine_ ? op_shell_latency(engine_) : 0; }
+#if OP_HAS_TAIL
+    uint32 PLUGIN_API getTailSamples() SMTG_OVERRIDE {
+        if (!engine_) return kNoTail;
+        const double samples = op_shell_tail_seconds(engine_) * processSetup.sampleRate;
+        if (!(samples < 4.0e9)) return kInfiniteTail;
+        return samples > 0.0 ? static_cast<uint32>(samples) : kNoTail;
+    }
+#endif
     tresult PLUGIN_API setState(IBStream* stream) SMTG_OVERRIDE {
         if (!stream || count_ == 0) return kResultFalse;
         IBStreamer reader(stream, kLittleEndian);
@@ -160,6 +180,19 @@ public:
     }
 
 private:
+    // Tells the controller which engine an open editor should show. The pointer
+    // only means something in this process, and the editor checks it is live.
+    void announce(void* engine) {
+#if OP_HAS_EDITOR
+        if (IPtr<IMessage> message = owned(allocateMessage())) {
+            message->setMessageID(kEngineMessage);
+            message->getAttributes()->setInt("engine", static_cast<int64>(reinterpret_cast<intptr_t>(engine)));
+            sendMessage(message);
+        }
+#else
+        (void)engine;
+#endif
+    }
     void destroy() {
         if (engine_) {
             op_shell_destroy(engine_);
@@ -206,8 +239,107 @@ public:
         }
         return kResultOk;
     }
+#if OP_HAS_EDITOR
+    IPlugView* PLUGIN_API createView(FIDString name) SMTG_OVERRIDE;
+    tresult PLUGIN_API notify(IMessage* message) SMTG_OVERRIDE {
+        if (message && message->getMessageID() && std::strcmp(message->getMessageID(), kEngineMessage) == 0) {
+            int64 value = 0;
+            if (message->getAttributes()->getInt("engine", value) == kResultOk) {
+                engine_ = reinterpret_cast<void*>(static_cast<intptr_t>(value));
+                if (editor_) op_editor_bind(editor_, engine_);
+            }
+            return kResultOk;
+        }
+        return EditController::notify(message);
+    }
+    tresult PLUGIN_API setParamNormalized(ParamID tag, ParamValue value) SMTG_OVERRIDE {
+        const tresult result = EditController::setParamNormalized(tag, value);
+        if (editor_ && result == kResultOk) op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, value)));
+        return result;
+    }
+    // Called by the view.
+    void* openEditor(void* parent) {
+        closeEditor();
+        OpEditorHost host{this, hostBegin, hostPerform, hostEnd};
+        editor_ = op_editor_create(&host);
+        if (!editor_) return nullptr;
+        for (int32 i = 0; i < parameters.getParameterCount(); ++i) {
+            const ParamID tag = static_cast<ParamID>(i);
+            op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, getParamNormalized(tag))));
+        }
+        op_editor_bind(editor_, engine_);
+        if (!op_editor_attach(editor_, parent)) closeEditor();
+        return editor_;
+    }
+    void closeEditor() {
+        if (editor_) {
+            op_editor_destroy(editor_);
+            editor_ = nullptr;
+        }
+    }
+
+private:
+    static void hostBegin(void* context, uint32_t index) { static_cast<Controller*>(context)->EditController::beginEdit(index); }
+    static void hostPerform(void* context, uint32_t index, double plain) {
+        auto* self = static_cast<Controller*>(context);
+        const ParamValue normalized = op_shell_to_normalized(index, plain);
+        self->EditController::setParamNormalized(index, normalized);
+        self->EditController::performEdit(index, normalized);
+    }
+    static void hostEnd(void* context, uint32_t index) { static_cast<Controller*>(context)->EditController::endEdit(index); }
+    void* editor_ = nullptr;
+    void* engine_ = nullptr;
+#else
     IPlugView* PLUGIN_API createView(FIDString) SMTG_OVERRIDE { return nullptr; }
+#endif
 };
+
+#if OP_HAS_EDITOR
+// The NSView host. The controller owns the editor, so a view that outlives its
+// window still closes cleanly.
+class EditorView final : public CPluginView {
+public:
+    explicit EditorView(Controller* controller) : controller_(controller) {
+        uint32_t width = 0;
+        uint32_t height = 0;
+        op_editor_size(&width, &height);
+        rect = ViewRect(0, 0, static_cast<int32>(width), static_cast<int32>(height));
+    }
+    ~EditorView() override {
+        if (open_ && controller_) controller_->closeEditor();
+    }
+    tresult PLUGIN_API isPlatformTypeSupported(FIDString type) SMTG_OVERRIDE {
+        return type && std::strcmp(type, kPlatformTypeNSView) == 0 ? kResultTrue : kResultFalse;
+    }
+    tresult PLUGIN_API attached(void* parent, FIDString type) SMTG_OVERRIDE {
+        if (!parent || isPlatformTypeSupported(type) != kResultTrue || !controller_) return kResultFalse;
+        if (!controller_->openEditor(parent)) return kResultFalse;
+        open_ = true;
+        return CPluginView::attached(parent, type);
+    }
+    tresult PLUGIN_API removed() SMTG_OVERRIDE {
+        if (open_ && controller_) controller_->closeEditor();
+        open_ = false;
+        return CPluginView::removed();
+    }
+    tresult PLUGIN_API onSize(ViewRect*) SMTG_OVERRIDE { return kResultOk; }
+    tresult PLUGIN_API checkSizeConstraint(ViewRect* size) SMTG_OVERRIDE {
+        if (!size) return kInvalidArgument;
+        size->right = size->left + rect.getWidth();
+        size->bottom = size->top + rect.getHeight();
+        return kResultOk;
+    }
+
+private:
+    IPtr<Controller> controller_;
+    bool open_ = false;
+};
+
+IPlugView* PLUGIN_API Controller::createView(FIDString name) {
+    if (!name || std::strcmp(name, ViewType::kEditor) != 0) return nullptr;
+    return new EditorView(this);
+}
+#endif
 }
 
 bool InitModule() { return true; }

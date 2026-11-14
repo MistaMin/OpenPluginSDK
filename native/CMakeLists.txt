@@ -22,6 +22,21 @@ set(OP_AU_MANUFACTURER "OPSh" CACHE STRING "Audio Unit manufacturer code, four c
 option(OP_BUILD_VST3 "Build the VST3 shell" ON)
 option(OP_BUILD_AU "Build the Audio Unit shell" ON)
 option(OP_BUILD_AAX "Build the unsigned AAX shell" ON)
+option(OP_EDITOR "The plugin exports op_editor_* (include/op_editor.h); host its view" OFF)
+option(OP_TAIL "The plugin exports op_shell_tail_seconds; report its tail to the host" OFF)
+option(OP_AAX_PAGES "Write an AAX page table into the bundle; needs four-character AAX IDs" OFF)
+if(OP_TAIL)
+  add_compile_definitions(OP_HAS_TAIL=1)
+else()
+  add_compile_definitions(OP_HAS_TAIL=0)
+endif()
+if(OP_EDITOR)
+  add_compile_definitions(OP_HAS_EDITOR=1)
+  # Objective-C class names are global in the host process.
+  string(MAKE_C_IDENTIFIER "${OP_PRODUCT}_${OP_VERSION}" OP_CLASS_SUFFIX)
+else()
+  add_compile_definitions(OP_HAS_EDITOR=0)
+endif()
 
 if(NOT EXISTS "${OP_RUST_LIB}")
   message(FATAL_ERROR "OP_RUST_LIB must be the built static library")
@@ -90,6 +105,15 @@ if(OP_BUILD_AU)
   target_link_libraries(openplugin_au_sdk PUBLIC "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation")
   configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-Info.plist" @ONLY)
   add_library(OpenPluginAU MODULE au/OpenPluginAU.cpp)
+  if(OP_EDITOR)
+    target_sources(OpenPluginAU PRIVATE au/OpenPluginAUView.mm)
+    target_compile_definitions(OpenPluginAU PRIVATE
+      "OP_AU_BUNDLE_ID=\"${OP_BUNDLE_ID}.au\""
+      "OP_AU_VIEW_CLASS=OpenPluginAUViewFactory_${OP_CLASS_SUFFIX}"
+      "OP_AU_VIEW_CLASS_NAME=\"OpenPluginAUViewFactory_${OP_CLASS_SUFFIX}\""
+      "OP_AU_CONTAINER_CLASS=OpenPluginAUView_${OP_CLASS_SUFFIX}")
+    target_link_libraries(OpenPluginAU PRIVATE "-framework Cocoa" "-framework AudioUnit")
+  endif()
   target_compile_features(OpenPluginAU PRIVATE cxx_std_23)
   target_include_directories(OpenPluginAU PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
   set_target_properties(OpenPluginAU PROPERTIES
@@ -147,6 +171,16 @@ if(OP_BUILD_AAX)
   add_custom_command(TARGET OpenPluginAAX POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginAAX>/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_AAX_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAAX>/Contents/Resources/AAX-SDK-LICENSE.txt")
+  if(OP_AAX_PAGES)
+    # The tool links the plugin, asks it for its parameters and writes the table.
+    add_executable(OpenPluginAAXPages aax/pages.cpp)
+    target_include_directories(OpenPluginAAXPages PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    op_link_rust(OpenPluginAAXPages)
+    add_dependencies(OpenPluginAAX OpenPluginAAXPages)
+    target_compile_definitions(OpenPluginAAX PRIVATE "OP_AAX_PAGE_TABLE=\"${OP_PRODUCT}Pages.xml\"")
+    add_custom_command(TARGET OpenPluginAAX POST_BUILD
+      COMMAND OpenPluginAAXPages "$<TARGET_BUNDLE_DIR:OpenPluginAAX>/Contents/Resources/${OP_PRODUCT}Pages.xml")
+  endif()
   add_executable(AAXProof aax/host_process.cpp aax/OpenPluginAAXProcess.cpp)
   target_include_directories(AAXProof PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"

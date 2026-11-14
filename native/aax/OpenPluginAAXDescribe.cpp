@@ -61,6 +61,9 @@ AAX_Result GetEffectDescriptions(AAX_ICollection* collection) {
     check(openplugin_aax::describe(*effect, AAX_eStemFormat_Stereo, static_cast<int32_t>(info.plugin_id_stereo), info));
     check(effect->AddProcPtr(reinterpret_cast<void*>(openplugin_aax::createParameters), kAAX_ProcPtrID_Create_EffectParameters));
     check(effect->AddProcPtr(reinterpret_cast<void*>(openplugin_aax::createGUI), kAAX_ProcPtrID_Create_EffectGUI));
+#ifdef OP_AAX_PAGE_TABLE
+    check(effect->AddResourceInfo(AAX_eResourceType_PageTable, OP_AAX_PAGE_TABLE));
+#endif
     check(collection->AddEffect(info.id, effect));
     check(collection->SetManufacturerName(info.vendor));
     check(collection->AddPackageName(info.name));

@@ -9,6 +9,8 @@ class AAX_IEffectGUI;
 namespace openplugin_aax {
 inline constexpr uint32_t kMaxParams = OP_SHELL_AAX_MAX_PARAMS;
 inline constexpr uint32_t kMaxBlock = 2048;
+// GetCustomData block the view reads: the engine pointer, valid in this process.
+inline constexpr AAX_CTypeID kEngineData = 'OpEn';
 struct Packet {
     float plain[kMaxParams];
     uint32_t count;
