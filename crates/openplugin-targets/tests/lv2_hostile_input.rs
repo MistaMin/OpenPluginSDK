@@ -241,10 +241,12 @@ impl Host {
         Self(raw)
     }
 
+    fn try_instantiate(&self, sample_rate: f64) -> *mut c_void {
+        unsafe { ((*self.0).instantiate)(self.0, sample_rate, std::ptr::null(), std::ptr::null()) }
+    }
+
     fn instantiate(&self, sample_rate: f64) -> *mut c_void {
-        let instance = unsafe {
-            ((*self.0).instantiate)(self.0, sample_rate, std::ptr::null(), std::ptr::null())
-        };
+        let instance = self.try_instantiate(sample_rate);
         assert!(
             !instance.is_null(),
             "instantiate returned null at {sample_rate} Hz"
@@ -360,14 +362,15 @@ fn randomized_hostile_values_and_lifecycle_orders_survive() {
 
     for iteration in 0..ITERATIONS {
         let block = BLOCKS[iteration % BLOCKS.len()];
-        // Most instances use a normal rate; every 97th iteration covers a
-        // hostile one. The systematic table is in `instantiate_rates_...`.
+        // The lifecycle loop uses only rates the shared range accepts, so every
+        // iteration has a live instance; rate rejection itself is covered by
+        // `instantiate_rates_use_the_shared_range`.
         let sample_rate = match iteration % 97 {
-            0 => f64::NAN,
-            1 => f64::INFINITY,
-            2 => -48_000.0,
+            0 => 1_000.0,
+            1 => 1_234.567_8,
+            2 => 7_999.0,
             3 => 0.0,
-            4 => 1.0e9,
+            4 => 768_000.0,
             5 => 44_100.0,
             _ => 48_000.0,
         };
@@ -697,41 +700,33 @@ fn reconnected_ports_and_lifecycle_order_stay_safe() {
 }
 
 #[test]
-fn instantiate_rates_substitute_below_8_khz() {
+fn instantiate_rates_use_the_shared_range() {
     let host = Host::new();
+    let mut input = [0.25f32; 64];
+    let mut output = [SENTINEL; 64];
 
-    // NaN, infinities, zero, negative, a rate below the floor and one on the
-    // floor: everything under 8 kHz becomes 48 kHz. 1e9 is finite and above
-    // the floor, so it is forwarded as an f32.
-    let rates = [
-        f64::NAN,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        0.0,
-        -0.0,
-        -48_000.0,
+    // Rates in the shared 1 kHz..=768 kHz range are prepared exactly.
+    for &rate in &[
+        1_000.0,
+        1_001.0,
+        1_234.567_8,
         7_999.0,
         8_000.0,
         44_100.0,
         48_000.0,
         96_000.0,
-        1.0e9,
-    ];
-    let mut input = [0.25f32; 64];
-    let mut output = [SENTINEL; 64];
-
-    for &rate in &rates {
-        let instance = host.instantiate(rate);
+        768_000.0,
+    ] {
+        let instance = host.try_instantiate(rate);
+        assert!(
+            !instance.is_null(),
+            "instantiate rejected the supported rate {rate}"
+        );
         let prepared = PREPARED_RATE.with(|cell| cell.get());
-        let expected = if rate.is_finite() && rate >= 8_000.0 {
-            rate as f32
-        } else {
-            48_000.0
-        };
         assert_eq!(
             prepared.to_bits(),
-            expected.to_bits(),
-            "sample rate {rate} prepared the plugin with {prepared}, expected {expected}"
+            (rate as f32).to_bits(),
+            "sample rate {rate} prepared the plugin with {prepared}"
         );
         host.connect(instance, 0, input.as_mut_ptr() as *mut c_void);
         host.connect(instance, 1, input.as_mut_ptr() as *mut c_void);
@@ -748,27 +743,41 @@ fn instantiate_rates_substitute_below_8_khz() {
         }
     }
 
-    // f64::MAX is finite and above the floor, so the adapter forwards it; the
-    // f64 to f32 cast then becomes infinity because the adapter only enforces
-    // the documented 8 kHz floor and has no upper bound. A host never sends
-    // this, so the observed rate is not asserted: only that the instance still
-    // runs finite audio and can be cleaned up.
-    let instance = host.instantiate(f64::MAX);
-    let observed = PREPARED_RATE.with(|cell| cell.get());
-    // Today this is infinity; a future upper clamp would make it 48 kHz.
-    assert!(
-        observed >= 8_000.0,
-        "huge finite rate prepared as {observed}"
-    );
-    host.connect(instance, 0, input.as_mut_ptr() as *mut c_void);
-    host.connect(instance, 2, output.as_mut_ptr() as *mut c_void);
-    host.activate(instance);
-    host.run(instance, 64);
-    host.cleanup(instance);
-    for &sample in &output {
+    // 0.0 is LV2's "rate unknown" value: it keeps the 48 kHz fallback.
+    for &rate in &[0.0, -0.0] {
+        let instance = host.try_instantiate(rate);
+        assert!(!instance.is_null(), "unknown rate {rate} was rejected");
+        let prepared = PREPARED_RATE.with(|cell| cell.get());
+        assert_eq!(
+            prepared.to_bits(),
+            48_000.0f32.to_bits(),
+            "unknown rate {rate} prepared the plugin with {prepared}"
+        );
+        host.cleanup(instance);
+    }
+
+    // Non-finite rates and rates outside the shared range fail before prepare.
+    for &rate in &[
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        -1.0,
+        -48_000.0,
+        999.0,
+        768_001.0,
+        1.0e9,
+        f64::MAX,
+    ] {
+        PREPARED_RATE.with(|cell| cell.set(-1.0));
+        let instance = host.try_instantiate(rate);
         assert!(
-            (sample - 0.25).abs() < 1e-6,
-            "huge-rate instance processed {sample}"
+            instance.is_null(),
+            "instantiate accepted the hostile rate {rate}"
+        );
+        assert_eq!(
+            PREPARED_RATE.with(|cell| cell.get()),
+            -1.0,
+            "rate {rate} reached prepare"
         );
     }
 }
@@ -776,7 +785,7 @@ fn instantiate_rates_substitute_below_8_khz() {
 #[test]
 fn repeated_instantiate_and_cleanup_has_no_reused_state() {
     let host = Host::new();
-    let rates = [f64::NAN, 0.0, 8_000.0, 48_000.0, 1.0e9];
+    let rates = [0.0, 1_000.0, 7_999.0, 48_000.0, 768_000.0];
     let mut input = [0.25f32; 64];
     let mut output = [SENTINEL; 64];
 
