@@ -4,6 +4,8 @@
 
 Each milestone makes the SDK more stable. None of them depends on a product plugin built with it. Where a milestone needs a real plugin to prove something, it uses the SDK's own examples (`examples/editor`, `examples/gain`).
 
+This is the macOS roadmap, from 0.4 to 1.0. Windows and Linux have their own: [ROADMAP_WINDOWS_LINUX.md](ROADMAP_WINDOWS_LINUX.md). Each open item below is one task: what it changes, which files it owns, and what proves it done.
+
 The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin/GoodLookinDri), which the SDK draws with: 0.3 interaction, 0.4 host polish, 0.5 qualification.
 
 ## Where 0.3.1 Beta stands
@@ -51,33 +53,44 @@ Still open, carried into 0.4:
 
 ## 0.4: format conformance on macOS
 
-- **Validators in CI** against the example: `clap-validator`, `auval`, AAX Validator, pluginval and `lv2_validate`.
-- **Plugin state in the C++ shells:** a state call in the `op_shell_*` ABI, so `Plugin::save_state` reaches VST3, Audio Unit and AAX sessions.
-- **Audio Unit editor proof** to match `VST3EditorProof`.
-- **Shell gaps:**
-  - AAX reports no tail.
-  - AAX bypass is a dry copy that is not delayed by the reported latency (VST3 and the Audio Unit now delay it).
-  - The AAX packet holds at most 64 parameters.
-  - VST3 applies a parameter change at the block, using the last point in each queue, not at its sample offset.
-- **Scripted host smoke tests** with the example: load, automate, save, reopen, open the editor.
-- **One shell build script**, with optional signing and notarisation steps. The build does neither today.
+### Done
+
+- **Plugin state in the shell ABI.** `op_shell_save_state` and `op_shell_load_state` carry the parameters and the plugin's own chunk, all or nothing, safe beside the audio thread: a gate lets a state call take the plugin between blocks, and a block that starts meanwhile passes the input through dry. The existing `save_bytes`/`load_bytes` race with `process` is fixed by the same gate.
+- **VST3 sample-accurate changes.** Parameter changes and the bypass crossfade start at their sample offset; the block is rendered in segments between change points.
+- **AAX gaps.** Bypass is the input delayed by the reported latency with a 10 ms crossfade, like VST3 and the Audio Unit. The controls packet is sized by the parameter count (shell bound 4096; proven with 200). AAX has no tail report: that is a format limit, documented from the AAX SDK.
+- **Audio Unit editor proof** (`au_editor_proof`), the counterpart of `vst3_editor_proof`.
+- **Validators.** CI runs `auval` (normal and strict), pluginval at strictness 10 on the VST3 and the Audio Unit, `lv2_validate`, and a render through lilv's `lv2apply`, besides `clap-validator`. Avid's AAX Validator runs locally with `scripts/aax_validate.sh` (13 passed, 0 failed, 1 skipped: the cycle-count test needs HDX hardware).
+- **One build script.** `scripts/build_plugin.sh` builds CLAP, LV2, VST3, Audio Unit and AAX for one plugin, keeps build paths out of the binaries, and signs (Developer ID), notarises and PACE-signs when the environment asks for it ([BUILD.md](BUILD.md)).
+
+### Open
+
+1. **Plugin state in VST3.** `getState`/`setState` carry the `op_shell_save_state` blob after the parameter values and the bypass flag, versioned; a state written by 0.3.x still loads. Owns `native/vst3/*`. Proof: a plugin with its own chunk round-trips through the VST3 component, old states load, corrupt ones are refused unchanged.
+2. **Plugin state in the Audio Unit.** The class-info dictionary carries the blob under its own key; an old preset without it still loads. Owns `native/au/*`. Same proof through `kAudioUnitProperty_ClassInfo`.
+3. **Plugin state in AAX.** Chunk version 2 carries the blob; version 1 still loads. Owns `native/aax/*`. Same proof through the chunk calls.
+4. **No dry block for parameter-only plugins.** A plugin whose state is its parameters alone saves and loads from the parameter plane without the gate, so a host saving during playback never hears a dry block. Owns `crates/openplugin-ffi`, `crates/openplugin-core`. Proof: a parameter-only plugin's audio is untouched by saves during playback; a plugin with a chunk still round-trips.
+5. **CLAP state beside the audio thread.** The CLAP adapter calls `save_state`/`load_state` from the main thread without synchronisation, the race the shell gate fixed. Give CLAP the same guarantee. Owns `crates/openplugin-targets/src/clap.rs`. Proof: a concurrency test with `process` running during saves and loads.
+6. **Host smoke tests.** A scripted REAPER run with the example (CLAP and VST3) that loads it from a build folder through a separate REAPER configuration, automates a parameter, saves the project, reopens it and checks the value, opens and closes the editor. Nothing is installed into plug-in folders; the Audio Unit run waits for an install the owner approves. Owns `scripts/host_smoke/*`, `docs/HOST_TESTS.md`.
+
+Then **0.4.0**: version bump, notes, CI green.
 
 ## 0.5: a dependable editor layer
 
-- Resizable editors and keyboard focus in the `Editor` contract.
-- Hit-testing helpers for knobs, faders and switches, so an editor does not hand-code hit rectangles.
-- Repaint only what changed, on top of `SceneCanvas`'s cached layer.
-- An editor built from a GoodLookin design file, with each control bound to a parameter by id.
+1. **Resizable editors: contract and Rust hosts.** `Editor` gains a size range and `resize`; the Cocoa view follows its parent; CLAP (`can_resize`, `get_resize_hints`, `adjust_size`, `set_size`) and LV2 (`ui:resize`) honour it; `SceneCanvas` re-renders at the new size. Owns `crates/openplugin-core/src/editor.rs`, `crates/openplugin-dri/src/cocoa.rs`, `crates/openplugin-dri/src/render.rs`, the gui parts of `clap.rs` and `lv2.rs`, the `op_editor_*` functions. Proof: the main-thread Cocoa test resizes through CLAP and LV2 and checks the pixels.
+2. **Resizable editors in the C++ shells.** VST3 (`IPlugView::onSize`, `canResize`, `checkSizeConstraint`), the Audio Unit view and the AAX view follow the editor's size range. Owns `native/*/` view code. Proof: `vst3_editor_proof` and `au_editor_proof` resize and check the view. After task 1.
+3. **Hit-testing helpers.** A control registry in `openplugin-dri`: knobs, faders, switches and keys with hit areas, drag and wheel handling, double-click reset, fine adjustment, and gestures through `EditorHost`. Owns a new module in `openplugin-dri`. Proof: unit tests driving mouse sequences into gestures.
+4. **Keyboard input and focus.** Key events in the `Editor` contract, focus between controls, keys that the host should keep (transport, shortcuts) passed back. Owns `editor.rs`, `cocoa.rs`. After task 1.
+5. **Repaint only what changed.** Controls report damage; `SceneCanvas` re-rasterises damaged rectangles on top of the cached layer; the Cocoa view invalidates only those. Owns `render.rs`, `cocoa.rs`. Proof: identical pixels to a full repaint, and a measured frame time. After tasks 1 and 4.
+6. **Editors from design files.** Build an editor from a GoodLookin design CSV: each row a control from task 3, bound to a parameter by id, laid out with `host::map_rect`. Owns a new module in `openplugin-dri` and an example. After task 3.
 
-## 0.6: Windows and Linux
+Then **0.5.0**.
 
-- **Windows:** an `HWND` editor view. VST3 and AAX shells on Windows. AAX stays C++, because the Avid SDK has no C interface.
-- **Linux, standalone:** a native Wayland window. Wayland is the default session on current GNOME and KDE desktops.
-- **Linux, plugin editors:** an X11 view, used only for embedding in a host. On Linux, VST3 defines one window type, X11 (`kPlatformTypeX11EmbedWindowID`). LV2 has no Wayland UI type in common use. Linux DAWs host plugin editors through XWayland even in a Wayland session. When hosts embed native Wayland surfaces, through CLAP's `wayland` window API or a later VST3 or LV2 type, the SDK adds that path. The X11 path then stays only for the hosts that need it.
-- CLAP and LV2 tested on Linux. CI on macOS, Windows and Linux.
+## 1.0: stable and publishable on macOS
 
-## 1.0: stable and publishable
+1. **Crate metadata.** Every crate inherits the workspace's `authors`, `homepage`, `keywords` and `categories`; unused dependencies (`log` in core, `cpal` in targets) are removed or justified; `cargo publish --dry-run` passes for every crate that does not depend on an unpublished path.
+2. **GoodLookin DRI as a versioned dependency.** The SDK names GoodLookin DRI by version and by path, so it builds here and publishes once GoodLookin DRI is on crates.io. Publishing GoodLookin DRI is its owner's step.
+3. **API documentation.** `missing_docs` on for every public item, examples in the docs that compile, docs.rs metadata.
+4. **API review.** A list of every public item with keep, rename, hide or remove, for the owner to decide the freeze. Nothing is removed without that decision.
+5. **Changelog and breaking-change policy.** `CHANGELOG.md` from 0.1 to the release, and a written policy for breaking changes after 1.0.
 
-- A frozen public API and a written policy for breaking changes.
-- Publishable on crates.io. The SDK depends on GoodLookin DRI by local path today, so `openplugin = "0.3.1-beta"` from crates.io does not resolve.
-- Complete API documentation, and a changelog from 1.0 on.
+The freeze itself and the crates.io publish are the owner's decisions.
+
