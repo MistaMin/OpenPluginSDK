@@ -37,19 +37,26 @@ The SDK builds and is tested on current stable Rust. `rust-version` in `Cargo.to
 
 Done: generic shell proofs over `examples/editor`; clippy clean with warnings as errors, checked in CI; rates from 1 kHz to 768 kHz in every bridge, with every DSP block computing for the real rate (`effective_rate`, `tests/low_rates.rs`); hostile-input suites for CLAP, LV2, the shell ABI and state loading; no-allocation tests for CLAP, LV2 and the shell; macOS CI with the minimum-Rust check, GoodLookinDri pinned to a commit. The minimum is Rust 1.85, the first release that reads the edition-2024 crates in the dependency tree (`coreaudio-sys` through `cpal`); 1.84 cannot build it. It was 1.80, with no recorded reason.
 
-Open:
+The three gaps left after the first pass are closed:
 
-- The VST3 and Audio Unit proofs do not check bypass, and the AAX proof does not check a state round-trip.
-- The shell proofs need the third-party SDKs, so they are not in CI.
-- The no-allocation tests cover the Rust side; the C++ shells' own process paths are not measured.
+- Every format proves host bypass: VST3 (a new `kIsBypass` parameter) and the Audio Unit output the input delayed by the reported latency with a 10 ms crossfade, AAX copies the dry signal, and CLAP's `PARAM_IS_BYPASS` reaches `Plugin::set_host_bypass`. VST3 and the Audio Unit are also proven against a test bundle that reports 37 samples of latency.
+- AAX saves and restores state through its own versioned chunk, refuses corrupt chunks without touching any parameter, and proves the round trip.
+- The C++ process paths of VST3, the Audio Unit and AAX are proven not to allocate, counting every malloc-family call in the process, the Rust engine included, with a self-check and a negative control.
+- CI builds and runs the VST3 and Audio Unit shell proofs against pinned public SDKs (VST3 SDK v3.8.0, MIT; AudioUnitSDK 1.4.0, Apache-2.0), and runs `clap-validator` 0.4.1 on the example. The AAX proofs run only locally: the Avid SDK is not redistributable.
+
+Still open, carried into 0.4:
+
+- The C++ shells save parameter values only. A plugin's own state (`Plugin::save_state`) does not reach VST3, Audio Unit or AAX sessions; that needs a state call in the shell ABI shared by all three.
+- VST3 applies bypass and parameter changes at the block, not at their sample offset.
 
 ## 0.4: format conformance on macOS
 
 - **Validators in CI** against the example: `clap-validator`, `auval`, AAX Validator, pluginval and `lv2_validate`.
+- **Plugin state in the C++ shells:** a state call in the `op_shell_*` ABI, so `Plugin::save_state` reaches VST3, Audio Unit and AAX sessions.
 - **Audio Unit editor proof** to match `VST3EditorProof`.
 - **Shell gaps:**
   - AAX reports no tail.
-  - AAX bypass is a dry copy that is not delayed by the reported latency.
+  - AAX bypass is a dry copy that is not delayed by the reported latency (VST3 and the Audio Unit now delay it).
   - The AAX packet holds at most 64 parameters.
   - VST3 applies a parameter change at the block, using the last point in each queue, not at its sample offset.
 - **Scripted host smoke tests** with the example: load, automate, save, reopen, open the editor.
