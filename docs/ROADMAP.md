@@ -116,6 +116,8 @@ Then **0.6.0**.
 5. **Accessibility.** Controls from the registry appear to VoiceOver with name, value and role, and respond to its increment and decrement. Owns `cocoa.rs` and the registry. Proof: the main-thread test reads the accessibility tree.
 6. **Typing a value, tooltips, files.** Double-click or a key opens a text field that parses through `ParamInfo::parse`; controls show tooltips; the editor can open a file dialog and accept dropped files. Owns `cocoa.rs`, the registry. Proof: the main-thread test types a value and drops a file.
 
+Status: task 3 is done (`openplugin_core::worker`, proven allocation-free on the audio side, with an impulse swap during playback); its LV2 `worker` extension hookup waits until the LV2 parity task lands.
+
 Then **0.7.0**.
 
 ## 1.0: stable and publishable on macOS
@@ -128,7 +130,7 @@ Then **0.7.0**.
 6. **One sound in every format.** A test renders the same input and automation through CLAP, LV2, VST3, the Audio Unit and AAX and checks the outputs match the Rust engine's, sample for sample within float tolerance. Owns `scripts/format_parity/*`. Proof: the test passes for the examples and fails on a deliberately altered shell.
 7. **Installer.** `scripts/build_plugin.sh` can wrap the built bundles in a `.pkg` (`pkgbuild` and `productbuild`), one component per format, signed with a Developer ID Installer identity and notarised when the environment asks. Owns `scripts/*`, `docs/BUILD.md`. Proof: `pkgutil --payload-files` lists every bundle at its install path; the package is never installed by the test.
 
-Status: tasks 1, 2, 4 and 5 are done. Task 3 comes last, after 0.7, because it touches every public item.
+Status: tasks 1, 2, 4, 5 and 7 are done (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
 
 The freeze itself and the crates.io publish are the owner's decisions.
 

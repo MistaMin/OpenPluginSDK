@@ -22,6 +22,7 @@ pub mod seqlock;
 pub mod smooth;
 pub mod spsc;
 pub mod state;
+pub mod worker;
 
 pub use automation::{
     AutomationInterpolation, AutomationLane, AutomationMode, CurveInterpolation, LaneMode,
