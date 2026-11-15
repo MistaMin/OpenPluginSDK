@@ -25,6 +25,19 @@
 //! The top of a row is the control. Under it sits the text strip: the label, and for
 //! knobs and faders the value text. The strip is as high as the row's font size asks.
 //!
+//! # Keys
+//!
+//! The editor forwards keyboard input to its [`ControlSet`]: Tab and Shift-Tab walk the
+//! controls in file order, arrows and Page keys step the focused one, Home and End go to the
+//! ends, Space and Return flip a switch, Delete resets, Escape clears focus. A focus ring is
+//! drawn around the focused control while the view holds the keyboard. Keys the set does not
+//! use go back to the host.
+//!
+//! # Repaint
+//!
+//! [`Editor::damage`] reports the rows whose control changed (value, hover, pressed, focus),
+//! so a view repaints only those; see [`crate::render::SceneCanvas::frame_damaged`].
+//!
 //! # Rows that bind to nothing
 //!
 //! A row with an empty `parameter` or an id the plugin does not have is not a control. It
@@ -48,12 +61,12 @@ use goodlookindri::design::{self, Item};
 use goodlookindri::host::map_rect;
 use goodlookindri::scene::{Point, Rect, Scene};
 use goodlookindri::{meters, switches};
-use openplugin_core::editor::Modifiers;
+use openplugin_core::editor::{DamageRect, DamageTracker, Key, Modifiers};
 use openplugin_core::{Editor, EditorHost, Frame, PluginInfo, Unit};
 
 use crate::canvas::DrawList;
 use crate::controls::{draw_faceplate_code, draw_knob_code};
-use crate::hit::{Area, Control, ControlId, ControlSet};
+use crate::hit::{Area, Control, ControlId, ControlKind, ControlSet};
 use crate::render::SceneCanvas;
 use crate::styles::Color;
 
@@ -220,6 +233,10 @@ pub struct DesignEditor {
     size: (u32, u32),
     canvas: SceneCanvas,
     layer_key: u64,
+    /// The view has keyboard focus (the focus ring is drawn only then).
+    keys_active: bool,
+    /// What the next frame has to repaint.
+    damage: DamageTracker,
 }
 
 fn rect_area(r: Rect) -> Area {
@@ -387,6 +404,8 @@ impl DesignEditor {
             size,
             canvas: SceneCanvas::new(size.0 as f32, size.1 as f32),
             layer_key: hasher.finish(),
+            keys_active: true,
+            damage: DamageTracker::new(),
         })
     }
 
@@ -410,6 +429,15 @@ impl DesignEditor {
         self.info
     }
 
+    /// Mark the rows whose control changed since the last time.
+    fn collect_damage(&mut self) {
+        for id in self.controls.take_changed() {
+            if let Some(part) = self.parts.iter().find(|p| p.control == id) {
+                self.damage.add(part.reach());
+            }
+        }
+    }
+
     /// The control bound to the first row on parameter `id`.
     pub fn control_for(&self, id: &str) -> Option<&Control> {
         let index = self.info.params.iter().position(|p| p.id == id)?;
@@ -417,7 +445,21 @@ impl DesignEditor {
     }
 }
 
+/// The focus ring: 4 points out of the control, 2 wide.
+const RING_OUT: f32 = 4.0;
+const RING_WIDTH: f32 = 2.0;
+const RING_COLOUR: GlColor = GlColor(0xff5cc8ff);
+
 impl Part {
+    /// Everything this row can change on screen: the row, and the ring around the control
+    /// and the light and shadow a lit knob or a fader cap puts past it.
+    fn reach(&self) -> DamageRect {
+        let side = self.body.w.min(self.body.h);
+        let m = (RING_OUT + RING_WIDTH + 2.0).max(side * 0.3);
+        let r = self.bounds;
+        DamageRect::new(r.x, r.y, r.w, r.h).union(&DamageRect::new(self.body.x, self.body.y, self.body.w, self.body.h)).expanded(m)
+    }
+
     fn text_y(&self, line: f32) -> f32 {
         self.bounds.y + self.body.h + self.font * LINE * line
     }
@@ -491,9 +533,16 @@ impl Editor for DesignEditor {
         self.controls.param_changed(index, plain);
     }
 
+    fn damage(&mut self) -> Option<Vec<DamageRect>> {
+        self.collect_damage();
+        self.damage.pending().map(<[DamageRect]>::to_vec)
+    }
+
     fn render(&mut self, scale: f32) -> Frame<'_> {
+        self.collect_damage();
         let (w, h) = (self.size.0 as f32, self.size.1 as f32);
         let (parts, controls, plate) = (&self.parts, &self.controls, self.plate);
+        let ring = self.keys_active;
         // The plate and the printed labels never move: one layer, rasterised once per scale.
         let layer = |dl: &mut DrawList| {
             draw_faceplate_code(dl, w, h, plate.code);
@@ -503,15 +552,51 @@ impl Editor for DesignEditor {
             }
             dl.append(legend);
         };
-        self.canvas.frame_layered(scale, self.layer_key, layer, |dl| {
+        let damage = self.damage.pending();
+        let frame = self.canvas.frame_damaged(scale, self.layer_key, layer, |dl| {
             for p in parts {
                 p.paint(dl, controls, plate);
             }
-        })
+            if let Some(c) = controls.focused().and_then(|id| controls.get(id)).filter(|_| ring) {
+                let (x, y, w, h) = c.area.bounds();
+                let outline = Rect::new(x, y, w, h).expanded(RING_OUT);
+                let mut scene = Scene::new();
+                match c.kind {
+                    ControlKind::Knob => scene.stroke_ellipse(outline, RING_COLOUR, RING_WIDTH),
+                    _ => scene.stroke_round(outline, 6.0, RING_COLOUR, RING_WIDTH),
+                }
+                dl.append(scene);
+            }
+        }, damage);
+        self.damage.clear();
+        frame
     }
 
     fn modifiers_changed(&mut self, modifiers: Modifiers) {
         self.controls.set_modifiers(modifiers);
+    }
+
+    fn wants_keys(&self) -> bool {
+        self.controls.wants_keys()
+    }
+
+    fn key_down(&mut self, key: Key, modifiers: Modifiers) -> bool {
+        self.controls.key_down(key, modifiers)
+    }
+
+    fn key_up(&mut self, key: Key, modifiers: Modifiers) -> bool {
+        self.controls.key_up(key, modifiers)
+    }
+
+    fn focus_changed(&mut self, focused: bool) {
+        self.keys_active = focused;
+        // The ring shows only while the view has the keyboard.
+        if let Some(rect) = self.controls.focused().and_then(|id| self.parts.iter().find(|p| p.control == id)).map(Part::reach) {
+            self.damage.add(rect);
+        }
+        if !focused {
+            self.controls.release_keys();
+        }
     }
 
     fn mouse_down(&mut self, x: f32, y: f32, clicks: u32) {
@@ -802,6 +887,139 @@ mod tests {
             let mut e = DesignEditor::from_items(items, &INFO, EditorHost::detached(), &DesignOptions::default().plate(plate)).unwrap();
             let f = e.render(1.0);
             assert!(f.pixels.iter().any(|p| *p != f.pixels[0]));
+        }
+    }
+
+    fn key(e: &mut DesignEditor, k: Key) -> bool {
+        let down = e.key_down(k, Modifiers::NONE);
+        e.key_up(k, Modifiers::NONE);
+        down
+    }
+
+    #[test]
+    fn keys_reach_the_controls_and_a_focus_ring_is_drawn() {
+        let (mut e, log) = rig(&full());
+        assert!(e.wants_keys());
+        let plain = e.render(2.0).pixels.to_vec();
+        // Nothing is focused: arrows and Escape belong to the host.
+        assert!(!key(&mut e, Key::Up) && !key(&mut e, Key::Escape) && !key(&mut e, Key::Char('a')));
+        assert!(take(&log).is_empty());
+        // Tab walks the rows in file order: gain, warm, mode, drive; then leaves.
+        let mut order = Vec::new();
+        for _ in 0..4 {
+            assert!(key(&mut e, Key::Tab));
+            order.push(e.controls().focused());
+        }
+        assert_eq!(order, vec![Some(0), Some(1), Some(2), Some(3)]);
+        assert!(!key(&mut e, Key::Tab) && e.controls().focused().is_none(), "past the last row Tab goes to the host");
+        // The ring appears on the focused control, and goes with focus.
+        assert!(key(&mut e, Key::Tab));
+        let ringed = e.render(2.0).pixels.to_vec();
+        assert_ne!(ringed, plain, "a ring is drawn");
+        e.focus_changed(false);
+        assert!(e.render(2.0).pixels == plain.as_slice(), "no ring while the view lacks the keyboard");
+        e.focus_changed(true);
+        assert!(e.render(2.0).pixels == ringed.as_slice());
+        // Up steps the focused knob by a hundredth of its range, as a whole gesture.
+        assert!(key(&mut e, Key::Up));
+        let g = take(&log);
+        assert_eq!(g.len(), 3, "{g:?}");
+        let Gesture::Perform(0, v) = g[1] else { panic!("{g:?}") };
+        assert!((v - 0.48).abs() < 1e-3, "{v}");
+        // Space flips the switch, Delete resets the knob, Escape clears focus.
+        assert!(key(&mut e, Key::Tab));
+        assert!(key(&mut e, Key::Space));
+        assert_eq!(take(&log), vec![Gesture::Begin(1), Gesture::Perform(1, 1.0), Gesture::End(1)]);
+        e.mouse_down(45.0, 36.0, 1);
+        e.mouse_up(45.0, 36.0);
+        take(&log);
+        assert!(key(&mut e, Key::Delete));
+        assert_eq!(take(&log), vec![Gesture::Begin(0), Gesture::Perform(0, 0.0), Gesture::End(0)]);
+        assert!(key(&mut e, Key::Escape) && e.controls().focused().is_none());
+        // A key up of a key the editor did not take is the host's.
+        assert!(!e.key_up(Key::Char('x'), Modifiers::NONE));
+        // A design with nothing to control wants no keys.
+        let (empty, _) = rig(&csv(&["ghost,nope,Ghost,Brit,#CE9435,10,10,70,76,10"]));
+        assert!(!empty.wants_keys());
+    }
+
+    /// Two editors fed the same events: `part` repaints what it reports, `whole` everything.
+    fn same_frames(scale: f32, steps: &[(&str, &dyn Fn(&mut DesignEditor))]) -> (usize, usize) {
+        let (mut part, _) = rig(&full());
+        let (mut whole, _) = rig(&full());
+        let (mut partial, mut idle) = (0, 0);
+        part.render(scale);
+        whole.render(scale);
+        for (what, step) in steps {
+            step(&mut part);
+            step(&mut whole);
+            let damage = part.damage();
+            match &damage {
+                Some(r) if r.is_empty() => idle += 1,
+                Some(_) => partial += 1,
+                None => {}
+            }
+            whole.damage.add_all();
+            let expected = whole.render(scale).pixels.to_vec();
+            let got = part.render(scale);
+            let bad = got.pixels.iter().zip(&expected).filter(|(a, b)| a != b).count();
+            assert_eq!(bad, 0, "{what}: {bad} pixels differ from a full repaint at scale {scale} (damage {damage:?})");
+        }
+        (partial, idle)
+    }
+
+    #[test]
+    fn damage_only_frames_equal_full_repaints() {
+        let drag = |x: f32, _from: f32, to: f32| move |e: &mut DesignEditor| e.mouse_move(x, to);
+        let knob = centre(&rig(&full()).0, "gain");
+        let fader = centre(&rig(&full()).0, "drive");
+        let lever = centre(&rig(&full()).0, "warm");
+        let keys = (30.0f32, 110.0f32);
+        let steps: Vec<(&str, Box<dyn Fn(&mut DesignEditor)>)> = vec![
+            ("idle", Box::new(|_| {})),
+            ("hover the knob", Box::new(move |e| e.mouse_move(knob.0, knob.1))),
+            ("press the knob", Box::new(move |e| e.mouse_down(knob.0, knob.1, 1))),
+            ("drag the knob 1", Box::new(drag(knob.0, knob.1, knob.1 - 7.0))),
+            ("drag the knob 2", Box::new(drag(knob.0, knob.1, knob.1 - 30.0))),
+            ("drag the knob 3", Box::new(drag(knob.0, knob.1, knob.1 + 60.0))),
+            ("release the knob", Box::new(move |e| e.mouse_up(knob.0, knob.1 + 60.0))),
+            ("click the lever", Box::new(move |e| {
+                e.mouse_down(lever.0, lever.1, 1);
+                e.mouse_up(lever.0, lever.1);
+            })),
+            ("a key", Box::new(move |e| {
+                e.mouse_down(keys.0 + 60.0, keys.1, 1);
+                e.mouse_up(keys.0 + 60.0, keys.1);
+            })),
+            ("fader", Box::new(move |e| {
+                e.mouse_down(fader.0, fader.1, 1);
+                e.mouse_move(fader.0, fader.1 - 40.0);
+                e.mouse_up(fader.0, fader.1 - 40.0);
+            })),
+            ("host value", Box::new(|e| e.param_changed(0, 17.5))),
+            ("host value again", Box::new(|e| e.param_changed(0, 17.5))),
+            ("host value, tone", Box::new(|e| e.param_changed(3, 1.0))),
+            ("focus a row", Box::new(|e| {
+                e.key_down(Key::Tab, Modifiers::NONE);
+            })),
+            ("step it", Box::new(|e| {
+                e.key_down(Key::PageUp, Modifiers::NONE);
+            })),
+            ("tab on", Box::new(|e| {
+                e.key_down(Key::Tab, Modifiers::NONE);
+                e.key_down(Key::Tab, Modifiers::NONE);
+            })),
+            ("lose the keyboard", Box::new(|e| e.focus_changed(false))),
+            ("regain the keyboard", Box::new(|e| e.focus_changed(true))),
+            ("clear focus", Box::new(|e| {
+                e.key_down(Key::Escape, Modifiers::NONE);
+            })),
+            ("idle again", Box::new(|_| {})),
+        ];
+        let steps: Vec<(&str, &dyn Fn(&mut DesignEditor))> = steps.iter().map(|(n, f)| (*n, f.as_ref())).collect();
+        for scale in [2.0, 1.0, 1.5] {
+            let (partial, idle) = same_frames(scale, &steps);
+            assert!(partial >= 12 && idle >= 2, "scale {scale}: {partial} partial, {idle} idle frames");
         }
     }
 }
