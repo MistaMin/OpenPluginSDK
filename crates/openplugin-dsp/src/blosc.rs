@@ -21,13 +21,24 @@
 //! synthesis of bandlimited classical waveforms using integrated polynomial
 //! interpolation", J. Acoust. Soc. Am. 131(1), 2012, which builds the residuals
 //! by integrating polynomial interpolation kernels (BLEP, and BLAMP for
-//! piecewise-linear waves). This module uses the uniform B-spline kernels:
+//! piecewise-linear waves). This module uses the uniform B-spline kernels
+//! `M_n` of width `n` samples (Schoenberg's cardinal B-splines; `n` = 2 is the
+//! triangle, `n` = 4 the cubic). With the truncated-power form
 //!
-//! * [`BlepOrder::Two`]: the triangle kernel, width 2 samples. Its integral is
-//!   the classic 2-point PolyBLEP `t^2/2`-style residual. Latency 1 sample.
-//! * [`BlepOrder::Four`]: the cubic B-spline kernel, width 4 samples, a 4-point
-//!   residual with a much steeper attenuation of the aliased partials.
-//!   Latency 2 samples.
+//! ```text
+//! H_n(x) = sum_k (-1)^k C(n,k) (x + n/2 - k)_+^n / n!        (integral of M_n)
+//! G_n(x) = sum_k (-1)^k C(n,k) (x + n/2 - k)_+^(n+1) / (n+1)!  (integral of H_n)
+//! ```
+//!
+//! the step residual is `H_n(x)` for `x < 0` and `-H_n(-x)` for `x > 0`, and
+//! the ramp residual is `G_n(-|x|)`. `n` = 2 is the classic 2-point PolyBLEP
+//! residual of Välimäki and Huovilainen. A wider kernel attenuates the aliased
+//! partials more, at the price of more latency and more work per event:
+//!
+//! * [`BlepOrder::Two`]: width 2, latency 1 sample.
+//! * [`BlepOrder::Four`]: width 4, latency 2. The default.
+//! * [`BlepOrder::Six`]: width 6, latency 3.
+//! * [`BlepOrder::Eight`]: width 8, latency 4.
 //!
 //! The output is delayed by [`BandlimitedOsc::latency`] samples. That is what
 //! lets the corrections reach the samples before the step, which a zero-latency
@@ -38,31 +49,91 @@
 //! The phase is `f64`, so a 20 Hz tone does not drift over hours. Events inside
 //! one sample interval (wrap, pulse edge, sync) are processed in time order.
 //!
-//! Remaining aliasing: PolyBLEP lowers aliasing sharply, it does not remove it.
-//! Order [`BlepOrder::Four`] is below roughly -50 dB under the fundamental up
-//! to 5 kHz at 44.1 kHz (measured in `tests/synth_proof.rs`); for demanding
-//! uses, run at 2x oversampling or use the wavetable oscillator, which has its
-//! own measured floor.
+//! Remaining aliasing: PolyBLEP lowers aliasing, it does not remove it. The
+//! measured aliased power for each order and pitch up to 5 kHz at 44.1 kHz is
+//! in `tests/synth_proof.rs` and in the cookbook; for demanding uses pick a
+//! wider order, run at 2x oversampling, or use the wavetable oscillator, which
+//! has its own, lower, measured floor.
 //!
 //! Nothing here allocates, and non-finite or negative frequencies are treated
 //! as zero so the phase cannot become NaN.
 
-/// Which residual polynomial to use.
+/// Which residual kernel to use: the B-spline width in samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlepOrder {
-    /// 2-point (1 sample latency). Cheapest.
+    /// Width 2 (1 sample latency). Cheapest.
     Two,
-    /// 4-point (2 samples latency). Default.
+    /// Width 4 (2 samples latency). Default.
     Four,
+    /// Width 6 (3 samples latency).
+    Six,
+    /// Width 8 (4 samples latency).
+    Eight,
 }
 
 impl BlepOrder {
-    const fn half_width(self) -> usize {
+    /// Kernel width in samples.
+    pub const fn width(self) -> usize {
         match self {
-            Self::Two => 1,
-            Self::Four => 2,
+            Self::Two => 2,
+            Self::Four => 4,
+            Self::Six => 6,
+            Self::Eight => 8,
         }
     }
+
+    const fn half_width(self) -> usize {
+        self.width() / 2
+    }
+}
+
+/// `sum_k (-1)^k C(n,k) (t - k)_+^p / p!` with `t = x + n/2`, the cardinal
+/// B-spline integrals (`p = n` for the step, `n + 1` for the ramp).
+fn truncated_power_sum(n: usize, p: i32, x: f64) -> f64 {
+    let t = x + n as f64 * 0.5;
+    let mut binom = 1.0f64;
+    let mut sum = 0.0;
+    for k in 0..=n {
+        let d = t - k as f64;
+        if d > 0.0 {
+            let term = binom * d.powi(p);
+            if k % 2 == 0 { sum += term } else { sum -= term }
+        }
+        binom = binom * (n - k) as f64 / (k + 1) as f64;
+    }
+    let mut fact = 1.0;
+    for i in 2..=p {
+        fact *= f64::from(i);
+    }
+    sum / fact
+}
+
+/// Step residual `r(x) = H(x) - u(x)` for a unit step at `x = 0`.
+///
+/// `x` is the sample position minus the step position, in samples. `H` is the
+/// integral of the B-spline low-pass impulse of the given order. `r` is odd and
+/// zero for `|x| >= width / 2`.
+pub fn blep_residual(order: BlepOrder, x: f64) -> f64 {
+    let n = order.width();
+    let ax = x.abs();
+    if !(ax < n as f64 * 0.5) {
+        return 0.0;
+    }
+    // H(-ax); for x < 0 that is H(x), for x > 0, H(x) - 1 = -H(-x).
+    let h = truncated_power_sum(n, n as i32, -ax);
+    if x < 0.0 { h } else { -h }
+}
+
+/// Ramp residual `R(x) = Lambda(x) - x u(x)`: the band-limited ramp minus the
+/// ideal ramp for a unit slope change at `x = 0`. Even in `x`, zero for
+/// `|x| >= width / 2`.
+pub fn blamp_residual(order: BlepOrder, x: f64) -> f64 {
+    let n = order.width();
+    let ax = x.abs();
+    if !(ax < n as f64 * 0.5) {
+        return 0.0;
+    }
+    truncated_power_sum(n, n as i32 + 1, -ax)
 }
 
 /// Waveform of a [`BandlimitedOsc`].
@@ -78,70 +149,8 @@ pub enum BlWave {
     Triangle,
 }
 
-/// Step residual `r(x) = H(x) - u(x)` for a unit step at `x = 0`.
-///
-/// `x` is the sample position minus the step position, in samples. `H` is the
-/// integral of the B-spline low-pass impulse of the given order. `r` is odd and
-/// zero for `|x| >= half_width`.
-pub fn blep_residual(order: BlepOrder, x: f64) -> f64 {
-    let ax = x.abs();
-    let h = match order {
-        BlepOrder::Two => {
-            if ax >= 1.0 {
-                return 0.0;
-            }
-            // H(-a) = (1 - a)^2 / 2 for the triangle kernel.
-            let d = 1.0 - ax;
-            0.5 * d * d
-        }
-        BlepOrder::Four => {
-            if ax >= 2.0 {
-                return 0.0;
-            }
-            if ax >= 1.0 {
-                let d = 2.0 - ax;
-                d * d * d * d / 24.0
-            } else {
-                // H(-a), a in [0, 1], integral of the cubic B-spline.
-                let a = ax;
-                0.5 - 2.0 * a / 3.0 + a * a * a / 3.0 - a * a * a * a / 8.0
-            }
-        }
-    };
-    // H(x) for x < 0 is `h`; for x > 0, H(x) - 1 = -H(-x).
-    if x < 0.0 { h } else { -h }
-}
 
-/// Ramp residual `R(x) = Lambda(x) - x u(x)`: the band-limited ramp minus the
-/// ideal ramp for a unit slope change at `x = 0`. Even in `x`, zero for
-/// `|x| >= half_width`.
-pub fn blamp_residual(order: BlepOrder, x: f64) -> f64 {
-    let ax = x.abs();
-    match order {
-        BlepOrder::Two => {
-            if ax >= 1.0 {
-                return 0.0;
-            }
-            let d = 1.0 - ax;
-            d * d * d / 6.0
-        }
-        BlepOrder::Four => {
-            if ax >= 2.0 {
-                return 0.0;
-            }
-            if ax >= 1.0 {
-                let d = 2.0 - ax;
-                d * d * d * d * d / 120.0
-            } else {
-                let a = ax;
-                let a2 = a * a;
-                7.0 / 30.0 - a / 2.0 + a2 / 3.0 - a2 * a2 / 12.0 + a2 * a2 * a / 40.0
-            }
-        }
-    }
-}
-
-const RING: usize = 8;
+const RING: usize = 16;
 
 /// A band-limited oscillator. See the module documentation.
 #[derive(Clone, Copy, Debug)]
@@ -394,48 +403,53 @@ impl BandlimitedOsc {
 mod tests {
     use super::*;
 
-    /// Cubic B-spline kernel and its integrals, by brute force.
-    fn kernel(order: BlepOrder, x: f64) -> f64 {
-        let a = x.abs();
-        match order {
-            BlepOrder::Two => (1.0 - a).max(0.0),
-            BlepOrder::Four => {
-                if a < 1.0 {
-                    2.0 / 3.0 - a * a + a * a * a / 2.0
-                } else if a < 2.0 {
-                    (2.0 - a).powi(3) / 6.0
-                } else {
-                    0.0
-                }
-            }
+    const ORDERS: [BlepOrder; 4] = [BlepOrder::Two, BlepOrder::Four, BlepOrder::Six, BlepOrder::Eight];
+
+    /// Cardinal B-spline of width `n` by the Cox-de Boor recursion (independent of the closed form).
+    fn bspline(n: usize, x: f64) -> f64 {
+        if n == 1 {
+            return if (-0.5..0.5).contains(&x) { 1.0 } else { 0.0 };
         }
+        let h = n as f64 * 0.5;
+        ((h + x) * bspline(n - 1, x + 0.5) + (h - x) * bspline(n - 1, x - 0.5)) / (n - 1) as f64
     }
 
     #[test]
     fn residuals_match_numerical_integrals_of_the_kernel() {
-        for order in [BlepOrder::Two, BlepOrder::Four] {
-            let steps = 400_000;
-            let lo = -3.0;
-            let dx = 6.0 / steps as f64;
-            let mut h = 0.0; // H(x)
-            let mut l = 0.0; // Lambda(x)
+        for order in ORDERS {
+            let n = order.width();
+            let steps = 200_000;
+            let lo = -(n as f64) * 0.5 - 1.0;
+            let dx = -2.0 * lo / steps as f64;
+            let mut h = 0.0; // H(x), running
+            let mut l = 0.0; // Lambda(x), running
+            let mut checked = 0;
             for i in 0..steps {
-                let x = lo + (i as f64 + 0.5) * dx;
-                h += kernel(order, x) * dx;
-                l += h * dx;
-                let xe = x + 0.5 * dx;
-                if (xe * 8.0).round() / 8.0 - xe < 1e-9 && (xe * 8.0 - (xe * 8.0).round()).abs() < 1e-6 {
-                    let u = if xe > 0.0 { 1.0 } else { 0.0 };
-                    let r = blep_residual(order, xe + 1e-9);
-                    if xe.abs() > 1e-6 {
-                        assert!((r - (h - u)).abs() < 2e-4, "{order:?} step x={xe}: {r} vs {}", h - u);
-                        let rr = blamp_residual(order, xe);
-                        let ramp = if xe > 0.0 { xe } else { 0.0 };
-                        assert!((rr - (l - ramp)).abs() < 2e-4, "{order:?} ramp x={xe}: {rr} vs {}", l - ramp);
-                    }
+                let x = lo + (i as f64 + 1.0) * dx; // right edge of the cell
+                let mid = x - 0.5 * dx;
+                let h_prev = h;
+                h += bspline(n, mid) * dx;
+                l += 0.5 * (h_prev + h) * dx;
+                // Compare at a few points, away from the step itself.
+                if i % 20_000 == 7_777 && x.abs() > 0.05 {
+                    let u = if x > 0.0 { 1.0 } else { 0.0 };
+                    let ramp = if x > 0.0 { x } else { 0.0 };
+                    let r = blep_residual(order, x);
+                    let rr = blamp_residual(order, x);
+                    assert!((r - (h - u)).abs() < 1e-4, "{order:?} step x={x}: {r} vs {}", h - u);
+                    assert!((rr - (l - ramp)).abs() < 1e-4, "{order:?} ramp x={x}: {rr} vs {}", l - ramp);
+                    checked += 1;
                 }
             }
-            assert!((h - 1.0).abs() < 1e-6);
+            assert!(checked >= 8);
+            assert!((h - 1.0).abs() < 1e-6, "kernel integrates to 1");
+            // Odd step residual, even ramp residual, compact support.
+            for x in [0.1, 0.7, 1.3] {
+                assert!((blep_residual(order, x) + blep_residual(order, -x)).abs() < 1e-12);
+                assert!((blamp_residual(order, x) - blamp_residual(order, -x)).abs() < 1e-12);
+            }
+            assert_eq!(blep_residual(order, n as f64 * 0.5), 0.0);
+            assert_eq!(blamp_residual(order, -(n as f64) * 0.5 - 0.1), 0.0);
         }
     }
 
@@ -446,7 +460,7 @@ mod tests {
 
     #[test]
     fn amplitude_and_dc_are_right() {
-        for order in [BlepOrder::Two, BlepOrder::Four] {
+        for order in ORDERS {
             // Exactly periodic: 100 cycles in 8192 samples is not an integer period, use 1/64.
             let ds = 1.0 / 64.0;
             let n = 64 * 400;

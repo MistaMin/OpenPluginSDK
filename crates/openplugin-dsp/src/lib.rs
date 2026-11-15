@@ -53,6 +53,7 @@ pub mod resample;
 pub mod saturation;
 pub mod svf;
 pub mod voice;
+pub mod voice_alloc;
 pub mod true_peak;
 pub mod wavetable;
 pub mod window;
@@ -98,5 +99,8 @@ pub use resample::{playback_ratio, Quality, SincConfig, SincKernel, SincPlayer};
 pub use saturation::{saturate_sample, SaturationMode};
 pub use svf::{Svf, SvfMode};
 pub use voice::{Polyphony, SampleVoice};
+pub use voice_alloc::{
+    Allocation, GlideMode, NoteOff, StealPolicy, Voice, VoiceAllocator, VoiceMode, VoicePhase,
+};
 pub use wavetable::{WavetableError, WavetableOsc, WavetableSet};
 pub use window::{hann, WindowRms};
