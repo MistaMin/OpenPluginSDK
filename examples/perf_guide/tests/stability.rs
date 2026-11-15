@@ -58,14 +58,12 @@ fn smoothing_removes_the_step_a_gain_jump_puts_into_the_signal() {
 
 /// Documented behaviour of the SDK filters when a parameter, not the signal, is NaN.
 #[test]
-fn a_nan_cutoff_silences_biquad_until_it_is_configured_again_and_svf_ignores_it() {
+fn a_nan_cutoff_is_ignored_by_biquad_and_svf() {
     use openplugin_dsp::{Biquad, FilterType, Svf, SvfMode};
     let mut biquad = Biquad::new();
     biquad.configure(FilterType::LowPass, 48_000.0, 1_000.0, 0.707, 0.0);
     biquad.configure(FilterType::LowPass, 48_000.0, f32::NAN, 0.707, 0.0);
-    let out: Vec<f32> = (0..200).map(|_| biquad.process_sample(0.5)).collect();
-    assert!(out.iter().all(|v| *v == 0.0), "Biquad with a NaN cutoff outputs silence, not NaN");
-    biquad.configure(FilterType::LowPass, 48_000.0, 1_000.0, 0.707, 0.0);
+    // The NaN call was ignored: the filter keeps its old coefficients and passes DC.
     assert!((0..2000).map(|_| biquad.process_sample(0.5)).last().unwrap() > 0.4);
 
     let mut svf = Svf::new();

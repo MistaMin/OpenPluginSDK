@@ -320,7 +320,28 @@ pub unsafe fn process_events(ptr: *mut ShellInstance, args: *const OpProcess) ->
     let ran = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
         (*ptr).ffi.process_block(&*args)
     }));
+    if ran.is_err() {
+        unsafe { silence_outputs(&*args) };
+    }
     u32::from(matches!(ran, Ok(true)))
+}
+
+/// After a panic in the plugin: write silence to every output channel, so the host does not
+/// play half a block. The block was validated before it reached the plugin, so the pointers
+/// and counts are the host's.
+///
+/// # Safety
+/// `args` is the block the host passed to `process_events`.
+unsafe fn silence_outputs(args: &OpProcess) {
+    if args.outputs.is_null() || args.output_channels as usize > 64 {
+        return;
+    }
+    for channel in 0..args.output_channels as usize {
+        let dst = unsafe { *args.outputs.add(channel) };
+        if !dst.is_null() {
+            unsafe { std::ptr::write_bytes(dst, 0, args.frames as usize) };
+        }
+    }
 }
 
 /// # Safety
@@ -775,6 +796,9 @@ pub unsafe fn process(
         transport: std::ptr::null(),
     };
     let ran = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.process_block(&args) }));
+    if ran.is_err() {
+        unsafe { silence_outputs(&args) };
+    }
     let ok = matches!(ran, Ok(true));
     if tracing {
         let output = unsafe { trace::peak(out_left, frames).max(trace::peak(out_right, frames)) };
