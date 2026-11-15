@@ -8,6 +8,12 @@
 //     (the shell re-binds the editor to the new engine);
 //   - a click at a point produces begin, value and end events for one
 //     parameter, seen by an AUEventListener, and the unit's value changes;
+//   - the view follows its frame as a host sets it: a larger frame resizes the
+//     editor within its range and shape, a click at the scaled position of the
+//     Warm toggle edits the parameter while the old position hits nothing, and
+//     a frame outside the range is clamped for the editor;
+//   - an editor-initiated size (double-click on the bare plate) changes the
+//     container's frame, which is what a host observes to size its window;
 //   - the view goes away, and tearing down with the unit first, while a second
 //     view is open, does not crash.
 //
@@ -127,6 +133,44 @@ int main(int argc, char** argv) {
         CHECK(events.lastBegin == param && events.lastEnd == param && events.lastValue == param);
         CHECK(after != before);
         CHECK(events.value == after);
+
+        // Resizing: the host sets the view's frame. The range comes from the view.
+        auto click = [&](NSView* target, double height, double px, double py, int count) {
+            NSPoint where = NSMakePoint(px, height - py);
+            for (NSEventType type : {NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp}) {
+                NSEvent* e = [NSEvent mouseEventWithType:type location:where modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:count pressure:1];
+                if (type == NSEventTypeLeftMouseDown) [target mouseDown:e];
+                else [target mouseUp:e];
+            }
+            spin(0.2);
+        };
+        [container setFrameSize:NSMakeSize(100000, 100000)];
+        const NSSize big = editor.frame.size;  // the largest size the editor takes
+        [container setFrameSize:NSMakeSize(1, 1)];
+        const NSSize small = editor.frame.size;
+        std::printf("range %.0fx%.0f to %.0fx%.0f\n", small.width, small.height, big.width, big.height);
+        CHECK(big.width > size.width && small.width < size.width);
+        CHECK(container.frame.size.width == 1);  // the container keeps the frame the host gave it
+        [container setFrameSize:big];
+        CHECK(editor.frame.size.width == big.width && editor.frame.size.height == big.height);
+        std::printf("resized to %.0fx%.0f\n", big.width, big.height);
+        const double factor = big.width / size.width;
+        const int mark = events.begins;
+        click(editor, big.height, x, y, 1);  // the old position hits nothing at this size
+        CHECK(events.begins == mark);
+        click(editor, big.height, x * factor, y * factor, 1);
+        std::printf("scaled click: %d begin / %d end\n", events.begins, events.ends);
+        CHECK(events.begins == mark + 1 && events.ends == events.begins);
+        CHECK(events.lastBegin == param);
+        // The editor asks for a size: a double-click on the bare plate.
+        [container setFrameSize:size];
+        CHECK(editor.frame.size.width == size.width);
+        click(editor, size.height, 5, 5, 2);
+        const NSSize asked = container.frame.size;
+        std::printf("editor asked for %.0fx%.0f\n", asked.width, asked.height);
+        CHECK(asked.width > size.width);
+        CHECK(editor.frame.size.width == asked.width && editor.frame.size.height == asked.height);
+        [container setFrameSize:size];
         AUListenerDispose(listener);
 
         // Closing the view: the container leaves the window and is freed.
