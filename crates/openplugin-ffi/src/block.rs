@@ -230,9 +230,9 @@ impl FfiInstance {
             return;
         }
         let channels = audio.channels;
-        for c in 0..channels {
+        for (c, buffer) in audio.buffers.iter_mut().enumerate().take(channels) {
             let src = unsafe { input_for(args.inputs, args.input_channels as usize, c) };
-            unsafe { read_span(src, start, &mut audio.buffers[c][..n]) };
+            unsafe { read_span(src, start, &mut buffer[..n]) };
         }
         for (c, channel) in audio.sidechain.iter_mut().enumerate() {
             let src = if side && c < args.sidechain_channels as usize {
