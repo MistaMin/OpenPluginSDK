@@ -1,0 +1,21 @@
+[package]
+name = "openplugin-testing"
+description = "Conformance kit and benchmark harness for OpenPluginSDK plugins: run your own plugin through what hosts do"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/openplugin-testing"
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+openplugin-core = { workspace = true }
+
+[dev-dependencies]
+openplugin = { workspace = true }
+example-editor = { path = "../../examples/editor" }
+example-design-editor = { path = "../../examples/design_editor" }

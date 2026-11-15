@@ -5,6 +5,7 @@ members = [
     "crates/openplugin-dri",
     "crates/openplugin-targets",
     "crates/openplugin-ffi",
+    "crates/openplugin-testing",
     "crates/openplugin",
     "examples/gain",
     "examples/console_eq",
@@ -30,6 +31,7 @@ openplugin-dsp = { path = "crates/openplugin-dsp", version = "0.3.1-beta" }
 openplugin-dri = { path = "crates/openplugin-dri", version = "0.3.1-beta" }
 openplugin-targets = { path = "crates/openplugin-targets", version = "0.3.1-beta" }
 openplugin-ffi = { path = "crates/openplugin-ffi", version = "0.3.1-beta" }
+openplugin-testing = { path = "crates/openplugin-testing", version = "0.3.1-beta" }
 openplugin = { path = "crates/openplugin", version = "0.3.1-beta" }
 goodlookindri = { path = "../GoodLookinDri", version = "0.2.0" }
 goodlookindri-shell = { path = "../GoodLookinDri/shell", version = "0.2.0" }
