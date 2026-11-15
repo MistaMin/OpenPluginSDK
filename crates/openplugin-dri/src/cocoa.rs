@@ -42,7 +42,10 @@
 //!
 //! Typing, tooltips, files: after every tick and input call the view polls the editor
 //! for a text-field request ([`Editor::take_text_edit`]; a native `NSTextField` over the
-//! control, the view as its delegate: Return commits, Escape and focus loss cancel; no key
+//! control, the view as its delegate: Return and Enter commit, Escape cancels, and losing focus (a click
+//! elsewhere, the window resigning key, the view leaving its window) commits valid text and
+//! drops invalid text; a local key monitor takes Return, Enter and Escape for the field before a
+//! host's own key handling can, and is removed whenever the field closes; no key
 //! reaches the editor while it is open), re-registers one tooltip rectangle per
 //! [`Editor::tooltips`] entry when the layout moved (the text is asked again when a tip
 //! shows), and takes a file-dialog request ([`Editor::take_file_dialog`], an `NSOpenPanel`
@@ -876,12 +879,14 @@ unsafe fn open_text_field(this: Id, edit: TextEdit) { unsafe {
     if let Some(st) = state(this) {
         st.opening = false;
     }
+    install_field_hooks(this, window);
 }}
 
 /// Take the field away. `cancel` tells the editor nothing was committed.
 unsafe fn close_text_field(this: Id, cancel: bool) { unsafe {
     let Some(st) = state(this) else { return };
     let Some(field) = st.text_field.take() else { return };
+    remove_field_hooks(this);
     if cancel {
         guarded(this, |st| st.editor.text_edit_cancel());
     }
@@ -896,26 +901,43 @@ unsafe fn close_text_field(this: Id, cancel: bool) { unsafe {
     invalidate(this);
 }}
 
+/// Hand the field's text to the editor. Accepted: the field closes. Refused: it stays, turns
+/// red and the system beeps. False when no field is open.
+unsafe fn commit_text_field(this: Id) -> bool { unsafe {
+    let Some(field) = state(this).and_then(|st| st.text_field) else { return false };
+    let text = field_text(field);
+    let mut done = false;
+    guarded(this, |st| done = st.editor.text_edit_commit(&text));
+    if done {
+        close_text_field(this, false);
+    } else {
+        send!((), field, b"setTextColor:\0", Id = send!(Id, class(b"NSColor\0") as Id, b"redColor\0"));
+        NSBeep();
+    }
+    true
+}}
+
+unsafe fn field_text(field: Id) -> String { unsafe {
+    let utf8 = send!(*const c_char, send!(Id, field, b"stringValue\0"), b"UTF8String\0");
+    if utf8.is_null() { String::new() } else { CStr::from_ptr(utf8).to_string_lossy().into_owned() }
+}}
+
+/// Focus left the field: valid text is committed, invalid text is discarded without a sound.
+unsafe fn field_lost_focus(this: Id) { unsafe {
+    let Some(field) = state(this).and_then(|st| st.text_field) else { return };
+    let text = field_text(field);
+    let mut done = false;
+    guarded(this, |st| done = st.editor.text_edit_commit(&text));
+    // A refused commit leaves the edit open at the editor: cancel closes it.
+    close_text_field(this, !done);
+}}
+
 /// Return commits through the editor, Escape cancels; every other command is the field's own.
 extern "C" fn do_command(this: Id, _cmd: Sel, _control: Id, _text_view: Id, command: Sel) -> i8 {
     unsafe {
         let name = CStr::from_ptr(sel_getName(command)).to_bytes();
         match name {
-            b"insertNewline:" => {
-                let Some(field) = state(this).and_then(|st| st.text_field) else { return 0 };
-                let utf8 = send!(*const c_char, send!(Id, field, b"stringValue\0"), b"UTF8String\0");
-                let text = if utf8.is_null() { String::new() } else { CStr::from_ptr(utf8).to_string_lossy().into_owned() };
-                let mut done = false;
-                guarded(this, |st| done = st.editor.text_edit_commit(&text));
-                if done {
-                    close_text_field(this, false);
-                } else {
-                    // Refused: the field stays, its text turns red and the system beeps.
-                    send!((), field, b"setTextColor:\0", Id = send!(Id, class(b"NSColor\0") as Id, b"redColor\0"));
-                    NSBeep();
-                }
-                1
-            }
+            b"insertNewline:" => commit_text_field(this) as i8,
             b"cancelOperation:" => {
                 close_text_field(this, true);
                 1
@@ -925,14 +947,161 @@ extern "C" fn do_command(this: Id, _cmd: Sel, _control: Id, _text_view: Id, comm
     }
 }
 
-/// The field lost focus without Return: cancel.
+/// The field lost focus without Return: commit what is valid.
 extern "C" fn text_ended(this: Id, _cmd: Sel, _note: Id) {
     unsafe {
         if state(this).is_some_and(|st| !st.opening) {
-            close_text_field(this, true);
+            field_lost_focus(this);
         }
     }
 }
+
+/// The window the field sits in stopped being key.
+extern "C" fn window_resigned_key(this: Id, _cmd: Sel, _note: Id) {
+    unsafe {
+        if state(this).is_some_and(|st| !st.opening) {
+            field_lost_focus(this);
+        }
+    }
+}
+
+/// The view is about to leave its window (or change window): the field goes first,
+/// while the window is still there.
+extern "C" fn view_will_move_to_window(this: Id, _cmd: Sel, new_window: Id) {
+    unsafe {
+        if new_window != send!(Id, this, b"window\0") {
+            field_lost_focus(this);
+            remove_field_hooks(this);
+        }
+        let sup = ObjcSuper { receiver: this, super_class: class(b"NSView\0") };
+        let f: unsafe extern "C" fn(*const ObjcSuper, Sel, Id) = std::mem::transmute(objc_msgSendSuper as unsafe extern "C" fn());
+        f(&sup, sel(b"viewWillMoveToWindow:\0"), new_window);
+    }
+}
+
+// ---- The key monitor for the type-in field ---------------------------------
+
+/// What the field does with a key while it is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldKey {
+    Commit,
+    Cancel,
+    Pass,
+}
+
+/// Return (36) and keypad Enter (76) commit, Escape (53) cancels, but only when the field's own
+/// editor holds the keyboard; every other key, and these keys elsewhere, pass unchanged.
+pub fn field_key(key_code: u16, field_editor_is_first_responder: bool) -> FieldKey {
+    match (field_editor_is_first_responder, key_code) {
+        (true, 36 | 76) => FieldKey::Commit,
+        (true, 53) => FieldKey::Cancel,
+        _ => FieldKey::Pass,
+    }
+}
+
+#[repr(C)]
+struct MonitorBlock {
+    isa: *const c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: unsafe extern "C" fn(*const MonitorBlock, Id) -> Id,
+    descriptor: *const BlockDescriptor,
+}
+
+// The block is read-only and holds no state: the views are found through `MONITORS`.
+unsafe impl Sync for MonitorBlock {}
+
+static MONITOR_BLOCK: MonitorBlock = MonitorBlock {
+    isa: &raw const _NSConcreteGlobalBlock as *const c_void,
+    flags: 1 << 28,
+    reserved: 0,
+    invoke: monitor_invoke,
+    descriptor: &MONITOR_BLOCK_DESCRIPTOR,
+};
+
+static MONITOR_BLOCK_DESCRIPTOR: BlockDescriptor = BlockDescriptor { reserved: 0, size: std::mem::size_of::<MonitorBlock>() };
+
+thread_local! {
+    /// The views with an open field and the monitor object AppKit gave each (main thread only).
+    static MONITORS: std::cell::RefCell<Vec<(usize, usize)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// How many key monitors the type-in fields hold right now. Zero when no field is open.
+pub fn key_monitor_count() -> usize {
+    MONITORS.with(|m| m.borrow().len())
+}
+
+/// The field editor of the view's open field, when it holds the keyboard in the event's window.
+unsafe fn field_has_keyboard(view: Id, event: Id) -> bool { unsafe {
+    let Some(field) = state(view).and_then(|st| st.text_field) else { return false };
+    let window = send!(Id, view, b"window\0");
+    // An event for another window is not ours. (An event that names no window, as a test
+    // builds for a window that was never created on screen, is judged by the responder alone.)
+    let target = send!(Id, event, b"window\0");
+    if window.is_null() || (!target.is_null() && target != window) {
+        return false;
+    }
+    let editor = send!(Id, field, b"currentEditor\0");
+    !editor.is_null() && send!(Id, window, b"firstResponder\0") == editor
+}}
+
+/// The handler AppKit calls for every key down of the application: nil swallows the event.
+unsafe extern "C" fn monitor_invoke(_block: *const MonitorBlock, event: Id) -> Id { unsafe {
+    if event.is_null() {
+        return event;
+    }
+    let views: Vec<usize> = MONITORS.with(|m| m.borrow().iter().map(|e| e.0).collect());
+    for v in views {
+        let view = v as Id;
+        // Never re-enter an editor call.
+        if state(view).is_none_or(|st| st.busy) {
+            continue;
+        }
+        match field_key(send!(u16, event, b"keyCode\0"), field_has_keyboard(view, event)) {
+            FieldKey::Commit => {
+                commit_text_field(view);
+                return null_mut();
+            }
+            FieldKey::Cancel => {
+                close_text_field(view, true);
+                return null_mut();
+            }
+            FieldKey::Pass => {}
+        }
+    }
+    event
+}}
+
+/// The field is open: watch the keys, and the window losing key.
+unsafe fn install_field_hooks(this: Id, window: Id) { unsafe {
+    if MONITORS.with(|m| m.borrow().iter().any(|e| e.0 == this as usize)) || state(this).is_none_or(|st| st.text_field.is_none()) {
+        return;
+    }
+    // NSEventMaskKeyDown is 1 << NSEventTypeKeyDown (10).
+    let monitor = send!(Id, class(b"NSEvent\0") as Id, b"addLocalMonitorForEventsMatchingMask:handler:\0", u64 = 1u64 << 10, *const MonitorBlock = &MONITOR_BLOCK);
+    if !monitor.is_null() {
+        send!(Id, monitor, b"retain\0");
+        MONITORS.with(|m| m.borrow_mut().push((this as usize, monitor as usize)));
+    }
+    if !window.is_null() {
+        let center = send!(Id, class(b"NSNotificationCenter\0") as Id, b"defaultCenter\0");
+        send!((), center, b"addObserver:selector:name:object:\0", Id = this, Sel = sel(b"openpluginWindowResignedKey:\0"), Id = ns_string("NSWindowDidResignKeyNotification"), Id = window);
+    }
+}}
+
+/// Take the monitor and the observer away. Safe to call when neither is there.
+unsafe fn remove_field_hooks(this: Id) { unsafe {
+    let taken = MONITORS.with(|m| {
+        let mut m = m.borrow_mut();
+        m.iter().position(|e| e.0 == this as usize).map(|i| m.remove(i).1)
+    });
+    if let Some(monitor) = taken {
+        send!((), class(b"NSEvent\0") as Id, b"removeMonitor:\0", Id = monitor as Id);
+        send!((), monitor as Id, b"release\0");
+    }
+    let center = send!(Id, class(b"NSNotificationCenter\0") as Id, b"defaultCenter\0");
+    send!((), center, b"removeObserver:\0", Id = this);
+}}
 
 /// Keep one tooltip rectangle per entry of [`Editor::tooltips`], moved with
 /// the layout. Registered again only when a rectangle (or the view's size) changed.
@@ -1506,6 +1675,8 @@ unsafe fn view_class() -> Class { unsafe {
     add(b"view:stringForToolTip:point:userData:\0", tooltip_string as *const c_void, b"@@:@q{CGPoint=dd}^v\0");
     add(b"control:textView:doCommandBySelector:\0", do_command as *const c_void, b"c@:@@:\0");
     add(b"controlTextDidEndEditing:\0", text_ended as *const c_void, b"v@:@\0");
+    add(b"openpluginWindowResignedKey:\0", window_resigned_key as *const c_void, b"v@:@\0");
+    add(b"viewWillMoveToWindow:\0", view_will_move_to_window as *const c_void, b"v@:@\0");
     add(b"draggingEntered:\0", dragging_entered as *const c_void, b"Q@:@\0");
     add(b"draggingUpdated:\0", dragging_updated as *const c_void, b"Q@:@\0");
     add(b"draggingExited:\0", dragging_exited as *const c_void, b"v@:@\0");
@@ -1710,6 +1881,7 @@ impl Drop for EditorView {
                 send!((), self.timer, b"invalidate\0");
                 send!((), self.timer, b"release\0");
             }
+            remove_field_hooks(self.view);
             if let Some(field) = self.state.as_mut().and_then(|s| s.text_field.take()) {
                 send!((), field, b"setDelegate:\0", Id = null_mut());
                 send!((), field, b"removeFromSuperview\0");

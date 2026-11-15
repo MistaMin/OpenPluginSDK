@@ -71,6 +71,23 @@ mod mac {
             rig.set_field_text(c"clean");
             assert!(rig.field_command(c"cancelOperation:"));
             assert!(rig.gestures().is_empty() && !rig.has_field());
+
+            // Return through the application's event path (a host that takes Return) commits.
+            use openplugin::dri::cocoa::key_monitor_count;
+            rig.click(x, y, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"2 kHz");
+            assert_eq!(key_monitor_count(), 1);
+            rig.app_key(36, c"\r", 0);
+            assert_eq!(rig.gestures(), ["begin 1", "perform 1 2000.000", "end 1"]);
+            assert!(!rig.has_field() && key_monitor_count() == 0);
+            // Losing focus commits valid text.
+            rig.click(x, y, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"3 kHz");
+            rig.field_end_editing();
+            assert_eq!(rig.gestures(), ["begin 1", "perform 1 3000.000", "end 1"]);
+            assert!(!rig.has_field() && key_monitor_count() == 0);
         }
     }
 }

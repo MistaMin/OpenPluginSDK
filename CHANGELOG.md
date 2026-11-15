@@ -87,6 +87,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 
 ### Fixed
 
+- The type-in field could not be committed in Pro Tools, which takes Return and keypad Enter for its own commands before the field sees them. While the field is open the Cocoa view now holds an `NSEvent` local key-down monitor that takes Return (36), keypad Enter (76) and Escape (53) when the field's own editor has the keyboard (Return and Enter commit, Escape cancels, the event is swallowed; every other key passes), and removes it when the field closes, the view leaves its window or the view is dropped. Losing focus (a click elsewhere, the window resigning key, the view leaving its window) now commits valid text instead of cancelling; invalid text is discarded silently; Escape still cancels. `Editor::take_text_edit` and `text_edit_cancel` docs updated. New `openplugin_dri::cocoa::{field_key, FieldKey, key_monitor_count}`. Proven by main-thread tests (`typing` in `example-editor` and `example-design-editor`: Return, Enter and Escape through `-[NSApplication sendEvent:]`, monitor count back to zero after close, removal and drop); not yet re-tested in Pro Tools.
 - `save_bytes` / `load_bytes` raced with `process` (fixed by the gate above), and so did CLAP's `state.save` / `state.load`.
 - VST3 `setState` applied values while it was still reading them, so a bad state left them half-applied; it now validates first.
 - The shell bundles' signatures were broken by the post-build copies ("code has no resources but signature indicates they must be present").
