@@ -25,6 +25,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 - `openplugin_dri::DesignEditor`: an editor built from a GoodLookin design CSV, each row bound to a parameter by id; `examples/design_editor`.
 - `docs/PUBLISHING.md`, `CHANGELOG.md`, `docs/VERSIONING.md` and `docs/API_REVIEW.md`; crate metadata (authors, homepage, keywords, categories, readme, documentation) inherited by every crate; GoodLookin DRI named by version as well as path.
 - `docs/ROADMAP.md` for macOS to 1.0 and `docs/ROADMAP_WINDOWS_LINUX.md`.
+- `openplugin_dsp::Dither`: RPDF and TPDF dither to 8..=24 bits, first-order and designed order 9 perceptual noise shaping at any sample rate (designed from Terhardt's threshold of hearing; no published coefficient table is reproduced), per-channel seedable PCG32 noise, auto-blank on digital silence, and `i16`/`i24`/`i32` output helpers. `pcm::f32_to_i24` and `i24_to_f32`. New `docs/DSP_COOKBOOK.md` with the dither recipe.
 
 ### Changed
 
