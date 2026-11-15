@@ -66,9 +66,12 @@ use openplugin_core::worker::{self, Executor, Step, Task, Waker};
 
 use openplugin_core::midi::{self, Message, Parser};
 use openplugin_core::{
-    sample_rate_supported, Category, EditorFactory, EditorState, IoConfig, MeterFrame, ParamCursor, ParamInfo, ParamPlane,
+    sample_rate_supported, Category, EditorFactory, IoConfig, MeterFrame, ParamCursor, ParamInfo, ParamPlane,
     Plugin, Seqlock, Taper, Transport, Unit,
 };
+
+#[cfg(any(target_os = "macos", test))]
+use openplugin_core::EditorState;
 
 type CreateFn = fn() -> Box<dyn Plugin>;
 
@@ -685,6 +688,7 @@ pub fn set_editor(factory: EditorFactory) {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn editor_factory() -> Option<EditorFactory> {
     EDITOR.lock().ok().and_then(|slot| *slot)
 }
@@ -739,6 +743,7 @@ struct Instance {
     has_position: bool,
     scratch: [Vec<f32>; 2],
     prepared: usize,
+    #[cfg(any(target_os = "macos", test))]
     editor_state: Option<EditorState>,
     bridge: Arc<Bridge>,
     /// The host's `worker:schedule`, if it offered one that works.
@@ -765,6 +770,7 @@ fn uri() -> &'static CStr {
 }
 
 /// Parameters of the installed plugin, read once.
+#[cfg(target_os = "macos")]
 fn param_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| creator().map(|create| create().info().params.len()).unwrap_or(0))
@@ -819,6 +825,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
     }
     cursor.invalidate();
     cursor.pull(&plane, inner.as_mut());
+    #[cfg(any(target_os = "macos", test))]
     let editor_state = inner.editor_state();
     let controls = vec![std::ptr::null(); plane.len()];
     let sidechain = map.sidechain as usize;
@@ -845,6 +852,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
         has_position: false,
         scratch: [vec![0.0; PREPARED], vec![0.0; PREPARED]],
         prepared: PREPARED,
+        #[cfg(any(target_os = "macos", test))]
         editor_state,
         bridge,
         schedule,
@@ -1231,6 +1239,7 @@ pub fn descriptor(index: u32) -> *const Lv2Descriptor {
 /// # Safety
 /// `handle` is null or the handle a host passes as `instance-access`, which
 /// is a plugin instance in the same process.
+#[cfg(any(target_os = "macos", test))]
 unsafe fn instance_state(handle: *const c_void) -> Option<EditorState> {
     let instance = unsafe { (handle as *const Instance).as_ref()? };
     if instance.magic != MAGIC {
