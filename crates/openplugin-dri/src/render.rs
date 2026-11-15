@@ -378,7 +378,7 @@ mod tests {
         move |dl| {
             draw_knob_code(dl, 60.0, 50.0, 30.0, knob, "GAIN", &format!("{knob:.2}"), "Brit", Color::BRIT_RED);
             let mut s = goodlookindri::scene::Scene::new();
-            s.text(goodlookindri::scene::Point::new(150.0, 100.0), &format!("N{label}"), GlColor(0xffffffff), 14.0, true);
+            s.text(goodlookindri::scene::Point::new(150.0, 100.0), format!("N{label}"), GlColor(0xffffffff), 14.0, true);
             dl.append(s);
         }
     }

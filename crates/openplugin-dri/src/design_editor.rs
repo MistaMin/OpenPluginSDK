@@ -943,8 +943,10 @@ mod tests {
         assert!(!empty.wants_keys());
     }
 
+    type Step = Box<dyn Fn(&mut DesignEditor)>;
+
     /// Two editors fed the same events: `part` repaints what it reports, `whole` everything.
-    fn same_frames(scale: f32, steps: &[(&str, &dyn Fn(&mut DesignEditor))]) -> (usize, usize) {
+    fn same_frames(scale: f32, steps: &[(&str, Step)]) -> (usize, usize) {
         let (mut part, _) = rig(&full());
         let (mut whole, _) = rig(&full());
         let (mut partial, mut idle) = (0, 0);
@@ -975,7 +977,7 @@ mod tests {
         let fader = centre(&rig(&full()).0, "drive");
         let lever = centre(&rig(&full()).0, "warm");
         let keys = (30.0f32, 110.0f32);
-        let steps: Vec<(&str, Box<dyn Fn(&mut DesignEditor)>)> = vec![
+        let steps: Vec<(&str, Step)> = vec![
             ("idle", Box::new(|_| {})),
             ("hover the knob", Box::new(move |e| e.mouse_move(knob.0, knob.1))),
             ("press the knob", Box::new(move |e| e.mouse_down(knob.0, knob.1, 1))),
@@ -1016,7 +1018,6 @@ mod tests {
             })),
             ("idle again", Box::new(|_| {})),
         ];
-        let steps: Vec<(&str, &dyn Fn(&mut DesignEditor))> = steps.iter().map(|(n, f)| (*n, f.as_ref())).collect();
         for scale in [2.0, 1.0, 1.5] {
             let (partial, idle) = same_frames(scale, &steps);
             assert!(partial >= 12 && idle >= 2, "scale {scale}: {partial} partial, {idle} idle frames");
