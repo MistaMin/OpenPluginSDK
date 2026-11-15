@@ -289,9 +289,9 @@ impl Butterworth {
         if order % 2 == 1 {
             self.pole.set(omode, sample_rate, freq);
         }
-        for k in 0..order / 2 {
+        for (k, section) in self.sections.iter_mut().enumerate().take(order / 2) {
             let q = Self::section_q(order, k) as f32;
-            self.sections[k].configure(smode, sample_rate, freq, q, 0.0);
+            section.configure(smode, sample_rate, freq, q, 0.0);
         }
     }
 

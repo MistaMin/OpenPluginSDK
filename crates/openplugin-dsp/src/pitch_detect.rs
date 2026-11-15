@@ -214,9 +214,9 @@ impl PitchDetector for YinDetector {
         }
         if pick == 0 {
             let mut best = f64::INFINITY;
-            for t in self.tau_min..self.tau_max {
-                if self.cmnd[t] < best {
-                    best = self.cmnd[t];
+            for (t, &d) in self.cmnd.iter().enumerate().take(self.tau_max).skip(self.tau_min) {
+                if d < best {
+                    best = d;
                     pick = t;
                 }
             }

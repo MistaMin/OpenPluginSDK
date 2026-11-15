@@ -236,10 +236,10 @@ impl PluckedString {
             let c = (-2.0 * PI * fc / self.fs).exp();
             let mut y = 0.0;
             for pass in 0..2 {
-                for i in 0..n {
-                    y = (1.0 - c) * self.buf[i] + c * y;
+                for v in &mut self.buf[..n] {
+                    y = (1.0 - c) * *v + c * y;
                     if pass == 1 {
-                        self.buf[i] = y;
+                        *v = y;
                     }
                 }
             }

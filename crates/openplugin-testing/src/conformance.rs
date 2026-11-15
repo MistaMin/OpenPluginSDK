@@ -787,8 +787,8 @@ impl<'s, P: Plugin> Session<'s, P> {
         let mut peak = 0.0f32;
         let mut nonfinite: Option<(usize, usize, f32)> = None;
         let mut denormal: Option<(usize, usize, f32)> = None;
-        for c in 0..self.nout.min(self.io.len()) {
-            for (i, &s) in self.io[c][..frames].iter().enumerate() {
+        for (c, channel) in self.io.iter().enumerate().take(self.nout) {
+            for (i, &s) in channel[..frames].iter().enumerate() {
                 if !s.is_finite() {
                     nonfinite.get_or_insert((c, i, s));
                 } else {
@@ -958,8 +958,8 @@ impl<'s, P: Plugin> Session<'s, P> {
         while done < total && !self.dead {
             let len = 512.min(self.max_block).min(total - done);
             self.impulse_block(len, done == 0);
-            for c in 0..self.nout.min(self.io.len()) {
-                for (i, &s) in self.io[c][..len].iter().enumerate() {
+            for channel in self.io.iter().take(self.nout) {
+                for (i, &s) in channel[..len].iter().enumerate() {
                     if s.is_finite() && s.abs() > peak {
                         peak = s.abs();
                         peak_at = done + i;
@@ -1227,11 +1227,10 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
         }
         let mut sg = Gen::new(Stimulus::Noise);
         let info = s.info;
-        for index in 0..info.params.len() {
+        for (index, p) in info.params.iter().enumerate() {
             if !s.writable(index) {
                 continue;
             }
-            let p = &info.params[index];
             let span = (p.max - p.min).abs().max(1.0);
             let values = [
                 p.min,
@@ -1301,11 +1300,10 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
         let info = a.info;
 
         // Parameters: write, read back, write the read value again.
-        for index in 0..info.params.len() {
+        for (index, p) in info.params.iter().enumerate() {
             if !a.writable(index) {
                 continue;
             }
-            let p = &info.params[index];
             let v = if round == 0 { p.default } else { p.min + (p.max - p.min) * a.rng.unit() };
             a.apply_param(index, v);
             let Some(first) = a.catching("param", |pl| pl.param(p.id)).flatten() else { continue };

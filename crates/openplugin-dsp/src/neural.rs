@@ -423,8 +423,8 @@ impl Gru {
         // z and r: rows 0..2h see the input and the previous state.
         self.wx.add_rows(0, 2 * h, x, &mut self.pre[..2 * h]);
         self.wh.add_rows(0, 2 * h, &self.h, &mut self.pre[..2 * h]);
-        for k in 0..2 * h {
-            self.pre[k] = sigmoid_of(fast, self.pre[k]);
+        for v in &mut self.pre[..2 * h] {
+            *v = sigmoid_of(fast, *v);
         }
         for k in 0..h {
             self.rh[k] = self.pre[h + k] * self.h[k];

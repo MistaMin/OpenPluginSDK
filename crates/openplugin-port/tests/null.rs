@@ -36,7 +36,8 @@ fn example_dylib() -> &'static Path {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let status = std::process::Command::new(cargo).args(["build", "-p", "example-editor", "--lib"]).current_dir(&root).status().expect("run cargo");
         assert!(status.success(), "building the example failed");
-        let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
+        // A relative CARGO_TARGET_DIR is relative to the workspace root, where the build above ran.
+        let target = std::env::var_os("CARGO_TARGET_DIR").map(|t| root.join(t)).unwrap_or_else(|| root.join("target"));
         let dylib = target.join("debug").join("libexample_editor.dylib");
         assert!(dylib.is_file(), "{} was not built", dylib.display());
         dylib
