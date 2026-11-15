@@ -134,6 +134,23 @@ Status: tasks 1, 2, 4, 5 and 7 are done (7: `--pkg`, `scripts/make_pkg.sh`, `scr
 
 The freeze itself and the crates.io publish are the owner's decisions.
 
+## DSP library: building blocks for good products
+
+This track runs beside the milestones. `openplugin-dsp` has a starter set: an RBJ biquad, one compressor, saturation curves with ADAA, 2x and linear-phase oversampling, a short convolver (1024 taps), loudness after BS.1770 and R 128, meters, a fixed delay, a naive oscillator, a sample voice, soft bypass and delta listening. It has no dither, no state-variable or crossover filters, no limiter or gate, no long convolution, no modulated delay or reverb, no band-limited oscillator or envelope, and no STFT. Every block below is allocation-free on the audio path, computes for the real sample rate (`effective_rate`), stays free of denormals, cites the paper or standard it follows, and is written from that source, never ported from JUCE or from code under a licence the SDK cannot carry. A cookbook in `docs/DSP_COOKBOOK.md` shows each one inside a small plugin.
+
+Blocks that land before 1.0 are frozen with it. Later ones arrive in minor releases, since adding a module breaks nothing.
+
+1. **Dither and noise shaping.** RPDF and TPDF dither to any word length from 8 to 24 bits, first-order and higher-order noise shaping from published curves, an independent generator per channel with a fixed seed for tests, auto-blanking on digital silence, and dithered paths for the `pcm` conversions. Proof: noise floor and spectrum against theory; zero output for silence; a truncation test shows the distortion dither removes.
+2. **Filters.** A topology-preserving state-variable filter (stable under fast modulation), analog-matched biquads with no cramping near Nyquist, Linkwitz-Riley crossovers for two to four bands that sum flat, one-pole, DC blocker, allpass and Butterworth cascades. Proof: responses against the analog prototypes; crossover sum within 0.01 dB; modulation stress without blow-up.
+3. **Dynamics.** Envelope followers (peak and RMS, attack, release, hold), soft knee, gate and expander, a lookahead limiter with a true-peak ceiling, sidechain filters, and linked detection across channels. Proof: static curves, time constants, a ceiling never exceeded on true-peak test signals.
+4. **Long convolution.** Uniformly and non-uniformly partitioned convolution for impulses of seconds, a zero-latency head, mono, stereo and true-stereo, impulses loaded through the 0.7 worker. Proof: equal to direct convolution; CPU per block measured; no allocation.
+5. **Modulation and delay.** Fractional delays (Hermite, Lagrange, Thiran allpass), modulated delay lines, an LFO that syncs to the host transport, and chorus, flanger and phaser building blocks. Proof: group delay against theory; LFO phase locked to transport.
+6. **Reverb.** A feedback delay network after Jot, the plate after Dattorro, early-reflection taps, damping per band. Proof: decay time against the setting; no instability at any setting.
+7. **Synthesis.** Band-limited oscillators (PolyBLEP and BLAMP), mip-mapped wavetables, ADSR envelopes, white and pink noise, voice allocation with stealing and glide, a windowed-sinc resampler for sample playback. Proof: aliasing measured against the naive oscillator; envelope timing.
+8. **Spectral.** An STFT frame with windows (Hann, Blackman-Harris, Kaiser), hop and overlap-add with a constant-overlap check, and lock-free spectrum data for editors. Proof: identity resynthesis; analyser bins against known tones.
+9. **Utility.** Mid/side, width, pan laws (-3, -4.5 and -6 dB), balance, polarity, dB gain with smoothing, and a denormal guard that sets flush-to-zero on the audio thread. Proof: unit tests per block.
+10. **Metering.** True peak after BS.1770, PPM ballistics (EBU, DIN, Nordic, BBC), the K-system, and correlation and goniometer feeds for editors. Proof: test signals from the standards.
+
 ## After 1.0
 
 - **Binaural rendering.** Any SDK layout to headphones through head-related impulse responses, convolved per channel with `openplugin-dsp`'s convolver, loaded through the 0.7 worker. Needs an HRTF set whose license allows shipping it, or one the user supplies; choosing the set is the owner's decision.
