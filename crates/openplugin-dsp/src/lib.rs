@@ -25,6 +25,7 @@
 //! - [`utility`]: mid/side, width, pan laws, balance, polarity, smoothed dB gain, [`DenormalGuard`].
 //! - [`TruePeakMeter`], [`Ppm`] (EBU, DIN, Nordic, BBC), [`KMeter`], [`VuIec`], [`EbuMeter`], and the lock-free [`scope_feed`] for correlation and goniometer.
 //! - [`FdnReverb`], [`PlateReverb`], [`EarlyReflections`]: Jot-Chaigne feedback delay network, Dattorro plate, and tapped-delay early reflections.
+//! - [`TransistorLadder`], [`DiodeLadder`], [`Korg35`], the [`wdf`] building blocks with [`DiodeClipper`], and [`TapeHysteresis`]: virtual analog (zero-delay-feedback filters, wave digital filters, Jiles-Atherton tape).
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 //! - [`BandlimitedOsc`], [`WavetableOsc`], [`Adsr`], [`PinkNoise`], [`VoiceAllocator`], [`SincKernel`]: synthesis (PolyBLEP/BLAMP oscillators with hard sync, mip-mapped wavetables, envelopes, noise, voice stealing and glide, a windowed-sinc resampler).
 
@@ -50,6 +51,8 @@ pub mod early;
 pub mod fdn;
 pub mod gain_comp;
 pub mod gain_computer;
+pub mod korg35;
+pub mod ladder;
 pub mod lfo;
 pub mod linear_phase;
 pub mod kmeter;
@@ -74,6 +77,7 @@ mod reverb_common;
 pub mod resample;
 pub mod saturation;
 pub mod svf;
+pub mod tape;
 pub mod utility;
 pub mod voice;
 pub mod true_peak_meter;
@@ -81,6 +85,7 @@ pub mod spectrum;
 pub mod stft;
 pub mod voice_alloc;
 pub mod wavetable;
+pub mod wdf;
 pub mod window;
 pub mod windows;
 
@@ -111,6 +116,8 @@ pub use early::{EarlyPattern, EarlyReflections, EarlyTap, MAX_EARLY_TAPS};
 pub use fdn::{FdnMatrix, FdnReverb};
 pub use gain_comp::GainComp;
 pub use interp::{group_delay, phase_delay, Interpolation};
+pub use korg35::{Korg35, Korg35Mode};
+pub use ladder::{DiodeLadder, TransistorLadder, DIODE_K_CRIT};
 pub use lfo::{Feel, Lfo, LfoRate, LfoShape, NoteDivision};
 pub use linear_phase::{LinearPhaseOversampler, OversampleError};
 pub use matched::{MatchedBiquad, MatchedKind};
@@ -141,6 +148,11 @@ pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, S
 pub use resample::{playback_ratio, Quality, SincConfig, SincKernel, SincPlayer};
 pub use saturation::{saturate_sample, SaturationMode};
 pub use svf::{Svf, SvfMode};
+pub use tape::TapeHysteresis;
+pub use wdf::{
+    wright_omega, Capacitor, DiodeClipper, DiodePair, DiodeParams, Inductor, Inverter, Parallel,
+    Resistor, ResistiveVoltageSource, Series, SingleDiode, WdfPort,
+};
 pub use voice::{Polyphony, SampleVoice};
 pub use voice_alloc::{
     Allocation, GlideMode, NoteOff, StealPolicy, Voice, VoiceAllocator, VoiceMode, VoicePhase,

@@ -928,3 +928,80 @@ The kernel is a Kaiser-windowed sinc stored as a table of 256 to 2048 phases per
 | `Best` | 128 | 0.44 | 0.00002 dB | -118.9 dB |
 
 Folding test (a 0.30 cycles/sample tone read at ratio 1.7 would land above Nyquist): the residue is -60.4, -84.4, -101.3 and -132.3 dB for the four qualities, and a tone that stays in band keeps unit gain to within 0.14 % (`Low`) or better. `SincConfig` sets the taps, attenuation and phases by hand.
+
+
+## Virtual analog
+
+Zero-delay-feedback filters, wave digital filters and a tape model. Sources are in the module docs; where a paper's exact equation was not available the derivation is ours and says so. All are allocation-free, `f64` inside, treat a non-finite input as 0 and recover from it.
+
+### Ladder, diode ladder and Korg-35 filters
+
+```rust
+use openplugin_dsp::{DiodeLadder, Korg35, Korg35Mode, TransistorLadder};
+
+let mut ladder = TransistorLadder::new(sample_rate); // 4 poles, tanh per stage
+ladder.set_cutoff(800.0);      // Hz; |H| = 1/(4-k) here
+ladder.set_resonance(0.9);     // k = 4 r, self-oscillation at 1.0
+ladder.set_drive(2.0);         // gain before the first tanh
+ladder.set_poles(4);           // tap 1..=4
+// per sample (cutoff and resonance may change every sample):
+let y = ladder.process_sample(x);
+
+let mut diode = DiodeLadder::new(sample_rate);   // k = r * 901/49, oscillates at 1.195 fc
+let mut korg = Korg35::new(sample_rate);         // 2-pole Sallen-Key, K = 2 r
+korg.set_mode(Korg35Mode::HighPass);
+```
+
+The transistor ladder places a `tanh` at the input of each stage and in the feedback sum, and solves the one unknown (the loop input) per sample by Newton's method inside a bracket that always contains the root, so it cannot diverge; the diode ladder solves its 4x4 system by damped Newton; the Korg-35 solves a scalar monotone equation. All three are capped (16, 16 and 12 iterations; typically 2 to 4).
+
+Measured (tests in `crates/openplugin-dsp/tests/va_proof.rs`), small signal against the linear analog prototype with the bilinear frequency mapping (rates 44.1, 48, 96, 192 kHz, cutoffs 1 to 4 kHz, several resonances):
+
+| filter | worst magnitude error | worst phase error |
+| --- | --- | --- |
+| transistor ladder, `1/((1+s)^4 + k)` | 0.0041 dB | below 1e-4 rad |
+| diode ladder, `1/(s^4+7s^3+15s^2+10s+1+k)` | 0.0001 dB | |
+| Korg-35 low-pass and high-pass, `1/(s^2+(2-K)s+1)` | 0.0002 dB | |
+
+At 192 kHz the transistor ladder's resonance peak (k = 3.6) is at 973.3 Hz and 11.14 dB against 973.3 Hz and 11.14 dB for the unwarped analog prototype. Self-oscillation: below the critical resonance a kick decays to nothing (below 1e-8 after 3 s); above it a bounded oscillation grows (transistor ladder r 1.05: 996 Hz at 1 kHz cutoff, amplitude 0.08; diode ladder r 1.1: 1104 Hz, about 1.2 times the cutoff as derived; Korg-35 r 1.05: 1008 Hz). With white noise in and cutoff (20 Hz to 0.45 fs), resonance (0 to 1.25) and drive (0 to 8) random every sample for 60 000 samples at 44.1 and 192 kHz, the outputs stay finite and below 4.2; the ladders use at most 10 iterations.
+
+### Wave digital filters and the diode clipper
+
+```rust
+use openplugin_dsp::{Capacitor, DiodePair, DiodeParams, Parallel, ResistiveVoltageSource, WdfPort};
+
+let mut tree = Parallel::new(ResistiveVoltageSource::new(2200.0), Capacitor::new(10e-9, sample_rate));
+let root = DiodePair::new(DiodeParams::D1N4148);
+// per sample:
+tree.a.set_voltage(f64::from(x));
+let v = root.process(&mut tree);   // reflect up, solve the root, send down
+// after changing a component: tree.a.set_resistance(..); tree.refresh();
+```
+
+`Series`, `Parallel` and `Inverter` are generic adaptors (adapted towards the root), with `Resistor`, `Capacitor`, `Inductor` and `ResistiveVoltageSource` as leaves, so a circuit is a type and the audio path has no allocation or dynamic dispatch. The root is a `DiodePair` (Werner et al. 2015 via `wright_omega`, plus two Newton steps on the exact `sinh` equation) or a `SingleDiode`. `DiodeClipper` is the finished example.
+
+Against an independent trapezoidal implicit solve of `C dv/dt = (vs - v)/R - 2 Is sinh(v/nVt)` run at 3.07 MHz, maximum error as a share of the output peak (2.2 kohm, 10 nF, 1N4148):
+
+| input | 48 kHz | 96 kHz | 192 kHz |
+| --- | --- | --- | --- |
+| 200 Hz, 0.3 V | 0.086 % | 0.020 % | 0.005 % |
+| 1 kHz, 2 V | 1.9 % | 0.53 % | 0.17 % |
+| 1 kHz, 8 V | 5.6 % | 2.8 % | 1.3 % |
+| 3 kHz, 4 V | 10.6 % | 5.1 % | 2.2 % |
+
+The remaining error is the bilinear capacitor meeting a clipping edge shorter than a sample, so it falls with the rate and a clipper wants oversampling. Against the same scheme at its own rate the WDF agrees to 3e-8 V, which shows the wave algebra and root are exact.
+
+### Tape (Jiles-Atherton hysteresis)
+
+```rust
+use openplugin_dsp::{LinearPhaseOversampler, TapeHysteresis};
+
+let mut os = LinearPhaseOversampler::prepare(4, 1, max_block)?;
+let mut tape = TapeHysteresis::new(4.0 * sample_rate); // the model runs at the oversampled rate
+tape.set_drive(3.0);       // input gain
+tape.set_saturation(0.8);  // field scale, earlier knee
+tape.set_width(0.5);       // pinning, loop width
+os.process(&[input], &mut [&mut output[..]], |s| s[0] = tape.process_sample(s[0]))?;
+// report os.latency_samples() as the plugin latency
+```
+
+The model is the Jiles-Atherton equations in normalised form, integrated in the field variable with fourth-order Runge-Kutta (substeps of at most 0.25 field units, 1 to 32), after Chowdhury (DAFx-19). Parameter values are our own, not the paper's; no head-gap or loss filter. Measured: at drive 1 the output against input is a closed loop (closure 1e-6) with remanent values of -0.233 and +0.233 at the input's zero crossings, and the loop area grows from 0.20 (width 0) to 0.53 (width 1). Harmonics grow with drive (odd harmonics dominate): THD 7.0 %, 9.6 %, 11.0 %, 13.3 %, 19.7 % at drives 0.25, 0.5, 1, 2, 4, and the output rms rises monotonically. Aliasing of a 7001 Hz sine at 48 kHz (energy outside the harmonics of the tone, relative to the fundamental): tape at drive 3, saturation 0.8: -17.8 dB at 1x and -43.2 dB with 4x `LinearPhaseOversampler`; transistor ladder at 12 kHz cutoff, drive 10: -14.9 dB and -41.1 dB.
