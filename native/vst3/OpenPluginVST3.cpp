@@ -227,6 +227,16 @@ std::string shell_format(uint32_t index, double plain) {
     return big;
 }
 
+// "6.0 dB" with unit "dB" is "6.0"; text without that unit at its end is unchanged.
+static std::string strip_unit(const std::string& text, const char* unit) {
+    if (!unit || !*unit) return text;
+    const std::string u(unit);
+    if (text.size() <= u.size() || text.compare(text.size() - u.size(), u.size(), u) != 0) return text;
+    std::string rest = text.substr(0, text.size() - u.size());
+    while (!rest.empty() && rest.back() == ' ') rest.pop_back();
+    return rest.empty() ? text : rest;
+}
+
 class ShellParameter final : public Parameter {
 public:
     ShellParameter(const TChar* title, const TChar* units, ParamID tag, ParamValue normalized, int32 stepCount, int32 flags)
@@ -235,8 +245,12 @@ public:
     ParamValue toNormalized(ParamValue plain) const SMTG_OVERRIDE { return op_shell_to_normalized(index_, plain); }
     // The plugin's own text for the plain value ("6.0 dB"), not the
     // normalized number the SDK prints.
+    // VST3 hosts print the parameter's units after this string, so a trailing
+    // unit the plugin's text already carries is dropped ("6.0 dB" -> "6.0").
     void toString(ParamValue normalized, String128 string) const SMTG_OVERRIDE {
-        const std::string text = shell_format(index_, toPlain(normalized));
+        std::string text = shell_format(index_, toPlain(normalized));
+        OpParamDesc desc{};
+        if (op_shell_param(index_, &desc)) text = strip_unit(text, desc.unit);
         utf8_to_utf16(text.data(), text.size(), string, 128);
     }
     bool fromString(const TChar* string, ParamValue& normalized) const SMTG_OVERRIDE {

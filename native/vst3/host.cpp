@@ -115,6 +115,12 @@ static ParamID check_bypass_parameter(IEditController* controller) {
 // value and for the value of a typed text. The text is the plugin's own
 // (op_shell_param_format), not the normalized number; typed text is read as
 // the plugin reads it (op_shell_param_parse).
+static std::string ascii_of_units(IEditController* controller, ParamID id) {
+    ParameterInfo info{};
+    if (controller->getParameterInfo(static_cast<int32>(id), info) != kResultOk) return {};
+    return ascii_of(info.units);
+}
+
 static std::string text_of(IEditController* controller, ParamID id, double normalized) {
     String128 text{};
     CHECK(controller->getParamStringByValue(id, normalized, text) == kResultOk);
@@ -143,7 +149,15 @@ static void check_parameter_text(IEditController* controller, ParamID bypass, co
         for (double normalized : {0.0, desc.default_normalized, 0.5, 1.0}) {
             const double plain = op_shell_to_plain(i, normalized);
             const std::string shown = text_of(controller, i, normalized);
-            CHECK(shown == abi_text(i, plain));
+            // The units are VST3's own field, so the text leaves out a trailing unit.
+            std::string expected = abi_text(i, plain);
+            const std::string unit(desc.unit);
+            if (!unit.empty() && expected.size() > unit.size() &&
+                expected.compare(expected.size() - unit.size(), unit.size(), unit) == 0) {
+                expected.erase(expected.size() - unit.size());
+                while (!expected.empty() && expected.back() == ' ') expected.pop_back();
+            }
+            CHECK(shown == expected);
             CHECK(!shown.empty());
             double back = -1.0;
             CHECK(value_of(controller, i, shown.c_str(), back));
@@ -160,7 +174,8 @@ static void check_parameter_text(IEditController* controller, ParamID bypass, co
     if (gain.min == -24.0 && gain.max == 24.0 && std::string(gain.unit) == "dB") {
         const std::string shown = text_of(controller, 0, 0.625);
         std::printf("VST3 %s Gain at normalized 0.625 shows \"%s\"\n", label, shown.c_str());
-        CHECK(shown == "6.0 dB");
+        CHECK(shown == "6.0");  // the host adds the units field, "dB"
+        CHECK(ascii_of_units(controller, 0) == "dB");
         CHECK(shown.find("0.6250") == std::string::npos);
         double typed = -1.0;
         CHECK(value_of(controller, 0, "6 dB", typed));

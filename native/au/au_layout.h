@@ -109,7 +109,10 @@ inline void appendTags(const OpBus& bus, std::vector<AudioChannelLayoutTag>& tag
     if (busHasRoles(bus)) {
         for (const TagDef& def : tagTable()) if (tagFits(def, bus)) add(def.tag);
         // The SDK accepts a layout with channel descriptions only if the list has this entry.
-        add(kTagUseDescriptions);
+        // Only surround buses offer it: a mono or stereo bus has one layout, and auval reads
+        // this entry on a stereo bus as a promise to take every two-channel layout (Binaural,
+        // MatrixStereo, ...), which the shell would then have to refuse.
+        if (bus.channels > 2) add(kTagUseDescriptions);
     } else if (bus.channels == 1) {
         add(kTagMono);
     } else {
