@@ -429,6 +429,20 @@ if(OP_BUILD_AAX)
   add_executable(AAXAllocLatencyProof aax/host_alloc.cpp aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
   target_include_directories(AAXAllocLatencyProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
   target_compile_definitions(AAXAllocLatencyProof PRIVATE OP_STUB_PARAMS=200 OP_STUB_LATENCY=37)
+  # ABI 2 proofs over the same stand-in (OP_STUB_PARAMS=1, no latency), whose layouts, kind and note
+  # ports a proof sets at run time. AAXEventsProof drives the process callback with a fake MIDI node
+  # and transport: MIDI in and out at sample offsets, parameter events, transport, sidechain, stems
+  # in Pro Tools' order. AAXDescribeProof runs GetEffectDescriptions against a recording collection
+  # (components, stems, MIDI nodes, sidechain, categories, ABI check) and the offline notification.
+  add_executable(AAXEventsProof aax/host_events.cpp aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXEventsProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXEventsProof PRIVATE OP_STUB_PARAMS=1 OP_STUB_LATENCY=0)
+  target_link_libraries(AAXEventsProof PRIVATE openplugin_aax_sdk)
+  add_executable(AAXDescribeProof aax/host_describe.cpp aax/OpenPluginAAXDescribe.cpp aax/OpenPluginAAXParameters.cpp
+    aax/OpenPluginAAXState.cpp aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXDescribeProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXDescribeProof PRIVATE OP_STUB_PARAMS=1 OP_STUB_LATENCY=0)
+  target_link_libraries(AAXDescribeProof PRIVATE openplugin_aax_sdk)
   add_executable(AAXBundleProof aax/host_bundle.cpp)
   target_link_libraries(AAXBundleProof PRIVATE "-framework CoreFoundation")
   add_dependencies(AAXBundleProof OpenPluginAAX)
@@ -439,6 +453,8 @@ if(OP_BUILD_AAX)
   add_test(NAME aax_params_proof COMMAND AAXParamsProof)
   add_test(NAME aax_state_blob_proof COMMAND AAXStateBlobProof)
   add_test(NAME aax_alloc_latency_proof COMMAND AAXAllocLatencyProof)
+  add_test(NAME aax_events_proof COMMAND AAXEventsProof)
+  add_test(NAME aax_describe_proof COMMAND AAXDescribeProof)
   add_test(NAME aax_bundle_proof COMMAND AAXBundleProof "$<TARGET_BUNDLE_DIR:OpenPluginAAX>")
 endif()
 

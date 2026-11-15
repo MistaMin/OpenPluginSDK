@@ -37,6 +37,10 @@ Both stopped every test on the machine used for the result below, and both are i
 - It does not run DSP tests (`test.cycle_counts`) or HDX. The shell is native only.
 - It does not check Avid's PACE/iLok wrapping, which a shipped plug-in needs.
 
+## After AAX parity on shell ABI 2
+
+15 November 2026, same validator and machine, with the shell on `op_shell_process_events`, a transport MIDI node and `UsesTransport` in every description: 14 results, 13 passed, 0 failed, 1 skipped (`test.cycle_counts`). The example is an audio effect, so the validator did not see a MIDI node, a sidechain, an instrument or a surround stem; `aax_describe_proof` covers what the shell describes for those, and no AAX validator run does. The copy of the validator was in a path without spaces, and its `SysInfo.rb` patched as above because volumes without a container size were mounted (before the patch three tests ended `E_ABORTED` in `SysInfo.rb:249`, an Avid-tool failure unrelated to the shell).
+
 ## Result on this machine
 
 14 November 2026, macOS arm64, AAX Plug-In Validator 2024.6.0 (DigiShell v24.9.0x14), AAX SDK 2.8.1, example "Example Gain" built from `examples/editor` with the editor view and page table: 14 results, 13 passed, 0 failed, 1 skipped (`test.cycle_counts`, needs HDX and the DAE dish). `info.productids` reported manufacturer 1332758372, product 1164199790. The shell needed no change.

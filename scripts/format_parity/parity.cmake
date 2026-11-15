@@ -10,6 +10,8 @@
 set(OP_PARITY_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(OP_PARITY_FAULT_SCALE "1e-4" CACHE STRING "Output error of the negative-control shells (relative)")
 set(OP_PARITY_FAULT_DEFS "op_shell_process=parity_faulty_process")
+# A shell on ABI 2 (AAX) calls op_shell_process_events; the fault must sit on that call.
+set(OP_PARITY_FAULT_EVENTS_DEFS "op_shell_process=parity_faulty_process" "op_shell_process_events=parity_faulty_process_events")
 set_source_files_properties("${OP_PARITY_DIR}/native/parity_fault.cpp" PROPERTIES
   COMPILE_DEFINITIONS "PARITY_FAULT_SCALE=${OP_PARITY_FAULT_SCALE}f")
 
@@ -93,7 +95,7 @@ if(OP_BUILD_AAX)
   add_executable(ParityAAXFault "${OP_PARITY_DIR}/native/aax_parity.cpp" aax/OpenPluginAAXProcess.cpp
     "${OP_PARITY_DIR}/native/parity_fault.cpp")
   target_include_directories(ParityAAXFault PRIVATE ${OP_PARITY_AAX_INCLUDES})
-  target_compile_definitions(ParityAAXFault PRIVATE ${OP_PARITY_FAULT_DEFS})
+  target_compile_definitions(ParityAAXFault PRIVATE ${OP_PARITY_FAULT_EVENTS_DEFS})
   target_link_libraries(ParityAAXFault PRIVATE openplugin_aax_sdk)
   op_link_rust(ParityAAXFault)
 endif()
