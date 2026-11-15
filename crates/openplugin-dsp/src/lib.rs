@@ -19,11 +19,15 @@
 //! - [`Downmix`], [`Upmix`]: surround to stereo or mono by channel role (BS.775 / A/52), and the passive stereo upmix.
 //! - [`Dither`]: RPDF/TPDF dither to 8..=24 bits with noise shaping and auto-blank.
 //! - [`Stft`], [`SpectrumAnalyzer`], [`WindowKind`]: STFT frames with overlap-add, windows with ENBW, and a lock-free spectrum feed to editors.
+//! - [`ModDelay`], [`Interpolation`]: fractional, per-sample modulated delay (Hermite, Lagrange, Thiran allpass).
+//! - [`Lfo`]: sine, triangle, saw, square, sample-and-hold and smoothed random, free-running or locked to the host [`openplugin_core::Transport`].
+//! - [`Chorus`], [`Flanger`], [`Phaser`]: modulation effect building blocks.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 
 pub mod adaa;
 pub mod biquad;
 pub mod bypass;
+pub mod chorus;
 pub mod convolve;
 pub mod crossover;
 pub mod delta;
@@ -34,16 +38,21 @@ pub mod dynamics;
 pub mod envelope;
 pub mod limiter;
 pub mod filters;
+pub mod flanger;
+pub mod interp;
 pub mod gain_comp;
 pub mod gain_computer;
+pub mod lfo;
 pub mod linear_phase;
 pub mod loudness;
 pub mod matched;
 pub mod meter;
+pub mod moddelay;
 pub mod musical;
 pub mod oscillator;
 pub mod oversampling;
 pub mod partitioned;
+pub mod phaser;
 pub mod pcm;
 pub mod pitch;
 pub mod rate;
@@ -59,6 +68,7 @@ pub mod windows;
 pub use adaa::{Adaa2Taylor, ResidualAdaa1};
 pub use biquad::{Biquad, FilterType};
 pub use bypass::SoftBypass;
+pub use chorus::{Chorus, MAX_CHORUS_MS, MAX_CHORUS_VOICES};
 pub use convolve::BlockConvolver;
 pub use crossover::{Crossover, LinkwitzRiley, LrOrder, MAX_BANDS};
 pub use delta::Delta;
@@ -75,17 +85,22 @@ pub use filters::{
     Allpass1, Allpass2, Butterworth, ButterworthKind, DcBlocker, OnePoleFilter, OnePoleMode,
     MAX_BUTTERWORTH_ORDER,
 };
+pub use flanger::{Flanger, MAX_FLANGER_FEEDBACK, MAX_FLANGER_MS};
 pub use gain_comp::GainComp;
+pub use interp::{group_delay, phase_delay, Interpolation};
+pub use lfo::{Feel, Lfo, LfoRate, LfoShape, NoteDivision};
 pub use linear_phase::{LinearPhaseOversampler, OversampleError};
 pub use loudness::{KWeighting, Loudness, LoudnessMatch};
 pub use matched::{MatchedBiquad, MatchedKind};
 pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuMeter};
+pub use moddelay::{Glide, ModDelay};
 pub use musical::{
     ms_from_samples, ms_per_beat, samples_from_ms, samples_from_ticks, samples_per_beat,
 };
 pub use oscillator::{Oscillator, Wave};
 pub use oversampling::{OversampleFactor, Oversampler2x};
 pub use dither::{Dither, DitherKind, NoiseShaping};
+pub use phaser::{Phaser, MAX_PHASER_FEEDBACK, MAX_PHASER_STAGES};
 pub use partitioned::{ConvolutionIr, ConvolveError, ConvolverConfig, Layout, LongConvolver};
 pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to_f32, lerp};
 pub use pitch::{hz_from_midi, midi_from_hz};

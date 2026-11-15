@@ -179,6 +179,7 @@ name = "openplugin-dsp"
 version = "0.3.1-beta"
 dependencies = [
  "openplugin-core",
+ "openplugin-testing",
  "rustfft",
 ]
 

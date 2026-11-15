@@ -16,3 +16,6 @@ categories.workspace = true
 [dependencies]
 openplugin-core = { workspace = true }
 rustfft = { workspace = true }
+
+[dev-dependencies]
+openplugin-testing = { workspace = true }
