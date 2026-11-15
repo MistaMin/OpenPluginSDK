@@ -37,6 +37,8 @@ Formats and options
   --editor / --no-editor shells host the plugin's editor (default: off) [OP_EDITOR=1]
   --tail / --no-tail     shells report the plugin's tail (default: off) [OP_TAIL=1]
   --aax-pages            write an AAX page table into the AAX bundle   [OP_AAX_PAGES=1]
+  --pkg                  also wrap the bundles in an installer package,
+                         OUT/NAME-VERSION.pkg, by scripts/make_pkg.sh  [OP_PKG=1]
   --archs LIST           arm64, x86_64 or universal (default: the host's) [OP_ARCHS]
   --deployment-target V  macOS deployment target (default: 11.0)       [OP_DEPLOYMENT_TARGET]
 
@@ -54,6 +56,9 @@ Signing, all optional (environment only; nothing here is printed)
                          hardened runtime and a secure timestamp. Unset: ad-hoc.
   NOTARY_PROFILE         notarytool keychain profile. Set (needs CODESIGN_IDENTITY):
                          zip, submit, wait and staple each bundle.
+  INSTALLER_IDENTITY     "Developer ID Installer: ..." identity, for --pkg. Set:
+                         sign the installer packages. Unset: unsigned package.
+                         With NOTARY_PROFILE the package is notarised and stapled too.
   WRAPTOOL               path to PACE wraptool. Set, with PACE_ACCOUNT and
   PACE_WCGUID            (the iLok account and the wrap configuration GUID):
                          PACE-sign the AAX bundle (needs CODESIGN_IDENTITY).
@@ -74,6 +79,7 @@ AU_SUBTYPE="${OP_AU_SUBTYPE:-}"; AU_MANUFACTURER="${OP_AU_MANUFACTURER:-}"
 TTL_BIN="${OP_TTL_BIN:-}"; STANDALONE_BIN="${OP_STANDALONE_BIN:-}"; FEATURES="${OP_FEATURES:-}"
 FORMATS="${OP_FORMATS:-clap,lv2,vst3,au,aax}"
 EDITOR="${OP_EDITOR:-0}"; TAIL="${OP_TAIL:-0}"; AAX_PAGES="${OP_AAX_PAGES:-0}"
+PKG="${OP_PKG:-0}"
 ARCHS="${OP_ARCHS:-}"; DEPLOY="${OP_DEPLOYMENT_TARGET:-11.0}"
 VST3_SDK="${VST3_SDK:-}"; AU_SDK="${AU_SDK:-}"; AAX_SDK="${AAX_SDK:-}"
 OUT="${OP_OUT:-$PWD/dist}"; WORK="${OP_WORK_DIR:-$PWD/build/openplugin}"
@@ -102,6 +108,7 @@ while [ $# -gt 0 ]; do
     --tail) TAIL=1; shift ;;
     --no-tail) TAIL=0; shift ;;
     --aax-pages) AAX_PAGES=1; shift ;;
+    --pkg) PKG=1; shift ;;
     --archs) need "$@"; ARCHS="$2"; shift 2 ;;
     --deployment-target) need "$@"; DEPLOY="$2"; shift 2 ;;
     --vst3-sdk) need "$@"; VST3_SDK="$2"; shift 2 ;;
@@ -185,6 +192,9 @@ if has_format standalone && [ -z "$STANDALONE_BIN" ]; then die "standalone needs
 
 if [ -n "${NOTARY_PROFILE:-}" ] && [ -z "${CODESIGN_IDENTITY:-}" ]; then
   die "NOTARY_PROFILE needs CODESIGN_IDENTITY: Apple only notarises Developer ID signed code"
+fi
+if [ "$PKG" = 1 ] && [ -n "${NOTARY_PROFILE:-}" ] && [ -z "${INSTALLER_IDENTITY:-}" ]; then
+  die "--pkg with NOTARY_PROFILE needs INSTALLER_IDENTITY: Apple only notarises Developer ID signed packages"
 fi
 if [ -n "${WRAPTOOL:-}" ]; then
   if ! has_format aax; then echo "build_plugin: WRAPTOOL is set but aax is not built; ignoring it" >&2; fi
@@ -393,6 +403,16 @@ if [ -n "${NOTARY_PROFILE:-}" ]; then
       *) run xcrun stapler staple "$b" ;;
     esac
   done
+fi
+
+# ---------- installer package ----------
+if [ "$PKG" = 1 ]; then
+  note "installer package"
+  PKG_FORMATS="$FORMATS"
+  PKG_DRY=(); if [ "$DRY" = 1 ]; then PKG_DRY=(--dry-run); fi
+  run "$SDK_ROOT/scripts/make_pkg.sh" --bundles "$OUT" --name "$NAME" --lv2-stem "$STEM" \
+    --bundle-id "$BUNDLE_ID" --version "$VERSION" --formats "$PKG_FORMATS" \
+    --work-dir "$WORK/pkg" --out "$OUT/$NAME-$VERSION.pkg" ${PKG_DRY[@]+"${PKG_DRY[@]}"}
 fi
 
 # ---------- checks ----------
