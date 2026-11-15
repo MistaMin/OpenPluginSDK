@@ -64,7 +64,7 @@ static std::vector<float> shell_defaults() {
 static void check_parameters(IEditController* controller) {
     OpShellInfo info{};
     CHECK(op_shell_info(&info) != 0);
-    CHECK(info.abi == OP_SHELL_ABI);
+    CHECK(info.abi >= OP_SHELL_ABI && op_shell_abi_version() >= OP_SHELL_ABI);
     // The plugin's parameters, then the host bypass parameter.
     CHECK(controller->getParameterCount() == static_cast<int32>(info.param_count) + 1);
     for (uint32_t i = 0; i < info.param_count; ++i) {

@@ -184,6 +184,41 @@ if(OP_BUILD_VST3)
     target_link_libraries(VST3StateProof PRIVATE sdk "-framework CoreFoundation")
     add_dependencies(VST3StateProof OpenPluginVST3State)
     add_test(NAME vst3_state_proof COMMAND VST3StateProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3State>")
+    # ABI 2 events proof: the same shell over three stand-in plugins (native/vst3/events_stub.cpp):
+    # an effect with a sidechain and surround layouts, an instrument, and a note effect with no
+    # audio. The example has no notes, sidechain or surround layouts, so it cannot show those.
+    function(op_vst3_events_stub stub_variant stub_name stub_target)
+      set(OP_PRODUCT_SAVED "${OP_PRODUCT}")
+      set(OP_PRODUCT "${stub_name}")
+      configure_file(vst3/Info.plist.in "${CMAKE_BINARY_DIR}/${stub_target}-Info.plist" @ONLY)
+      set(OP_PRODUCT "${OP_PRODUCT_SAVED}")
+      add_library(${stub_target} MODULE
+        vst3/OpenPluginVST3.cpp
+        vst3/events_stub.cpp
+        "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
+      target_include_directories(${stub_target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+      target_compile_definitions(${stub_target} PRIVATE STUB_VARIANT=${stub_variant})
+      set_target_properties(${stub_target} PROPERTIES
+        OUTPUT_NAME "${stub_name}"
+        BUNDLE TRUE
+        BUNDLE_EXTENSION vst3
+        PREFIX ""
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/${stub_target}-Info.plist")
+      target_link_libraries(${stub_target} PRIVATE sdk "-framework CoreFoundation")
+    endfunction()
+    op_vst3_events_stub(0 "Events Stub" OpenPluginVST3Events)
+    op_vst3_events_stub(1 "Synth Stub" OpenPluginVST3Synth)
+    op_vst3_events_stub(2 "Note Stub" OpenPluginVST3Notes)
+    add_executable(VST3EventsProof vst3/events_host.cpp
+      "${OP_VST3_SDK}/public.sdk/source/common/memorystream.cpp"
+      "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp"
+      "${OP_VST3_SDK}/public.sdk/source/vst/hosting/eventlist.cpp")
+    target_include_directories(VST3EventsProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/vst3")
+    target_link_libraries(VST3EventsProof PRIVATE sdk "-framework CoreFoundation")
+    add_dependencies(VST3EventsProof OpenPluginVST3Events OpenPluginVST3Synth OpenPluginVST3Notes)
+    add_test(NAME vst3_noalloc_events_proof COMMAND VST3NoAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Events>")
+    add_dependencies(VST3NoAllocProof OpenPluginVST3Events)
+    add_test(NAME vst3_events_proof COMMAND VST3EventsProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Events>" "$<TARGET_BUNDLE_DIR:OpenPluginVST3Synth>" "$<TARGET_BUNDLE_DIR:OpenPluginVST3Notes>")
   endif()
   if(OP_EDITOR)
     # The editor in the VST3 shell. OP_EDITOR_PROOF_CLICK is "x;y;param":
