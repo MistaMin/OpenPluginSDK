@@ -47,6 +47,7 @@ use openplugin_core::{
 
 pub use openplugin_core::Plugin;
 
+pub mod block;
 pub mod shell;
 
 /// One parameter, the way a host builds its control.
@@ -116,6 +117,14 @@ struct Audio {
     side_channels: usize,
     max_block: usize,
     rate: f32,
+    /// Events of the block in flight, sorted by offset. Capacity fixed at creation.
+    events: Vec<block::OpEvent>,
+    /// MIDI the plugin produced in the last block. Capacity fixed at creation.
+    midi_out: Vec<block::OpMidiEvent>,
+    /// Entries of `midi_out` already handed to the host.
+    midi_read: usize,
+    /// Index into `supported_layouts` last selected.
+    layout_index: u32,
 }
 
 /// A tail in seconds: infinity for an endless tail, zero for none or unknown.
@@ -177,6 +186,8 @@ pub struct FfiInstance {
     state_lock: Mutex<()>,
     /// A `reset` that found the gate busy; the next block performs it.
     reset_pending: AtomicBool,
+    /// MIDI output events lost to a full buffer since the last read.
+    midi_dropped: AtomicU32,
 }
 
 unsafe impl Send for FfiInstance {}
@@ -226,6 +237,10 @@ impl FfiInstance {
                 side_channels,
                 max_block,
                 rate,
+                events: Vec::with_capacity(block::MAX_EVENTS),
+                midi_out: Vec::with_capacity(block::MAX_MIDI_OUT),
+                midi_read: 0,
+                layout_index: 0,
             }),
             plane,
             meters: Seqlock::new(MeterFrame::SILENT),
@@ -241,6 +256,7 @@ impl FfiInstance {
             gate: AtomicU32::new(0),
             state_lock: Mutex::new(()),
             reset_pending: AtomicBool::new(false),
+            midi_dropped: AtomicU32::new(0),
         }
     }
 
@@ -695,7 +711,7 @@ impl FfiInstance {
         true
     }
 
-    fn render(&self, audio: &mut Audio, channels: usize, frames: usize, with_sidechain: bool) {
+    fn apply_offline(&self, audio: &mut Audio) {
         let flag = self.offline.load(Ordering::Acquire);
         let offline = match flag {
             1 => Some(false),
@@ -717,8 +733,25 @@ impl FfiInstance {
                 audio.applied_offline = Some(offline);
             }
         }
+    }
+
+    fn publish(&self, audio: &mut Audio) {
+        let (latency, meters, bus) = (
+            audio.inner.latency(),
+            audio.inner.meters(),
+            audio.inner.bus_meters(),
+        );
+        let tail = tail_seconds_of(audio.inner.tail(), audio.rate);
+        self.tail.store(tail.to_bits(), Ordering::Release);
+        self.latency.store(latency as u32, Ordering::Release);
+        self.meters.publish(meters);
+        self.bus_meters.publish(bus);
+    }
+
+    fn render(&self, audio: &mut Audio, channels: usize, frames: usize, with_sidechain: bool) {
+        self.apply_offline(audio);
         audio.cursor.pull(&self.plane, audio.inner.as_mut());
-        let (latency, meters, bus) = {
+        {
             let Audio {
                 inner,
                 buffers,
@@ -731,13 +764,8 @@ impl FfiInstance {
                 None
             };
             inner.process_buses(&mut buffers[..channels], side, frames);
-            (inner.latency(), inner.meters(), inner.bus_meters())
-        };
-        let tail = tail_seconds_of(audio.inner.tail(), audio.rate);
-        self.tail.store(tail.to_bits(), Ordering::Release);
-        self.latency.store(latency as u32, Ordering::Release);
-        self.meters.publish(meters);
-        self.bus_meters.publish(bus);
+        }
+        self.publish(audio);
     }
 }
 

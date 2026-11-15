@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 1,
+    OP_SHELL_ABI = 2,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -74,6 +74,136 @@ uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, ui
 // parameter and no plugin state (a plugin whose load_state refuses a chunk
 // must itself have changed nothing).
 uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t length);
+// ---- ABI 2: events, transport, sidechain, MIDI out, layouts, kind --------
+//
+// Versioning: OP_SHELL_ABI is the version of this header. op_shell_abi_version()
+// is the version of the library. A version only ever adds functions, enum
+// values and struct fields at the end; nothing is removed or changed. A shell
+// compiled against OP_SHELL_ABI = N works with a library of version >= N and
+// must refuse one below N. A change that cannot be additive gets new symbol
+// names instead. Channel order on every bus is the SDK's canonical order (the
+// CLAP surround ids); the shell reorders from the host's order.
+uint32_t op_shell_abi_version(void);
+
+enum {
+    OP_KIND_EFFECT = 0,
+    OP_KIND_INSTRUMENT = 1,
+    OP_KIND_NOTE_EFFECT = 2,
+    OP_NOTE_PORT_INPUT = 1,
+    OP_NOTE_PORT_OUTPUT = 2
+};
+// Plugin kind (OP_KIND_*) and note ports (OP_NOTE_PORT_* bits). No instance needed.
+uint32_t op_shell_kind(void);
+uint32_t op_shell_note_ports(void);
+
+enum {
+    OP_EVENT_NOTE_ON = 1,
+    OP_EVENT_NOTE_OFF = 2,
+    OP_EVENT_MIDI = 3,
+    OP_EVENT_PARAM_PLAIN = 4,
+    OP_EVENT_PARAM_NORMALIZED = 5,
+    OP_MAX_EVENTS = 1024,
+    OP_MAX_MIDI_OUT = 1024,
+    OP_MAX_CHANNELS = 64
+};
+typedef struct OpEvent {
+    uint32_t offset;     // sample offset in the block, < frames
+    uint32_t kind;       // OP_EVENT_*
+    uint32_t index;      // parameter index (parameter kinds)
+    float value;         // plain or normalized value (parameter kinds)
+    uint8_t channel;     // MIDI channel 0..15 (note kinds)
+    uint8_t note;        // 0..127
+    uint8_t velocity;    // 0..127
+    uint8_t reserved;
+    uint8_t midi[4];     // status + 2 data bytes (OP_EVENT_MIDI)
+} OpEvent;
+typedef struct OpMidiEvent {
+    uint32_t offset;     // sample offset in the block just processed
+    uint8_t data[4];     // 3 MIDI bytes + 0
+} OpMidiEvent;
+
+enum {
+    OP_TRANSPORT_PLAYING = 1,
+    OP_TRANSPORT_RECORDING = 2,
+    OP_TRANSPORT_HAS_TEMPO = 4,
+    OP_TRANSPORT_HAS_SIGNATURE = 8,
+    OP_TRANSPORT_HAS_BEATS = 16,     // quarter_notes, bar_start, bar_number
+    OP_TRANSPORT_HAS_SECONDS = 32
+};
+typedef struct OpTransport {
+    uint32_t flags;
+    uint32_t numerator;
+    uint32_t denominator;
+    uint32_t reserved;
+    double tempo;
+    int64_t sample_pos;
+    double seconds;
+    double quarter_notes;
+    double bar_start;
+    int64_t bar_number;
+} OpTransport;
+
+typedef struct OpProcess {
+    uint32_t struct_size;            // sizeof(OpProcess)
+    uint32_t frames;
+    const float* const* inputs;      // input_channels pointers; NULL when 0 (instrument)
+    uint32_t input_channels;
+    uint32_t output_channels;
+    float* const* outputs;           // output_channels pointers
+    const float* const* sidechain;   // NULL and 0 for none
+    uint32_t sidechain_channels;
+    uint32_t event_count;
+    const OpEvent* events;           // any order; at most OP_MAX_EVENTS
+    const OpTransport* transport;    // NULL keeps the previous transport
+} OpProcess;
+
+// Audio thread. No allocation. Returns 1, or 0 when refused (struct too small,
+// a NULL array with a non-zero count, too many events or channels, a block
+// longer than the size given to op_shell_create); a refused block touches
+// nothing. An event with offset >= frames, an unknown kind or an invalid value
+// is skipped. Events are applied sample-accurately: the block is cut at each
+// distinct offset. Inputs may alias outputs. One input channel feeds a wider
+// engine bus on every channel. A block that starts during a state call is
+// passed through dry and returns 1.
+uint32_t op_shell_process_events(void* instance, const OpProcess* args);
+
+// MIDI the plugin produced in the last block, after op_shell_process_events,
+// on the same thread. Copies up to `capacity` events to `out` and returns the
+// count; call again for the rest. The next block clears what was not read.
+// No allocation. op_shell_midi_dropped returns the events lost to a full
+// buffer (OP_MAX_MIDI_OUT per block) since its last call.
+uint32_t op_shell_midi_out(void* instance, OpMidiEvent* out, uint32_t capacity);
+uint32_t op_shell_midi_dropped(const void* instance);
+
+// Layouts. Queries need no instance. A bus is absent (kind 0, 0 channels) or has
+// a kind, a channel count and roles[i]: the CLAP surround id of channel i in the
+// canonical order (0xFF: none, as for mono, ambisonic, discrete and channels
+// past 16).
+enum {
+    OP_BUS_ABSENT = 0, OP_BUS_MONO = 1, OP_BUS_STEREO = 2,
+    OP_BUS_SURROUND = 3, OP_BUS_AMBISONIC = 4, OP_BUS_DISCRETE = 5,
+    OP_ROLE_NONE = 0xFF, OP_ROLE_SLOTS = 16
+};
+typedef struct OpBus {
+    uint32_t kind;
+    uint32_t channels;
+    uint8_t roles[OP_ROLE_SLOTS];
+} OpBus;
+typedef struct OpLayout {
+    OpBus input;
+    OpBus output;
+    OpBus sidechain;
+    char name[64];
+} OpLayout;
+uint32_t op_shell_layout_count(void);
+uint32_t op_shell_layout(uint32_t index, OpLayout* out);
+// Select a layout before the first block (allocates; main thread). Returns 1 or 0.
+uint32_t op_shell_set_layout(void* instance, uint32_t index);
+uint32_t op_shell_layout_selected(void* instance);
+
+// Offline (bounce) rendering; takes effect at the next block.
+void op_shell_set_offline(void* instance, uint32_t offline);
+
 #if OP_HAS_TAIL
 // Optional, with -DOP_TAIL=ON: how long the output rings after the input
 // stops, in seconds. Infinity means it never ends. Safe to call from any
