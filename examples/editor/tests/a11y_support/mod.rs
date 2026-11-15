@@ -223,3 +223,137 @@ pub fn near(a: CGRect, b: CGRect) -> bool {
     let d = |x: f64, y: f64| (x - y).abs() < 0.51;
     d(a.origin.x, b.origin.x) && d(a.origin.y, b.origin.y) && d(a.size.w, b.size.w) && d(a.size.h, b.size.h)
 }
+
+// ---- Typing, tooltips and files -------------------------------------------
+
+#[link(name = "objc")]
+unsafe extern "C" {
+    fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
+    fn class_addMethod(cls: Id, sel: Sel, imp: *const c_void, types: *const c_char) -> i8;
+    fn objc_registerClassPair(cls: Id);
+}
+
+impl Rig {
+    /// The view's size in points (the window is as big).
+    pub unsafe fn view_height(&self) -> f64 { unsafe { rect_of(self.raw(), c"bounds").size.h }}
+
+    /// A mouse down and up at editor point (x, y), as events through `mouseDown:` and `mouseUp:`.
+    pub unsafe fn click(&self, x: f32, y: f32, clicks: isize, flags: usize) { unsafe {
+        let at = CGPoint { x: f64::from(x), y: self.view_height() - f64::from(y) };
+        let number = send!(isize, self.window, c"windowNumber");
+        for (kind, name) in [(1usize, c"mouseDown:"), (2usize, c"mouseUp:")] {
+            let event = send!(
+                Id,
+                class(c"NSEvent"),
+                c"mouseEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:clickCount:pressure:",
+                usize = kind,
+                CGPoint = at,
+                usize = flags,
+                f64 = 0.0,
+                isize = number,
+                Id = std::ptr::null_mut(),
+                isize = 0,
+                isize = clicks,
+                f32 = 1.0
+            );
+            assert!(!event.is_null());
+            send!((), self.raw(), name, Id = event);
+        }
+    }}
+
+    /// A key down and up through `keyDown:` and `keyUp:`.
+    pub unsafe fn key(&self, code: u16, chars: &CStr, flags: usize) { unsafe {
+        let number = send!(isize, self.window, c"windowNumber");
+        for (kind, name) in [(10usize, c"keyDown:"), (11usize, c"keyUp:")] {
+            let event = send!(
+                Id,
+                class(c"NSEvent"),
+                c"keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:",
+                usize = kind,
+                CGPoint = CGPoint { x: 0.0, y: 0.0 },
+                usize = flags,
+                f64 = 0.0,
+                isize = number,
+                Id = std::ptr::null_mut(),
+                Id = ns_string(chars),
+                Id = ns_string(chars),
+                i8 = 0,
+                u16 = code
+            );
+            assert!(!event.is_null());
+            send!((), self.raw(), name, Id = event);
+        }
+    }}
+
+    /// The text field's string, or `<none>`.
+    pub unsafe fn field_text(&self) -> String { unsafe {
+        match self.view.as_ref().and_then(|v| v.text_field()) {
+            Some(f) => text(send!(Id, f, c"stringValue")),
+            None => "<none>".into(),
+        }
+    }}
+
+    pub unsafe fn set_field_text(&self, t: &CStr) { unsafe {
+        let f = self.view.as_ref().and_then(|v| v.text_field()).expect("a text field");
+        send!((), f, c"setStringValue:", Id = ns_string(t));
+    }}
+
+    pub fn has_field(&self) -> bool {
+        self.view.as_ref().is_some_and(|v| v.text_field().is_some())
+    }
+
+    /// The field editor's command (`insertNewline:`, `cancelOperation:`) as the
+    /// text field's delegate (the view) hears it. Returns whether it was taken.
+    pub unsafe fn field_command(&self, name: &CStr) -> bool { unsafe {
+        let f: unsafe extern "C" fn(Id, Sel, Id, Id, Sel) -> i8 = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+        f(self.raw(), sel(c"control:textView:doCommandBySelector:"), std::ptr::null_mut(), std::ptr::null_mut(), sel(name)) != 0
+    }}
+
+    /// The field lost focus.
+    pub unsafe fn field_end_editing(&self) { unsafe {
+        send!((), self.raw(), c"controlTextDidEndEditing:", Id = std::ptr::null_mut());
+    }}
+}
+
+thread_local! {
+    static DRAG: std::cell::Cell<(Id, CGPoint)> = const { std::cell::Cell::new((std::ptr::null_mut(), CGPoint { x: 0.0, y: 0.0 })) };
+}
+
+extern "C" fn drag_pasteboard(_this: Id, _cmd: Sel) -> Id {
+    DRAG.with(|d| d.get().0)
+}
+
+extern "C" fn drag_location(_this: Id, _cmd: Sel) -> CGPoint {
+    DRAG.with(|d| d.get().1)
+}
+
+/// A stand-in for the `NSDraggingInfo` AppKit passes: a pasteboard holding file
+/// URLs, and a place in window coordinates.
+pub unsafe fn dragging_info(paths: &[&CStr], window_point: CGPoint) -> Id { unsafe {
+    let name = c"OpenPluginTestDraggingInfo";
+    let mut cls = objc_getClass(name.as_ptr());
+    if cls.is_null() {
+        cls = objc_allocateClassPair(class(c"NSObject"), name.as_ptr(), 0);
+        class_addMethod(cls, sel(c"draggingPasteboard"), drag_pasteboard as *const c_void, c"@@:".as_ptr());
+        class_addMethod(cls, sel(c"draggingLocation"), drag_location as *const c_void, c"{CGPoint=dd}@:".as_ptr());
+        objc_registerClassPair(cls);
+    }
+    let pasteboard = send!(Id, class(c"NSPasteboard"), c"pasteboardWithUniqueName");
+    send!(isize, pasteboard, c"clearContents");
+    let urls: Vec<Id> = paths.iter().map(|p| send!(Id, class(c"NSURL"), c"fileURLWithPath:", Id = ns_string(p))).collect();
+    let array = send!(Id, class(c"NSArray"), c"arrayWithObjects:count:", *const Id = urls.as_ptr(), usize = urls.len());
+    assert!(send!(i8, pasteboard, c"writeObjects:", Id = array) != 0);
+    DRAG.with(|d| d.set((pasteboard, window_point)));
+    send!(Id, send!(Id, cls, c"alloc"), c"init")
+}}
+
+/// Send a drag message (`draggingEntered:` and the like) that returns an operation.
+pub unsafe fn drag_op(view: Id, name: &CStr, info: Id) -> usize { unsafe { send!(usize, view, name, Id = info) }}
+pub unsafe fn drag_bool(view: Id, name: &CStr, info: Id) -> bool { unsafe { send!(i8, view, name, Id = info) != 0 }}
+
+/// Read a property of an object as text: `message` of a panel.
+pub unsafe fn string_of(obj: Id, name: &CStr) -> String { unsafe { text(send!(Id, obj, name)) }}
+pub unsafe fn count_of(array: Id) -> usize { unsafe { if array.is_null() { 0 } else { send!(usize, array, c"count") } }}
+pub unsafe fn id_of(obj: Id, name: &CStr) -> Id { unsafe { send!(Id, obj, name) }}
+pub unsafe fn bool_of(obj: Id, name: &CStr) -> bool { unsafe { send!(i8, obj, name) != 0 }}
+pub unsafe fn array_item(array: Id, i: usize) -> Id { unsafe { send!(Id, array, c"objectAtIndex:", usize = i) }}

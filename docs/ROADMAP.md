@@ -122,6 +122,8 @@ Status: task 3 is done, including LV2: `openplugin_core::worker` (proven allocat
 
 Status: task 5 is done (`Editor::accessibility_nodes`, `accessibility_action` and `accessibility_focus`; `ControlSet` and `DesignEditor` provide them automatically; the Cocoa view exposes `NSAccessibilityElement` children with name, value, role and screen frame, increment, decrement and press as mouse-equivalent gestures, focus following and value-changed notifications; proven by the `a11y` main-thread tests; speech by VoiceOver itself is not verified headlessly).
 
+Status: task 6 is done (`Editor::take_text_edit`, `text_edit_commit`, `text_edit_cancel`, `tooltips`, `wants_drops`, `accepts_drop`, `files_dropped`, `take_file_dialog`, `file_dialog_done`; double-click types a value and Option-double-click resets, configurable; proven by the `typing` main-thread tests of both editor examples; the real sheet, tooltip bubble and drag cursor are not verified headlessly).
+
 Then **0.7.0**.
 
 ## 1.0: stable and publishable on macOS

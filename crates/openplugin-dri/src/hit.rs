@@ -23,7 +23,18 @@
 //!   length, so the cap follows the pointer. While a fine modifier is held
 //!   ([`Modifiers::fine`]) travel counts a tenth as much. Changing the
 //!   modifier mid-drag does not jump the value.
-//! * A double-click on a knob or fader sets the default in one gesture.
+//! * A double-click on a knob or fader does what [`ControlSet::set_double_click`]
+//!   says: by default ([`DoubleClick::EditText`]) it asks the view for a text
+//!   field over the control; with [`DoubleClick::Reset`] it sets the default in
+//!   one gesture. Holding Option (Alt) turns it into the other one. Return on a
+//!   focused knob, fader or key bank opens the field too.
+//! * Typing a value: [`ControlSet::take_text_edit`] hands out the request (the
+//!   control's area and `ParamInfo::format` of its value), and
+//!   [`ControlSet::text_edit_commit`] reads the text with `ParamInfo::parse` and
+//!   sends one whole begin, perform, end. Text that does not parse changes
+//!   nothing and is refused (the view keeps the field open).
+//! * Tooltips: [`ControlSet::tooltips`] lists every control's rectangle with
+//!   "Name: value" (or the text of [`Control::tooltip`]).
 //! * The wheel steps a continuous control by [`WHEEL_STEP`] of its range per
 //!   unit (a tenth of that when fine) and a stepped control by one position
 //!   per whole unit of accumulated scroll.
@@ -55,7 +66,7 @@
 //!   [`ControlSet::take_changed`] lists the controls whose look changed since
 //!   the last call, so an editor repaints only those ([`openplugin_core::Editor::damage`]).
 
-use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, DamageRect};
+use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, DamageRect, TextEdit, Tooltip};
 use openplugin_core::{EditorHost, ParamFlags, ParamInfo, Unit};
 
 pub use openplugin_core::editor::{Key, Modifiers};
@@ -146,6 +157,20 @@ pub enum ControlKind {
     KeyBank { vertical: bool },
 }
 
+/// What a double-click on a knob or fader does (see [`ControlSet::set_double_click`]).
+///
+/// The default is [`Self::EditText`]: typing a value is what a double-click
+/// means in most plugins, and the default value stays one gesture away
+/// (Option-double-click, or Delete or Backspace on the focused control).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DoubleClick {
+    /// Open a text field over the control. Option held: reset to the default.
+    #[default]
+    EditText,
+    /// Reset to the default in one gesture. Option held: open the text field.
+    Reset,
+}
+
 /// Index of a control in its [`ControlSet`], in the order they were added.
 pub type ControlId = usize;
 
@@ -162,6 +187,7 @@ pub struct Control {
     pressed: bool,
     focused: bool,
     drag_range: f32,
+    tip: Option<String>,
     /// The look last reported by [`ControlSet::take_changed`].
     seen: Option<Look>,
 }
@@ -177,7 +203,7 @@ struct Look {
 
 impl Control {
     fn new(kind: ControlKind, area: Area, param: usize, info: &'static ParamInfo) -> Self {
-        Self { area, kind, param, info, value: info.clamp(info.default), hover: false, pressed: false, focused: false, drag_range: 0.0, seen: None }
+        Self { area, kind, param, info, value: info.clamp(info.default), hover: false, pressed: false, focused: false, drag_range: 0.0, tip: None, seen: None }
     }
 
     pub fn knob(area: Area, param: usize, info: &'static ParamInfo) -> Self {
@@ -205,6 +231,12 @@ impl Control {
         if points.is_finite() && points > 0.0 {
             self.drag_range = points;
         }
+        self
+    }
+
+    /// A tooltip of your own for this control, instead of "Name: value".
+    pub fn tooltip(mut self, text: impl Into<String>) -> Self {
+        self.tip = Some(text.into());
         self
     }
 
@@ -304,6 +336,11 @@ pub struct ControlSet {
     modifiers: Modifiers,
     wheel_acc: f32,
     wheel_id: Option<ControlId>,
+    double_click: DoubleClick,
+    /// The control a text field is open for.
+    editing: Option<ControlId>,
+    /// A request for a field the view has not taken yet.
+    pending_edit: Option<TextEdit>,
 }
 
 impl ControlSet {
@@ -319,7 +356,83 @@ impl ControlSet {
             modifiers: Modifiers::NONE,
             wheel_acc: 0.0,
             wheel_id: None,
+            double_click: DoubleClick::default(),
+            editing: None,
+            pending_edit: None,
         }
+    }
+
+    /// What a double-click on a knob or fader does. See [`DoubleClick`].
+    pub fn set_double_click(&mut self, action: DoubleClick) {
+        self.double_click = action;
+    }
+
+    /// Builder form of [`Self::set_double_click`].
+    pub fn with_double_click(mut self, action: DoubleClick) -> Self {
+        self.double_click = action;
+        self
+    }
+
+    pub fn double_click(&self) -> DoubleClick {
+        self.double_click
+    }
+
+    /// The control a text field is open for.
+    pub fn editing(&self) -> Option<ControlId> {
+        self.editing
+    }
+
+    /// Ask for a text field over control `id`, prefilled with its formatted
+    /// value. False for a control that does not exist, is read-only, or is a
+    /// toggle or button (they have nothing to type).
+    pub fn begin_text_edit(&mut self, id: ControlId) -> bool {
+        let Some(c) = self.controls.get(id) else { return false };
+        if !c.interactive() || matches!(c.kind, ControlKind::Toggle | ControlKind::Button) {
+            return false;
+        }
+        self.pending_edit = Some(TextEdit { rect: DamageRect::from_tuple(c.area.bounds()), text: c.info.format(c.value), label: c.info.name.to_string() });
+        self.editing = Some(id);
+        true
+    }
+
+    /// The request made by [`Self::begin_text_edit`], once.
+    /// [`openplugin_core::Editor::take_text_edit`] forwards here.
+    pub fn take_text_edit(&mut self) -> Option<TextEdit> {
+        self.pending_edit.take()
+    }
+
+    /// The field's text arrived (Return). It is read with `ParamInfo::parse`
+    /// and clamped; the control takes it and the host gets begin, perform, end
+    /// in one go. False, with nothing sent and the edit still open, when the
+    /// text is not a value (or no edit is open).
+    pub fn text_edit_commit(&mut self, text: &str) -> bool {
+        let Some(id) = self.editing else { return false };
+        let (param, info) = (self.controls[id].param, self.controls[id].info);
+        let Some(v) = info.parse(text).filter(|v| v.is_finite()) else { return false };
+        let v = info.clamp(v);
+        self.controls[id].value = v;
+        self.editing = None;
+        self.host.set(param, v);
+        true
+    }
+
+    /// The field closed without a value.
+    pub fn text_edit_cancel(&mut self) {
+        self.editing = None;
+        self.pending_edit = None;
+    }
+
+    /// One tooltip per control, in the order they were added (a tooltip's
+    /// index is its [`ControlId`]): the control's area and "Name: value", or
+    /// the text given with [`Control::tooltip`].
+    pub fn tooltips(&self) -> Vec<Tooltip> {
+        self.controls
+            .iter()
+            .map(|c| Tooltip {
+                rect: DamageRect::from_tuple(c.area.bounds()),
+                text: c.tip.clone().unwrap_or_else(|| format!("{}: {}", c.info.name, c.info.format(c.value))),
+            })
+            .collect()
     }
 
     /// Add a control. A later one is on top where areas overlap.
@@ -429,6 +542,12 @@ impl ControlSet {
         match kind {
             ControlKind::Knob | ControlKind::FaderV | ControlKind::FaderH => {
                 if clicks >= 2 {
+                    let edit = (self.double_click == DoubleClick::EditText) != self.modifiers.alt;
+                    if edit {
+                        self.set_hover(Some(id));
+                        self.begin_text_edit(id);
+                        return;
+                    }
                     let d = info.clamp(info.default);
                     self.controls[id].value = d;
                     self.host.set(param, d);
@@ -712,6 +831,7 @@ impl ControlSet {
                 self.focus.is_some_and(|id| self.step_key(id, key, modifiers.fine()))
             }
             Key::Home | Key::End => plain && self.focus.is_some_and(|id| self.jump_key(id, key == Key::End)),
+            Key::Return if plain && self.focus.is_some_and(|id| self.begin_text_edit(id)) => true,
             Key::Return | Key::Space => plain && self.focus.is_some_and(|id| self.press_key(id, key)),
             Key::Delete | Key::Backspace => plain && self.focus.is_some_and(|id| self.reset_key(id)),
             Key::Char(_) => false,
@@ -934,6 +1054,7 @@ mod tests {
     #[test]
     fn double_click_resets_to_default() {
         let (mut set, log) = knob_rig();
+        set.set_double_click(DoubleClick::Reset);
         set.param_changed(0, 10.0);
         set.mouse_down(30.0, 30.0, 2);
         set.mouse_up(30.0, 30.0);
@@ -1406,9 +1527,9 @@ mod tests {
         take(&log);
         assert!(set.key_down(Key::Tab, NO));
         assert_eq!(take(&log), vec![Perform(7, 0.0), End(7)]);
-        // Return and Space mean nothing to a knob or a key bank.
+        // Space means nothing to a knob or a key bank (Return opens the text field).
         focus(&mut set, 0);
-        assert!(!set.key_down(Key::Return, NO));
+        assert!(!set.key_down(Key::Space, NO));
         focus(&mut set, 3);
         assert!(!set.key_down(Key::Space, NO));
         assert!(take(&log).is_empty());
@@ -1654,5 +1775,112 @@ mod tests {
         set.mouse_up(30.0, 30.0);
         assert!(set.accessibility_focus(4) && set.focused() == Some(4));
         assert!(!set.accessibility_focus(2));
+    }
+
+    #[test]
+    fn double_click_opens_the_text_field_by_default_and_option_resets() {
+        let (mut set, log) = knob_rig();
+        assert_eq!(set.double_click(), DoubleClick::EditText);
+        set.param_changed(0, 10.0);
+        set.mouse_down(30.0, 30.0, 2);
+        set.mouse_up(30.0, 30.0);
+        assert!(take(&log).is_empty(), "opening the field sends nothing");
+        let edit = set.take_text_edit().expect("a request");
+        assert_eq!((edit.text.as_str(), edit.label.as_str()), ("10.0 dB", "Gain"));
+        assert_eq!(edit.rect, DamageRect::new(0.0, 0.0, 60.0, 60.0));
+        assert!(set.take_text_edit().is_none(), "once");
+        assert_eq!(set.editing(), Some(0));
+        set.text_edit_cancel();
+        // Option-double-click resets, as a whole gesture.
+        set.set_modifiers(Modifiers { alt: true, ..Modifiers::NONE });
+        set.mouse_down(30.0, 30.0, 2);
+        set.mouse_up(30.0, 30.0);
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, 0.0), End(0)]);
+        assert!(set.take_text_edit().is_none());
+        // With Reset configured it is the other way round.
+        set.set_modifiers(Modifiers::NONE);
+        set.set_double_click(DoubleClick::Reset);
+        set.mouse_down(30.0, 30.0, 2);
+        set.mouse_up(30.0, 30.0);
+        assert!(take(&log).len() == 3 && set.take_text_edit().is_none());
+        set.set_modifiers(Modifiers { alt: true, ..Modifiers::NONE });
+        set.mouse_down(30.0, 30.0, 2);
+        set.mouse_up(30.0, 30.0);
+        assert!(set.take_text_edit().is_some() && take(&log).is_empty());
+    }
+
+    #[test]
+    fn return_opens_the_field_on_sliders_and_still_flips_toggles() {
+        let (mut set, log) = key_rig();
+        focus(&mut set, 0);
+        assert!(set.key_down(Key::Return, Modifiers::NONE));
+        assert!(set.key_up(Key::Return, Modifiers::NONE));
+        assert_eq!(set.take_text_edit().map(|e| e.text), Some("0.0 dB".to_string()));
+        set.text_edit_cancel();
+        focus(&mut set, 3); // key bank: the choice's name
+        assert!(set.key_down(Key::Return, Modifiers::NONE));
+        assert_eq!(set.take_text_edit().map(|e| e.text), Some("B".to_string()));
+        set.text_edit_cancel();
+        focus(&mut set, 1);
+        assert!(set.key_down(Key::Return, Modifiers::NONE));
+        assert!(set.take_text_edit().is_none());
+        assert_eq!(take(&log), vec![Begin(1), Perform(1, 1.0), End(1)]);
+    }
+
+    #[test]
+    fn committing_text_parses_clamps_and_sends_one_gesture() {
+        let (mut set, log) = knob_rig();
+        assert!(!set.text_edit_commit("3"), "no edit is open");
+        set.mouse_down(30.0, 30.0, 2);
+        set.mouse_up(30.0, 30.0);
+        assert!(set.text_edit_commit("-6 dB"));
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, -6.0), End(0)]);
+        assert_eq!(set.get(0).unwrap().value(), -6.0);
+        assert_eq!(set.editing(), None);
+        // Out of range text is clamped, like every value.
+        set.begin_text_edit(0);
+        assert!(set.text_edit_commit("99"));
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, 24.0), End(0)]);
+    }
+
+    #[test]
+    fn invalid_text_is_refused_and_keeps_the_edit_open() {
+        let (mut set, log) = knob_rig();
+        set.begin_text_edit(0);
+        for bad in ["", "abc", "12 parsecs", "nan"] {
+            assert!(!set.text_edit_commit(bad), "{bad:?}");
+        }
+        assert!(take(&log).is_empty());
+        assert_eq!(set.editing(), Some(0));
+        assert!(set.text_edit_commit("1"));
+        // Cancel sends nothing and ends it.
+        set.begin_text_edit(0);
+        take(&log);
+        set.text_edit_cancel();
+        assert!(take(&log).is_empty() && set.editing().is_none() && !set.text_edit_commit("2"));
+    }
+
+    #[test]
+    fn nothing_to_type_for_toggles_buttons_and_read_only_controls() {
+        let (mut set, _log) = key_rig();
+        for id in [1, 2, 5] {
+            assert!(!set.begin_text_edit(id), "{id}");
+        }
+        assert!(!set.begin_text_edit(99));
+        assert!(set.take_text_edit().is_none());
+    }
+
+    #[test]
+    fn tooltips_name_the_parameter_and_follow_the_value() {
+        let (mut set, _log) = key_rig();
+        set.add(Control::knob(Area::rect(0.0, 200.0, 40.0, 40.0), 0, &GAIN).tooltip("Input level"));
+        let tips = set.tooltips();
+        assert_eq!(tips.len(), set.len());
+        assert_eq!((tips[0].text.as_str(), tips[0].rect), ("Gain: 0.0 dB", DamageRect::new(0.0, 0.0, 60.0, 60.0)));
+        assert_eq!(tips[1].text, "Warm: Off");
+        assert_eq!(tips[3].text, "Mode: B");
+        assert_eq!(tips[7].text, "Input level");
+        set.param_changed(0, -6.0);
+        assert_eq!(set.tooltips()[0].text, "Gain: -6.0 dB");
     }
 }

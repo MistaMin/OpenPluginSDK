@@ -61,7 +61,7 @@ use goodlookindri::design::{self, Item};
 use goodlookindri::host::map_rect;
 use goodlookindri::scene::{Point, Rect, Scene};
 use goodlookindri::{meters, switches};
-use openplugin_core::editor::{DamageRect, DamageTracker, Key, Modifiers};
+use openplugin_core::editor::{DamageRect, DamageTracker, Key, Modifiers, TextEdit, Tooltip};
 use openplugin_core::{Editor, EditorHost, Frame, PluginInfo, Unit};
 
 use crate::canvas::DrawList;
@@ -410,6 +410,11 @@ impl DesignEditor {
     }
 
     /// The controls, with their hit areas and current values.
+    /// What a double-click on a knob or fader does (see [`crate::hit::DoubleClick`]).
+    pub fn set_double_click(&mut self, action: crate::hit::DoubleClick) {
+        self.controls.set_double_click(action);
+    }
+
     pub fn controls(&self) -> &ControlSet {
         &self.controls
     }
@@ -626,6 +631,22 @@ impl Editor for DesignEditor {
     fn wheel(&mut self, x: f32, y: f32, dy: f32) {
         self.controls.wheel(x, y, dy);
     }
+
+    fn take_text_edit(&mut self) -> Option<TextEdit> {
+        self.controls.take_text_edit()
+    }
+
+    fn text_edit_commit(&mut self, text: &str) -> bool {
+        self.controls.text_edit_commit(text)
+    }
+
+    fn text_edit_cancel(&mut self) {
+        self.controls.text_edit_cancel();
+    }
+
+    fn tooltips(&self) -> Vec<Tooltip> {
+        self.controls.tooltips()
+    }
 }
 
 #[cfg(test)]
@@ -784,8 +805,20 @@ mod tests {
         e.param_changed(0, -6.0);
         assert_eq!(e.control_for("gain").unwrap().value(), -6.0);
         assert!(take(&log).is_empty());
-        // Double-click resets.
+        // Double-click opens the text field; typing commits through parse.
         let (x, y) = centre(&e, "gain");
+        e.mouse_down(x, y, 2);
+        e.mouse_up(x, y);
+        assert!(take(&log).is_empty());
+        let edit = e.take_text_edit().expect("text field request");
+        assert_eq!((edit.text.as_str(), edit.label.as_str()), ("-6.0 dB", "Gain"));
+        assert!(!e.text_edit_commit("nonsense"));
+        assert!(e.text_edit_commit("3 dB"));
+        assert_eq!(take(&log), vec![Gesture::Begin(0), Gesture::Perform(0, 3.0), Gesture::End(0)]);
+        assert_eq!(e.tooltips().len(), e.controls().len());
+        assert_eq!(e.tooltips()[0].text, "Gain: 3.0 dB");
+        // Option-double-click resets.
+        e.modifiers_changed(Modifiers { alt: true, ..Modifiers::NONE });
         e.mouse_down(x, y, 2);
         e.mouse_up(x, y);
         assert_eq!(take(&log), vec![Gesture::Begin(0), Gesture::Perform(0, 0.0), Gesture::End(0)]);
