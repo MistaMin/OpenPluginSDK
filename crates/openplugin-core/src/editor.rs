@@ -27,6 +27,7 @@
 //! the macOS view in `openplugin-dri` blits.
 
 use std::any::Any;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -411,6 +412,41 @@ pub struct AccessNode {
     pub enabled: bool,
 }
 
+/// A small native text field the editor asks the view to open over a control
+/// (see [`Editor::take_text_edit`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextEdit {
+    /// The control the field covers, in editor points, origin top left.
+    pub rect: DamageRect,
+    /// What the field starts with (`ParamInfo::format` of the value).
+    pub text: String,
+    /// The name a screen reader gives the field (the parameter's name).
+    pub label: String,
+}
+
+/// A tooltip for a place in the editor (see [`Editor::tooltips`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tooltip {
+    /// Where the pointer must rest, in editor points, origin top left.
+    pub rect: DamageRect,
+    /// The text shown. The view asks for it again whenever it shows the tip.
+    pub text: String,
+}
+
+/// A request for an open-file dialog (see [`Editor::take_file_dialog`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileDialog {
+    /// The editor's own number for this request, handed back with the answer.
+    pub tag: u32,
+    /// The message shown in the dialog. Empty for none.
+    pub title: String,
+    /// File name extensions that can be chosen, without the dot, any case.
+    /// Empty allows every file.
+    pub extensions: Vec<String>,
+    /// More than one file may be chosen.
+    pub multiple: bool,
+}
+
 /// The plugin's editor. Main thread only; it is never sent to another thread.
 pub trait Editor {
     /// The current size in points (logical pixels). A fixed editor never
@@ -513,6 +549,69 @@ pub trait Editor {
     fn accessibility_focus(&mut self, _node: usize) -> bool {
         false
     }
+
+    /// The editor wants the view to open a native text field. Called after
+    /// every input call and tick; return the request once and `None` after.
+    /// The view shows a field over [`TextEdit::rect`] with the text selected.
+    /// Return commits it through [`Self::text_edit_commit`]; Escape, or the
+    /// field losing focus, calls [`Self::text_edit_cancel`]. While the field
+    /// is open every key goes to it and none reaches the editor or the host.
+    /// The default never asks.
+    fn take_text_edit(&mut self) -> Option<TextEdit> {
+        None
+    }
+
+    /// The user pressed Return in the field. Parse `text`, send the gestures
+    /// through the [`EditorHost`] and return true. Return false for text that
+    /// is not a value: the field stays open, turns red and the system beeps.
+    fn text_edit_commit(&mut self, _text: &str) -> bool {
+        false
+    }
+
+    /// The field closed without a commit (Escape, focus lost, a click
+    /// elsewhere, a resize). No gesture is sent.
+    fn text_edit_cancel(&mut self) {}
+
+    /// The places that show a tooltip. The view keeps one tooltip rectangle
+    /// per entry (empty and non-finite rectangles are skipped) and moves them
+    /// with the layout: they are compared after every tick and input call.
+    /// The text is read again each time a tip is about to show, so a value
+    /// that changed since is current. The default is none.
+    fn tooltips(&self) -> Vec<Tooltip> {
+        Vec::new()
+    }
+
+    /// Whether the editor ever accepts dropped files. Asked when the view is
+    /// made and on every tick; only a view whose editor says yes registers as
+    /// a drag destination, so an editor that says no (the default) leaves
+    /// drops to the host.
+    fn wants_drops(&self) -> bool {
+        false
+    }
+
+    /// A drag of files is over the editor at (`x`, `y`) points. True shows
+    /// the copy cursor and lets the drop happen. Called again as it moves.
+    fn accepts_drop(&mut self, _x: f32, _y: f32) -> bool {
+        false
+    }
+
+    /// Files were dropped at (`x`, `y`). True when the editor took them.
+    fn files_dropped(&mut self, _paths: &[PathBuf], _x: f32, _y: f32) -> bool {
+        false
+    }
+
+    /// The editor wants an open-file dialog. Called after every input call
+    /// and tick; return the request once. The view shows the system panel
+    /// (a sheet on the view's window, or a window of its own when it has none)
+    /// and answers later, on the main thread, with [`Self::file_dialog_done`].
+    fn take_file_dialog(&mut self) -> Option<FileDialog> {
+        None
+    }
+
+    /// The answer to a [`FileDialog`]: the chosen files, or `None` when the
+    /// user cancelled. Arrives on the main thread, never inside the call that
+    /// asked.
+    fn file_dialog_done(&mut self, _tag: u32, _paths: Option<Vec<PathBuf>>) {}
 }
 
 /// Makes the plugin's editor. Passed to `export_clap!`, `export_lv2!` and
@@ -759,6 +858,15 @@ mod tests {
         assert!(probe.accessibility_nodes().is_empty());
         assert!(!probe.accessibility_action(0, AccessAction::Increment));
         assert!(!probe.accessibility_focus(0));
+    }
+
+    #[test]
+    fn default_editor_ignores_text_tooltips_and_files() {
+        let mut probe = Probe(Vec::new());
+        assert!(probe.take_text_edit().is_none() && !probe.text_edit_commit("1"));
+        assert!(probe.tooltips().is_empty() && !probe.wants_drops());
+        assert!(!probe.accepts_drop(1.0, 1.0) && !probe.files_dropped(&[], 1.0, 1.0));
+        assert!(probe.take_file_dialog().is_none());
     }
 
     #[test]

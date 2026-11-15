@@ -3,7 +3,7 @@
 //! The engine shares a peak meter with its editor through
 //! [`Plugin::editor_state`]. The editor is drawn with GoodLookin DRI 0.2 and
 //! rasterised by [`SceneCanvas`]: a Navy plate, a lit Brit knob for the gain
-//! (drag it up or down, Shift for fine; double-click resets), a bat toggle for Warm (click it),
+//! (drag it up or down, Shift for fine; double-click types a value, Option-double-click resets), a bat toggle for Warm (click it),
 //! and an LED ladder. It resizes from 180x120 to 480x320, keeping 3:2, and a
 //! double-click on the bare plate asks the host for a larger or the opening size.
 //! Hit areas, drags and keys live in a [`ControlSet`]: click a control, or press Tab, to focus it
@@ -14,11 +14,17 @@
 //! CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), and the VST3, Audio Unit and AAX
 //! shells (`op_editor_*`). The factory presets are text files in `presets/`,
 //! embedded by `build.rs`.
+//!
+//! Typing, tooltips and files: double-click the knob (or focus it and press Return) to type a
+//! value such as `-6 dB`; every control shows a tooltip with its name and value, and the meter's
+//! tip names the last file the editor was given. Drop a file on the editor, or press Command-O
+//! for the open-file dialog (`.wav` and `.aif` files), and the name is shown in the meter's tooltip.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use openplugin::core::editor::{DamageRect, DamageTracker, Key, Modifiers, SizeRange};
+use openplugin::core::editor::{DamageRect, DamageTracker, FileDialog, Key, Modifiers, SizeRange, TextEdit, Tooltip};
 use openplugin::core::{Editor, EditorHost, EditorState, Frame, PresetBank};
 use openplugin::dri::goodlookindri::color::Color as GlColor;
 use openplugin::dri::goodlookindri::scene::{Rect, Scene};
@@ -218,6 +224,10 @@ pub struct GainEditor {
     damage: DamageTracker,
     /// The picture the meter shows (see [`ladder_picture`]) in the last frame accounted for.
     meter_picture: Option<u32>,
+    /// The name of the last file dropped or chosen, shown in the meter's tooltip.
+    last_file: Option<String>,
+    /// An open-file dialog the view has not taken yet.
+    dialog: Option<FileDialog>,
 }
 
 /// How far a knob paints past its hit area, in points at the opening layout: its legend and
@@ -258,6 +268,8 @@ impl GainEditor {
             canvas: SceneCanvas::new(WIDTH as f32, HEIGHT as f32),
             damage: DamageTracker::new(),
             meter_picture: None,
+            last_file: None,
+            dialog: None,
         }
     }
 
@@ -298,6 +310,17 @@ impl GainEditor {
     pub fn values(&self) -> [f32; 2] {
         let v = |i: usize| self.controls.for_param(i).map_or(PARAMS[i].default, |c| c.value());
         [v(0), v(1)]
+    }
+
+    /// The name of the last file dropped on the editor or chosen in its dialog.
+    pub fn last_file(&self) -> Option<&str> {
+        self.last_file.as_deref()
+    }
+
+    fn remember(&mut self, paths: &[PathBuf]) -> bool {
+        let Some(name) = paths.first().and_then(|p| p.file_name()) else { return false };
+        self.last_file = Some(name.to_string_lossy().into_owned());
+        true
     }
 
     pub fn is_bound(&self) -> bool {
@@ -442,7 +465,56 @@ impl Editor for GainEditor {
     }
 
     fn key_down(&mut self, key: Key, modifiers: Modifiers) -> bool {
+        if key == Key::Char('o') && modifiers.command {
+            self.dialog = Some(FileDialog { tag: 1, title: "Choose an audio file".into(), extensions: vec!["wav".into(), "aif".into(), "aiff".into()], multiple: false });
+            return true;
+        }
         self.controls.key_down(key, modifiers)
+    }
+
+    fn take_text_edit(&mut self) -> Option<TextEdit> {
+        self.controls.take_text_edit()
+    }
+
+    fn text_edit_commit(&mut self, text: &str) -> bool {
+        self.controls.text_edit_commit(text)
+    }
+
+    fn text_edit_cancel(&mut self) {
+        self.controls.text_edit_cancel();
+    }
+
+    fn tooltips(&self) -> Vec<Tooltip> {
+        let mut tips = self.controls.tooltips();
+        let meter = DamageRect::from_tuple(layout(self.size.0, self.size.1).meter);
+        let text = match &self.last_file {
+            Some(name) => format!("Output level. Last file: {name}"),
+            None => "Output level. Drop an audio file here, or press Command-O".to_string(),
+        };
+        tips.push(Tooltip { rect: meter, text });
+        tips
+    }
+
+    fn wants_drops(&self) -> bool {
+        true
+    }
+
+    fn accepts_drop(&mut self, _x: f32, _y: f32) -> bool {
+        true
+    }
+
+    fn files_dropped(&mut self, paths: &[PathBuf], _x: f32, _y: f32) -> bool {
+        self.remember(paths)
+    }
+
+    fn take_file_dialog(&mut self) -> Option<FileDialog> {
+        self.dialog.take()
+    }
+
+    fn file_dialog_done(&mut self, _tag: u32, paths: Option<Vec<PathBuf>>) {
+        if let Some(paths) = paths {
+            self.remember(&paths);
+        }
     }
 
     fn key_up(&mut self, key: Key, modifiers: Modifiers) -> bool {

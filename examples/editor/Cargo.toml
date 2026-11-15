@@ -23,3 +23,7 @@ harness = false
 [[test]]
 name = "a11y"
 harness = false
+
+[[test]]
+name = "typing"
+harness = false

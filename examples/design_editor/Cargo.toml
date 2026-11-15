@@ -16,3 +16,7 @@ openplugin = { workspace = true }
 [[test]]
 name = "a11y"
 harness = false
+
+[[test]]
+name = "typing"
+harness = false

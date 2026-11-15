@@ -40,14 +40,24 @@
 //! host's automation too), `FocusedUIElementChanged` when keyboard focus moved,
 //! and `LayoutChanged` when the controls or the size changed.
 //!
+//! Typing, tooltips, files: after every tick and input call the view polls the editor
+//! for a text-field request ([`Editor::take_text_edit`]; a native `NSTextField` over the
+//! control, the view as its delegate: Return commits, Escape and focus loss cancel; no key
+//! reaches the editor while it is open), re-registers one tooltip rectangle per
+//! [`Editor::tooltips`] entry when the layout moved (the text is asked again when a tip
+//! shows), and takes a file-dialog request ([`Editor::take_file_dialog`], an `NSOpenPanel`
+//! sheet whose answer is delivered on a later tick). A view whose editor
+//! [`Editor::wants_drops`] is a drag destination for file URLs.
+//!
 //! Main thread only.
 
 #![allow(unsafe_code, clippy::missing_safety_doc)]
 
-use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, SizeRange};
+use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, FileDialog, SizeRange, TextEdit};
 use openplugin_core::editor::{Key, Modifiers};
 use openplugin_core::Editor;
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
+use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::time::Instant;
 
@@ -80,6 +90,7 @@ struct CGRect {
 unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Class;
     fn sel_registerName(name: *const c_char) -> Sel;
+    fn sel_getName(sel: Sel) -> *const c_char;
     fn objc_msgSend();
     fn objc_msgSendSuper();
     #[cfg(target_arch = "x86_64")]
@@ -102,6 +113,14 @@ unsafe extern "C" {
     static NSAccessibilityFocusedUIElementChangedNotification: Id;
     static NSAccessibilityLayoutChangedNotification: Id;
     fn NSAccessibilityPostNotification(element: Id, notification: Id);
+    static NSPasteboardTypeFileURL: Id;
+    static NSPasteboardURLReadingFileURLsOnlyKey: Id;
+    fn NSBeep();
+}
+
+#[link(name = "System")]
+unsafe extern "C" {
+    static _NSConcreteGlobalBlock: [*const c_void; 32];
 }
 
 #[link(name = "Foundation", kind = "framework")]
@@ -202,7 +221,24 @@ struct State {
     ax_elements: Vec<Id>,
     /// What the nodes looked like when notifications were last posted.
     ax_seen: Vec<AxSeen>,
+    /// The open text field (an autoreleased-on-close `NSTextField`, retained here).
+    text_field: Option<Id>,
+    /// The field must close (the editor's size changed under it); done outside the editor call.
+    field_cancel: bool,
+    /// The field is being opened: AppKit reports an end of editing while the field editor swaps in.
+    opening: bool,
+    /// The tooltip rectangles registered, by tooltip index, in view points.
+    tip_key: Vec<(usize, [f64; 4])>,
+    /// The view is registered as a drag destination.
+    drags: bool,
+    /// Answers to file dialogs, delivered on the next tick.
+    file_results: Vec<(u32, Option<Vec<PathBuf>>)>,
+    file_hook: Option<FileHook>,
 }
+
+/// Stands in for the system file panel (tests): `Some(answer)` resolves the
+/// request, `None` lets the real panel open.
+pub type FileHook = Box<dyn FnMut(&FileDialog) -> Option<Option<Vec<PathBuf>>>>;
 
 /// A node as the last notification pass saw it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,6 +302,9 @@ unsafe fn follow(this: Id, st: &mut State, frame: bool) { unsafe {
         return;
     }
     st.size = now;
+    if st.text_field.is_some() {
+        st.field_cancel = true;
+    }
     if !st.ax_elements.is_empty() {
         NSAccessibilityPostNotification(this, NSAccessibilityLayoutChangedNotification);
     }
@@ -357,7 +396,11 @@ unsafe fn draw(this: Id, st: &mut State) {
 
 /// The event position in editor points (a host may show the view at another size).
 unsafe fn local(this: Id, size: (u32, u32), event: Id) -> (f32, f32) { unsafe {
-    let p = send!(CGPoint, event, b"locationInWindow\0");
+    local_point(this, size, send!(CGPoint, event, b"locationInWindow\0"))
+}}
+
+/// A window point in editor points.
+unsafe fn local_point(this: Id, size: (u32, u32), p: CGPoint) -> (f32, f32) { unsafe {
     let q = send!(CGPoint, this, b"convertPoint:fromView:\0", CGPoint = p, Id = null_mut());
     let b = send_rect(this, b"bounds\0");
     let sx = if b.size.w > 1.0 { size.0 as f64 / b.size.w } else { 1.0 };
@@ -439,6 +482,10 @@ unsafe fn pass_on(this: Id, name: &[u8], event: Id) { unsafe {
 }}
 
 unsafe fn key_event(this: Id, event: Id, down: bool) { unsafe {
+    // While the text field is open, nothing typed reaches the editor or the host.
+    if state(this).is_some_and(|st| st.text_field.is_some()) {
+        return;
+    }
     let mut handled = false;
     guarded(this, |st| {
         let mods = sync_modifiers(st, event);
@@ -511,6 +558,8 @@ fn view_rect(r: &openplugin_core::editor::DamageRect, editor: (u32, u32), view: 
 /// Ask the editor what changed and invalidate that: nothing, some rectangles, or the whole view.
 unsafe fn invalidate(this: Id) { unsafe {
     ax_sync(this);
+    poll_requests(this);
+    sync_tooltips(this);
     let mut damage = None;
     let mut size = (0, 0);
     guarded(this, |st| {
@@ -536,6 +585,8 @@ unsafe fn invalidate(this: Id) { unsafe {
 
 extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
     unsafe {
+        // A click on the view (the field takes its own) abandons the field.
+        close_text_field(this, true);
         // A click gives the editor the keyboard, when it wants keys. Outside the
         // editor call: taking focus calls the editor again.
         if state(this).is_some_and(|st| st.editor.wants_keys()) {
@@ -599,7 +650,12 @@ extern "C" fn tick(this: Id, _cmd: Sel, _timer: Id) {
             st.editor.tick(dt);
             // An editor may change its own size (a poll hook resized it).
             follow(this, st, true);
+            // Answers to file dialogs arrive here, never inside the call that asked.
+            for (tag, paths) in std::mem::take(&mut st.file_results) {
+                st.editor.file_dialog_done(tag, paths);
+            }
         });
+        ensure_drag_registration(this);
         // A window moved to a display of another scale gets a full frame.
         if state(this).is_some_and(|st| st.scale != 0.0 && st.scale != backing_scale(this).clamp(1.0, 3.0)) {
             redraw(this);
@@ -616,6 +672,342 @@ extern "C" fn yes(_this: Id, _cmd: Sel) -> i8 {
 extern "C" fn yes_event(_this: Id, _cmd: Sel, _event: Id) -> i8 {
     1
 }
+
+// ---- Typing a value, tooltips, files -------------------------------------
+
+/// Requests the editor made during the last call: a text field, a file dialog.
+/// Never called inside an editor call.
+unsafe fn poll_requests(this: Id) { unsafe {
+    if state(this).is_some_and(|st| st.field_cancel) {
+        if let Some(st) = state(this) {
+            st.field_cancel = false;
+        }
+        close_text_field(this, true);
+    }
+    let mut edit = None;
+    let mut dialog = None;
+    guarded(this, |st| {
+        edit = st.editor.take_text_edit();
+        dialog = st.editor.take_file_dialog();
+    });
+    if let Some(edit) = edit {
+        open_text_field(this, edit);
+    }
+    if let Some(dialog) = dialog {
+        open_file_dialog(this, dialog);
+    }
+}}
+
+/// Open the small native field over the control, with its text selected.
+unsafe fn open_text_field(this: Id, edit: TextEdit) { unsafe {
+    close_text_field(this, true);
+    let Some(st) = state(this) else { return };
+    let r = view_space(this, st.size, &edit.rect);
+    let (w, h) = (r.size.w.max(72.0), 22.0);
+    let frame = CGRect {
+        origin: CGPoint { x: r.origin.x + (r.size.w - w) * 0.5, y: r.origin.y + (r.size.h - h) * 0.5 },
+        size: CGSize { w, h },
+    };
+    let field = send!(Id, send!(Id, class(b"NSTextField\0") as Id, b"alloc\0"), b"initWithFrame:\0", CGRect = frame);
+    if field.is_null() {
+        return;
+    }
+    send!((), field, b"setStringValue:\0", Id = ns_string(&edit.text));
+    send!((), field, b"setAlignment:\0", isize = 2);
+    send!((), field, b"setFont:\0", Id = send!(Id, class(b"NSFont\0") as Id, b"systemFontOfSize:\0", f64 = 11.0));
+    send!((), field, b"setAccessibilityLabel:\0", Id = ns_string(&edit.label));
+    send!((), field, b"setDelegate:\0", Id = this);
+    send!((), this, b"addSubview:\0", Id = field);
+    st.text_field = Some(field);
+    st.opening = true;
+    let window = send!(Id, this, b"window\0");
+    if !window.is_null() {
+        send!(i8, window, b"makeFirstResponder:\0", Id = field);
+        send!((), field, b"selectText:\0", Id = null_mut());
+    }
+    if let Some(st) = state(this) {
+        st.opening = false;
+    }
+}}
+
+/// Take the field away. `cancel` tells the editor nothing was committed.
+unsafe fn close_text_field(this: Id, cancel: bool) { unsafe {
+    let Some(st) = state(this) else { return };
+    let Some(field) = st.text_field.take() else { return };
+    if cancel {
+        guarded(this, |st| st.editor.text_edit_cancel());
+    }
+    send!((), field, b"setDelegate:\0", Id = null_mut());
+    let window = send!(Id, this, b"window\0");
+    if !window.is_null() {
+        send!(i8, window, b"makeFirstResponder:\0", Id = this);
+    }
+    send!((), field, b"removeFromSuperview\0");
+    // We may be inside the field's own delegate call: let it unwind first.
+    send!(Id, field, b"autorelease\0");
+    invalidate(this);
+}}
+
+/// Return commits through the editor, Escape cancels; every other command is the field's own.
+extern "C" fn do_command(this: Id, _cmd: Sel, _control: Id, _text_view: Id, command: Sel) -> i8 {
+    unsafe {
+        let name = CStr::from_ptr(sel_getName(command)).to_bytes();
+        match name {
+            b"insertNewline:" => {
+                let Some(field) = state(this).and_then(|st| st.text_field) else { return 0 };
+                let utf8 = send!(*const c_char, send!(Id, field, b"stringValue\0"), b"UTF8String\0");
+                let text = if utf8.is_null() { String::new() } else { CStr::from_ptr(utf8).to_string_lossy().into_owned() };
+                let mut done = false;
+                guarded(this, |st| done = st.editor.text_edit_commit(&text));
+                if done {
+                    close_text_field(this, false);
+                } else {
+                    // Refused: the field stays, its text turns red and the system beeps.
+                    send!((), field, b"setTextColor:\0", Id = send!(Id, class(b"NSColor\0") as Id, b"redColor\0"));
+                    NSBeep();
+                }
+                1
+            }
+            b"cancelOperation:" => {
+                close_text_field(this, true);
+                1
+            }
+            _ => 0,
+        }
+    }
+}
+
+/// The field lost focus without Return: cancel.
+extern "C" fn text_ended(this: Id, _cmd: Sel, _note: Id) {
+    unsafe {
+        if state(this).is_some_and(|st| !st.opening) {
+            close_text_field(this, true);
+        }
+    }
+}
+
+/// Keep one tooltip rectangle per entry of [`Editor::tooltips`], moved with
+/// the layout. Registered again only when a rectangle (or the view's size) changed.
+unsafe fn sync_tooltips(this: Id) { unsafe {
+    let Some(st) = state(this) else { return };
+    let size = st.size;
+    let key: Vec<(usize, [f64; 4])> = st
+        .editor
+        .tooltips()
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.rect.is_finite() && !t.rect.is_empty())
+        .map(|(i, t)| {
+            let r = view_space(this, size, &t.rect);
+            (i, [r.origin.x, r.origin.y, r.size.w, r.size.h])
+        })
+        .collect();
+    if key == st.tip_key {
+        return;
+    }
+    send!((), this, b"removeAllToolTips\0");
+    for (i, r) in &key {
+        let rect = CGRect { origin: CGPoint { x: r[0], y: r[1] }, size: CGSize { w: r[2], h: r[3] } };
+        send!(isize, this, b"addToolTipRect:owner:userData:\0", CGRect = rect, Id = this, *mut c_void = *i as *mut c_void);
+    }
+    st.tip_key = key;
+}}
+
+/// `view:stringForToolTip:point:userData:`: the text is asked of the editor each time a tip shows.
+extern "C" fn tooltip_string(this: Id, _cmd: Sel, _view: Id, _tag: isize, _point: CGPoint, data: *mut c_void) -> Id {
+    unsafe {
+        let index = data as usize;
+        match state(this).and_then(|st| st.editor.tooltips().into_iter().nth(index)) {
+            Some(t) => ns_string(&t.text),
+            None => null_mut(),
+        }
+    }
+}
+
+/// Register as a drag destination for file URLs once the editor wants drops.
+unsafe fn ensure_drag_registration(this: Id) { unsafe {
+    let Some(st) = state(this) else { return };
+    if st.drags || !st.editor.wants_drops() {
+        return;
+    }
+    st.drags = true;
+    let types = ns_array(&[NSPasteboardTypeFileURL]);
+    send!((), this, b"registerForDraggedTypes:\0", Id = types);
+}}
+
+/// File paths in an `NSArray` of `NSURL`.
+unsafe fn urls_to_paths(urls: Id) -> Vec<PathBuf> { unsafe {
+    let mut out = Vec::new();
+    if urls.is_null() {
+        return out;
+    }
+    let n = send!(usize, urls, b"count\0");
+    for i in 0..n {
+        let url = send!(Id, urls, b"objectAtIndex:\0", usize = i);
+        let path = send!(Id, url, b"path\0");
+        if path.is_null() {
+            continue;
+        }
+        let utf8 = send!(*const c_char, path, b"UTF8String\0");
+        if !utf8.is_null() {
+            out.push(PathBuf::from(CStr::from_ptr(utf8).to_string_lossy().into_owned()));
+        }
+    }
+    out
+}}
+
+/// The file URLs on a dragging info's pasteboard.
+unsafe fn drag_paths(info: Id) -> Vec<PathBuf> { unsafe {
+    let pasteboard = send!(Id, info, b"draggingPasteboard\0");
+    if pasteboard.is_null() {
+        return Vec::new();
+    }
+    let classes = ns_array(&[class(b"NSURL\0") as Id]);
+    let yes = send!(Id, class(b"NSNumber\0") as Id, b"numberWithBool:\0", i8 = 1);
+    let options = send!(
+        Id,
+        class(b"NSDictionary\0") as Id,
+        b"dictionaryWithObject:forKey:\0",
+        Id = yes,
+        Id = NSPasteboardURLReadingFileURLsOnlyKey
+    );
+    urls_to_paths(send!(Id, pasteboard, b"readObjectsForClasses:options:\0", Id = classes, Id = options))
+}}
+
+unsafe fn drag_position(this: Id, info: Id) -> (f32, f32) { unsafe {
+    let size = state(this).map_or((1, 1), |st| st.size);
+    local_point(this, size, send!(CGPoint, info, b"draggingLocation\0"))
+}}
+
+/// NSDragOperationCopy over a place the editor accepts, none elsewhere.
+unsafe fn drag_over(this: Id, info: Id) -> usize { unsafe {
+    if drag_paths(info).is_empty() {
+        return 0;
+    }
+    let (x, y) = drag_position(this, info);
+    let mut ok = false;
+    guarded(this, |st| ok = st.editor.accepts_drop(x, y));
+    ok as usize
+}}
+
+extern "C" fn dragging_entered(this: Id, _cmd: Sel, info: Id) -> usize {
+    unsafe { drag_over(this, info) }
+}
+
+extern "C" fn dragging_updated(this: Id, _cmd: Sel, info: Id) -> usize {
+    unsafe { drag_over(this, info) }
+}
+
+extern "C" fn dragging_exited(_this: Id, _cmd: Sel, _info: Id) {}
+
+extern "C" fn prepare_for_drag(this: Id, _cmd: Sel, info: Id) -> i8 {
+    unsafe { (drag_over(this, info) != 0) as i8 }
+}
+
+extern "C" fn perform_drag(this: Id, _cmd: Sel, info: Id) -> i8 {
+    unsafe {
+        let paths = drag_paths(info);
+        if paths.is_empty() {
+            return 0;
+        }
+        let (x, y) = drag_position(this, info);
+        let mut taken = false;
+        guarded(this, |st| taken = st.editor.files_dropped(&paths, x, y));
+        invalidate(this);
+        taken as i8
+    }
+}
+
+/// The system open panel for a request (not shown).
+unsafe fn make_open_panel(req: &FileDialog) -> Id { unsafe {
+    let panel = send!(Id, class(b"NSOpenPanel\0") as Id, b"openPanel\0");
+    if panel.is_null() {
+        return panel;
+    }
+    send!((), panel, b"setAllowsMultipleSelection:\0", i8 = req.multiple as i8);
+    send!((), panel, b"setCanChooseFiles:\0", i8 = 1);
+    send!((), panel, b"setCanChooseDirectories:\0", i8 = 0);
+    if !req.title.is_empty() {
+        send!((), panel, b"setMessage:\0", Id = ns_string(&req.title));
+    }
+    let types: Vec<Id> = req.extensions.iter().map(|e| e.trim().trim_start_matches('.')).filter(|e| !e.is_empty()).map(|e| ns_string(e)).collect();
+    if !types.is_empty() {
+        send!((), panel, b"setAllowedFileTypes:\0", Id = ns_array(&types));
+    }
+    panel
+}}
+
+/// The completion block of a panel: a global block (it is never copied or
+/// freed by the runtime) that carries the view, the panel and the tag after the
+/// header, and frees itself when it has run.
+#[repr(C)]
+struct PanelBlock {
+    isa: *const c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: unsafe extern "C" fn(*mut PanelBlock, isize),
+    descriptor: *const BlockDescriptor,
+    view: Id,
+    panel: Id,
+    tag: u32,
+}
+
+#[repr(C)]
+struct BlockDescriptor {
+    reserved: usize,
+    size: usize,
+}
+
+static PANEL_BLOCK_DESCRIPTOR: BlockDescriptor = BlockDescriptor { reserved: 0, size: std::mem::size_of::<PanelBlock>() };
+
+/// `NSModalResponseOK` is 1; anything else is a cancel.
+unsafe extern "C" fn panel_done(block: *mut PanelBlock, response: isize) { unsafe {
+    let b = Box::from_raw(block);
+    let paths = if response == 1 { Some(urls_to_paths(send!(Id, b.panel, b"URLs\0"))).filter(|p| !p.is_empty()) } else { None };
+    // The view may be gone; its state says so.
+    if let Some(st) = state(b.view) {
+        st.file_results.push((b.tag, paths));
+    }
+    send!((), b.panel, b"release\0");
+    send!((), b.view, b"release\0");
+}}
+
+unsafe fn make_panel_block(view: Id, panel: Id, tag: u32) -> *mut PanelBlock { unsafe {
+    send!(Id, view, b"retain\0");
+    send!(Id, panel, b"retain\0");
+    Box::into_raw(Box::new(PanelBlock {
+        isa: &raw const _NSConcreteGlobalBlock as *const c_void,
+        flags: 1 << 28,
+        reserved: 0,
+        invoke: panel_done,
+        descriptor: &PANEL_BLOCK_DESCRIPTOR,
+        view,
+        panel,
+        tag,
+    }))
+}}
+
+/// Show the panel as a sheet on the view's window, or on its own without one.
+/// The answer is queued and delivered on a later tick.
+unsafe fn open_file_dialog(this: Id, req: FileDialog) { unsafe {
+    let Some(st) = state(this) else { return };
+    if let Some(answer) = st.file_hook.as_mut().and_then(|hook| hook(&req)) {
+        st.file_results.push((req.tag, answer));
+        return;
+    }
+    let panel = make_open_panel(&req);
+    if panel.is_null() {
+        st.file_results.push((req.tag, None));
+        return;
+    }
+    let block = make_panel_block(this, panel, req.tag);
+    let window = send!(Id, this, b"window\0");
+    if window.is_null() {
+        send!((), panel, b"beginWithCompletionHandler:\0", *mut PanelBlock = block);
+    } else {
+        send!((), panel, b"beginSheetModalForWindow:completionHandler:\0", Id = window, *mut PanelBlock = block);
+    }
+}}
 
 // ---- Accessibility -------------------------------------------------------
 
@@ -961,6 +1353,14 @@ unsafe fn view_class() -> Class { unsafe {
     add(b"mouseUp:\0", mouse_up as *const c_void, b"v@:@\0");
     add(b"scrollWheel:\0", scroll_wheel as *const c_void, b"v@:@\0");
     add(b"openpluginTick:\0", tick as *const c_void, b"v@:@\0");
+    add(b"view:stringForToolTip:point:userData:\0", tooltip_string as *const c_void, b"@@:@q{CGPoint=dd}^v\0");
+    add(b"control:textView:doCommandBySelector:\0", do_command as *const c_void, b"c@:@@:\0");
+    add(b"controlTextDidEndEditing:\0", text_ended as *const c_void, b"v@:@\0");
+    add(b"draggingEntered:\0", dragging_entered as *const c_void, b"Q@:@\0");
+    add(b"draggingUpdated:\0", dragging_updated as *const c_void, b"Q@:@\0");
+    add(b"draggingExited:\0", dragging_exited as *const c_void, b"v@:@\0");
+    add(b"prepareForDragOperation:\0", prepare_for_drag as *const c_void, b"c@:@\0");
+    add(b"performDragOperation:\0", perform_drag as *const c_void, b"c@:@\0");
     add(b"isAccessibilityElement\0", view_is_ax_element as *const c_void, b"c@:\0");
     add(b"accessibilityRole\0", view_ax_role as *const c_void, b"@@:\0");
     add(b"accessibilityChildren\0", view_ax_children as *const c_void, b"@@:\0");
@@ -993,7 +1393,7 @@ impl EditorView {
             if view.is_null() {
                 return None;
             }
-            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false, scale: 0.0, ax_elements: Vec::new(), ax_seen: Vec::new() }));
+            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false, scale: 0.0, ax_elements: Vec::new(), ax_seen: Vec::new(), text_field: None, field_cancel: false, opening: false, tip_key: Vec::new(), drags: false, file_results: Vec::new(), file_hook: None }));
             object_setInstanceVariable(view, IVAR.as_ptr() as *const c_char, state as *mut c_void);
 
             // Mouse-moved events need a tracking area: moved | active always | in visible rect.
@@ -1026,6 +1426,8 @@ impl EditorView {
                 let run_loop = send!(Id, class(b"NSRunLoop\0") as Id, b"currentRunLoop\0");
                 send!((), run_loop, b"addTimer:forMode:\0", Id = timer, Id = NSRunLoopCommonModes);
             }
+            sync_tooltips(view);
+            ensure_drag_registration(view);
             Some(EditorView { view, timer, state })
         }
     }
@@ -1079,6 +1481,54 @@ impl EditorView {
         unsafe { self.state.as_mut().map(|s| s.editor.as_mut()) }
     }
 
+    /// The open text field (an `NSTextField`), if any.
+    pub fn text_field(&self) -> Option<Id> {
+        unsafe { self.state.as_ref().and_then(|s| s.text_field) }
+    }
+
+    /// The tooltip rectangles in view points (x, y, width, height) with the
+    /// text the view answers for each, asked through the same
+    /// `view:stringForToolTip:point:userData:` method AppKit calls.
+    pub fn tooltip_rects(&self) -> Vec<([f64; 4], String)> {
+        unsafe {
+            let Some(st) = self.state.as_ref() else { return Vec::new() };
+            st.tip_key
+                .iter()
+                .map(|(i, r)| {
+                    let f: unsafe extern "C" fn(Id, Sel, Id, isize, CGPoint, *mut c_void) -> Id = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                    let s = f(self.view, sel(b"view:stringForToolTip:point:userData:\0"), self.view, 0, CGPoint { x: 0.0, y: 0.0 }, *i as *mut c_void);
+                    let text = if s.is_null() { String::new() } else { CStr::from_ptr(send!(*const c_char, s, b"UTF8String\0")).to_string_lossy().into_owned() };
+                    (*r, text)
+                })
+                .collect()
+        }
+    }
+
+    /// Answer file dialog requests with `hook` instead of showing the system
+    /// panel, for tests. See [`FileHook`].
+    pub fn set_file_dialog_hook(&self, hook: Option<FileHook>) {
+        if let Some(s) = unsafe { self.state.as_mut() } {
+            s.file_hook = hook;
+        }
+    }
+
+    /// The `NSOpenPanel` the view would show for a request, not shown (the
+    /// caller owns nothing: it is autoreleased). For tests.
+    pub fn open_panel_for(request: &FileDialog) -> Id {
+        unsafe { make_open_panel(request) }
+    }
+
+    /// Run the completion path of a real panel with `response` (1 is OK, 0
+    /// cancel) on a panel that was never shown: the same block the system
+    /// calls. For tests.
+    pub fn simulate_panel_response(&self, request: &FileDialog, response: isize) {
+        unsafe {
+            let panel = make_open_panel(request);
+            let block = make_panel_block(self.view, panel, request.tag);
+            ((*block).invoke)(block, response);
+        }
+    }
+
     /// Replace the poll hook.
     pub fn set_poll(&mut self, poll: Option<Poll>) {
         if let Some(s) = unsafe { self.state.as_mut() } {
@@ -1093,6 +1543,11 @@ impl Drop for EditorView {
             if !self.timer.is_null() {
                 send!((), self.timer, b"invalidate\0");
                 send!((), self.timer, b"release\0");
+            }
+            if let Some(field) = self.state.as_mut().and_then(|s| s.text_field.take()) {
+                send!((), field, b"setDelegate:\0", Id = null_mut());
+                send!((), field, b"removeFromSuperview\0");
+                send!(Id, field, b"autorelease\0");
             }
             // Elements the host still holds must not reach the view again.
             if let Some(st) = self.state.as_mut() {
