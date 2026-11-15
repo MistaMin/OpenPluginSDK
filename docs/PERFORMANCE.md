@@ -170,13 +170,21 @@ the subnormal range.
 The SDK's DSP flushes state in its filters, envelope followers and convolvers
 (`flush`: `|x| < 1e-30` becomes `0.0`, see
 [`svf.rs`](../crates/openplugin-dsp/src/svf.rs) and the test `tails_flush_to_zero_without_denormals`
-in [`filters.rs`](../crates/openplugin-dsp/tests/filters.rs)). It is not exported as a public helper
-yet; the guard is coming, and until then the two-line version in your own code is:
+in [`filters.rs`](../crates/openplugin-dsp/tests/filters.rs)). For your own state there are two ways:
 
 ```rust
+// 1. Flush in the loop, before a value reaches the subnormal range.
 y *= 0.97;
-if y.abs() < 1.0e-30 { y = 0.0; }   // before it reaches the subnormal range
+if y.abs() < 1.0e-30 { y = 0.0; }
+
+// 2. Let the CPU flush for the whole process call: flush-to-zero (FPCR.FZ on arm64,
+//    MXCSR FTZ and DAZ on x86_64), restored when the guard drops.
+let _ftz = openplugin_dsp::DenormalGuard::new();
 ```
+
+`DenormalGuard` ([`utility.rs`](../crates/openplugin-dsp/src/utility.rs)) is free on the loop
+itself, unlike the per-sample flush measured below; keep it on the stack of `process` only, since
+it changes the floating-point mode of the calling thread until it drops.
 
 Note that `Biquad` guards NaN but does **not** flush; use `Svf`, `MatchedBiquad` or flush yourself
 if a `Biquad` tail must reach exact zero.
