@@ -134,7 +134,7 @@ Then **0.7.0**.
 
 8. **Universal binaries, proven.** `--archs universal` already joins arm64 and x86_64 with `lipo`, but only the CLAP and LV2 were checked. Build every format universal, the AAX SDK library included, run the x86_64 slice of every proof, the format-parity test and `clap-validator` under Rosetta, and add a CI job that does the same. Owns `scripts/build_plugin.sh`, `native/CMakeLists.txt` architecture settings, CI. Proof: `lipo -archs` lists both slices in every bundle, and every proof passes on each slice.
 
-Status: tasks 1, 2, 4, 5, 6 and 7 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
+Status: tasks 1, 2, 4, 5, 6 and 7 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls; 8: every format builds universal and every proof passes on both slices, x86_64 under Rosetta) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
 
 The freeze itself and the crates.io publish are the owner's decisions.
 
@@ -142,7 +142,7 @@ The freeze itself and the crates.io publish are the owner's decisions.
 
 This track runs beside the milestones. `openplugin-dsp` has a starter set: an RBJ biquad, one compressor, saturation curves with ADAA, 2x and linear-phase oversampling, a short convolver (1024 taps), loudness after BS.1770 and R 128, meters, a fixed delay, a naive oscillator, a sample voice, soft bypass and delta listening. It has no dither, no state-variable or crossover filters, no limiter or gate, no long convolution, no modulated delay or reverb, no band-limited oscillator or envelope, and no STFT. Every block below is allocation-free on the audio path, computes for the real sample rate (`effective_rate`), stays free of denormals, cites the paper or standard it follows, and is written from that source, never ported from JUCE or from code under a licence the SDK cannot carry. A cookbook in `docs/DSP_COOKBOOK.md` shows each one inside a small plugin.
 
-Done: task 1 (dither and noise shaping). Running: tasks 2, 3 and 4.
+Done: tasks 1 to 4 (dither and noise shaping; SVF, matched biquads, Linkwitz-Riley crossovers and Butterworth cascades; envelopes, gain computer, linked dynamics, true peak and a lookahead limiter; long partitioned convolution with a zero-latency head). Open items from them: the matched biquad is not safe under per-sample modulation (use the SVF), full-band white noise can pass the limiter's true-peak ceiling by up to 1.7 dB, and the long convolver's worst block is about 15 times its average.
 
 Blocks that land before 1.0 are frozen with it. Later ones arrive in minor releases, since adding a module breaks nothing.
 
@@ -171,6 +171,8 @@ Blocks that land before 1.0 are frozen with it. Later ones arrive in minor relea
 2. **A benchmark harness.** CPU per block for any `Plugin` across sample rates, block sizes and channel counts, as a fraction of real time, with a stable report to compare commits. Proof: reports for the examples; a deliberate slowdown shows.
 3. **The performance guide.** `docs/PERFORMANCE.md`: the real-time rules and how the kit checks them; denormals and flush-to-zero; block versus per-sample work; parameter smoothing cost; memory layout (structure of arrays, cache lines); helping the Rust compiler vectorise (chunks, slices without bounds checks, `#[inline]`, LTO, codegen units, target CPU); fast approximations of `tanh`, `exp` and `sin` with stated error; oversampling cost; measuring with Instruments and the harness. Every claim shown with a measured example in the repo.
 4. **The stability guide.** `docs/STABILITY.md`: numerically stable filter topologies and when to use `f64`; guarding state against NaN; panics never crossing the format boundary; thread rules for state, editor and audio; host behaviours to survive (block size changes, rate changes without a reset, process before activate, state loads during playback); soak and fuzz testing with the kit. Each rule linked to the test that enforces it in the SDK.
+
+Status: tasks 1 and 2 are done (`openplugin-testing`: `conformance` with 13 checks and `bench` with commit comparison; it found NaN and denormal bugs in two examples and in `Biquad`, now fixed). Tasks 3 and 4 are next.
 
 ## Porting toolkit: moving a plugin from another SDK
 
