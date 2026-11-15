@@ -184,6 +184,7 @@ void op_shell_set_offline(void* instance, uint32_t offline) {
     if (instance) static_cast<Stub*>(instance)->pending_offline = offline != 0;
 }
 uint32_t op_shell_set_track_info(void*, const char*, uint32_t, uint32_t) { return 1; }
+uint32_t op_shell_take_changes(void*) { return 0; }
 uint32_t op_shell_midi_out(void* instance, OpMidiEvent* out, uint32_t capacity) {
     if (!instance || !out) return 0;
     Stub& s = *static_cast<Stub*>(instance);

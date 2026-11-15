@@ -328,6 +328,28 @@ public:
         return AAX_CEffectParameters::NotificationReceived(type, data, size);
     }
     void* engine() const { return state_.engine; }
+    // ---- telling the host about changes (ABI 6) ----------------------------------------
+    // The host calls TimerWakeup about every 30 ms on its own non-real-time thread; the
+    // shell asks the engine there what changed. A new latency goes to SetSignalLatency (the
+    // host applies it and sends AAX_eNotificationEvent_SignalLatencyChanged; GetSignalLatency
+    // then reads it). New parameter info goes out as AAX_eNotificationEvent_ParameterNameChanged
+    // for each parameter, with its id as the payload, so the host reads the names again.
+    // Nothing is taken without a controller, so a change waits until there is one to tell.
+    AAX_Result TimerWakeup() override {
+        const AAX_Result result = AAX_CEffectParameters::TimerWakeup();
+        tellChanges(Controller());
+        return result;
+    }
+    uint32_t tellChanges(AAX_IController* controller) {
+        if (!controller || !state_.engine) return 0;
+        const uint32_t flags = op_shell_take_changes(state_.engine) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
+        if (flags & OP_CHANGE_LATENCY) controller->SetSignalLatency(static_cast<int32_t>(op_shell_latency(state_.engine)));
+        if (flags & OP_CHANGE_PARAM_INFO) {
+            for (const std::string& id : ids_)
+                controller->SendNotification(AAX_eNotificationEvent_ParameterNameChanged, id.c_str(), static_cast<uint32_t>(id.size() + 1));
+        }
+        return flags;
+    }
     AAX_Result ResetFieldData(AAX_CFieldIndex field, void* destination, uint32_t size) const override {
         if (field == stateField) {
             if (!destination || size != sizeof(ProcessState*)) return AAX_ERROR_INVALID_ARGUMENT;
@@ -446,4 +468,6 @@ bool proofText(AAX_CEffectParameters* p, uint32_t index, double normalized, int3
 bool proofValue(AAX_CEffectParameters* p, uint32_t index, const char* text, double* normalized) { return static_cast<Parameters*>(p)->proofValue(index, text, normalized); }
 bool proofUpdate(AAX_CEffectParameters* p, uint32_t index, double normalized) { return static_cast<Parameters*>(p)->proofUpdate(index, normalized); }
 bool proofPacket(AAX_CEffectParameters* p, PacketBuffer* out) { return static_cast<Parameters*>(p)->proofPacket(out); }
+uint32_t proofWakeup(AAX_CEffectParameters* p, AAX_IController* controller) { return static_cast<Parameters*>(p)->tellChanges(controller); }
+AAX_Result proofTimerWakeup(AAX_CEffectParameters* p) { return p->TimerWakeup(); }
 }

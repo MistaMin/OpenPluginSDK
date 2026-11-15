@@ -4,7 +4,9 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 
+pub mod clap_host;
 pub mod plugins;
+pub mod shift;
 pub mod worker;
 
 use openplugin_targets::lv2::Lv2Feature;

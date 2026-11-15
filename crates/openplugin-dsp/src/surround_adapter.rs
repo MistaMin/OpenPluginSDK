@@ -100,8 +100,8 @@
 use std::sync::Mutex;
 
 use openplugin_core::{
-    AaxIds, BusMeters, EditorState, IoConfig, MeterFrame, NotePorts, Plugin, PluginInfo,
-    SpeakerLayout, Tail, Transport, MAX_AUDIO_CHANNELS,
+    AaxIds, BusMeters, EditorState, HostNotifier, IoConfig, MeterFrame, NotePorts, Plugin,
+    PluginInfo, SpeakerLayout, Tail, Transport, MAX_AUDIO_CHANNELS,
 };
 
 use crate::downmix::{roles_of, Downmix, DownmixTarget, MixSettings};
@@ -584,6 +584,11 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
 
     fn editor_state(&self) -> Option<EditorState> {
         self.engines[0].plugin.editor_state()
+    }
+
+    /// The first engine reports the latency and the parameters, so it keeps the notifier.
+    fn set_host_notifier(&mut self, notifier: HostNotifier) {
+        self.engines[0].plugin.set_host_notifier(notifier);
     }
 
     fn aax_ids(&self) -> Option<AaxIds> {

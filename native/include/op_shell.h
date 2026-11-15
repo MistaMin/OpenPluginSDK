@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 5,
+    OP_SHELL_ABI = 6,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -257,6 +257,29 @@ uint32_t op_shell_set_track_info(void* instance, const char* name_utf8, uint32_t
 // a space. No instance needed; any thread, no allocation after the first
 // descriptor read.
 size_t op_shell_param_group(uint32_t index, char* buf, size_t cap);
+
+// ---- ABI 6: telling the host about changes --------------------------------
+// The plugin's latency (op_shell_latency) or its parameter info (names, units,
+// value text) changed at run time. The plugin says so through its
+// HostNotifier, from any thread, process included; the library also compares
+// the latency after every block. The shell polls op_shell_take_changes on its
+// main thread (a timer, an idle call) and tells the host the way the format
+// asks: VST3 restartComponent, Audio Unit property notifications, AAX
+// SetSignalLatency and AAX_eNotificationEvent_ParameterNameChanged.
+enum {
+    OP_CHANGE_LATENCY = 1,      // read op_shell_latency again and tell the host
+    OP_CHANGE_PARAM_INFO = 2    // tell the host to read the parameter info again
+};
+// Returns the OP_CHANGE_* bits raised since the last call and clears them, so
+// each change is reported once; 0 for a NULL instance. A latency equal to the
+// one op_shell_latency last returned is not reported (the host knows it), so a
+// new engine that comes up with the latency the host already read is quiet.
+// Bits this header does not define may appear in a newer library; ignore them.
+// Any thread; never blocks, never allocates. op_shell_reset now applies the
+// parameter values stored so far before it resets, so op_shell_latency right
+// after a reset is the latency of those values.
+uint32_t op_shell_take_changes(void* instance);
+// ---- end of ABI 6 -----------------------------------------------------------
 
 #if OP_HAS_TAIL
 // Optional, with -DOP_TAIL=ON: how long the output rings after the input

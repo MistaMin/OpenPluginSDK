@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 class AAX_CEffectParameters;
+class AAX_IController;
 class AAX_IEffectGUI;
 namespace openplugin_aax {
 // The most parameters this shell takes. It is the shell's own bound (it sizes the
@@ -184,4 +185,9 @@ bool proofValue(AAX_CEffectParameters* parameters, uint32_t index, const char* t
 // kProofBypass as the index addresses the master bypass.
 inline constexpr uint32_t kProofBypass = 0xFFFFFFFFu;
 bool proofUpdate(AAX_CEffectParameters* parameters, uint32_t index, double normalized);
+// What TimerWakeup does (ABI 6), with `controller` standing in for the host's: tell it what
+// changed. Returns the OP_CHANGE_* bits it told.
+uint32_t proofWakeup(AAX_CEffectParameters* parameters, AAX_IController* controller);
+// The data model's own TimerWakeup, which has no controller in a proof.
+AAX_Result proofTimerWakeup(AAX_CEffectParameters* parameters);
 }

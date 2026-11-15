@@ -17,6 +17,18 @@ OpenPluginSDK's target crates line up with the five formats:
 | **AAX** | macOS | In-process process callback and ACF exports. A Pro Tools load is not claimed | `native/aax` linked to an external AAX SDK. Native mono and stereo. Editor view with `-DOP_EDITOR=ON`; the editor reports its size and asks the host for a new one through `AAX_IViewContainer::SetViewSize`. Not exercised without Pro Tools |
 | **Standalone**| Windows, macOS, Linux | Live performance, test harnesses | CPAL audio driver + window runner |
 
+## Telling the host about changes
+
+A plugin's latency or parameter info (names, units, value text) can change at run time. The plugin keeps the `HostNotifier` it is given (`Plugin::set_host_notifier`, once, on the main thread) and calls `latency_changed` or `param_info_changed` from any thread, `process` included (one atomic `fetch_or`, no allocation, no lock). Every entry also compares `Plugin::latency` after each block, so a latency that moves inside `process` reaches the host without a call. Each change is told once, on the thread the format asks for:
+
+| Format | Latency | Parameter info |
+|---|---|---|
+| CLAP | `request_restart` (thread-safe) once, from the block that saw it or the main thread; the next `activate` calls `clap_host_latency.changed`, the only place CLAP allows it, and `latency.get` returns the new value. A change while deactivated waits for `activate` | `request_callback` from the audio thread, then `clap_host_params.rescan(VALUES \| TEXT \| INFO)` in `on_main_thread`. A host without `request_callback` is told at the next main-thread call (activate, deactivate, a state load, track info) |
+| LV2 | the `latency` output port, written after every `run` (also in `activate` and `connect_port`) | none (LV2 has no call for it) |
+| VST3, AU, AAX | `restartComponent(kLatencyChanged)`, `kAudioUnitProperty_Latency`, `SetSignalLatency`, through `op_shell_take_changes` (shell ABI 6, [SHELL.md](SHELL.md#telling-the-host-about-changes-abi-6)) | `kParamTitlesChanged \| kParamValuesChanged`, `kAudioUnitProperty_ParameterList` and `ParameterInfo`, `AAX_eNotificationEvent_ParameterNameChanged` |
+
+Parameter info comes from `Plugin::info`: a plugin that renames its parameters returns another `&'static PluginInfo` with the same parameters (ids, ranges, flags, order) and calls `param_info_changed`. CLAP reads the new names and text at once; the shells read the type's first table for now (a known limit in SHELL.md). Proofs: `tests/clap_changes.rs` and `tests/clap_changes_no_alloc.rs` (a fake CLAP host that counts every call and checks the thread), `tests/lv2_latency.rs` (the port through the exported descriptor, no allocation), the ffi tests and the shell proofs listed in SHELL.md, all with the test plugin of `crates/openplugin-targets/tests/common/shift.rs`, whose latency follows a parameter or jumps after a number of blocks.
+
 ## Host menu and track
 
 Two host integrations that work from the editor and the host's own services, per format (details in [EDITOR.md](EDITOR.md#the-hosts-parameter-menu-and-the-track)):
@@ -102,9 +114,10 @@ Port order, computed from the plugin by `lv2::PortMap::of` so the instance, the 
 | next | `freewheel`, `lv2:designation lv2:freeWheeling`; above 0.5 calls `Plugin::set_offline(true)` |
 | next, if `note_ports().input` | `events_in`, `atom:Sequence` supporting `midi:MidiEvent` and `time:Position` |
 | next, if `note_ports().output` | `events_out`, `atom:Sequence` with `midi:MidiEvent` from `Plugin::pull_midi` |
-| last | one `lv2:isSideChain` audio input per sidechain channel of the chosen layout (`lv2::layout_of`) |
+| next | one `lv2:isSideChain` audio input per sidechain channel of the chosen layout (`lv2::layout_of`) |
+| last | `latency`, a control output with `lv2:designation lv2:latency` and `lv2:reportsLatency` (`PortMap::latency`), written with `Plugin::latency` after every `run` |
 
-The three atom/sidechain kinds and `freewheel` are `lv2:connectionOptional`. A plugin with atom ports lists `urid:map` as a required feature; if a host passes none anyway, atoms are ignored and audio still runs.
+The three atom/sidechain kinds, `freewheel` and `latency` are `lv2:connectionOptional`. A plugin with atom ports lists `urid:map` as a required feature; if a host passes none anyway, atoms are ignored and audio still runs.
 
 - **Notes.** Events are delivered at their frame offsets by rendering in segments, as CLAP does: note-on through `note_on_channel`, note-off through `note_off`, every other message through `midi::deliver`. Events must be ordered by time; one that goes back in time is delivered at the current position, one outside the block is dropped.
 - **Transport.** A `time:Position` object (Object or Blank) maps to `Transport`: `speed` to `playing`, `beatsPerMinute` to `tempo`, `beatsPerBar` and `beatUnit` to `numerator` and `denominator`, `bar` to `bar_number`, `barBeat` to `quarter_notes` (converted from the signature's beat unit), `frame` to `sample_pos` and `seconds`. Hosts send a position only when it changes, so between positions the SDK advances `sample_pos`, `seconds` and `quarter_notes` itself while `playing`. A plugin that returns `note_ports().input == false` has no atom port and gets no transport.

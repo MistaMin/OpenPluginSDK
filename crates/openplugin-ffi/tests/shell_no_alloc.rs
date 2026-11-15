@@ -15,6 +15,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
 use openplugin_ffi::shell;
 
+#[path = "../../openplugin-targets/tests/common/shift.rs"]
+mod shift;
+
 static ARMED: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static FREES: AtomicUsize = AtomicUsize::new(0);
@@ -584,4 +587,32 @@ fn shell_audio_and_parameter_setters_do_not_allocate() {
     unsafe { shell::destroy(instance) };
 
     events_do_not_allocate();
+    changes_do_not_allocate();
+}
+
+/// Shell ABI 6: a block in which the plugin flags a new latency and new
+/// parameter names (its `HostNotifier`, from inside `process`), the shell's
+/// poll and its read of the latency, and a reset that applies stored values.
+fn changes_do_not_allocate() {
+    let instance = shell::create::<shift::Shift>(48_000.0, 512, 2);
+    assert!(!instance.is_null());
+    let mut left = [0.25f32; 512];
+    let mut right = [0.25f32; 512];
+    let (l, r) = (left.as_mut_ptr(), right.as_mut_ptr());
+    let flags = measured("a block that changes the latency and the names, then the poll", || unsafe {
+        shell::set_plain(instance, 0, 64.0);
+        shell::set_plain(instance, 1, 1.0);
+        assert_eq!(shell::process(instance, l, r, l, r, 512), 1);
+        shell::take_changes(instance)
+    });
+    assert_eq!(flags, shell::CHANGE_LATENCY | shell::CHANGE_PARAM_INFO);
+    let latency = measured("op_shell_latency after the poll", || unsafe { shell::latency(instance) });
+    assert_eq!(latency, 64);
+    let flags = measured("reset that applies a stored latency", || unsafe {
+        shell::set_plain(instance, 0, 12.0);
+        shell::reset(instance);
+        shell::take_changes(instance)
+    });
+    assert_eq!(flags, shell::CHANGE_LATENCY);
+    unsafe { shell::destroy(instance) };
 }

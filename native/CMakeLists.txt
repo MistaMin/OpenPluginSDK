@@ -235,6 +235,35 @@ if(OP_BUILD_VST3)
     target_link_libraries(VST3TrackProof PRIVATE sdk "-framework CoreFoundation")
     add_dependencies(VST3TrackProof OpenPluginVST3Track)
     add_test(NAME vst3_track_proof COMMAND VST3TrackProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Track>")
+    # Telling the host about changes (shell ABI 6): the same shell over a stub whose latency follows
+    # its parameter (vst3/changes_stub.cpp), with a host that records restartComponent.
+    set(OP_PRODUCT_SAVED "${OP_PRODUCT}")
+    set(OP_PRODUCT "Changes Stub")
+    configure_file(vst3/Info.plist.in "${CMAKE_BINARY_DIR}/vst3-changes-Info.plist" @ONLY)
+    set(OP_PRODUCT "${OP_PRODUCT_SAVED}")
+    add_library(OpenPluginVST3Changes MODULE
+      vst3/OpenPluginVST3.cpp
+      vst3/changes_stub.cpp
+      "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
+    target_include_directories(OpenPluginVST3Changes PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/vst3")
+    set_target_properties(OpenPluginVST3Changes PROPERTIES
+      OUTPUT_NAME "Changes Stub"
+      BUNDLE TRUE
+      BUNDLE_EXTENSION vst3
+      PREFIX ""
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-changes-Info.plist")
+    target_link_libraries(OpenPluginVST3Changes PRIVATE sdk "-framework CoreFoundation")
+    add_executable(VST3ChangesProof vst3/changes.cpp
+      "${OP_VST3_SDK}/public.sdk/source/vst/hosting/hostclasses.cpp"
+      "${OP_VST3_SDK}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp"
+      "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp")
+    target_include_directories(VST3ChangesProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/vst3")
+    target_link_libraries(VST3ChangesProof PRIVATE sdk "-framework CoreFoundation")
+    add_dependencies(VST3ChangesProof OpenPluginVST3Changes)
+    add_test(NAME vst3_changes_proof COMMAND VST3ChangesProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Changes>")
+    # process() still allocates nothing while the latency moves under it.
+    add_dependencies(VST3NoAllocProof OpenPluginVST3Changes)
+    add_test(NAME vst3_noalloc_changes_proof COMMAND VST3NoAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Changes>")
     # ABI 2 events proof: the same shell over three stand-in plugins (native/vst3/events_stub.cpp):
     # an effect with a sidechain and surround layouts, an instrument, and a note effect with no
     # audio. The example has no notes, sidechain or surround layouts, so it cannot show those.
@@ -502,10 +531,44 @@ if(OP_BUILD_AU)
     target_link_libraries(AUTextProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
     add_dependencies(AUTextProof OpenPluginAUText)
     add_test(NAME au_text_proof COMMAND AUTextProof "$<TARGET_BUNDLE_DIR:OpenPluginAUText>")
+    # Telling the host about changes (shell ABI 6): the shell over the stand-in whose latency
+    # follows its parameter (vst3/changes_stub.cpp, shared with the VST3 proof), with a host that
+    # listens to the latency and parameter properties and runs the main run loop.
+    function(op_au_changes_plist)
+      set(OP_PRODUCT "ChangesTest")
+      set(OP_BUNDLE_ID "com.opengrid.test.changes")
+      set(OP_VERSION "1")
+      set(OP_MANUFACTURER "OpenPlugin")
+      set(OP_AU_SUBTYPE "ChTs")
+      set(OP_AU_MANUFACTURER "OpTs")
+      set(OP_AU_TYPE "aufx")
+      configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-changes-Info.plist" @ONLY)
+    endfunction()
+    op_au_changes_plist()
+    add_library(OpenPluginAUChanges MODULE au/OpenPluginAU.cpp vst3/changes_stub.cpp)
+    op_au_set_type(OpenPluginAUChanges aufx)
+    target_compile_features(OpenPluginAUChanges PRIVATE cxx_std_23)
+    target_include_directories(OpenPluginAUChanges PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+    set_target_properties(OpenPluginAUChanges PROPERTIES
+      OUTPUT_NAME "ChangesTest"
+      BUNDLE TRUE
+      BUNDLE_EXTENSION component
+      PREFIX ""
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-changes-Info.plist")
+    target_link_libraries(OpenPluginAUChanges PRIVATE openplugin_au_sdk)
+    add_executable(AUChangesProof au/changes_host.cpp)
+    target_include_directories(AUChangesProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(AUChangesProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+    add_dependencies(AUChangesProof OpenPluginAUChanges)
+    add_test(NAME au_changes_proof COMMAND AUChangesProof "$<TARGET_BUNDLE_DIR:OpenPluginAUChanges>")
+    # The render path still allocates nothing while the latency moves under it.
+    add_dependencies(AUAllocProof OpenPluginAUChanges)
+    add_test(NAME au_alloc_changes_proof COMMAND AUAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginAUChanges>")
+    set_tests_properties(au_alloc_changes_proof PROPERTIES DEPENDS au_changes_proof)
     # Shell ABI 2 parity (events, MIDI in and out, transport, sidechain, layouts, offline, the ABI
     # check) over au/probe_shell.cpp, a stand-in that implements all of ABI 2 and reports what it
     # received. Five components of the same shell source: an effect (aufx), an instrument (aumu), a
-    # music effect (aumf), and two effects whose library reports ABI 6 (newer than the shell, accepted) and ABI 2 (older than OP_SHELL_ABI 5, refused).
+    # music effect (aumf), and two effects whose library reports OP_SHELL_ABI + 1 (newer than the shell, accepted) and ABI 2 (older than OP_SHELL_ABI, refused).
     function(op_au_probe_bundle target product subtype type kind abi)
       set(OP_PRODUCT "${product}")
       set(OP_BUNDLE_ID "com.opengrid.test.${subtype}")
@@ -528,10 +591,10 @@ if(OP_BUILD_AU)
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/${target}-Info.plist")
       target_link_libraries(${target} PRIVATE openplugin_au_sdk)
     endfunction()
-    op_au_probe_bundle(OpenPluginAUProbeFx "ProbeFx" "PrFx" aufx 0 5)
-    op_au_probe_bundle(OpenPluginAUProbeInst "ProbeInst" "PrIn" aumu 1 5)
-    op_au_probe_bundle(OpenPluginAUProbeMidiFx "ProbeMidiFx" "PrMf" aumf 2 5)
-    op_au_probe_bundle(OpenPluginAUProbeNewer "ProbeNewer" "PrNw" aufx 0 6)
+    op_au_probe_bundle(OpenPluginAUProbeFx "ProbeFx" "PrFx" aufx 0 OP_SHELL_ABI)
+    op_au_probe_bundle(OpenPluginAUProbeInst "ProbeInst" "PrIn" aumu 1 OP_SHELL_ABI)
+    op_au_probe_bundle(OpenPluginAUProbeMidiFx "ProbeMidiFx" "PrMf" aumf 2 OP_SHELL_ABI)
+    op_au_probe_bundle(OpenPluginAUProbeNewer "ProbeNewer" "PrNw" aufx 0 "(OP_SHELL_ABI+1)")
     op_au_probe_bundle(OpenPluginAUProbeOlder "ProbeOlder" "PrOl" aufx 0 2)
     add_executable(AUEventsProof au/events_host.cpp)
     target_compile_features(AUEventsProof PRIVATE cxx_std_23)
@@ -719,6 +782,13 @@ if(OP_BUILD_AAX)
     op_link_rust(AAXRolesProof "${OP_ROLE_LIB}")
     add_test(NAME aax_roles_proof COMMAND AAXRolesProof)
   endif()
+  # AAXChangesProof: telling the host about changes (shell ABI 6) through the real data model's
+  # TimerWakeup, with a fake AAX_IController recording SetSignalLatency and ParameterNameChanged.
+  add_executable(AAXChangesProof aax/host_changes.cpp aax/OpenPluginAAXParameters.cpp aax/OpenPluginAAXState.cpp
+    aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXChangesProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXChangesProof PRIVATE OP_STUB_PARAMS=3 OP_STUB_LATENCY=0)
+  target_link_libraries(AAXChangesProof PRIVATE openplugin_aax_sdk)
   add_executable(AAXBundleProof aax/host_bundle.cpp)
   target_link_libraries(AAXBundleProof PRIVATE "-framework CoreFoundation")
   add_dependencies(AAXBundleProof OpenPluginAAX)
@@ -740,6 +810,7 @@ if(OP_BUILD_AAX)
   add_test(NAME aax_alloc_latency_proof COMMAND AAXAllocLatencyProof)
   add_test(NAME aax_events_proof COMMAND AAXEventsProof)
   add_test(NAME aax_describe_proof COMMAND AAXDescribeProof)
+  add_test(NAME aax_changes_proof COMMAND AAXChangesProof)
   add_test(NAME aax_bundle_proof COMMAND AAXBundleProof "$<TARGET_BUNDLE_DIR:OpenPluginAAX>")
 endif()
 

@@ -15,6 +15,7 @@
 #include "op_shell.h"
 #include "proof_stub.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -71,6 +72,10 @@ struct Stub {
     std::vector<uint8_t> chunk;
     uint32_t growOnQuery = 0;  // bytes the chunk grows by right after the next size query
     uint32_t loads = 0;
+    // ABI 6: the latency now, what op_shell_latency last returned, and the changes not yet taken.
+    std::atomic<uint32_t> latency{kLatency};
+    std::atomic<uint32_t> told{kLatency};
+    std::atomic<uint32_t> changes{0};
     Stub() : plain(kParams) {}
 };
 void put(char* dst, size_t size, const char* src) {
@@ -141,7 +146,13 @@ void* op_shell_create(double, uint32_t, uint32_t channels) {
 }
 void op_shell_destroy(void* instance) { delete static_cast<Stub*>(instance); }
 void op_shell_reset(void*) {}
-uint32_t op_shell_latency(void*) { return kLatency; }
+uint32_t op_shell_latency(void* instance) {
+    if (!instance) return kLatency;
+    Stub& stub = *static_cast<Stub*>(instance);
+    const uint32_t now = stub.latency.load();
+    stub.told.store(now);
+    return now;
+}
 uint32_t op_shell_set_plain(void* instance, uint32_t index, float plain) {
     if (!instance || index >= kParams) return 0;
     static_cast<Stub*>(instance)->plain[index] = plain;
@@ -199,7 +210,26 @@ uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t lengt
     ++stub.loads;
     return 1;
 }
+// ---- ABI 6: as the Rust library does, a latency the host already read is not reported. ----
+static std::atomic<uint32_t> gTakes{0};
+uint32_t op_shell_take_changes(void* instance) {
+    if (!instance) return 0;
+    gTakes.fetch_add(1);
+    Stub& stub = *static_cast<Stub*>(instance);
+    uint32_t flags = stub.changes.exchange(0);
+    if ((flags & OP_CHANGE_LATENCY) && stub.latency.load() == stub.told.load()) flags &= ~static_cast<uint32_t>(OP_CHANGE_LATENCY);
+    return flags;
+}
 // Test hooks, not part of the shell ABI.
+void op_stub_set_latency(void* instance, uint32_t samples) {
+    if (!instance) return;
+    Stub& stub = *static_cast<Stub*>(instance);
+    if (stub.latency.exchange(samples) != samples) stub.changes.fetch_or(OP_CHANGE_LATENCY);
+}
+void op_stub_raise_changes(void* instance, uint32_t flags) {
+    if (instance) static_cast<Stub*>(instance)->changes.fetch_or(flags);
+}
+uint32_t op_stub_takes(void) { return gTakes.load(); }
 uint32_t op_stub_set_chunk(void* instance, const uint8_t* data, uint32_t length) {
     if (!instance || (!data && length)) return 0;
     static_cast<Stub*>(instance)->chunk.assign(data, data + length);
