@@ -295,6 +295,8 @@ struct AudioReport {
 fn start_audio(plugin: PluginPtr) -> Audio {
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
+    let running = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ran = running.clone();
     let handle = std::thread::spawn(move || {
         let plugin = plugin;
         let mut out = [vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]];
@@ -307,6 +309,7 @@ fn start_audio(plugin: PluginPtr) -> Audio {
             let status = run_block(plugin.0, &mut out, &mut input);
             assert_eq!(status, 1, "process keeps going");
             report.blocks += 1;
+            ran.store(report.blocks, Ordering::Release);
             let first = out[0][0];
             let uniform = out.iter().all(|channel| channel.iter().all(|s| *s == first));
             if !uniform {
@@ -319,6 +322,13 @@ fn start_audio(plugin: PluginPtr) -> Audio {
         report.allocations = counted() - before;
         report
     });
+    // The state calls must overlap processing: on a loaded machine the main thread could
+    // otherwise finish every round before the audio thread is first scheduled.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while running.load(Ordering::Acquire) < 8 {
+        assert!(std::time::Instant::now() < deadline, "the audio thread never started");
+        std::thread::yield_now();
+    }
     Audio { stop, handle }
 }
 
