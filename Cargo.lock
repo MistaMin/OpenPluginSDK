@@ -62,6 +62,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-perf-guide"
+version = "0.3.1-beta"
+dependencies = [
+ "openplugin-core",
+ "openplugin-dsp",
+ "openplugin-testing",
+]
+
+[[package]]
 name = "fontdue"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
