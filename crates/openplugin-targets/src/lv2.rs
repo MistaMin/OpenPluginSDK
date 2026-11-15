@@ -25,6 +25,7 @@
 //!
 //! [`export_lv2!`] emits `lv2_descriptor` from a cdylib, and with
 //! `editor = make_editor` also `lv2ui_descriptor`: a `ui:CocoaUI` on macOS.
+//! On Linux it is a `ui:X11UI` the host drives through `ui:idleInterface`.
 //! Its gestures are control-port writes plus `ui:touch` grabs, values come
 //! back through `port_event`, and with `instance-access` it is bound to the
 //! engine's [`EditorState`]. [`manifest_ttl`] and [`plugin_ttl`] write the
@@ -688,7 +689,7 @@ pub fn set_editor(factory: EditorFactory) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn editor_factory() -> Option<EditorFactory> {
     EDITOR.lock().ok().and_then(|slot| *slot)
 }
@@ -771,7 +772,7 @@ fn uri() -> &'static CStr {
 }
 
 /// Parameters of the installed plugin, read once.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn param_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| creator().map(|create| create().info().params.len()).unwrap_or(0))
@@ -1260,6 +1261,13 @@ pub unsafe fn instance_state(handle: *const c_void) -> Option<EditorState> {
 #[cfg(target_os = "macos")]
 pub use ui::{lv2ui_descriptor, Lv2UiDescriptor};
 
+#[cfg(target_os = "linux")]
+pub use ui_x11::{lv2ui_descriptor, Lv2UiDescriptor};
+
+#[cfg(target_os = "linux")]
+#[path = "lv2_ui_x11.rs"]
+mod ui_x11;
+
 #[cfg(target_os = "macos")]
 mod ui {
     //! `ui:CocoaUI`: the editor in an `NSView`, handed to the host as the widget.
@@ -1612,6 +1620,11 @@ pub fn manifest_ttl(plugin: &dyn Plugin, binary_stem: &str, with_ui: bool) -> St
     out.push_str("@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n");
     out.push_str("@prefix ui:   <http://lv2plug.in/ns/extensions/ui#> .\n\n");
     let _ = writeln!(out, "<{uri}>\n    a lv2:Plugin ;\n    lv2:binary <{binary}> ;\n    rdfs:seeAlso <{binary_stem}.ttl> .");
+    #[cfg(target_os = "linux")]
+    if with_ui {
+        out.push_str(&ui_x11::manifest_entry(uri, &binary, binary_stem));
+        return out;
+    }
     if with_ui {
         let _ = writeln!(out, "\n<{uri}#ui>\n    a ui:CocoaUI ;\n    ui:binary <{binary}> ;\n    rdfs:seeAlso <{binary_stem}.ttl> .");
     }
@@ -1769,6 +1782,11 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
         }
         out.push_str(" .\n");
     }
+    #[cfg(target_os = "linux")]
+    if with_ui {
+        out.push_str(&ui_x11::ui_ttl(uri, resizable));
+        return out;
+    }
     if with_ui {
         let _ = writeln!(out, "\n<{uri}#ui>");
         out.push_str("    a ui:CocoaUI ;\n");
@@ -1785,9 +1803,10 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
 }
 
 /// Write `manifest.ttl` and `<binary_stem>.ttl` into an LV2 bundle folder.
-/// The editor is described on macOS when `with_ui` is set.
+/// The editor is described on macOS when `with_ui` is set (`ui:CocoaUI`),
+/// and on Linux (`ui:X11UI`).
 pub fn write_bundle(plugin: &dyn Plugin, dir: &std::path::Path, binary_stem: &str, with_ui: bool) -> std::io::Result<()> {
-    let with_ui = with_ui && cfg!(target_os = "macos");
+    let with_ui = with_ui && cfg!(any(target_os = "macos", target_os = "linux"));
     std::fs::write(dir.join("manifest.ttl"), manifest_ttl(plugin, binary_stem, with_ui))?;
     std::fs::write(dir.join(format!("{binary_stem}.ttl")), plugin_ttl(plugin, with_ui))
 }
@@ -1805,7 +1824,7 @@ pub fn write_bundle_for_editor(
     let resizable = editor
         .and_then(|make| make(openplugin_core::EditorHost::detached()))
         .map(|e| !e.size_range().is_fixed());
-    let ui = if cfg!(target_os = "macos") { resizable } else { None };
+    let ui = if cfg!(any(target_os = "macos", target_os = "linux")) { resizable } else { None };
     std::fs::write(dir.join("manifest.ttl"), manifest_ttl(plugin, binary_stem, ui.is_some()))?;
     std::fs::write(dir.join(format!("{binary_stem}.ttl")), plugin_ttl_sized(plugin, ui))
 }
@@ -1879,13 +1898,13 @@ impl<P: Plugin> Lv2Harness<P> {
 /// Export `lv2_descriptor` from a cdylib. `$plugin` implements [`Plugin`] and [`Default`].
 ///
 /// `export_lv2!(P, editor = make_editor)` also exports `lv2ui_descriptor`
-/// (a `ui:CocoaUI`, macOS). Describe it with [`write_bundle`]`(.., true)`.
+/// (a `ui:CocoaUI` on macOS, a `ui:X11UI` on Linux). Describe it with [`write_bundle`]`(.., true)`.
 #[macro_export]
 macro_rules! export_lv2 {
     ($plugin:ty, editor = $editor:path) => {
         $crate::export_lv2!($plugin);
 
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub extern "C" fn lv2ui_descriptor(index: u32) -> *const $crate::lv2::Lv2UiDescriptor {
             $crate::lv2::set_creator(__openplugin_lv2_create);
@@ -2045,7 +2064,10 @@ mod tests {
         assert!(ttl.contains("lv2:toggled"));
         assert!(ttl.contains(r#"rdfs:label "Hard" ; rdf:value 1.0"#));
         assert!(ttl.contains("units:unit units:db"));
+        #[cfg(not(target_os = "linux"))]
         assert!(ttl.contains("a ui:CocoaUI"));
+        #[cfg(target_os = "linux")]
+        assert!(ttl.contains("a ui:X11UI") && !ttl.contains("CocoaUI"));
         assert!(ttl.trim_end().ends_with('.'));
         // A fixed editor lists ui:noUserResize; a resizable one offers ui:resize instead.
         assert!(ttl.contains("ui:noUserResize") && !ttl.contains("lv2:extensionData ui:resize"));
