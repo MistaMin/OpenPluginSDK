@@ -219,10 +219,10 @@ uint32_t op_shell_process_events(void* instance, const OpProcess* a) {
     for (uint32_t i = 0; i < a->frames; ++i) {
         while (next < a->event_count && a->events[next].offset <= i) {
             const OpEvent& e = a->events[next++];
-            if (e.kind == OP_EVENT_NOTE_ON) {
+            if (e.kind == OP_EVENT_NOTE_ON || e.kind == OP_EVENT_NOTE_ON_ID) {  // ABI 7: the VST3 shell sends ids
                 s.note = e.note;
                 echo(s, e.offset, static_cast<uint8_t>(0x90 | e.channel), static_cast<uint8_t>(e.note + 12), e.velocity);
-            } else if (e.kind == OP_EVENT_NOTE_OFF) {
+            } else if (e.kind == OP_EVENT_NOTE_OFF || e.kind == OP_EVENT_NOTE_OFF_ID) {
                 if (s.note == e.note) s.note = -1;
                 echo(s, e.offset, static_cast<uint8_t>(0x80 | e.channel), static_cast<uint8_t>(e.note + 12), e.velocity);
             } else if (e.kind == OP_EVENT_MIDI) {

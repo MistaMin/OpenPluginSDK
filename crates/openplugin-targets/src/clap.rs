@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as Clock};
 
 use openplugin_core::{
-    decode_params, encode_params, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Gesture, GestureQueue,
-    HostNotifier, IoConfig, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
+    decode_params, encode_params, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
+    ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
     Seqlock, SpeakerLayout, Tail, TrackInfo, Transport, MAX_AUDIO_CHANNELS,
 };
 
@@ -141,6 +141,8 @@ const KIND_PARAM: u8 = 0;
 const KIND_NOTE_ON: u8 = 1;
 const KIND_NOTE_OFF: u8 = 2;
 const KIND_MIDI: u8 = 3;
+const KIND_EXPRESSION: u8 = 4;
+const KIND_MOD: u8 = 5;
 
 #[derive(Clone, Copy)]
 struct Sched {
@@ -148,10 +150,12 @@ struct Sched {
     kind: u8,
     param: u32,
     value: f32,
-    note: u8,
     velocity: u8,
-    channel: u8,
+    /// Expression id (`KIND_EXPRESSION`).
+    expression: u8,
     midi: [u8; 3],
+    /// The note a note, expression or modulation event is for.
+    target: NoteRef,
 }
 
 impl Sched {
@@ -161,12 +165,23 @@ impl Sched {
             kind: 0,
             param: 0,
             value: 0.0,
-            note: 0,
             velocity: 0,
-            channel: 0,
+            expression: 0,
             midi: [0; 3],
+            target: NoteRef::ALL,
         }
     }
+}
+
+/// A CLAP note id: 0 or more, else -1 (none).
+fn note_id(id: i32) -> i32 {
+    if id < 0 { -1 } else { id }
+}
+
+/// Whether the event's header claims at least the size of its struct, so a
+/// short event is never read past its end.
+fn sized<T>(header: &clap_event_header) -> bool {
+    header.size as usize >= std::mem::size_of::<T>()
 }
 
 struct Instance {
@@ -202,6 +217,10 @@ struct Instance {
     bus_meters: Seqlock<BusMeters>,
     sched: [Sched; MAX_SCHED],
     sched_count: usize,
+    /// [`Plugin::note_expressions`], read once at creation.
+    expressions: ExpressionSet,
+    /// The MPE receiver for a plugin that asked for MPE ([`Plugin::mpe_input`]).
+    mpe: Option<MpeReceiver>,
     buffers: Vec<Vec<f32>>,
     sidechain: Vec<Vec<f32>>,
     sample_rate: f32,
@@ -351,22 +370,78 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
             EVENT_NOTE_ON => {
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_note) };
                 let velocity = (event.velocity.clamp(0.0, 1.0) * 127.0).round() as u8;
-                let channel = if event.channel < 0 { 0 } else { event.channel.min(15) as u8 };
+                let channel = if event.channel < 0 { 0 } else { event.channel.min(15) };
+                // The key goes on as given: Plugin::note_on_ref's default hands
+                // it to note_on_channel exactly as before note ids existed.
                 push_sched(instance, Sched {
                     time: header.time,
                     kind: KIND_NOTE_ON,
-                    note: event.key as u8,
                     velocity,
-                    channel,
+                    target: NoteRef::new(note_id(event.note_id), event.port_index.max(0), channel, event.key),
                     ..Sched::empty()
                 });
             }
             EVENT_NOTE_OFF => {
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_note) };
+                let velocity = if event.velocity.is_finite() { (event.velocity.clamp(0.0, 1.0) * 127.0).round() as u8 } else { 0 };
                 push_sched(instance, Sched {
                     time: header.time,
                     kind: KIND_NOTE_OFF,
-                    note: event.key as u8,
+                    velocity,
+                    target: NoteRef::new(note_id(event.note_id), event.port_index, event.channel, event.key),
+                    ..Sched::empty()
+                });
+            }
+            EVENT_NOTE_EXPRESSION => {
+                if instance.expressions.is_empty() || !sized::<clap_event_note_expression>(header) {
+                    continue;
+                }
+                let event = unsafe { &*(header as *const clap_event_header as *const clap_event_note_expression) };
+                let Some(expression) = Expression::from_id(i64::from(event.expression_id)) else { continue };
+                if !instance.expressions.contains(expression) {
+                    continue;
+                }
+                let (Some(target), Some(value)) = (
+                    NoteRef::checked(event.note_id, event.port_index, event.channel, event.key),
+                    expression.sanitize(event.value),
+                ) else {
+                    continue;
+                };
+                push_sched(instance, Sched {
+                    time: header.time,
+                    kind: KIND_EXPRESSION,
+                    expression: expression as u8,
+                    value,
+                    target,
+                    ..Sched::empty()
+                });
+            }
+            EVENT_PARAM_MOD => {
+                if header.space_id != 0 || !sized::<clap_event_param_mod>(header) {
+                    continue;
+                }
+                let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_mod) };
+                let Some(param) = instance.info.params.get(event.param_id as usize) else { continue };
+                let Some(target) = NoteRef::checked(event.note_id, event.port_index, event.channel, event.key) else {
+                    continue;
+                };
+                // A per-note amount only for a parameter that offers it; the
+                // whole-plugin form for any modulatable one.
+                let allowed = if target.is_all() {
+                    param.flags.contains(ParamFlags::MODULATABLE)
+                } else {
+                    param.flags.contains(ParamFlags::POLY_MODULATION)
+                };
+                if !allowed || !event.amount.is_finite() {
+                    continue;
+                }
+                let span = (param.max - param.min).abs();
+                push_sched(instance, Sched {
+                    time: header.time,
+                    kind: KIND_MOD,
+                    param: event.param_id,
+                    value: (event.amount as f32).clamp(-span, span),
+                    target,
                     ..Sched::empty()
                 });
             }
@@ -401,9 +476,18 @@ fn apply_group(instance: &mut Instance, start: usize, end: usize) {
                 instance.plane.store(event.param as usize, event.value);
                 dirty = true;
             }
-            KIND_NOTE_ON => instance.inner.note_on_channel(0, event.channel, event.note, event.velocity),
-            KIND_NOTE_OFF => instance.inner.note_off(0, event.note),
-            KIND_MIDI => instance.inner.midi(0, event.midi),
+            KIND_NOTE_ON => instance.inner.note_on_ref(0, event.target, event.velocity),
+            KIND_NOTE_OFF => instance.inner.note_off_ref(0, event.target, event.velocity),
+            KIND_MIDI => match instance.mpe.as_mut() {
+                Some(receiver) => mpe::receive_into(receiver, instance.inner.as_mut(), 0, event.midi),
+                None => instance.inner.midi(0, event.midi),
+            },
+            KIND_EXPRESSION => {
+                if let Some(expression) = Expression::from_id(i64::from(event.expression)) {
+                    instance.inner.note_expression(0, event.target, expression, event.value);
+                }
+            }
+            KIND_MOD => instance.inner.param_modulation(0, event.param as usize, event.target, event.value),
             _ => {}
         }
     }
@@ -918,17 +1002,20 @@ unsafe extern "C" fn note_ports_count(plugin: *const clap_plugin, is_input: bool
     })
 }
 
-unsafe extern "C" fn note_ports_get(_plugin: *const clap_plugin, index: u32, is_input: bool, info: *mut clap_note_port_info) -> bool {
+unsafe extern "C" fn note_ports_get(plugin: *const clap_plugin, index: u32, is_input: bool, info: *mut clap_note_port_info) -> bool {
     guarded(std::ptr::null(), false, || {
         if !is_input || index != 0 || info.is_null() {
             return false;
         }
+        // A plugin that takes per-note expressions prefers CLAP note events
+        // (they carry note ids); one that asked for MPE also takes MPE MIDI.
+        let (expressive, mpe) = instance(plugin).map_or((false, false), |i| (!i.expressions.is_empty(), i.mpe.is_some()));
         unsafe {
             std::ptr::write_bytes(info, 0, 1);
             let info = &mut *info;
             info.id = 0;
-            info.supported_dialects = NOTE_DIALECT_CLAP | NOTE_DIALECT_MIDI;
-            info.preferred_dialect = NOTE_DIALECT_MIDI;
+            info.supported_dialects = NOTE_DIALECT_CLAP | NOTE_DIALECT_MIDI | if mpe { NOTE_DIALECT_MIDI_MPE } else { 0 };
+            info.preferred_dialect = if expressive { NOTE_DIALECT_CLAP } else { NOTE_DIALECT_MIDI };
             copy_cstr(&mut info.name, "MIDI In");
         }
         true
@@ -1229,6 +1316,15 @@ fn clap_param_flags(param: &ParamInfo) -> u32 {
         && !param.flags.contains(ParamFlags::NOT_REALTIME)
     {
         flags |= PARAM_IS_AUTOMATABLE;
+    }
+    if param.flags.contains(ParamFlags::MODULATABLE) {
+        flags |= PARAM_IS_MODULATABLE;
+    }
+    if param.flags.contains(ParamFlags::POLY_MODULATION) {
+        flags |= PARAM_IS_MODULATABLE_PER_NOTE_ID
+            | PARAM_IS_MODULATABLE_PER_KEY
+            | PARAM_IS_MODULATABLE_PER_CHANNEL
+            | PARAM_IS_MODULATABLE_PER_PORT;
     }
     flags
 }
@@ -1881,6 +1977,8 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
     // appears later.
     let has_chunk = !inner.state_is_parameters_only();
     let editor_state = inner.editor_state();
+    let expressions = inner.note_expressions();
+    let mpe = MpeReceiver::for_plugin(inner.as_ref());
     let instance = Box::new(Instance {
         plugin: clap_plugin {
             desc: std::ptr::null(),
@@ -1929,6 +2027,8 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
         bus_meters: Seqlock::new(BusMeters::SILENT),
         sched: [Sched::empty(); MAX_SCHED],
         sched_count: 0,
+        expressions,
+        mpe,
         buffers: Vec::new(),
         sidechain: Vec::new(),
         sample_rate: 48_000.0,

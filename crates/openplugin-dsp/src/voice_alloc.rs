@@ -47,8 +47,26 @@
 //!
 //! No allocation after construction, no panics for any byte value, and
 //! velocity or time arguments that are NaN are sanitised.
+//!
+//! # Per-note expression and polyphonic modulation
+//!
+//! Each voice remembers the [`NoteRef`] of its note (host note id, port,
+//! channel, key; [`VoiceAllocator::note_on_ref`]) and keeps a
+//! [`NoteExpressions`]. [`VoiceAllocator::note_expression`] and
+//! [`VoiceAllocator::poly_modulation`] apply a value to the sounding voices
+//! whose note the event names and to no other: by note id when both sides
+//! have one, else by port, channel and key with `-1` as a wildcard (the CLAP
+//! rule; [`NoteRef::matches`]). A host that sends no note id (MIDI, MPE, the
+//! Audio Unit, AAX, LV2) is matched by channel and key: MPE gives each note
+//! its own channel. Values ramp over [`VoiceAllocator::set_expression_smoothing`]
+//! (5 ms by default) as [`Voice::advance`] runs, like the glide; a value sent
+//! before the voice's first sample is taken at once. [`Voice::pitch`] and
+//! [`Voice::hz`] include the voice's [`Expression::Tuning`].
+
+use openplugin_core::{Expression, NoteRef};
 
 use crate::pitch::hz_from_midi;
+use crate::voice::NoteExpressions;
 
 /// Which voice to take when all are busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +118,8 @@ pub struct Voice<S> {
     target: f32,
     glide_step: f32,
     glide_left: u32,
+    reference: NoteRef,
+    expressions: NoteExpressions,
 }
 
 impl<S> Voice<S> {
@@ -116,6 +136,8 @@ impl<S> Voice<S> {
             target: 0.0,
             glide_step: 0.0,
             glide_left: 0,
+            reference: NoteRef::ALL,
+            expressions: NoteExpressions::new(),
         }
     }
 
@@ -137,9 +159,32 @@ impl<S> Voice<S> {
         self.velocity
     }
 
-    /// Current pitch as a (fractional) MIDI note, after glide.
+    /// Current pitch as a (fractional) MIDI note, after glide, plus the
+    /// note's [`Expression::Tuning`] (0 unless a host sent one).
     pub fn pitch(&self) -> f32 {
-        self.pitch
+        self.pitch + self.expressions.get(Expression::Tuning)
+    }
+
+    /// The note this voice plays: host note id, port, channel and key, as
+    /// given to [`VoiceAllocator::note_on_ref`] (a plain `note_on` has no id,
+    /// port or channel).
+    pub fn note_ref(&self) -> NoteRef {
+        self.reference
+    }
+
+    /// The current (ramped) value of a per-note expression.
+    pub fn expression(&self, expression: Expression) -> f32 {
+        self.expressions.get(expression)
+    }
+
+    /// The current amount of polyphonic modulation slot `slot`.
+    pub fn modulation(&self, slot: usize) -> f32 {
+        self.expressions.modulation(slot)
+    }
+
+    /// Every expression and modulation value of the voice.
+    pub fn expressions(&self) -> &NoteExpressions {
+        &self.expressions
     }
 
     /// Current pitch in Hz.
@@ -152,8 +197,10 @@ impl<S> Voice<S> {
         self.glide_left > 0
     }
 
-    /// Move the glide forward by `samples`; lands exactly on the note.
+    /// Move the glide and the expression ramps forward by `samples`; the
+    /// glide lands exactly on the note.
     pub fn advance(&mut self, samples: u32) {
+        self.expressions.advance(samples);
         if self.glide_left == 0 {
             return;
         }
@@ -174,6 +221,7 @@ impl<S> Voice<S> {
         self.level = velocity;
         self.age = age;
         self.sustained = false;
+        self.expressions.start();
         self.retarget(note, from, glide_samples);
     }
 
@@ -217,6 +265,9 @@ pub struct NoteOff {
 
 const MAX_HELD: usize = 32;
 
+/// Expression ramp when none is set: 5 ms.
+const DEFAULT_SMOOTHING: f32 = 0.005;
+
 /// `N` voices with state `S`. See the module documentation.
 #[derive(Clone, Debug)]
 pub struct VoiceAllocator<S, const N: usize> {
@@ -232,6 +283,7 @@ pub struct VoiceAllocator<S, const N: usize> {
     held: [u8; MAX_HELD],
     held_len: usize,
     pedal: bool,
+    smoothing: f32,
 }
 
 impl<S: Default, const N: usize> Default for VoiceAllocator<S, N> {
@@ -251,7 +303,7 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
     /// Like [`VoiceAllocator::new`] with a state built per voice index.
     pub fn with_state(sample_rate: f32, mut make: impl FnMut(usize) -> S) -> Self {
         let sr = if sample_rate.is_finite() && sample_rate > 0.0 { sample_rate } else { 48_000.0 };
-        Self {
+        let mut this = Self {
             voices: std::array::from_fn(|i| Voice::new(make(i))),
             mode: VoiceMode::Poly,
             policy: StealPolicy::Oldest,
@@ -264,13 +316,73 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
             held: [0; MAX_HELD],
             held_len: 0,
             pedal: false,
-        }
+            smoothing: DEFAULT_SMOOTHING,
+        };
+        this.apply_smoothing();
+        this
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         if sample_rate.is_finite() && sample_rate > 0.0 {
             self.sample_rate = sample_rate;
+            self.apply_smoothing();
         }
+    }
+
+    /// How long a per-note expression or modulation takes to reach a new
+    /// value, in seconds (0 to 1; 0 jumps). 5 ms by default.
+    pub fn set_expression_smoothing(&mut self, seconds: f32) {
+        self.smoothing = if seconds.is_finite() { seconds.clamp(0.0, 1.0) } else { DEFAULT_SMOOTHING };
+        self.apply_smoothing();
+    }
+
+    fn apply_smoothing(&mut self) {
+        let samples = (f64::from(self.smoothing) * f64::from(self.sample_rate)).round() as u32;
+        for v in &mut self.voices {
+            v.expressions.set_ramp(samples);
+        }
+    }
+
+    /// The sounding voices (held or in their release) whose note `target`
+    /// names ([`NoteRef::matches`]), by index. Allocates nothing.
+    pub fn matching(&self, target: NoteRef) -> impl Iterator<Item = usize> + '_ {
+        self.voices
+            .iter()
+            .enumerate()
+            .filter(move |(_, v)| !v.is_free() && target.matches(v.reference))
+            .map(|(i, _)| i)
+    }
+
+    /// Set a per-note expression on every sounding voice whose note `target`
+    /// names, and on no other. Returns how many voices took it: 0 for a
+    /// target no voice matches (an unknown note id) or a NaN or infinite
+    /// value. The value is clamped to [`Expression::range`].
+    pub fn note_expression(&mut self, target: NoteRef, expression: Expression, value: f32) -> usize {
+        if !value.is_finite() {
+            return 0;
+        }
+        let mut count = 0;
+        for v in self.voices.iter_mut() {
+            if !v.is_free() && target.matches(v.reference) && v.expressions.set(expression, value) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Set polyphonic modulation slot `slot` (below
+    /// [`crate::voice::MOD_SLOTS`]) to `amount` on every sounding voice whose
+    /// note `target` names. Returns how many voices took it; 0 for a bad slot,
+    /// a non-finite amount or no match. [`NoteRef::ALL`] reaches every voice
+    /// (monophonic modulation).
+    pub fn poly_modulation(&mut self, target: NoteRef, slot: usize, amount: f32) -> usize {
+        let mut count = 0;
+        for v in self.voices.iter_mut() {
+            if !v.is_free() && target.matches(v.reference) && v.expressions.set_modulation(slot, amount) {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub fn set_policy(&mut self, policy: StealPolicy) {
@@ -369,13 +481,38 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
 
     /// Start `note` at MIDI `velocity` (0..=127; 0 counts as a note-off and returns `None`).
     pub fn note_on(&mut self, note: u8, velocity: u8) -> Option<Allocation> {
+        self.note_on_ref(NoteRef::key(note), velocity)
+    }
+
+    /// [`Self::note_on`] for a note with its host note id, port and channel,
+    /// which the voice remembers for routing ([`Self::note_expression`],
+    /// [`Self::note_off_ref`]). Its expressions start neutral. Rule 1 (the
+    /// same note held) needs the same key on the same channel (a voice or
+    /// note without a channel matches any), so MPE notes of one key on two
+    /// channels get two voices. A key outside 0..=127 starts nothing.
+    pub fn note_on_ref(&mut self, reference: NoteRef, velocity: u8) -> Option<Allocation> {
         if N == 0 {
             return None;
         }
-        if velocity == 0 {
-            self.note_off(note);
+        let Ok(note) = u8::try_from(reference.key) else {
+            return None;
+        };
+        if note > 127 {
             return None;
         }
+        if velocity == 0 {
+            self.note_off_ref(reference);
+            return None;
+        }
+        let allocation = self.allocate(note, velocity, reference.channel);
+        if let Some(a) = allocation {
+            self.voices[a.voice].reference = reference;
+        }
+        allocation
+    }
+
+    fn allocate(&mut self, note: u8, velocity: u8, channel: i16) -> Option<Allocation> {
+        let same_channel = |v: &Voice<S>| channel < 0 || v.reference.channel < 0 || v.reference.channel == channel;
         let vel = f32::from(velocity.min(127)) / 127.0;
         self.clock = self.clock.wrapping_add(1);
         let age = self.clock;
@@ -402,11 +539,11 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         };
 
         // Rule 1: the same note already held.
-        let mut index = self.voices.iter().position(|v| v.phase == VoicePhase::Held && v.note == note);
+        let mut index = self.voices.iter().position(|v| v.phase == VoicePhase::Held && v.note == note && same_channel(v));
         let mut stolen = None;
         // Rule 2: same-note tail.
         if index.is_none() && self.policy == StealPolicy::SameNote {
-            index = self.voices.iter().position(|v| v.phase == VoicePhase::Released && v.note == note);
+            index = self.voices.iter().position(|v| v.phase == VoicePhase::Released && v.note == note && same_channel(v));
         }
         // Rule 3: a free voice.
         if index.is_none() {
@@ -482,12 +619,25 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
     /// Key up. Poly: the held voice for `note` is released (or flagged, with the
     /// sustain pedal down). Mono modes: see [`NoteOff`].
     pub fn note_off(&mut self, note: u8) -> NoteOff {
+        self.note_off_ref(NoteRef::key(note))
+    }
+
+    /// Key up for the first held voice whose note `target` names
+    /// ([`NoteRef::matches`]: the note id, else port, channel and key). A
+    /// target with wildcards releases one voice per call; call again until
+    /// `released` is `None` to release them all.
+    pub fn note_off_ref(&mut self, target: NoteRef) -> NoteOff {
         if self.mode != VoiceMode::Poly {
-            return self.mono_off(note);
+            let key = match u8::try_from(target.key) {
+                Ok(key) => key,
+                Err(_) if N > 0 && target.matches(self.voices[0].reference) => self.voices[0].note,
+                Err(_) => return NoteOff::default(),
+            };
+            return self.mono_off(key);
         }
         let pedal = self.pedal;
         for (i, v) in self.voices.iter_mut().enumerate() {
-            if v.phase == VoicePhase::Held && v.note == note && !v.sustained {
+            if v.phase == VoicePhase::Held && target.matches(v.reference) && !v.sustained {
                 if pedal {
                     v.sustained = true;
                     return NoteOff::default();
@@ -796,5 +946,81 @@ mod tests {
         a.voice_mut(0).unwrap().state.push(9.0);
         assert_eq!(a.voice(0).unwrap().state.len(), 4);
         assert_eq!(a.voice(1).unwrap().state, vec![1.0; 3]);
+    }
+
+    fn snapshot(a: &Alloc4, i: usize) -> [f32; 4] {
+        let v = a.voice(i).unwrap();
+        [v.pitch(), v.expression(Expression::Pressure), v.expression(Expression::Brightness), v.modulation(0)]
+    }
+
+    #[test]
+    fn an_expression_for_one_note_id_changes_that_voice_only() {
+        let mut a = Alloc4::new(48_000.0);
+        a.set_expression_smoothing(0.0);
+        let x = a.note_on_ref(NoteRef::new(101, 0, 0, 60), 100).unwrap().voice;
+        let y = a.note_on_ref(NoteRef::new(102, 0, 0, 64), 100).unwrap().voice;
+        let before = snapshot(&a, y);
+        let target = NoteRef::new(101, -1, -1, -1);
+        assert_eq!(a.note_expression(target, Expression::Tuning, 2.0), 1);
+        assert_eq!(a.note_expression(target, Expression::Pressure, 0.75), 1);
+        assert_eq!(a.note_expression(target, Expression::Brightness, 0.25), 1);
+        assert_eq!(a.poly_modulation(target, 0, 3.0), 1);
+        assert_eq!(snapshot(&a, x), [62.0, 0.75, 0.25, 3.0]);
+        assert_eq!(snapshot(&a, y), before, "the other voice is untouched");
+        // Negative control: an id no voice has changes nothing.
+        let all = [snapshot(&a, x), snapshot(&a, y)];
+        assert_eq!(a.note_expression(NoteRef::new(999, -1, -1, -1), Expression::Tuning, -7.0), 0);
+        assert_eq!(a.poly_modulation(NoteRef::new(999, -1, -1, -1), 0, 9.0), 0);
+        assert_eq!([snapshot(&a, x), snapshot(&a, y)], all);
+        // Hostile values are refused.
+        assert_eq!(a.note_expression(target, Expression::Pressure, f32::NAN), 0);
+        assert_eq!(a.poly_modulation(target, 99, 1.0), 0);
+        assert_eq!(a.note_expression(target, Expression::Tuning, 1.0e9), 1);
+        assert_eq!(a.voice(x).unwrap().pitch(), 180.0, "clamped to +120 semitones");
+        // Monophonic: NoteRef::ALL reaches every voice.
+        assert_eq!(a.poly_modulation(NoteRef::ALL, 1, 0.5), 2);
+        // The note-off by id releases its own voice.
+        assert_eq!(a.note_off_ref(NoteRef::new(102, -1, -1, -1)).released, Some(y));
+        assert_eq!(a.voice(x).unwrap().phase(), VoicePhase::Held);
+    }
+
+    #[test]
+    fn without_note_ids_channel_and_key_route_and_mpe_channels_get_their_own_voices() {
+        let mut a = Alloc4::new(48_000.0);
+        a.set_expression_smoothing(0.0);
+        // Two MPE notes of the same key on two member channels: two voices.
+        let x = a.note_on_ref(NoteRef::midi(1, 60), 100).unwrap().voice;
+        let y = a.note_on_ref(NoteRef::midi(2, 60), 100).unwrap().voice;
+        assert_ne!(x, y);
+        assert_eq!(a.note_expression(NoteRef::on_channel(2), Expression::Tuning, -1.0), 1);
+        assert_eq!(a.voice(y).unwrap().pitch(), 59.0);
+        assert_eq!(a.voice(x).unwrap().pitch(), 60.0);
+        assert_eq!(a.note_expression(NoteRef::on_channel(5), Expression::Tuning, 4.0), 0);
+        // A plain note-on (no channel) is still found by a plain note-off.
+        let z = a.note_on(72, 90).unwrap().voice;
+        assert_eq!(a.note_off(72).released, Some(z));
+        assert_eq!(a.note_off_ref(NoteRef::midi(1, 60)).released, Some(x));
+    }
+
+    #[test]
+    fn expressions_ramp_with_advance_and_reset_at_the_next_note() {
+        let mut a = Alloc4::new(1_000.0);
+        a.set_expression_smoothing(0.004);
+        let v = a.note_on_ref(NoteRef::new(1, 0, 0, 60), 100).unwrap().voice;
+        // Sent before the first sample: taken at once.
+        a.note_expression(NoteRef::new(1, -1, -1, -1), Expression::Pressure, 0.5);
+        assert_eq!(a.voice(v).unwrap().expression(Expression::Pressure), 0.5);
+        a.voice_mut(v).unwrap().advance(1);
+        a.note_expression(NoteRef::new(1, -1, -1, -1), Expression::Pressure, 1.0);
+        assert_eq!(a.voice(v).unwrap().expression(Expression::Pressure), 0.5);
+        a.voice_mut(v).unwrap().advance(2);
+        assert_eq!(a.voice(v).unwrap().expression(Expression::Pressure), 0.75);
+        a.voice_mut(v).unwrap().advance(2);
+        assert_eq!(a.voice(v).unwrap().expression(Expression::Pressure), 1.0);
+        a.note_off_ref(NoteRef::new(1, -1, -1, -1));
+        a.free(v);
+        let w = a.note_on_ref(NoteRef::new(2, 0, 0, 62), 100).unwrap().voice;
+        assert_eq!(a.voice(w).unwrap().expression(Expression::Pressure), 0.0);
+        assert_eq!(a.voice(w).unwrap().note_ref(), NoteRef::new(2, 0, 0, 62));
     }
 }

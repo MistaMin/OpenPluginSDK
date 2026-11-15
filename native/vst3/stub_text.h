@@ -32,4 +32,12 @@ size_t op_shell_param_group(uint32_t, char* buf, size_t cap) {
     if (buf && cap > 0) buf[0] = '\0';
     return 0;
 }
+// ---- ABI 7: no per-note expression (the controller offers no INoteExpressionController).
+uint32_t op_shell_expressions(void) { return 0; }
+uint32_t op_shell_expression_info(uint32_t, OpExpressionInfo*) { return 0; }
+size_t op_shell_expression_format(uint32_t, double, char* buf, size_t cap) {
+    if (buf && cap > 0) buf[0] = '\0';
+    return 0;
+}
+int op_shell_expression_parse(uint32_t, const char*, double*) { return 0; }
 }

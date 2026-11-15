@@ -21,6 +21,8 @@ pub use openplugin_ffi::shell::{
     PARAM_DISCRETE, PARAM_LOG, STATE_MAX, STATE_OK, STATE_TOO_SMALL,
     // ABI 6: telling the host about changes.
     take_changes, CHANGE_LATENCY, CHANGE_PARAM_INFO,
+    // ABI 7: per-note expression.
+    expression_format, expression_info, expression_parse, expressions, OpExpressionInfo,
 };
 
 #[cfg(target_os = "macos")]
@@ -476,6 +478,36 @@ macro_rules! export_shell {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_take_changes(instance: *mut ::std::ffi::c_void) -> u32 {
             unsafe { $crate::shell::take_changes(instance as *const $crate::shell::ShellInstance) }
+        }
+
+        // ABI 7: per-note expression.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_expressions() -> u32 {
+            $crate::shell::expressions::<$plugin>()
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_expression_info(id: u32, out: *mut $crate::shell::OpExpressionInfo) -> u32 {
+            unsafe { $crate::shell::expression_info::<$plugin>(id, out) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_expression_format(
+            id: u32,
+            value: f64,
+            buf: *mut ::std::ffi::c_char,
+            cap: usize,
+        ) -> usize {
+            unsafe { $crate::shell::expression_format(id, value, buf as *mut u8, cap) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_expression_parse(
+            id: u32,
+            text: *const ::std::ffi::c_char,
+            out: *mut f64,
+        ) -> i32 {
+            unsafe { $crate::shell::expression_parse(id, text, out) }
         }
 
         #[unsafe(no_mangle)]

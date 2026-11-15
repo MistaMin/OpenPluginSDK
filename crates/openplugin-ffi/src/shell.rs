@@ -8,16 +8,17 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Mutex, OnceLock};
 
 use openplugin_core::{
-    sample_rate_supported, AaxIds, Category, EditorState, IoConfig, NotePorts, ParamFlags,
+    sample_rate_supported, AaxIds, Category, EditorState, Expression, IoConfig, NotePorts, ParamFlags,
     ParamInfo, PluginInfo, PortKind, SpeakerLayout, Taper, Unit,
 };
 
 use crate::{FfiInstance, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
-pub const ABI: u32 = 6;
+pub const ABI: u32 = 7;
 pub use crate::block::{
     OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
+    EVENT_NOTE_EXPRESSION, EVENT_NOTE_OFF_ID, EVENT_NOTE_ON_ID, NOTE_ANY,
     EVENT_PARAM_NORMALIZED, EVENT_PARAM_PLAIN, MAX_EVENTS, MAX_MIDI_OUT, TRANSPORT_HAS_BEATS,
     TRANSPORT_HAS_SECONDS, TRANSPORT_HAS_SIGNATURE, TRANSPORT_HAS_TEMPO, TRANSPORT_PLAYING,
     TRANSPORT_RECORDING,
@@ -681,6 +682,109 @@ pub unsafe fn param_parse<P: Plugin + Default>(index: u32, text: *const std::ffi
             1
         }
         _ => 0,
+    }
+}
+
+// ---- ABI 7: per-note expression ---------------------------------------------
+
+/// [`OpExpressionInfo::flags`]: centred on a middle value (pan, tuning).
+pub const EXPRESSION_BIPOLAR: u32 = 1;
+
+/// One per-note expression as a host shows it. `min`, `max` and
+/// `default_value` are in the expression's own units ([`Expression::range`]);
+/// the range is linear, so a shell's normalized value is
+/// `(value - min) / (max - min)`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct OpExpressionInfo {
+    pub min: f64,
+    pub max: f64,
+    pub default_value: f64,
+    pub flags: u32,
+    pub reserved: u32,
+    pub name: [u8; 64],
+    pub short_name: [u8; 16],
+    pub unit: [u8; 16],
+}
+
+/// The expressions the plugin reacts to ([`Plugin::note_expressions`]): bit
+/// `1 << id` for each `OP_EXPRESSION_*` id. Message thread (it builds a
+/// plugin to ask it).
+pub fn expressions<P: Plugin + Default>() -> u32 {
+    std::panic::catch_unwind(|| P::default().note_expressions().bits()).unwrap_or(0)
+}
+
+/// Fill `out` for expression `id`. Returns 1, or 0 (writing nothing) for a
+/// null `out`, an unknown id or one the plugin does not list.
+///
+/// # Safety
+/// `out` is null or points to writable memory for one [`OpExpressionInfo`].
+pub unsafe fn expression_info<P: Plugin + Default>(id: u32, out: *mut OpExpressionInfo) -> u32 {
+    if out.is_null() {
+        return 0;
+    }
+    let Some(expression) = Expression::from_id(i64::from(id)) else {
+        return 0;
+    };
+    if expressions::<P>() & (1 << id) == 0 {
+        return 0;
+    }
+    let (min, max) = expression.range();
+    let mut info = OpExpressionInfo {
+        min: f64::from(min),
+        max: f64::from(max),
+        default_value: f64::from(expression.neutral()),
+        flags: if expression.is_bipolar() { EXPRESSION_BIPOLAR } else { 0 },
+        reserved: 0,
+        name: [0; 64],
+        short_name: [0; 16],
+        unit: [0; 16],
+    };
+    put(&mut info.name, expression.name());
+    put(&mut info.short_name, expression.short_name());
+    put(&mut info.unit, expression.unit());
+    unsafe { out.write(info) };
+    1
+}
+
+/// The text of `value` of expression `id` ([`Expression::format`]: dB, `L50`,
+/// `+1.00 st`, percent), with the length rules of [`param_format`]. An
+/// unknown id returns 0 and writes an empty string. Main thread: it allocates.
+///
+/// # Safety
+/// `buf` is null or points to `cap` writable bytes.
+pub unsafe fn expression_format(id: u32, value: f64, buf: *mut u8, cap: usize) -> usize {
+    let text = Expression::from_id(i64::from(id)).map(|e| e.format(value as f32)).unwrap_or_default();
+    unsafe { copy_text(&text, buf, cap) }
+}
+
+/// Reads `text` as a value of expression `id` ([`Expression::parse`]) into
+/// `*out_value`. Returns 1, or 0 leaving `*out_value` alone for a null
+/// pointer, an unknown id, text that is not UTF-8, longer than [`PARSE_MAX`]
+/// bytes, or not a value. Main thread.
+///
+/// # Safety
+/// `text` is null or a NUL-terminated string; `out_value` is null or writable.
+pub unsafe fn expression_parse(id: u32, text: *const std::ffi::c_char, out_value: *mut f64) -> i32 {
+    if text.is_null() || out_value.is_null() {
+        return 0;
+    }
+    let Some(expression) = Expression::from_id(i64::from(id)) else {
+        return 0;
+    };
+    let bytes = unsafe { std::ffi::CStr::from_ptr(text) }.to_bytes();
+    if bytes.len() > PARSE_MAX {
+        return 0;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    match expression.parse(text) {
+        Some(value) => {
+            unsafe { *out_value = f64::from(value) };
+            1
+        }
+        None => 0,
     }
 }
 

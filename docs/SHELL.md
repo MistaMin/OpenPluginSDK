@@ -49,6 +49,8 @@ Class IDs are 16 bytes from a 128-bit mix of the plugin id. VST3 prints them wit
 | `op_shell_set_track_info` (ABI 4) | message | yes (the name) |
 | `op_shell_param_group` (ABI 5) | any | no, after the first descriptor read |
 | `op_shell_take_changes` (ABI 6) | any (the shells poll on their main thread) | no |
+| `op_shell_expressions`, `op_shell_expression_info` (ABI 7) | message | yes (they build a plugin to ask it) |
+| `op_shell_expression_format`, `op_shell_expression_parse` (ABI 7) | message | yes (the text) |
 | `op_shell_process_events` | audio | no |
 | `op_shell_midi_out`, `op_shell_midi_dropped` | audio thread, after the block | no |
 
@@ -56,7 +58,7 @@ Class IDs are 16 bytes from a 128-bit mix of the plugin id. VST3 prints them wit
 
 `OP_SHELL_ABI` in the header is the ABI version the shell was written for; `op_shell_abi_version()` and `OpShellInfo.abi` are the version of the library. The rule:
 
-- A version only adds: functions, enum values, struct fields at the end of a struct that carries `struct_size`. Nothing is removed, renamed or changed in meaning. Adding anything raises the number (1 was everything up to save/load state, 2 adds this section, 3 adds the parameter text calls below, 4 adds the host's track, 5 adds parameter groups, 6 adds telling the host about changes).
+- A version only adds: functions, enum values, struct fields at the end of a struct that carries `struct_size`. Nothing is removed, renamed or changed in meaning. Adding anything raises the number (1 was everything up to save/load state, 2 adds this section, 3 adds the parameter text calls below, 4 adds the host's track, 5 adds parameter groups, 6 adds telling the host about changes, 7 adds per-note expression).
 - A shell built against `OP_SHELL_ABI = N` works with any library of version N or higher, and must refuse a library below N (`op_shell_abi_version() < OP_SHELL_ABI`) instead of calling symbols that are missing. The shells that existed before ABI 2 compare `info.abi` for equality; they are built from the same header as the library, so that still holds. The Audio Unit shell (whose test stand-ins report the current ABI, and one reports an older one that must be refused) checks `op_shell_abi_version() >= OP_SHELL_ABI` and `info.abi >= OP_SHELL_ABI`; a library that fails the check leaves the unit without parameters, and `AudioUnitInitialize` returns `kAudioUnitErr_FailedInitialization`.
 - A change that cannot be additive gets new symbol names (a new prefix), so a mismatch fails at load instead of misbehaving.
 
@@ -119,6 +121,27 @@ What each shell does with it (the poll runs on the main thread, never on the aud
 Without a host to tell (a VST3 controller with no `IComponentHandler`, halves that are not connected, an AAX data model with no controller) a change is dropped or, for AAX, left for a wakeup that has a controller. The VST3 shell now always gives a new engine the values it holds and then resets it (before, it gave them only after a state blob loaded; `process` gave them at the first block), which is what makes the latency read after a `kLatencyChanged` restart the right one. CLAP and LV2 are Rust entries and do not go through this ABI ([FORMATS.md](FORMATS.md)).
 
 Proofs: `vst3_changes_proof`, `au_changes_proof` and `aax_changes_proof` (fake hosts that record the notification, its thread and the latency they read back; the VST3 and Audio Unit ones over `native/vst3/changes_stub.cpp`, a stand-in whose latency follows its parameter, the AAX one over `proof_stub.cpp`), `vst3_noalloc_changes_proof` and `au_alloc_changes_proof` (the audio path of that stand-in allocates nothing), and on the Rust side `crates/openplugin-ffi/tests/shell_changes.rs` and the ABI 6 section of `shell_no_alloc.rs`.
+
+### Per-note expression (ABI 7)
+
+Notes with the host's note id, and per-note expressions addressed by that id, for the VST3 shell's note expressions ([EXPRESSION.md](EXPRESSION.md)). Added in ABI 7, in one block at the end of `op_shell.h`. `OpEvent` keeps its layout; three event kinds give its fields a meaning:
+
+| Kind | `index` | `channel`, `note` | `velocity` | `midi[0]` | `value` |
+|---|---|---|---|---|---|
+| `OP_EVENT_NOTE_ON_ID` (6) | host note id, int32 bits; `0xFFFFFFFF` (-1) for none | channel 0..15, key 0..127 | 1..127 | | |
+| `OP_EVENT_NOTE_OFF_ID` (7) | as above | as above | release velocity | | |
+| `OP_EVENT_NOTE_EXPRESSION` (8) | note id, or -1 | channel and key, `OP_NOTE_ANY` (0xFF) for any | | `OP_EXPRESSION_*` | the value in the expression's units |
+
+- `OP_EXPRESSION_VOLUME` 0 (linear gain `0..4`, 1 is unity), `_PAN` 1 (`0` left, `1` right), `_TUNING` 2 (semitones `-120..120`), `_VIBRATO` 3, `_EXPRESSION` 4, `_BRIGHTNESS` 5, `_PRESSURE` 6 (each `0..1`): the CLAP note expression ids and ranges.
+- A note-on or note-off with an id reaches `Plugin::note_on_ref` / `note_off_ref` (whose defaults call `note_on_channel` / `note_off`, so a plugin without expressions sees what it saw before). For a plugin that asked for MPE, a note without an id goes through the library's MPE receiver, like `OP_EVENT_NOTE_ON`; a note with an id never does.
+- An expression reaches `Plugin::note_expression` only when the plugin lists it; the value is clamped to the range and a NaN or infinite value is dropped. A note id below -1, an unknown expression, a channel past 15 or a key past 127 (other than `OP_NOTE_ANY`) makes the event invalid, and it is skipped like any invalid event.
+- `uint32_t op_shell_expressions(void)`: bit `1 << OP_EXPRESSION_*` for each expression the plugin lists (`Plugin::note_expressions`), 0 for none. No instance.
+- `uint32_t op_shell_expression_info(uint32_t id, OpExpressionInfo* out)`: `min`, `max` and `default_value` in the expression's units, `flags` (`OP_EXPRESSION_BIPOLAR` for pan and tuning), `name`, `short_name`, `unit` (UTF-8, NUL-terminated). Returns 0 and writes nothing for NULL, an unknown id or one the plugin does not list. Every range is linear, so a shell's normalized value is `(value - min) / (max - min)`; for VST3 that is exactly the predefined mapping of each type (volume `20 log(4 norm)` dB is a gain of `4 norm`, tuning `240 (norm - 0.5)` semitones).
+- `size_t op_shell_expression_format(uint32_t id, double value, char* buf, size_t cap)` and `int op_shell_expression_parse(uint32_t id, const char* text, double* out_value)`: the expression's text (`-6.0 dB`, `L50`, `+7.00 st`, `40%`) and back, with the length and refusal rules of the parameter text calls.
+
+The VST3 shell sends every note as `OP_EVENT_NOTE_ON_ID` / `OFF_ID` with `NoteOnEvent::noteId`, turns `kNoteExpressionValueEvent` (volume to brightness as the predefined types 0 to 5, pressure as the custom type `kCustomStart`) into `OP_EVENT_NOTE_EXPRESSION` with the plain value and `OP_NOTE_ANY` for channel and key, and drops one for a type the plugin does not list, a NaN or a negative note id. Its controller offers `INoteExpressionController` (count, info, value to string, string to value, on every channel of event bus 0) and `INoteExpressionPhysicalUIMapping` (X movement to tuning, Y movement to brightness, pressure to pressure) only when the plugin lists expressions, so a plugin without them is what it was. `NoteOnEvent::tuning` is not carried. The Audio Unit and AAX shells do not change: they pass MIDI as before, and a plugin that asked for MPE gets per-note expression from it in the library. Every stand-in answers the ABI 7 calls with no expressions (`native/vst3/stub_text.h`), and the VST3 events stub takes the note kinds with ids.
+
+Proofs: `vst3_expression_proof` (`native/vst3/expression_host.cpp`, over Expression Synth, `examples/expression_synth`, built when `libexample_expression_synth.a` is next to `OP_RUST_LIB` or given as `-DOP_EXPRESSION_LIB`), and on the Rust side `examples/expression_synth/tests/formats.rs`.
 
 ### Channel order
 
