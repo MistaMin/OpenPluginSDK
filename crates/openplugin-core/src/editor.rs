@@ -134,6 +134,31 @@ impl Modifiers {
     }
 }
 
+/// A key an editor can ask for. The view maps the platform's key codes to
+/// these; everything else arrives as [`Key::Char`] (the character the key
+/// types without modifiers, in lower case) or is not delivered at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Left,
+    Right,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Tab,
+    /// Return and the keypad Enter.
+    Return,
+    Escape,
+    /// The key that deletes forward (Fn-Delete on a Mac keyboard).
+    Delete,
+    /// The key above Return, which deletes backward.
+    Backspace,
+    Space,
+    Char(char),
+}
+
 /// A rendered editor frame. `pixels.len() == width * height`.
 #[derive(Clone, Copy)]
 pub struct Frame<'a> {
@@ -260,6 +285,29 @@ pub trait Editor {
     /// they belong to, never when nothing changed. Optional: a view that does
     /// not report modifiers leaves this uncalled.
     fn modifiers_changed(&mut self, _modifiers: Modifiers) {}
+
+    /// Whether the editor wants key events. A view takes keyboard focus only
+    /// while this is true, so an editor that says no (the default) leaves every
+    /// key with the host, as before.
+    fn wants_keys(&self) -> bool {
+        false
+    }
+
+    /// A key went down (auto-repeat sends it again). Return true when the
+    /// editor used it. A key the editor does not handle must return false: the
+    /// view then passes it to the host, which owns transport and shortcuts.
+    fn key_down(&mut self, _key: Key, _modifiers: Modifiers) -> bool {
+        false
+    }
+
+    /// A key went up. Return true when the editor used it, false to pass it
+    /// on to the host.
+    fn key_up(&mut self, _key: Key, _modifiers: Modifiers) -> bool {
+        false
+    }
+
+    /// The view gained or lost keyboard focus. On a loss, forget keys held.
+    fn focus_changed(&mut self, _focused: bool) {}
 
     /// Mouse input in points, origin at the top left.
     fn mouse_down(&mut self, _x: f32, _y: f32, _clicks: u32) {}
