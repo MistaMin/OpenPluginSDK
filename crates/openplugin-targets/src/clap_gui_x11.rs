@@ -14,7 +14,7 @@
 //!
 //! Size. CLAP sizes on X11 are physical pixels; the view and the editor work
 //! in points. Every size crossing the ABI goes through [`pixels_per_point`],
-//! which is 1.0 until the view says what scale it renders at. `set_scale`
+//! which is the scale the view renders at. `set_scale`
 //! returns false: the view, not the host, decides its scale.
 //!
 //! Resizing follows the macOS module: `can_resize`, `get_resize_hints`,
@@ -46,6 +46,8 @@ pub(super) trait View {
     /// The descriptor to watch, or negative for none.
     fn fd(&self) -> RawFd;
     fn pump(&mut self);
+    /// Physical pixels per editor point.
+    fn scale(&self) -> f64;
 }
 
 impl View for x11::EditorView {
@@ -73,18 +75,20 @@ impl View for x11::EditorView {
     fn pump(&mut self) {
         x11::EditorView::pump(self)
     }
+    fn scale(&self) -> f64 {
+        f64::from(x11::EditorView::scale(self))
+    }
 }
 
 fn make_x11_view(editor: Box<dyn Editor>, poll: x11::Poll) -> Option<Box<dyn View>> {
     x11::EditorView::new(editor, Some(poll)).map(|view| Box::new(view) as Box<dyn View>)
 }
 
-/// Physical pixels per editor point, for every size `clap.gui` passes on X11.
-///
-/// SCALE: always 1.0 for now. `x11::EditorView` does not yet report the scale
-/// it renders at; once it does, return that here and nothing else changes.
-fn pixels_per_point(_view: &dyn View) -> f64 {
-    1.0
+/// Physical pixels per editor point, for every size `clap.gui` passes on X11:
+/// the scale the view renders at (from the display's `Xft.dpi`).
+fn pixels_per_point(view: &dyn View) -> f64 {
+    let scale = view.scale();
+    if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
 }
 
 fn to_pixels(scale: f64, (w, h): (u32, u32)) -> (u32, u32) {
@@ -700,6 +704,9 @@ mod tests {
             probe(|p| p.pumps += 1);
             (self.poll)(self.editor.as_mut());
             self.editor.tick(0.033);
+        }
+        fn scale(&self) -> f64 {
+            1.0
         }
     }
 

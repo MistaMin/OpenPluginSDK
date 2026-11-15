@@ -78,25 +78,22 @@ static OFFERED: OfferedResize = OfferedResize(Resize { handle: std::ptr::null_mu
 /// The `ui:idleInterface` the UI offers the host through `extension_data`.
 static IDLE: IdleInterface = IdleInterface { idle: Some(idle) };
 
-/// X11 pixels per editor point. `ui:X11UI` sizes (`ui:resize` both ways) are
-/// in pixels, the view's sizes are in points.
-///
-/// ASSUMPTION: 1.0. `openplugin_dri::x11::EditorView` has no scale accessor
-/// yet; when it gets one, read it here and every conversion follows.
-fn pixels_per_point() -> f64 {
-    1.0
+/// X11 pixels per editor point: the scale the view renders at. `ui:X11UI`
+/// sizes (`ui:resize` both ways) are in pixels, the view's sizes are in points.
+fn pixels_per_point(view: &EditorView) -> f64 {
+    f64::from(view.scale())
 }
 
 /// Editor points to X11 pixels, for the host.
-fn to_pixels(points: u32) -> i32 {
-    let pixels = (f64::from(points) * pixels_per_point()).round();
+fn to_pixels(points: u32, scale: f64) -> i32 {
+    let pixels = (f64::from(points) * scale).round();
     if pixels >= f64::from(i32::MAX) { i32::MAX } else { pixels.max(0.0) as i32 }
 }
 
 /// X11 pixels from the host to editor points; `None` for a negative size.
-fn to_points(pixels: i32) -> Option<u32> {
+fn to_points(pixels: i32, scale: f64) -> Option<u32> {
     let pixels = u32::try_from(pixels).ok()?;
-    let points = (f64::from(pixels) / pixels_per_point()).round();
+    let points = (f64::from(pixels) / scale).round();
     (points.is_finite() && points <= f64::from(u32::MAX)).then_some(points as u32)
 }
 
@@ -105,7 +102,8 @@ fn to_points(pixels: i32) -> Option<u32> {
 unsafe extern "C" fn host_resizes(handle: *mut c_void, width: i32, height: i32) -> i32 {
     guarded(1, || {
         let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return 1 };
-        let (Some(w), Some(h)) = (to_points(width), to_points(height)) else { return 1 };
+        let scale = pixels_per_point(&ui.view);
+        let (Some(w), Some(h)) = (to_points(width, scale), to_points(height, scale)) else { return 1 };
         if !ui.view.size_range().contains(w, h) {
             return 1;
         }
@@ -207,15 +205,18 @@ unsafe extern "C" fn instantiate(
         let Some(parent) = parent else { return std::ptr::null_mut() };
         // A size the host agreed to, for the view to apply on its next tick.
         let granted: Rc<Cell<Option<(u32, u32)>>> = Rc::new(Cell::new(None));
+        // The view's scale, known once the view exists; the editor can only ask after that.
+        let scale: Rc<Cell<f64>> = Rc::new(Cell::new(1.0));
         let ask = {
             let granted = granted.clone();
+            let scale = scale.clone();
             let (handle, call) = match unsafe { resize.as_ref() } {
                 Some(r) => (r.handle as usize, r.ui_resize),
                 None => (0, None),
             };
             move |w: u32, h: u32| -> bool {
                 let Some(call) = call else { return false };
-                if unsafe { call(handle as *mut c_void, to_pixels(w), to_pixels(h)) } != 0 {
+                if unsafe { call(handle as *mut c_void, to_pixels(w, scale.get()), to_pixels(h, scale.get())) } != 0 {
                     return false;
                 }
                 granted.set(Some((w, h)));
@@ -235,6 +236,7 @@ unsafe extern "C" fn instantiate(
             }
         });
         let Some(mut view) = EditorView::new(editor, Some(poll)) else { return std::ptr::null_mut() };
+        scale.set(pixels_per_point(&view));
         let window = view.raw();
         if window == 0 || !view.attach(parent) {
             return std::ptr::null_mut();
@@ -242,7 +244,7 @@ unsafe extern "C" fn instantiate(
         if let Some(r) = unsafe { resize.as_ref() } {
             if let Some(f) = r.ui_resize {
                 let (w, h) = view.size();
-                unsafe { f(r.handle, to_pixels(w), to_pixels(h)) };
+                unsafe { f(r.handle, to_pixels(w, scale.get()), to_pixels(h, scale.get())) };
             }
         }
         if !widget.is_null() {
