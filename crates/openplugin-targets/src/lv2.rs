@@ -55,6 +55,7 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt::Write as _;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -610,46 +611,50 @@ pub fn worker_stats(handle: *mut c_void) -> Option<WorkerStats> {
 
 /// `worker:interface` `work`: runs one task step on the host's thread.
 unsafe extern "C" fn lv2_work(handle: *mut c_void, respond: Option<RespondFn>, respond_handle: *mut c_void, size: u32, data: *const c_void) -> u32 {
-    let Some(bridge) = bridge_of(handle) else { return WORKER_ERR_UNKNOWN };
-    // Our requests are exactly one `u32` task number; anything else is not ours.
-    let index = if size == 4 && !data.is_null() && data as usize % 4 == 0 { Some(unsafe { *(data as *const u32) } as usize) } else { None };
-    let Some(slot) = index.and_then(|i| bridge.slots.get(i)) else {
-        bridge.rejected.fetch_add(1, Ordering::Relaxed);
-        return WORKER_ERR_UNKNOWN;
-    };
-    let step = {
-        let mut guard = slot.task.lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_mut() {
-            Some(task) => task.work(),
-            None => {
-                bridge.rejected.fetch_add(1, Ordering::Relaxed);
-                return WORKER_ERR_UNKNOWN;
+    guarded(0, || {
+        let Some(bridge) = bridge_of(handle) else { return WORKER_ERR_UNKNOWN };
+        // Our requests are exactly one `u32` task number; anything else is not ours.
+        let index = if size == 4 && !data.is_null() && data as usize % 4 == 0 { Some(unsafe { *(data as *const u32) } as usize) } else { None };
+        let Some(slot) = index.and_then(|i| bridge.slots.get(i)) else {
+            bridge.rejected.fetch_add(1, Ordering::Relaxed);
+            return WORKER_ERR_UNKNOWN;
+        };
+        let step = {
+            let mut guard = slot.task.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(task) => task.work(),
+                None => {
+                    bridge.rejected.fetch_add(1, Ordering::Relaxed);
+                    return WORKER_ERR_UNKNOWN;
+                }
+            }
+        };
+        bridge.worked.fetch_add(1, Ordering::Relaxed);
+        match step {
+            Step::Idle => {}
+            Step::Done => {
+                if let Some(respond) = respond {
+                    unsafe { respond(respond_handle, size, data) };
+                }
+            }
+            // A result is waiting for room: ask for another call on the next run.
+            Step::Retry => {
+                slot.pending.fetch_add(1, Ordering::AcqRel);
             }
         }
-    };
-    bridge.worked.fetch_add(1, Ordering::Relaxed);
-    match step {
-        Step::Idle => {}
-        Step::Done => {
-            if let Some(respond) = respond {
-                unsafe { respond(respond_handle, size, data) };
-            }
-        }
-        // A result is waiting for room: ask for another call on the next run.
-        Step::Retry => {
-            slot.pending.fetch_add(1, Ordering::AcqRel);
-        }
-    }
-    WORKER_OK
+        WORKER_OK
+    })
 }
 
 /// `worker:interface` `work_response`: runs on the audio thread before `run`
 /// when a task finished. The result itself is taken by `Slot::poll`.
 unsafe extern "C" fn lv2_work_response(handle: *mut c_void, _size: u32, _data: *const c_void) -> u32 {
-    if let Some(bridge) = bridge_of(handle) {
-        bridge.responses.fetch_add(1, Ordering::Relaxed);
-    }
-    WORKER_OK
+    guarded(0, || {
+        if let Some(bridge) = bridge_of(handle) {
+            bridge.responses.fetch_add(1, Ordering::Relaxed);
+        }
+        WORKER_OK
+    })
 }
 
 unsafe extern "C" fn lv2_end_run(_handle: *mut c_void) -> u32 {
@@ -658,11 +663,11 @@ unsafe extern "C" fn lv2_end_run(_handle: *mut c_void) -> u32 {
 
 /// Install the plugin `lv2_descriptor` will instantiate.
 pub fn set_creator(create: CreateFn) {
-    *CREATOR.lock().expect("lv2 creator lock") = Some(create);
+    *CREATOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(create);
 }
 
 fn creator() -> Option<CreateFn> {
-    *CREATOR.lock().expect("lv2 creator lock")
+    *CREATOR.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Install the editor `lv2ui_descriptor` will open.
@@ -729,6 +734,8 @@ struct Instance {
     /// The host's `worker:schedule`, if it offered one that works.
     schedule: Option<WorkerSchedule>,
     handle_key: usize,
+    /// A callback into the plugin panicked; `run` outputs silence until `activate`.
+    poisoned: bool,
 }
 
 const PREPARED: usize = 8192;
@@ -804,6 +811,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
     let sidechain = map.sidechain as usize;
     Some(Box::new(Instance {
         magic: MAGIC,
+        poisoned: false,
         inner,
         plane,
         cursor,
@@ -978,68 +986,120 @@ fn drain_midi(instance: &mut Instance, frames: usize) {
     }
 }
 
+/// Runs one `extern "C"` entry so a panic never unwinds into the host. A panic returns `fail`,
+/// the format's failure value. `catch_unwind` allocates nothing unless a panic happens; the
+/// default panic hook still prints to stderr, so install your own hook if that matters on the
+/// audio thread.
+fn guarded<R>(fail: R, body: impl FnOnce() -> R) -> R {
+    catch_unwind(AssertUnwindSafe(body)).unwrap_or(fail)
+}
+
+/// [`guarded`] for a call on an instance: a panic also poisons it, so `run` outputs
+/// silence until the host activates the instance again.
+fn guarded_on<R>(handle: *mut c_void, fail: R, body: impl FnOnce() -> R) -> R {
+    match catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(_) => {
+            if let Some(instance) = unsafe { (handle as *mut Instance).as_mut() } {
+                instance.poisoned = true;
+            }
+            fail
+        }
+    }
+}
+
 extern "C" fn lv2_instantiate(
     _descriptor: *const Lv2Descriptor,
     sample_rate: f64,
     _bundle_path: *const c_char,
     features: *const *const Lv2Feature,
 ) -> *mut c_void {
-    match new_instance(sample_rate, features) {
-        Some(mut instance) => {
-            instance.handle_key = &*instance as *const Instance as usize;
-            BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).push((instance.handle_key, instance.bridge.clone()));
-            Box::into_raw(instance) as *mut c_void
+    guarded(std::ptr::null_mut(), || {
+        match new_instance(sample_rate, features) {
+            Some(mut instance) => {
+                instance.handle_key = &*instance as *const Instance as usize;
+                BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).push((instance.handle_key, instance.bridge.clone()));
+                Box::into_raw(instance) as *mut c_void
+            }
+            None => std::ptr::null_mut(),
         }
-        None => std::ptr::null_mut(),
-    }
+    })
 }
 
 extern "C" fn lv2_connect(instance: *mut c_void, port: u32, data: *mut c_void) {
-    if instance.is_null() {
-        return;
-    }
-    let instance = unsafe { &mut *(instance as *mut Instance) };
-    let map = instance.map;
-    if let Some(slot) = map.audio_slot(port) {
-        instance.ports[slot] = data as *mut f32;
-    } else if port >= map.first_param() && port < map.freewheel() {
-        if let Some(slot) = instance.controls.get_mut((port - map.first_param()) as usize) {
-            *slot = data as *const f32;
+    guarded_on(instance, (), || {
+        if instance.is_null() {
+            return;
         }
-    } else if port == map.freewheel() {
-        instance.freewheel = data as *const f32;
-    } else if Some(port) == map.atom_in() {
-        instance.atom_in = data as *const u8;
-    } else if Some(port) == map.atom_out() {
-        instance.atom_out = data as *mut u8;
-    } else if port >= map.sidechain_first() {
-        if let Some(slot) = instance.side_ports.get_mut((port - map.sidechain_first()) as usize) {
-            *slot = data as *const f32;
+        let instance = unsafe { &mut *(instance as *mut Instance) };
+        let map = instance.map;
+        if let Some(slot) = map.audio_slot(port) {
+            instance.ports[slot] = data as *mut f32;
+        } else if port >= map.first_param() && port < map.freewheel() {
+            if let Some(slot) = instance.controls.get_mut((port - map.first_param()) as usize) {
+                *slot = data as *const f32;
+            }
+        } else if port == map.freewheel() {
+            instance.freewheel = data as *const f32;
+        } else if Some(port) == map.atom_in() {
+            instance.atom_in = data as *const u8;
+        } else if Some(port) == map.atom_out() {
+            instance.atom_out = data as *mut u8;
+        } else if port >= map.sidechain_first() {
+            if let Some(slot) = instance.side_ports.get_mut((port - map.sidechain_first()) as usize) {
+                *slot = data as *const f32;
+            }
         }
-    }
+    })
 }
 
 extern "C" fn lv2_activate(instance: *mut c_void) {
-    if instance.is_null() {
-        return;
-    }
-    unsafe {
-        let instance = &mut *(instance as *mut Instance);
-        read_controls(instance);
-        read_freewheel(instance);
-        instance.inner.reset();
-        instance.cursor.invalidate();
-        instance.cursor.pull(&instance.plane, instance.inner.as_mut());
-    }
+    guarded_on(instance, (), || {
+        if instance.is_null() {
+            return;
+        }
+        unsafe {
+            let instance = &mut *(instance as *mut Instance);
+            instance.poisoned = false;
+            read_controls(instance);
+            read_freewheel(instance);
+            instance.inner.reset();
+            instance.cursor.invalidate();
+            instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+        }
+    })
 }
 
 extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
     if instance.is_null() {
         return;
     }
+    if unsafe { &*(instance as *const Instance) }.poisoned {
+        silence_outputs(instance as *mut Instance, sample_count as usize);
+        return;
+    }
+    let ran = catch_unwind(AssertUnwindSafe(|| run_block(instance as *mut Instance, sample_count as usize)));
+    if ran.is_err() {
+        if let Some(instance) = unsafe { (instance as *mut Instance).as_mut() } {
+            instance.poisoned = true;
+        }
+        silence_outputs(instance as *mut Instance, sample_count as usize);
+    }
+}
+
+/// Zero the host's output audio buffers for `frames` frames.
+fn silence_outputs(instance: *mut Instance, frames: usize) {
+    let instance = unsafe { &*instance };
+    for dst in &instance.ports[2..4] {
+        if !dst.is_null() {
+            unsafe { std::ptr::write_bytes(*dst, 0, frames) };
+        }
+    }
+}
+
+fn run_block(instance: *mut Instance, frames: usize) {
     unsafe {
-        let instance = &mut *(instance as *mut Instance);
-        let frames = sample_count as usize;
+        let instance = &mut *instance;
         read_controls(instance);
         read_freewheel(instance);
         if frames == 0 {
@@ -1082,31 +1142,37 @@ fn flush_worker(instance: &Instance) {
 }
 
 extern "C" fn lv2_deactivate(instance: *mut c_void) {
-    if instance.is_null() {
-        return;
-    }
-    unsafe {
-        (*(instance as *mut Instance)).inner.reset();
-    }
+    guarded_on(instance, (), || {
+        if instance.is_null() {
+            return;
+        }
+        unsafe {
+            (*(instance as *mut Instance)).inner.reset();
+        }
+    })
 }
 
 extern "C" fn lv2_cleanup(instance: *mut c_void) {
-    if instance.is_null() {
-        return;
-    }
-    unsafe {
-        let mut instance = Box::from_raw(instance as *mut Instance);
-        instance.magic = 0;
-        BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).retain(|(key, _)| *key != instance.handle_key);
-        drop(instance);
-    }
+    guarded((), || {
+        if instance.is_null() {
+            return;
+        }
+        unsafe {
+            let mut instance = Box::from_raw(instance as *mut Instance);
+            instance.magic = 0;
+            BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).retain(|(key, _)| *key != instance.handle_key);
+            drop(instance);
+        }
+    })
 }
 
 extern "C" fn lv2_extension(uri: *const c_char) -> *const c_void {
-    if !uri.is_null() && unsafe { CStr::from_ptr(uri) }.to_bytes() == WORKER_INTERFACE {
-        return (&WORKER_IFACE as *const WorkerInterface).cast();
-    }
-    std::ptr::null()
+    guarded(std::ptr::null(), || {
+        if !uri.is_null() && unsafe { CStr::from_ptr(uri) }.to_bytes() == WORKER_INTERFACE {
+            return (&WORKER_IFACE as *const WorkerInterface).cast();
+        }
+        std::ptr::null()
+    })
 }
 
 fn published() -> &'static Lv2Descriptor {
@@ -1125,11 +1191,8 @@ fn published() -> &'static Lv2Descriptor {
 
 /// `lv2_descriptor`. Index 0 is the plugin. Call [`set_creator`] first.
 pub fn descriptor(index: u32) -> *const Lv2Descriptor {
-    if index == 0 && creator().is_some() {
-        published()
-    } else {
-        std::ptr::null()
-    }
+    // `published` builds the URI, which may run the plugin's constructor.
+    guarded(std::ptr::null(), || if index == 0 && creator().is_some() { published() } else { std::ptr::null() })
 }
 
 /// The editor state of an `instance-access` handle, if it is a live
@@ -1201,13 +1264,15 @@ mod ui {
     /// The host sets the editor's size. 0 on success; non-zero if the size is
     /// outside the editor's range (a fixed editor takes only its own size).
     unsafe extern "C" fn host_resizes(handle: *mut c_void, width: i32, height: i32) -> i32 {
-        let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return 1 };
-        let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else { return 1 };
-        if !ui.view.size_range().contains(w, h) {
-            return 1;
-        }
-        ui.view.resize(w, h);
-        0
+        guarded(1, || {
+            let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return 1 };
+            let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else { return 1 };
+            if !ui.view.size_range().contains(w, h) {
+                return 1;
+            }
+            ui.view.resize(w, h);
+            0
+        })
     }
 
     struct Ui {
@@ -1260,100 +1325,108 @@ mod ui {
         widget: *mut *mut c_void,
         features: *const *const Lv2Feature,
     ) -> *mut c_void {
-        let Some(factory) = editor_factory() else { return std::ptr::null_mut() };
-        if plugin_uri.is_null() || unsafe { CStr::from_ptr(plugin_uri) } != uri() {
-            return std::ptr::null_mut();
-        }
-        let mut parent = std::ptr::null_mut();
-        let mut instance: *const c_void = std::ptr::null();
-        let mut touch: *const Touch = std::ptr::null();
-        let mut resize: *const Resize = std::ptr::null();
-        let mut next = features;
-        while !next.is_null() && !unsafe { *next }.is_null() {
-            let feature = unsafe { &**next };
-            if !feature.uri.is_null() {
-                match unsafe { CStr::from_ptr(feature.uri) }.to_bytes() {
-                    b"http://lv2plug.in/ns/extensions/ui#parent" => parent = feature.data,
-                    b"http://lv2plug.in/ns/ext/instance-access" => instance = feature.data,
-                    b"http://lv2plug.in/ns/extensions/ui#touch" => touch = feature.data as *const Touch,
-                    b"http://lv2plug.in/ns/extensions/ui#resize" => resize = feature.data as *const Resize,
-                    _ => {}
-                }
+        guarded(std::ptr::null_mut(), || {
+            let Some(factory) = editor_factory() else { return std::ptr::null_mut() };
+            if plugin_uri.is_null() || unsafe { CStr::from_ptr(plugin_uri) } != uri() {
+                return std::ptr::null_mut();
             }
-            next = unsafe { next.add(1) };
-        }
-        // A size the host agreed to, for the view to apply on its next tick.
-        let granted: Rc<Cell<Option<(u32, u32)>>> = Rc::new(Cell::new(None));
-        let ask = {
-            let granted = granted.clone();
-            let (handle, call) = match unsafe { resize.as_ref() } {
-                Some(r) => (r.handle as usize, r.ui_resize),
-                None => (0, None),
+            let mut parent = std::ptr::null_mut();
+            let mut instance: *const c_void = std::ptr::null();
+            let mut touch: *const Touch = std::ptr::null();
+            let mut resize: *const Resize = std::ptr::null();
+            let mut next = features;
+            while !next.is_null() && !unsafe { *next }.is_null() {
+                let feature = unsafe { &**next };
+                if !feature.uri.is_null() {
+                    match unsafe { CStr::from_ptr(feature.uri) }.to_bytes() {
+                        b"http://lv2plug.in/ns/extensions/ui#parent" => parent = feature.data,
+                        b"http://lv2plug.in/ns/ext/instance-access" => instance = feature.data,
+                        b"http://lv2plug.in/ns/extensions/ui#touch" => touch = feature.data as *const Touch,
+                        b"http://lv2plug.in/ns/extensions/ui#resize" => resize = feature.data as *const Resize,
+                        _ => {}
+                    }
+                }
+                next = unsafe { next.add(1) };
+            }
+            // A size the host agreed to, for the view to apply on its next tick.
+            let granted: Rc<Cell<Option<(u32, u32)>>> = Rc::new(Cell::new(None));
+            let ask = {
+                let granted = granted.clone();
+                let (handle, call) = match unsafe { resize.as_ref() } {
+                    Some(r) => (r.handle as usize, r.ui_resize),
+                    None => (0, None),
+                };
+                move |w: u32, h: u32| -> bool {
+                    let Some(call) = call else { return false };
+                    let (Ok(wi), Ok(hi)) = (i32::try_from(w), i32::try_from(h)) else { return false };
+                    if unsafe { call(handle as *mut c_void, wi, hi) } != 0 {
+                        return false;
+                    }
+                    granted.set(Some((w, h)));
+                    true
+                }
             };
-            move |w: u32, h: u32| -> bool {
-                let Some(call) = call else { return false };
-                let (Ok(wi), Ok(hi)) = (i32::try_from(w), i32::try_from(h)) else { return false };
-                if unsafe { call(handle as *mut c_void, wi, hi) } != 0 {
-                    return false;
+            let first = creator().map(|create| PortMap::of(create().as_ref()).first_param()).unwrap_or(AUDIO_PORTS);
+            let Some(mut editor) = factory(host_for(Link { write, controller, touch, first }).with_resize(ask)) else {
+                return std::ptr::null_mut();
+            };
+            editor.bind(unsafe { instance_state(instance) });
+            let count = param_count();
+            let poll = Box::new(move |editor: &mut dyn Editor| {
+                if let Some((w, h)) = granted.take() {
+                    let (w, h) = editor.size_range().clamp(w, h);
+                    editor.resize(w, h);
                 }
-                granted.set(Some((w, h)));
-                true
+            });
+            let Some(view) = EditorView::new(editor, Some(poll)) else { return std::ptr::null_mut() };
+            if !parent.is_null() {
+                unsafe { view.attach(parent) };
             }
-        };
-        let first = creator().map(|create| PortMap::of(create().as_ref()).first_param()).unwrap_or(AUDIO_PORTS);
-        let Some(mut editor) = factory(host_for(Link { write, controller, touch, first }).with_resize(ask)) else {
-            return std::ptr::null_mut();
-        };
-        editor.bind(unsafe { instance_state(instance) });
-        let count = param_count();
-        let poll = Box::new(move |editor: &mut dyn Editor| {
-            if let Some((w, h)) = granted.take() {
-                let (w, h) = editor.size_range().clamp(w, h);
-                editor.resize(w, h);
+            if let Some(r) = unsafe { resize.as_ref() } {
+                if let Some(f) = r.ui_resize {
+                    let (w, h) = view.size();
+                    unsafe { f(r.handle, w as i32, h as i32) };
+                }
             }
-        });
-        let Some(view) = EditorView::new(editor, Some(poll)) else { return std::ptr::null_mut() };
-        if !parent.is_null() {
-            unsafe { view.attach(parent) };
-        }
-        if let Some(r) = unsafe { resize.as_ref() } {
-            if let Some(f) = r.ui_resize {
-                let (w, h) = view.size();
-                unsafe { f(r.handle, w as i32, h as i32) };
+            if !widget.is_null() {
+                unsafe { *widget = view.raw() };
             }
-        }
-        if !widget.is_null() {
-            unsafe { *widget = view.raw() };
-        }
-        Box::into_raw(Box::new(Ui { view, count, first })) as *mut c_void
+            Box::into_raw(Box::new(Ui { view, count, first })) as *mut c_void
+        })
     }
 
     unsafe extern "C" fn cleanup(handle: *mut c_void) {
-        if !handle.is_null() {
-            drop(unsafe { Box::from_raw(handle as *mut Ui) });
-        }
+        guarded((), || {
+            if !handle.is_null() {
+                drop(unsafe { Box::from_raw(handle as *mut Ui) });
+            }
+        })
     }
 
     unsafe extern "C" fn port_event(handle: *mut c_void, port: u32, size: u32, format: u32, buffer: *const c_void) {
-        let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return };
-        if format != 0 || size != 4 || buffer.is_null() || port < ui.first {
-            return;
-        }
-        let index = (port - ui.first) as usize;
-        let value = unsafe { *(buffer as *const f32) };
-        if index >= ui.count || !value.is_finite() {
-            return;
-        }
-        if let Some(editor) = ui.view.editor() {
-            editor.param_changed(index, value);
-        }
+        guarded((), || {
+            let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return };
+            if format != 0 || size != 4 || buffer.is_null() || port < ui.first {
+                return;
+            }
+            let index = (port - ui.first) as usize;
+            let value = unsafe { *(buffer as *const f32) };
+            if index >= ui.count || !value.is_finite() {
+                return;
+            }
+            if let Some(editor) = ui.view.editor() {
+                editor.param_changed(index, value);
+            }
+        })
     }
 
     unsafe extern "C" fn extension_data(uri: *const c_char) -> *const c_void {
-        if !uri.is_null() && unsafe { CStr::from_ptr(uri) }.to_bytes() == b"http://lv2plug.in/ns/extensions/ui#resize" {
-            return &OFFERED.0 as *const Resize as *const c_void;
-        }
-        std::ptr::null()
+        guarded(std::ptr::null(), || {
+            if !uri.is_null() && unsafe { CStr::from_ptr(uri) }.to_bytes() == b"http://lv2plug.in/ns/extensions/ui#resize" {
+                return &OFFERED.0 as *const Resize as *const c_void;
+            }
+            std::ptr::null()
+        })
     }
 
     fn published() -> &'static Lv2UiDescriptor {
@@ -1363,11 +1436,13 @@ mod ui {
 
     /// `lv2ui_descriptor`. Index 0 is the editor, once [`set_editor`] ran.
     pub fn lv2ui_descriptor(index: u32) -> *const Lv2UiDescriptor {
-        if index == 0 && creator().is_some() && editor_factory().is_some() {
-            published()
-        } else {
-            std::ptr::null()
-        }
+        guarded(std::ptr::null(), || {
+            if index == 0 && creator().is_some() && editor_factory().is_some() {
+                published()
+            } else {
+                std::ptr::null()
+            }
+        })
     }
 }
 

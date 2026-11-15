@@ -50,6 +50,10 @@ impl Biquad {
         q: f32,
         gain_db: f32,
     ) {
+        // A NaN or infinite parameter keeps the previous coefficients.
+        if !(sample_rate.is_finite() && freq.is_finite() && q.is_finite() && gain_db.is_finite()) {
+            return;
+        }
         let sr = sample_rate.max(1000.0);
         let f0 = freq.clamp(10.0, sr * 0.499);
         let q = q.max(0.01);
@@ -132,11 +136,11 @@ impl Biquad {
         };
 
         let inv_a0 = 1.0 / a0;
-        self.b0 = b0 * inv_a0;
-        self.b1 = b1 * inv_a0;
-        self.b2 = b2 * inv_a0;
-        self.a1 = a1 * inv_a0;
-        self.a2 = a2 * inv_a0;
+        let c = [b0 * inv_a0, b1 * inv_a0, b2 * inv_a0, a1 * inv_a0, a2 * inv_a0];
+        if !c.iter().all(|v| v.is_finite()) {
+            return;
+        }
+        [self.b0, self.b1, self.b2, self.a1, self.a2] = c;
     }
 
     /// Filters one sample.
@@ -154,11 +158,73 @@ impl Biquad {
             self.reset();
             return 0.0;
         }
+        // Denormal prevention: flush every state variable below 1e-30.
+        let flush = |v: f32| if v.abs() < 1e-30 { 0.0 } else { v };
         self.x2 = self.x1;
-        self.x1 = x;
+        self.x1 = flush(x);
         self.y2 = self.y1;
-        // Denormal prevention
-        self.y1 = if y.abs() < 1e-25 { 0.0 } else { y };
+        self.y1 = flush(y);
         self.y1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn configured() -> Biquad {
+        let mut b = Biquad::new();
+        b.configure(FilterType::LowPass, 48000.0, 1000.0, 0.707, 0.0);
+        b
+    }
+
+    #[test]
+    fn non_finite_parameters_keep_previous_coefficients() {
+        let good = configured();
+        for (sr, f, q, g) in [
+            (f32::NAN, 1000.0, 0.7, 0.0),
+            (48000.0, f32::NAN, 0.7, 0.0),
+            (48000.0, f32::INFINITY, 0.7, 0.0),
+            (48000.0, 1000.0, f32::NEG_INFINITY, 0.0),
+            (48000.0, 1000.0, 0.7, f32::NAN),
+            (f32::INFINITY, 1000.0, 0.7, 6.0),
+        ] {
+            let mut b = good.clone();
+            b.configure(FilterType::Peaking, sr, f, q, g);
+            assert_eq!((b.b0, b.b1, b.b2, b.a1, b.a2), (good.b0, good.b1, good.b2, good.a1, good.a2));
+        }
+    }
+
+    #[test]
+    fn extreme_finite_gain_never_installs_non_finite_coefficients() {
+        let mut b = configured();
+        b.configure(FilterType::LowShelf, 48000.0, 100.0, 0.7, 1.0e30);
+        for v in [b.b0, b.b1, b.b2, b.a1, b.a2] {
+            assert!(v.is_finite());
+        }
+    }
+
+    #[test]
+    fn tiny_state_is_flushed_for_x_and_y() {
+        let mut b = configured();
+        b.process_sample(1e-31);
+        assert_eq!(b.x1, 0.0);
+        assert_eq!(b.y1, 0.0);
+        b.process_sample(0.0);
+        assert_eq!((b.x1, b.x2, b.y1, b.y2), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn decaying_tail_reaches_exact_zero() {
+        let mut b = configured();
+        b.process_sample(1.0);
+        let mut last = 1.0;
+        for _ in 0..200_000 {
+            last = b.process_sample(0.0);
+            if last == 0.0 {
+                break;
+            }
+        }
+        assert_eq!(last, 0.0);
     }
 }

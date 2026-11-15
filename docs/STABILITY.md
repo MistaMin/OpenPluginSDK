@@ -7,7 +7,7 @@ promise they will not do.
 
 The rule of this guide: **every rule links to the test that enforces it in the SDK**, and every
 number is measured in [`examples/perf_guide`](../examples/perf_guide). Where a rule has no test in
-the SDK, the guide says so under [Known gaps](#known-gaps).
+the SDK, the guide says so under [Findings](#findings-fixed) or says it is not covered.
 
 Two tools carry most of the enforcement, and both are in
 [TESTING_PLUGINS.md](TESTING_PLUGINS.md):
@@ -168,7 +168,7 @@ Which SDK filter does which:
 | `EnvelopeFollower` | n/a | n/a | yes (`flush` in [`envelope.rs`](../crates/openplugin-dsp/src/envelope.rs)) | n/a |
 | `LongConvolver` | n/a | n/a | yes (stage results and output) | n/a |
 | `Dither` shaper | n/a | bounded feedback | yes | n/a |
-| **`Biquad`** | yes | yes | **no** | **no, see below** |
+| `Biquad` | yes | yes | yes | ignored |
 
 Tests (all in [`filters.rs`](../crates/openplugin-dsp/tests/filters.rs) unless noted):
 `non_finite_input_does_not_poison_state`, `huge_input_resets_instead_of_overflowing`,
@@ -178,15 +178,13 @@ Tests (all in [`filters.rs`](../crates/openplugin-dsp/tests/filters.rs) unless n
 enforced by the kit, through `example_console_eq_conforms` in
 [`openplugin-testing/tests/examples.rs`](../crates/openplugin-testing/tests/examples.rs).
 
-`Biquad` is the weak one, and the tests say so. It guards the signal (a NaN input is silence, a
-non-finite result clears the state) but it does not flush, so its tail passes through the subnormal
-range, and `configure` does not reject a NaN parameter: with a NaN cutoff the coefficients become NaN,
-every result is non-finite, the guard clears the state each time, and the filter outputs silence
-until it is configured again. `Svf` ignores the same call and keeps working. Test:
-`a_nan_cutoff_silences_biquad_until_it_is_configured_again_and_svf_ignores_it` in
-[`tests/stability.rs`](../examples/perf_guide/tests/stability.rs). The cure is on your side of the
-call: clamp and check a parameter before it reaches `configure`, as `ParamInfo::clamp` does for
-anything that comes through `set_param`.
+`Biquad` guards the signal (a NaN input is silence, a non-finite result clears the state), flushes
+its state below 1e-30 like the others, and `configure` ignores a NaN or infinite parameter and keeps
+the previous coefficients, as `Svf` does. Test:
+`a_nan_cutoff_is_ignored_by_biquad_and_svf` in
+[`tests/stability.rs`](../examples/perf_guide/tests/stability.rs), and the unit tests in
+[`biquad.rs`](../crates/openplugin-dsp/src/biquad.rs). Clamping a parameter before it reaches
+`configure`, as `ParamInfo::clamp` does for anything that comes through `set_param`, is still right.
 
 For your own state, the rule in code (this is what `StableFilter::process` does per sample):
 
@@ -247,17 +245,32 @@ the buffer lengths; test `a_frame_count_larger_than_the_buffers_is_clamped_not_i
 division, no integer overflow in release-profile arithmetic you do not control, and no
 `RefCell`/`Mutex::lock().unwrap()` on the audio path.
 
-### Known gaps
+### Findings (fixed)
 
-- **The CLAP and LV2 entries (`openplugin-targets/src/clap.rs`, `lv2.rs`) have no `catch_unwind`.**
-  The Rust-side entries call your `Plugin` directly. A panic in `process` there is an unwind out of an
-  `extern "C"` function, which aborts the host process. The shell ABI (VST3, Audio Unit, AAX)
-  catches; CLAP and LV2 do not. Until that changes, CLAP and LV2 users depend entirely on the kit's
-  `no_panic` check and on writing a plugin that cannot panic. This is a fix for the SDK, not a
-  property to rely on.
-- **No SDK test makes a plugin panic through the shell** and checks the host call returns a
-  failure instead of the process dying. The `catch_unwind` sites are in the code and the kit proves
-  *detection*; the *containment* is not exercised by a test.
+- **The CLAP and LV2 entries now catch panics.** Every `extern "C"` entry in
+  [`clap.rs`](../crates/openplugin-targets/src/clap.rs) and [`lv2.rs`](../crates/openplugin-targets/src/lv2.rs)
+  runs under `catch_unwind`. A panic returns the failure value of the call (`CLAP_PROCESS_ERROR`,
+  `false`, 0 or null). A panic in `process`/`run`, `params.flush`, `reset` or `activate` (CLAP), or in
+  `run`, `connect_port`, `activate` or `deactivate` (LV2), poisons the instance: it writes silence
+  to the outputs (and `CLAP_PROCESS_ERROR` for CLAP) and calls nothing in your plugin from
+  `process` until the host activates it again. A panic in a state call fails that call and leaves
+  the audio running. `catch_unwind` allocates nothing unless a panic happens; the no-allocation tests
+  pass. The default panic hook still prints the message to stderr, on whichever thread panicked,
+  including the audio thread; install your own hook with `std::panic::set_hook` in your plugin's
+  init if that matters. Tests:
+  [`clap_panic.rs`](../crates/openplugin-targets/tests/clap_panic.rs) (process, `set_param` from an
+  event and from `params.flush`, note, reset, save, load),
+  [`lv2_panic.rs`](../crates/openplugin-targets/tests/lv2_panic.rs) (run, `set_param` from a control
+  port, note, deactivate, activate; the LV2 adapter publishes no state interface).
+- **Containment through the shell is tested.** The shell now also zeroes the outputs when it catches a
+  panic. [`shell_panic.rs`](../crates/openplugin-ffi/tests/shell_panic.rs): `process_events` and
+  `process` return 0 with silent outputs, state calls return failure, and a later call works.
+- **`Biquad::configure` rejects a NaN or infinite parameter** (the previous coefficients stay) and
+  `Biquad` flushes its state below 1e-30. Tests in
+  [`biquad.rs`](../crates/openplugin-dsp/src/biquad.rs).
+
+Not covered: a panic in the plugin's constructor during CLAP `create_plugin` or LV2 `instantiate`
+returns null by the same mechanism but has no test of its own.
 
 ## Thread rules
 
