@@ -213,7 +213,7 @@ impl SaturatorPlugin {
 Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. Exposes standard C ABI via `openplugin_targets::clap`. With `export_clap!(P, editor = make_editor)` it also offers `clap.gui` on macOS. `text_to_value` reads choice names, On/Off and units (`ParamInfo::parse`).
 
 ### LV2
-`export_lv2!` gives two stereo audio ports each way and one control port per parameter. `editor = make_editor` adds a `ui:CocoaUI`. `lv2::write_bundle` writes `manifest.ttl` and the plugin `.ttl` from the parameter table. `Plugin::lv2_uri` sets a fixed URI.
+`export_lv2!` gives two stereo audio ports each way (an instrument has outputs only) and one control port per parameter, then a `freeWheeling` port (`set_offline`), a MIDI/`time:Position` atom input when the plugin takes notes, a MIDI atom output when it sends them, and an `lv2:isSideChain` input per sidechain channel. Port order is in [docs/FORMATS.md](docs/FORMATS.md#lv2-ports). `editor = make_editor` adds a `ui:CocoaUI`. `lv2::write_bundle` writes `manifest.ttl` and the plugin `.ttl` from the parameter table. `Plugin::lv2_uri` sets a fixed URI.
 
 ### VST3
 A thin native factory in `native/vst3` calls the `op_shell_*` ABI from `export_shell!`. It implements the processor and the edit controller. With `-DOP_EDITOR=ON` and `export_shell!(P, editor = make_editor)` it hosts the plugin's editor. See [docs/SHELL.md](docs/SHELL.md).

@@ -8,6 +8,18 @@
 //! does not lock. The control ports are the whole state, as the host saves
 //! them.
 //!
+//! After the parameters, in this order, [`PortMap`] adds: the `freeWheeling`
+//! control port (always; maps to [`Plugin::set_offline`]), an `atom:Sequence`
+//! input when the plugin takes notes (`midi:MidiEvent` and `time:Position`),
+//! an `atom:Sequence` output when it sends MIDI, and one `lv2:isSideChain`
+//! audio input per sidechain channel. An instrument has no main audio input:
+//! its outputs are ports 0 and 1 and its parameters start at port 2. Every
+//! port an effect had before keeps its index.
+//! MIDI is delivered at its frame offsets by rendering in segments, the way
+//! the CLAP entry does. The atoms are read from the host's own buffers with
+//! bounds checks and no allocation; truncated, oversized or mistyped atoms
+//! are skipped.
+//!
 //! [`export_lv2!`] emits `lv2_descriptor` from a cdylib, and with
 //! `editor = make_editor` also `lv2ui_descriptor`: a `ui:CocoaUI` on macOS.
 //! Its gestures are control-port writes plus `ui:touch` grabs, values come
@@ -26,9 +38,10 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt::Write as _;
 use std::sync::{Mutex, OnceLock};
 
+use openplugin_core::midi::{self, Message, Parser};
 use openplugin_core::{
-    sample_rate_supported, Category, EditorFactory, EditorState, MeterFrame, ParamCursor, ParamPlane,
-    Plugin, Seqlock, Taper, Unit,
+    sample_rate_supported, Category, EditorFactory, EditorState, IoConfig, MeterFrame, ParamCursor, ParamPlane,
+    Plugin, Seqlock, Taper, Transport, Unit,
 };
 
 type CreateFn = fn() -> Box<dyn Plugin>;
@@ -38,6 +51,371 @@ static EDITOR: Mutex<Option<EditorFactory>> = Mutex::new(None);
 
 /// Audio ports in front of the control ports.
 pub const AUDIO_PORTS: u32 = 4;
+
+/// Most sidechain channels given a port each.
+const MAX_SIDECHAIN: usize = 8;
+/// An atom sequence larger than this is not a host buffer; it is ignored.
+const MAX_ATOM_BYTES: usize = 1 << 24;
+/// Bytes one MIDI event takes in an output sequence: time, atom header, and
+/// up to three data bytes padded to eight.
+const OUT_EVENT: usize = 24;
+
+/// The layout the LV2 entry runs: the first stereo-output layout, preferring
+/// one with a sidechain. LV2 ports are fixed, so the choice is made once from
+/// the plugin and the description file and the instance agree.
+pub fn layout_of(plugin: &dyn Plugin) -> IoConfig {
+    let fits = |l: &&IoConfig| l.output_channels() == 2 && (l.input_channels() == 2 || l.input_channels() == 0);
+    let layouts = plugin.supported_layouts();
+    layouts
+        .iter()
+        .filter(fits)
+        .find(|l| l.sidechain_channels() > 0)
+        .or_else(|| layouts.iter().find(fits))
+        .copied()
+        .unwrap_or(IoConfig::STEREO)
+}
+
+/// Where each port is. Computed from the plugin alone, so the instance, the
+/// editor and the description file agree.
+///
+/// Order: audio, parameters, `freeWheeling`, note input, note output,
+/// sidechain inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortMap {
+    pub instrument: bool,
+    pub params: u32,
+    pub notes_in: bool,
+    pub notes_out: bool,
+    pub sidechain: u32,
+}
+
+impl PortMap {
+    pub fn of(plugin: &dyn Plugin) -> Self {
+        let info = plugin.info();
+        let ports = plugin.note_ports();
+        Self {
+            instrument: info.is_instrument,
+            params: info.params.len() as u32,
+            notes_in: ports.input,
+            notes_out: ports.output,
+            sidechain: layout_of(plugin).sidechain_channels().min(MAX_SIDECHAIN) as u32,
+        }
+    }
+
+    /// Port of the first parameter: 4 for an effect, 2 for an instrument.
+    pub fn first_param(self) -> u32 {
+        if self.instrument { 2 } else { AUDIO_PORTS }
+    }
+
+    pub fn freewheel(self) -> u32 {
+        self.first_param() + self.params
+    }
+
+    pub fn atom_in(self) -> Option<u32> {
+        self.notes_in.then(|| self.freewheel() + 1)
+    }
+
+    pub fn atom_out(self) -> Option<u32> {
+        self.notes_out.then(|| self.freewheel() + 1 + u32::from(self.notes_in))
+    }
+
+    pub fn sidechain_first(self) -> u32 {
+        self.freewheel() + 1 + u32::from(self.notes_in) + u32::from(self.notes_out)
+    }
+
+    /// Slot in the four-entry audio table (in L, in R, out L, out R) of an
+    /// audio port, if `port` is one.
+    fn audio_slot(self, port: u32) -> Option<usize> {
+        if self.instrument {
+            (port < 2).then(|| port as usize + 2)
+        } else {
+            (port < AUDIO_PORTS).then_some(port as usize)
+        }
+    }
+}
+
+/// URIDs the host mapped for us. All zero when the host gave no `urid:map`;
+/// then no atom is read or written.
+#[derive(Clone, Copy, Default)]
+struct Urids {
+    sequence: u32,
+    frame_time: u32,
+    float: u32,
+    double: u32,
+    int: u32,
+    long: u32,
+    midi_event: u32,
+    position: u32,
+    speed: u32,
+    bpm: u32,
+    bar: u32,
+    bar_beat: u32,
+    beats_per_bar: u32,
+    beat_unit: u32,
+    frame: u32,
+    object: u32,
+    blank: u32,
+}
+
+#[repr(C)]
+struct UridMap {
+    handle: *mut c_void,
+    map: Option<unsafe extern "C" fn(*mut c_void, *const c_char) -> u32>,
+}
+
+impl Urids {
+    /// Ask the host's `urid:map` for every URI used. Not realtime.
+    fn from_features(features: *const *const Lv2Feature) -> Self {
+        let mut found: *const UridMap = std::ptr::null();
+        let mut next = features;
+        while !next.is_null() && !unsafe { *next }.is_null() {
+            let feature = unsafe { &**next };
+            if !feature.uri.is_null() && unsafe { CStr::from_ptr(feature.uri) }.to_bytes() == b"http://lv2plug.in/ns/ext/urid#map" {
+                found = feature.data as *const UridMap;
+            }
+            next = unsafe { next.add(1) };
+        }
+        let Some(map) = (unsafe { found.as_ref() }) else { return Self::default() };
+        let Some(call) = map.map else { return Self::default() };
+        let get = |uri: &CStr| unsafe { call(map.handle, uri.as_ptr()) };
+        Self {
+            sequence: get(c"http://lv2plug.in/ns/ext/atom#Sequence"),
+            frame_time: get(c"http://lv2plug.in/ns/ext/atom#frameTime"),
+            float: get(c"http://lv2plug.in/ns/ext/atom#Float"),
+            double: get(c"http://lv2plug.in/ns/ext/atom#Double"),
+            int: get(c"http://lv2plug.in/ns/ext/atom#Int"),
+            long: get(c"http://lv2plug.in/ns/ext/atom#Long"),
+            midi_event: get(c"http://lv2plug.in/ns/ext/midi#MidiEvent"),
+            position: get(c"http://lv2plug.in/ns/ext/time#Position"),
+            speed: get(c"http://lv2plug.in/ns/ext/time#speed"),
+            bpm: get(c"http://lv2plug.in/ns/ext/time#beatsPerMinute"),
+            bar: get(c"http://lv2plug.in/ns/ext/time#bar"),
+            bar_beat: get(c"http://lv2plug.in/ns/ext/time#barBeat"),
+            beats_per_bar: get(c"http://lv2plug.in/ns/ext/time#beatsPerBar"),
+            beat_unit: get(c"http://lv2plug.in/ns/ext/time#beatUnit"),
+            frame: get(c"http://lv2plug.in/ns/ext/time#frame"),
+            object: get(c"http://lv2plug.in/ns/ext/atom#Object"),
+            blank: get(c"http://lv2plug.in/ns/ext/atom#Blank"),
+        }
+    }
+
+    /// The host mapped the URIs, so a zero never matches a real type.
+    fn usable(&self) -> bool {
+        self.sequence != 0 && self.midi_event != 0
+    }
+}
+
+fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
+    let end = at.checked_add(4)?;
+    Some(u32::from_ne_bytes(bytes.get(at..end)?.try_into().ok()?))
+}
+
+fn i64_at(bytes: &[u8], at: usize) -> Option<i64> {
+    let end = at.checked_add(8)?;
+    Some(i64::from_ne_bytes(bytes.get(at..end)?.try_into().ok()?))
+}
+
+fn pad8(n: usize) -> Option<usize> {
+    n.checked_add(7).map(|v| v & !7)
+}
+
+/// One event of an input sequence: frame, atom type, atom body.
+struct AtomEvent<'a> {
+    frame: i64,
+    kind: u32,
+    body: &'a [u8],
+}
+
+/// The next well-formed event of a sequence body (`seq` starts at the
+/// sequence's unit field). A truncated or oversized event ends the walk.
+fn next_event<'a>(seq: &'a [u8], pos: &mut usize) -> Option<AtomEvent<'a>> {
+    let start = *pos;
+    let frame = i64_at(seq, start)?;
+    let size = u32_at(seq, start.checked_add(8)?)? as usize;
+    let kind = u32_at(seq, start.checked_add(12)?)?;
+    let body_at = start.checked_add(16)?;
+    let body = seq.get(body_at..body_at.checked_add(size)?)?;
+    *pos = body_at.checked_add(pad8(size)?)?;
+    Some(AtomEvent { frame, kind, body })
+}
+
+/// A number from any of the four atom number types.
+fn atom_number(urids: &Urids, kind: u32, value: &[u8]) -> Option<f64> {
+    let v = if kind == urids.float && value.len() >= 4 {
+        f64::from(f32::from_ne_bytes(value[..4].try_into().ok()?))
+    } else if kind == urids.double && value.len() >= 8 {
+        f64::from_ne_bytes(value[..8].try_into().ok()?)
+    } else if kind == urids.int && value.len() >= 4 {
+        f64::from(i32::from_ne_bytes(value[..4].try_into().ok()?))
+    } else if kind == urids.long && value.len() >= 8 {
+        i64::from_ne_bytes(value[..8].try_into().ok()?) as f64
+    } else {
+        return None;
+    };
+    v.is_finite().then_some(v)
+}
+
+/// What a `time:Position` object said. `None` for a field it left out.
+#[derive(Clone, Copy, Default)]
+struct Position {
+    speed: Option<f64>,
+    bpm: Option<f64>,
+    bar: Option<f64>,
+    bar_beat: Option<f64>,
+    beats_per_bar: Option<f64>,
+    beat_unit: Option<f64>,
+    frame: Option<f64>,
+}
+
+/// Read a `time:Position` object body (after the atom header). `None` if it
+/// is not one.
+fn parse_position(urids: &Urids, object: &[u8]) -> Option<Position> {
+    if urids.position == 0 || u32_at(object, 4)? != urids.position {
+        return None;
+    }
+    let mut out = Position::default();
+    let mut pos = 8usize;
+    while let Some(key) = u32_at(object, pos) {
+        let Some(size) = u32_at(object, pos + 8).map(|s| s as usize) else { break };
+        let Some(kind) = u32_at(object, pos + 12) else { break };
+        let Some(at) = pos.checked_add(16) else { break };
+        let Some(value) = at.checked_add(size).and_then(|end| object.get(at..end)) else { break };
+        let number = atom_number(urids, kind, value);
+        if key == urids.speed {
+            out.speed = number;
+        } else if key == urids.bpm {
+            out.bpm = number;
+        } else if key == urids.bar {
+            out.bar = number;
+        } else if key == urids.bar_beat {
+            out.bar_beat = number;
+        } else if key == urids.beats_per_bar {
+            out.beats_per_bar = number;
+        } else if key == urids.beat_unit {
+            out.beat_unit = number;
+        } else if key == urids.frame {
+            out.frame = number;
+        }
+        let Some(next) = pad8(size).and_then(|p| at.checked_add(p)) else { break };
+        pos = next;
+    }
+    Some(out)
+}
+
+/// Fold a position into the running transport.
+fn apply_position(transport: &mut Transport, p: &Position, rate: f32) {
+    if let Some(speed) = p.speed {
+        transport.playing = speed != 0.0;
+    }
+    if let Some(bpm) = p.bpm.filter(|v| *v > 0.0) {
+        transport.tempo = bpm;
+    }
+    if let Some(n) = p.beats_per_bar.filter(|v| *v >= 1.0 && *v <= f64::from(u32::MAX)) {
+        transport.numerator = n as u32;
+    }
+    if let Some(d) = p.beat_unit.filter(|v| *v >= 1.0 && *v <= f64::from(u32::MAX)) {
+        transport.denominator = d as u32;
+    }
+    if let Some(bar) = p.bar.filter(|v| *v >= 0.0 && *v <= i64::MAX as f64) {
+        transport.bar_number = bar as i64;
+    }
+    if let Some(frame) = p.frame.filter(|v| *v >= 0.0 && *v <= i64::MAX as f64) {
+        transport.sample_pos = frame as i64;
+        if rate > 0.0 {
+            transport.seconds = frame / f64::from(rate);
+        }
+    }
+    // Beats are in the time signature's unit; a quarter note is 4 / unit of them.
+    let quarters_per_beat = if transport.denominator > 0 { 4.0 / f64::from(transport.denominator) } else { 1.0 };
+    let per_bar = f64::from(transport.numerator.max(1)) * quarters_per_beat;
+    if p.bar.is_some() || p.beats_per_bar.is_some() || p.beat_unit.is_some() {
+        transport.bar_start = transport.bar_number as f64 * per_bar;
+    }
+    if let Some(beat) = p.bar_beat.filter(|v| *v >= 0.0) {
+        transport.quarter_notes = transport.bar_start + beat * quarters_per_beat;
+    }
+}
+
+/// Bytes in a MIDI message with this status byte (three at most).
+fn midi_len(status: u8) -> usize {
+    match status {
+        0x80..=0xBF | 0xE0..=0xEF | 0xF2 => 3,
+        0xC0..=0xDF | 0xF1 | 0xF3 => 2,
+        _ => 1,
+    }
+}
+
+/// The input sequence's events, as a slice from its `unit` field. `None` if
+/// the port is unconnected or what it points at is not a sequence we can read.
+///
+/// # Safety
+/// `atom` is null or the host's connected input atom port: 8-byte aligned,
+/// and `size` bytes follow the 8-byte atom header.
+unsafe fn input_sequence<'a>(urids: &Urids, atom: *const u8) -> Option<&'a [u8]> {
+    if atom.is_null() || !urids.usable() || atom as usize % 8 != 0 {
+        return None;
+    }
+    let header = unsafe { std::slice::from_raw_parts(atom, 8) };
+    let size = u32_at(header, 0)? as usize;
+    if u32_at(header, 4)? != urids.sequence || !(8..=MAX_ATOM_BYTES).contains(&size) {
+        return None;
+    }
+    let body = unsafe { std::slice::from_raw_parts(atom.add(8), size) };
+    // Unit 0 and atom:frameTime are frames; beat-timed sequences are not read.
+    let unit = u32_at(body, 0)?;
+    (unit == 0 || unit == urids.frame_time).then_some(body)
+}
+
+/// A host-provided output sequence being filled without allocation.
+struct OutSequence {
+    atom: *mut u8,
+    /// Body bytes the host gave us.
+    capacity: usize,
+    events: usize,
+}
+
+impl OutSequence {
+    /// Start an empty sequence in the port. `None` if the port is unusable.
+    ///
+    /// # Safety
+    /// `atom` is null or the host's connected output atom port: 8-byte
+    /// aligned, and `size` (as the host set it) body bytes follow the header.
+    unsafe fn begin(urids: &Urids, atom: *mut u8) -> Option<Self> {
+        if atom.is_null() || !urids.usable() || atom as usize % 8 != 0 {
+            return None;
+        }
+        let capacity = unsafe { std::ptr::read(atom as *const u32) } as usize;
+        if !(8..=MAX_ATOM_BYTES).contains(&capacity) {
+            return None;
+        }
+        let mut out = Self { atom, capacity, events: 0 };
+        out.finish(urids);
+        Some(out)
+    }
+
+    fn finish(&mut self, urids: &Urids) {
+        let mut head = [0u8; 16];
+        head[0..4].copy_from_slice(&((8 + self.events * OUT_EVENT) as u32).to_ne_bytes());
+        head[4..8].copy_from_slice(&urids.sequence.to_ne_bytes());
+        // unit 0 (frames) and padding stay zero.
+        unsafe { std::ptr::copy_nonoverlapping(head.as_ptr(), self.atom, 16) };
+    }
+
+    /// Append one MIDI event. False when it does not fit.
+    fn push(&mut self, urids: &Urids, frame: i64, data: &[u8]) -> bool {
+        if 8 + (self.events + 1) * OUT_EVENT > self.capacity {
+            return false;
+        }
+        let mut event = [0u8; OUT_EVENT];
+        event[0..8].copy_from_slice(&frame.to_ne_bytes());
+        event[8..12].copy_from_slice(&(data.len() as u32).to_ne_bytes());
+        event[12..16].copy_from_slice(&urids.midi_event.to_ne_bytes());
+        event[16..16 + data.len()].copy_from_slice(data);
+        unsafe { std::ptr::copy_nonoverlapping(event.as_ptr(), self.atom.add(16 + self.events * OUT_EVENT), OUT_EVENT) };
+        self.events += 1;
+        true
+    }
+}
 
 /// Install the plugin `lv2_descriptor` will instantiate.
 pub fn set_creator(create: CreateFn) {
@@ -92,8 +470,19 @@ struct Instance {
     plane: ParamPlane,
     cursor: ParamCursor,
     meters: Seqlock<MeterFrame>,
+    map: PortMap,
+    urids: Urids,
+    rate: f32,
     ports: [*mut f32; 4],
     controls: Vec<*const f32>,
+    freewheel: *const f32,
+    offline: bool,
+    atom_in: *const u8,
+    atom_out: *mut u8,
+    side_ports: Vec<*const f32>,
+    side: Vec<Vec<f32>>,
+    transport: Transport,
+    has_position: bool,
     scratch: [Vec<f32>; 2],
     prepared: usize,
     editor_state: Option<EditorState>,
@@ -133,7 +522,7 @@ fn instantiate_rate(sample_rate: f64) -> Option<f32> {
     sample_rate_supported(sample_rate).then_some(sample_rate as f32)
 }
 
-fn new_instance(sample_rate: f64) -> Option<Box<Instance>> {
+fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<Box<Instance>> {
     let create = creator()?;
     let mut inner = create();
     let info = inner.info();
@@ -144,19 +533,37 @@ fn new_instance(sample_rate: f64) -> Option<Box<Instance>> {
     if !inner.accepts_sample_rate(rate) {
         return None;
     }
-    inner.prepare(rate, PREPARED, 2);
+    let map = PortMap::of(inner.as_ref());
+    let layout = layout_of(inner.as_ref());
+    if inner.set_layout(layout) {
+        inner.prepare_layout(rate, PREPARED, layout);
+    } else {
+        inner.prepare(rate, PREPARED, 2);
+    }
     cursor.invalidate();
     cursor.pull(&plane, inner.as_mut());
     let editor_state = inner.editor_state();
     let controls = vec![std::ptr::null(); plane.len()];
+    let sidechain = map.sidechain as usize;
     Some(Box::new(Instance {
         magic: MAGIC,
         inner,
         plane,
         cursor,
         meters: Seqlock::new(MeterFrame::SILENT),
+        map,
+        urids: Urids::from_features(features),
+        rate,
         ports: [std::ptr::null_mut(); 4],
         controls,
+        freewheel: std::ptr::null(),
+        offline: false,
+        atom_in: std::ptr::null(),
+        atom_out: std::ptr::null_mut(),
+        side_ports: vec![std::ptr::null(); sidechain],
+        side: vec![vec![0.0; PREPARED]; sidechain],
+        transport: Transport::default(),
+        has_position: false,
         scratch: [vec![0.0; PREPARED], vec![0.0; PREPARED]],
         prepared: PREPARED,
         editor_state,
@@ -173,7 +580,21 @@ fn read_controls(instance: &mut Instance) {
     }
 }
 
-fn render(instance: &mut Instance, frames: usize) {
+/// `freeWheeling` above one half means the host is rendering offline.
+fn read_freewheel(instance: &mut Instance) {
+    if instance.freewheel.is_null() {
+        return;
+    }
+    let value = unsafe { *instance.freewheel };
+    let offline = value.is_finite() && value > 0.5;
+    if offline != instance.offline {
+        instance.offline = offline;
+        instance.inner.set_offline(offline);
+    }
+}
+
+/// Render `frames` frames starting `offset` frames into the host's buffers.
+fn render(instance: &mut Instance, offset: usize, frames: usize) {
     let frames = frames.min(instance.prepared);
     if frames == 0 {
         return;
@@ -181,31 +602,115 @@ fn render(instance: &mut Instance, frames: usize) {
     instance.cursor.pull(&instance.plane, instance.inner.as_mut());
     for channel in 0..2 {
         let src = instance.ports[channel];
-        if src.is_null() {
+        if src.is_null() || instance.map.instrument {
             instance.scratch[channel][..frames].fill(0.0);
         } else {
-            let samples = unsafe { std::slice::from_raw_parts(src, frames) };
+            let samples = unsafe { std::slice::from_raw_parts(src.add(offset), frames) };
             instance.scratch[channel][..frames].copy_from_slice(samples);
         }
     }
-    instance.inner.process(&mut instance.scratch, frames);
+    for (channel, buffer) in instance.side.iter_mut().enumerate() {
+        let src = instance.side_ports[channel];
+        if src.is_null() {
+            buffer[..frames].fill(0.0);
+        } else {
+            let samples = unsafe { std::slice::from_raw_parts(src.add(offset), frames) };
+            buffer[..frames].copy_from_slice(samples);
+        }
+    }
+    let side = if instance.side.is_empty() { None } else { Some(instance.side.as_slice()) };
+    instance.inner.process_buses(&mut instance.scratch, side, frames);
     for channel in 0..2 {
         let dst = instance.ports[channel + 2];
         if !dst.is_null() {
-            let out = unsafe { std::slice::from_raw_parts_mut(dst, frames) };
+            let out = unsafe { std::slice::from_raw_parts_mut(dst.add(offset), frames) };
             out.copy_from_slice(&instance.scratch[channel][..frames]);
         }
     }
     instance.meters.publish(instance.inner.meters());
 }
 
+/// Render `start..end` of the block in pieces no longer than the prepared size.
+fn render_range(instance: &mut Instance, start: usize, end: usize) {
+    let mut done = start;
+    while done < end {
+        let n = (end - done).min(instance.prepared);
+        render(instance, done, n);
+        done += n;
+    }
+}
+
+/// Deliver one input event at the current position.
+fn handle_event(instance: &mut Instance, event: &AtomEvent<'_>) {
+    let urids = instance.urids;
+    if event.kind == urids.midi_event {
+        // A fresh parser per event: LV2 MIDI events carry whole messages.
+        if let Ok(Some((message, _))) = Parser::new().pull(event.body) {
+            match message {
+                Message::NoteOn { channel, note, velocity } => instance.inner.note_on_channel(0, channel.index(), note, velocity),
+                other => midi::deliver(instance.inner.as_mut(), 0, other),
+            }
+        }
+    } else if event.kind != 0 && (event.kind == urids.object || event.kind == urids.blank) {
+        if let Some(position) = parse_position(&urids, event.body) {
+            apply_position(&mut instance.transport, &position, instance.rate);
+            instance.has_position = true;
+            instance.inner.set_transport(&instance.transport);
+        }
+    }
+}
+
+/// Move the running transport on by a block, for hosts that send a position
+/// only when it changes.
+fn advance_transport(instance: &mut Instance, frames: usize) {
+    let transport = &mut instance.transport;
+    if !instance.has_position || !transport.playing || instance.rate <= 0.0 {
+        return;
+    }
+    let seconds = frames as f64 / f64::from(instance.rate);
+    transport.sample_pos = transport.sample_pos.saturating_add(frames as i64);
+    transport.seconds += seconds;
+    if transport.tempo > 0.0 {
+        transport.quarter_notes += seconds * transport.tempo / 60.0;
+    }
+}
+
+/// Write the plugin's queued MIDI into the host's output sequence. Events
+/// that do not fit are dropped; the queue is always emptied.
+fn drain_midi(instance: &mut Instance, frames: usize) {
+    if !instance.map.notes_out {
+        return;
+    }
+    let urids = instance.urids;
+    let mut out = unsafe { OutSequence::begin(&urids, instance.atom_out) };
+    let last = frames.saturating_sub(1) as i64;
+    let mut previous = 0i64;
+    let mut guard = 0u32;
+    while let Some((time, data)) = instance.inner.pull_midi() {
+        guard += 1;
+        if guard > 65_536 {
+            break;
+        }
+        if let Some(sequence) = out.as_mut() {
+            let frame = i64::from(time).clamp(previous, last.max(previous));
+            let len = midi_len(data[0]);
+            if sequence.push(&urids, frame, &data[..len]) {
+                previous = frame;
+            }
+        }
+    }
+    if let Some(sequence) = out.as_mut() {
+        sequence.finish(&urids);
+    }
+}
+
 extern "C" fn lv2_instantiate(
     _descriptor: *const Lv2Descriptor,
     sample_rate: f64,
     _bundle_path: *const c_char,
-    _features: *const *const Lv2Feature,
+    features: *const *const Lv2Feature,
 ) -> *mut c_void {
-    match new_instance(sample_rate) {
+    match new_instance(sample_rate, features) {
         Some(instance) => Box::into_raw(instance) as *mut c_void,
         None => std::ptr::null_mut(),
     }
@@ -216,10 +721,23 @@ extern "C" fn lv2_connect(instance: *mut c_void, port: u32, data: *mut c_void) {
         return;
     }
     let instance = unsafe { &mut *(instance as *mut Instance) };
-    if port < AUDIO_PORTS {
-        instance.ports[port as usize] = data as *mut f32;
-    } else if let Some(slot) = instance.controls.get_mut((port - AUDIO_PORTS) as usize) {
-        *slot = data as *const f32;
+    let map = instance.map;
+    if let Some(slot) = map.audio_slot(port) {
+        instance.ports[slot] = data as *mut f32;
+    } else if port >= map.first_param() && port < map.freewheel() {
+        if let Some(slot) = instance.controls.get_mut((port - map.first_param()) as usize) {
+            *slot = data as *const f32;
+        }
+    } else if port == map.freewheel() {
+        instance.freewheel = data as *const f32;
+    } else if Some(port) == map.atom_in() {
+        instance.atom_in = data as *const u8;
+    } else if Some(port) == map.atom_out() {
+        instance.atom_out = data as *mut u8;
+    } else if port >= map.sidechain_first() {
+        if let Some(slot) = instance.side_ports.get_mut((port - map.sidechain_first()) as usize) {
+            *slot = data as *const f32;
+        }
     }
 }
 
@@ -230,6 +748,7 @@ extern "C" fn lv2_activate(instance: *mut c_void) {
     unsafe {
         let instance = &mut *(instance as *mut Instance);
         read_controls(instance);
+        read_freewheel(instance);
         instance.inner.reset();
         instance.cursor.invalidate();
         instance.cursor.pull(&instance.plane, instance.inner.as_mut());
@@ -237,26 +756,41 @@ extern "C" fn lv2_activate(instance: *mut c_void) {
 }
 
 extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
-    if instance.is_null() || sample_count == 0 {
+    if instance.is_null() {
         return;
     }
     unsafe {
         let instance = &mut *(instance as *mut Instance);
-        read_controls(instance);
-        let mut done = 0;
         let frames = sample_count as usize;
-        while done < frames {
-            let n = (frames - done).min(instance.prepared);
-            let saved = instance.ports;
-            for port in &mut instance.ports {
-                if !port.is_null() {
-                    *port = port.add(done);
-                }
-            }
-            render(instance, n);
-            instance.ports = saved;
-            done += n;
+        read_controls(instance);
+        read_freewheel(instance);
+        if frames == 0 {
+            // An empty output sequence is still a valid one.
+            drain_midi(instance, 0);
+            return;
         }
+        if instance.has_position {
+            instance.inner.set_transport(&instance.transport);
+        }
+        let sequence = input_sequence(&instance.urids, instance.atom_in);
+        let mut done = 0;
+        if let Some(sequence) = sequence {
+            let mut pos = 8;
+            while let Some(event) = next_event(sequence, &mut pos) {
+                // Out-of-block times are junk; in-block times never go back.
+                let Ok(frame) = usize::try_from(event.frame) else { continue };
+                if frame >= frames {
+                    continue;
+                }
+                let at = frame.max(done);
+                render_range(instance, done, at);
+                done = at;
+                handle_event(instance, &event);
+            }
+        }
+        render_range(instance, done, frames);
+        advance_transport(instance, frames);
+        drain_midi(instance, frames);
     }
 }
 
@@ -388,6 +922,7 @@ mod ui {
     struct Ui {
         view: EditorView,
         count: usize,
+        first: u32,
     }
 
     #[derive(Clone, Copy)]
@@ -395,6 +930,7 @@ mod ui {
         write: Option<WriteFn>,
         controller: *mut c_void,
         touch: *const Touch,
+        first: u32,
     }
 
     fn host_for(link: Link) -> EditorHost {
@@ -404,14 +940,14 @@ mod ui {
                 Gesture::Begin(i) | Gesture::End(i) => {
                     if let Some(t) = link.touch.as_ref() {
                         if let Some(f) = t.touch {
-                            f(t.handle, AUDIO_PORTS + i, matches!(gesture, Gesture::Begin(_)));
+                            f(t.handle, link.first + i, matches!(gesture, Gesture::Begin(_)));
                         }
                     }
                 }
                 Gesture::Perform(i, value) => {
                     if let Some(write) = link.write {
                         // Protocol 0: a float written to a control port.
-                        write(link.controller, AUDIO_PORTS + i, 4, 0, &value as *const f32 as *const c_void);
+                        write(link.controller, link.first + i, 4, 0, &value as *const f32 as *const c_void);
                     }
                 }
             }
@@ -473,7 +1009,8 @@ mod ui {
                 true
             }
         };
-        let Some(mut editor) = factory(host_for(Link { write, controller, touch }).with_resize(ask)) else {
+        let first = creator().map(|create| PortMap::of(create().as_ref()).first_param()).unwrap_or(AUDIO_PORTS);
+        let Some(mut editor) = factory(host_for(Link { write, controller, touch, first }).with_resize(ask)) else {
             return std::ptr::null_mut();
         };
         editor.bind(unsafe { instance_state(instance) });
@@ -497,7 +1034,7 @@ mod ui {
         if !widget.is_null() {
             unsafe { *widget = view.raw() };
         }
-        Box::into_raw(Box::new(Ui { view, count })) as *mut c_void
+        Box::into_raw(Box::new(Ui { view, count, first })) as *mut c_void
     }
 
     unsafe extern "C" fn cleanup(handle: *mut c_void) {
@@ -508,10 +1045,10 @@ mod ui {
 
     unsafe extern "C" fn port_event(handle: *mut c_void, port: u32, size: u32, format: u32, buffer: *const c_void) {
         let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return };
-        if format != 0 || size != 4 || buffer.is_null() || port < AUDIO_PORTS {
+        if format != 0 || size != 4 || buffer.is_null() || port < ui.first {
             return;
         }
-        let index = (port - AUDIO_PORTS) as usize;
+        let index = (port - ui.first) as usize;
         let value = unsafe { *(buffer as *const f32) };
         if index >= ui.count || !value.is_finite() {
             return;
@@ -649,14 +1186,18 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
     let uri = plugin_uri(plugin);
     let mut out = String::new();
     for (prefix, iri) in [
+        ("atom", "http://lv2plug.in/ns/ext/atom#"),
         ("doap", "http://usefulinc.com/ns/doap#"),
         ("foaf", "http://xmlns.com/foaf/0.1/"),
         ("lv2", "http://lv2plug.in/ns/lv2core#"),
+        ("midi", "http://lv2plug.in/ns/ext/midi#"),
         ("pprop", "http://lv2plug.in/ns/ext/port-props#"),
         ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
         ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
+        ("time", "http://lv2plug.in/ns/ext/time#"),
         ("ui", "http://lv2plug.in/ns/extensions/ui#"),
         ("units", "http://lv2plug.in/ns/extensions/units#"),
+        ("urid", "http://lv2plug.in/ns/ext/urid#"),
     ] {
         let _ = writeln!(out, "@prefix {prefix}: <{iri}> .");
     }
@@ -674,16 +1215,21 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
     let _ = writeln!(out, "    lv2:minorVersion {minor} ;");
     let _ = writeln!(out, "    lv2:microVersion {micro} ;");
     out.push_str("    lv2:optionalFeature lv2:hardRTCapable ;\n");
+    let map = PortMap::of(plugin);
+    if map.notes_in || map.notes_out {
+        out.push_str("    lv2:requiredFeature urid:map ;\n");
+    }
     if with_ui {
         let _ = writeln!(out, "    ui:ui <{uri}#ui> ;");
     }
     out.push_str("    lv2:port\n");
-    let audio = [
-        ("lv2:InputPort", "in_l", "Input L"),
-        ("lv2:InputPort", "in_r", "Input R"),
-        ("lv2:OutputPort", "out_l", "Output L"),
-        ("lv2:OutputPort", "out_r", "Output R"),
-    ];
+    let mut audio = Vec::new();
+    if !map.instrument {
+        audio.push(("lv2:InputPort", "in_l", "Input L"));
+        audio.push(("lv2:InputPort", "in_r", "Input R"));
+    }
+    audio.push(("lv2:OutputPort", "out_l", "Output L"));
+    audio.push(("lv2:OutputPort", "out_r", "Output R"));
     let mut ports: Vec<String> = audio
         .iter()
         .enumerate()
@@ -694,7 +1240,7 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
     for (i, p) in info.params.iter().enumerate() {
         let mut lines = vec![
             "    [ a lv2:ControlPort , lv2:InputPort".to_string(),
-            format!("      lv2:index {} ; lv2:symbol \"{}\" ; lv2:name {}", AUDIO_PORTS as usize + i, symbol(p.id), quoted(p.name)),
+            format!("      lv2:index {} ; lv2:symbol \"{}\" ; lv2:name {}", map.first_param() as usize + i, symbol(p.id), quoted(p.name)),
             format!("      lv2:default {} ; lv2:minimum {} ; lv2:maximum {}", number(p.clamp(p.default)), number(p.min), number(p.max)),
         ];
         let whole = |v: f32| v.fract() == 0.0;
@@ -724,6 +1270,28 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
             lines.push(format!("      units:unit {unit}"));
         }
         ports.push(format!("{} ]", lines.join(" ;\n")));
+    }
+    ports.push(format!(
+        "    [ a lv2:ControlPort , lv2:InputPort ;\n      lv2:index {} ; lv2:symbol \"freewheel\" ; lv2:name \"Freewheel\" ;\n      lv2:default 0.0 ; lv2:minimum 0.0 ; lv2:maximum 1.0 ;\n      lv2:designation lv2:freeWheeling ;\n      lv2:portProperty lv2:toggled , lv2:connectionOptional ]",
+        map.freewheel()
+    ));
+    if let Some(index) = map.atom_in() {
+        ports.push(format!(
+            "    [ a atom:AtomPort , lv2:InputPort ;\n      atom:bufferType atom:Sequence ;\n      atom:supports midi:MidiEvent , time:Position ;\n      lv2:index {index} ; lv2:symbol \"events_in\" ; lv2:name \"Events In\" ;\n      lv2:portProperty lv2:connectionOptional ]"
+        ));
+    }
+    if let Some(index) = map.atom_out() {
+        ports.push(format!(
+            "    [ a atom:AtomPort , lv2:OutputPort ;\n      atom:bufferType atom:Sequence ;\n      atom:supports midi:MidiEvent ;\n      lv2:index {index} ; lv2:symbol \"events_out\" ; lv2:name \"Events Out\" ;\n      lv2:portProperty lv2:connectionOptional ]"
+        ));
+    }
+    for channel in 0..map.sidechain {
+        ports.push(format!(
+            "    [ a lv2:AudioPort , lv2:InputPort ;\n      lv2:index {} ; lv2:symbol \"sidechain_{}\" ; lv2:name \"Sidechain {}\" ;\n      lv2:portProperty lv2:isSideChain , lv2:connectionOptional ]",
+            map.sidechain_first() + channel,
+            channel + 1,
+            channel + 1
+        ));
     }
     out.push_str(&ports.join(" ,\n"));
     out.push_str(" .\n");
@@ -1011,8 +1579,8 @@ mod tests {
         assert!(!sized.contains("noUserResize") && sized.contains("lv2:extensionData ui:resize .") && sized.trim_end().ends_with('.'));
         assert!(!plugin_ttl_sized(&Wide, None).contains("a ui:CocoaUI"));
         // Every port block is closed and separated.
-        assert_eq!(ttl.matches("lv2:index").count(), 8);
-        assert_eq!(ttl.matches(" ] ,\n").count(), 7);
+        assert_eq!(ttl.matches("lv2:index").count(), 10);
+        assert_eq!(ttl.matches(" ] ,\n").count(), 9);
         let manifest = manifest_ttl(&Wide, "Wide", false);
         assert!(manifest.contains("lv2:binary <Wide."));
         assert!(!manifest.contains("CocoaUI"));

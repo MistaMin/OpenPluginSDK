@@ -25,7 +25,7 @@ L2: Design Rust Interface (openplugin-dri)
     - Calls GoodLookin DRI for the 47 knob styles, 40 plates, meters, faders, and switches
 L3: Target Format Adapters (openplugin-targets)
     - CLAP instantiates a Plugin, pulls the parameter plane, honours event sample offsets, and can select a surround or ambisonic layout with an optional sidechain. It publishes tail, asks the host to restart when latency changes, and passes transport into `set_transport`
-    - LV2 descriptor: ports 0 and 1 in, 2 and 3 out, same parameter plane
+    - LV2 descriptor: ports 0 and 1 in, 2 and 3 out (an instrument: 0 and 1 out), same parameter plane, then freewheel, atom and sidechain ports
     - VST3, AU, and AAX layouts in this crate are not loadable. `export_shell!` exports the C ABI. The loadable adapters are `native/vst3`, `native/au`, and `native/aax`. They write the parameter plane and render through scratch. See [SHELL.md](SHELL.md)
     - openplugin-ffi is a Rust host session. FfiInstance publishes the parameter
       plane, renders stereo, planar, interleaved, and sidechain blocks through scratch
