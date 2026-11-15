@@ -167,6 +167,126 @@ pub struct Frame<'a> {
     pub height: usize,
 }
 
+/// A rectangle of the editor in points, origin top left. What [`Editor::damage`]
+/// reports.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DamageRect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl DamageRect {
+    pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
+        Self { x, y, w, h }
+    }
+
+    /// From an `(x, y, w, h)` tuple.
+    pub const fn from_tuple(r: (f32, f32, f32, f32)) -> Self {
+        Self { x: r.0, y: r.1, w: r.2, h: r.3 }
+    }
+
+    /// The same rectangle grown by `margin` points on every side.
+    pub fn expanded(&self, margin: f32) -> Self {
+        Self { x: self.x - margin, y: self.y - margin, w: self.w + 2.0 * margin, h: self.h + 2.0 * margin }
+    }
+
+    /// The smallest rectangle holding both.
+    pub fn union(&self, other: &Self) -> Self {
+        let (x0, y0) = (self.x.min(other.x), self.y.min(other.y));
+        let (x1, y1) = ((self.x + self.w).max(other.x + other.w), (self.y + self.h).max(other.y + other.h));
+        Self { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }
+    }
+
+    /// Whether the two share area or touch.
+    pub fn touches(&self, other: &Self) -> bool {
+        self.x <= other.x + other.w && other.x <= self.x + self.w && self.y <= other.y + other.h && other.y <= self.y + self.h
+    }
+
+    /// All four numbers are finite.
+    pub fn is_finite(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.w.is_finite() && self.h.is_finite()
+    }
+
+    /// No area.
+    pub fn is_empty(&self) -> bool {
+        !(self.w > 0.0 && self.h > 0.0)
+    }
+}
+
+/// Collects what an editor has to repaint, for [`Editor::damage`] and
+/// [`Editor::render`]. It starts as "everything" (nothing was drawn yet).
+/// [`Self::add`] marks a rectangle, [`Self::add_all`] the whole editor, and
+/// the editor calls [`Self::clear`] once a frame has drawn what it held.
+#[derive(Clone, Debug)]
+pub struct DamageTracker {
+    everything: bool,
+    rects: Vec<DamageRect>,
+}
+
+impl Default for DamageTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DamageTracker {
+    /// More rectangles than this become "everything": a long list costs more than it saves.
+    const MAX_RECTS: usize = 16;
+
+    pub fn new() -> Self {
+        Self { everything: true, rects: Vec::new() }
+    }
+
+    /// The whole editor needs repainting.
+    pub fn add_all(&mut self) {
+        self.everything = true;
+        self.rects.clear();
+    }
+
+    /// Mark `rect` (points). Empty rectangles are ignored; a non-finite one
+    /// marks everything.
+    pub fn add(&mut self, rect: DamageRect) {
+        if self.everything {
+            return;
+        }
+        if !rect.is_finite() {
+            self.add_all();
+            return;
+        }
+        if rect.is_empty() {
+            return;
+        }
+        let mut rect = rect;
+        // Fold in every rectangle it touches, so the list stays disjoint.
+        while let Some(i) = self.rects.iter().position(|r| r.touches(&rect)) {
+            rect = rect.union(&self.rects.swap_remove(i));
+        }
+        self.rects.push(rect);
+        if self.rects.len() > Self::MAX_RECTS {
+            self.add_all();
+        }
+    }
+
+    /// What is marked: `None` for everything, otherwise the rectangles (none
+    /// at all when nothing changed).
+    pub fn pending(&self) -> Option<&[DamageRect]> {
+        if self.everything { None } else { Some(&self.rects) }
+    }
+
+    /// Nothing is marked.
+    pub fn is_clean(&self) -> bool {
+        !self.everything && self.rects.is_empty()
+    }
+
+    /// A frame drew everything marked.
+    pub fn clear(&mut self) {
+        self.everything = false;
+        self.rects.clear();
+    }
+}
+
 /// The sizes an editor can take, in points. [`SizeRange::fixed`] is the
 /// default for every editor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -280,6 +400,18 @@ pub trait Editor {
 
     /// Draw the editor at `scale` device pixels per point.
     fn render(&mut self, scale: f32) -> Frame<'_>;
+
+    /// What changed on screen since the last call: `None` for everything (the
+    /// default, so an editor that does not override this is redrawn in full),
+    /// or the rectangles in points, none at all when nothing changed. The view
+    /// calls it after each [`Self::tick`] and input call, and invalidates only
+    /// those rectangles. The rectangles must cover every pixel that differs
+    /// from the frame last returned by [`Self::render`], anti-aliasing and
+    /// shadows included. A view that does not ask still gets correct frames:
+    /// [`Self::render`] repaints whatever is pending itself.
+    fn damage(&mut self) -> Option<Vec<DamageRect>> {
+        None
+    }
 
     /// The held modifier keys changed. Called before the mouse call that
     /// they belong to, never when nothing changed. Optional: a view that does
@@ -431,6 +563,28 @@ impl GestureQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damage_tracker_merges_and_clears() {
+        let mut d = DamageTracker::new();
+        assert!(d.pending().is_none(), "nothing drawn yet: everything");
+        d.clear();
+        assert!(d.is_clean() && d.pending() == Some(&[][..]));
+        d.add(DamageRect::new(0.0, 0.0, 10.0, 10.0));
+        d.add(DamageRect::new(50.0, 50.0, 5.0, 5.0));
+        d.add(DamageRect::new(0.0, 0.0, 0.0, 9.0));
+        assert_eq!(d.pending().map(<[_]>::len), Some(2));
+        d.add(DamageRect::new(8.0, 8.0, 50.0, 50.0));
+        assert_eq!(d.pending(), Some(&[DamageRect::new(0.0, 0.0, 58.0, 58.0)][..]));
+        d.add(DamageRect::new(f32::NAN, 0.0, 1.0, 1.0));
+        assert!(d.pending().is_none());
+        d.clear();
+        for i in 0..40 {
+            d.add(DamageRect::new(i as f32 * 20.0, 0.0, 5.0, 5.0));
+        }
+        assert!(d.pending().is_none(), "too many rectangles become everything");
+        assert!(Probe(Vec::new()).damage().is_none(), "the default is a full redraw");
+    }
 
     #[test]
     fn queue_keeps_order_and_rejects_when_full() {
