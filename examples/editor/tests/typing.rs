@@ -277,7 +277,7 @@ mod mac {
             }
             let request = FileDialog { tag: 7, title: "Choose a sample".into(), extensions: vec!["wav".into(), ".AIF".into()], multiple: true };
             log.borrow_mut().ask = Some(request.clone());
-            run_loop(0.15);
+            run_until(|| !log.borrow().answers.is_empty(), 5.0);
             // The request reached the view once; the answer came on a later tick.
             assert_eq!(seen.borrow().len(), 1);
             assert_eq!(seen.borrow()[0], request);
@@ -286,7 +286,7 @@ mod mac {
             // A cancel is None.
             *answer.borrow_mut() = Some(None);
             log.borrow_mut().ask = Some(FileDialog { tag: 8, ..request.clone() });
-            run_loop(0.15);
+            run_until(|| log.borrow().answers.len() >= 2, 5.0);
             assert_eq!(log.borrow().answers[1], (8, None));
 
             // The real panel: configured from the request, never shown.
@@ -301,11 +301,20 @@ mod mac {
             // The real completion block (what the system calls when the sheet ends) delivers a cancel.
             rig.view.as_ref().unwrap().set_file_dialog_hook(None);
             rig.view.as_ref().unwrap().simulate_panel_response(&FileDialog { tag: 9, ..request }, 0);
-            run_loop(0.15);
+            run_until(|| log.borrow().answers.len() >= 3, 5.0);
             assert_eq!(log.borrow().answers[2], (9, None));
             assert_eq!(log.borrow().answers.len(), 3);
         }
     }
+
+    /// Runs the main run loop in short slices until `done` holds or `max` seconds pass.
+    /// A loaded machine (a CI runner) can take several ticks to deliver an answer.
+    unsafe fn run_until(mut done: impl FnMut() -> bool, max: f64) { unsafe {
+        let start = std::time::Instant::now();
+        while !done() && start.elapsed().as_secs_f64() < max {
+            run_loop(0.05);
+        }
+    }}
 
     unsafe fn send_types(panel: Id) -> Vec<String> { unsafe {
         let types = id_of(panel, c"allowedFileTypes");
