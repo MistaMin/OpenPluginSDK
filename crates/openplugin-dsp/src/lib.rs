@@ -18,6 +18,7 @@
 //! - [`LoudnessMatch`]: automatic gain that holds the output at the input's K-weighted loudness.
 //! - [`Downmix`], [`Upmix`]: surround to stereo or mono by channel role (BS.775 / A/52), and the passive stereo upmix.
 //! - [`Dither`]: RPDF/TPDF dither to 8..=24 bits with noise shaping and auto-blank.
+//! - [`neural::Model`]: small Dense/GRU/LSTM/Conv1d inference for amp and pedal models, loaded from JSON.
 //! - [`Stft`], [`SpectrumAnalyzer`], [`WindowKind`]: STFT frames with overlap-add, windows with ENBW, and a lock-free spectrum feed to editors.
 //! - [`ModDelay`], [`Interpolation`]: fractional, per-sample modulated delay (Hermite, Lagrange, Thiran allpass).
 //! - [`Lfo`]: sine, triangle, saw, square, sample-and-hold and smoothed random, free-running or locked to the host [`openplugin_core::Transport`].
@@ -57,6 +58,7 @@ pub mod loudness;
 pub mod matched;
 pub mod meter;
 pub mod moddelay;
+pub mod neural;
 pub mod musical;
 pub mod noise;
 pub mod oscillator;
