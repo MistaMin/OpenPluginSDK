@@ -94,6 +94,68 @@ jobs:
         working-directory: OpenPluginSDK
         run: cargo test -p openplugin-dsp --release --lib simd -- --include-ignored --nocapture
 
+  # W1 on Linux: build the whole workspace and run every test that needs no
+  # window or display (core, DSP, DRI, the CLAP and LV2 targets, the shell ABI in
+  # openplugin-ffi, the plug-in port and the testing crate), then clippy. The
+  # macOS-only editor view is compiled out on Linux. GoodLookinDri is a public
+  # repository, so the plain checkout needs no token.
+  linux:
+    name: Linux build, tests and clippy (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      # Path dependency ../GoodLookinDri: both checkouts are children of
+      # $GITHUB_WORKSPACE, so it resolves next to OpenPluginSDK.
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Build the workspace
+        working-directory: OpenPluginSDK
+        run: cargo build --workspace --locked
+      - name: Tests that need no window
+        working-directory: OpenPluginSDK
+        run: >
+          cargo test --locked
+          -p openplugin-core -p openplugin-dsp -p openplugin-dri
+          -p openplugin-targets -p openplugin-ffi -p openplugin-port
+          -p openplugin-testing -p openplugin
+      - name: Clippy, warnings as errors
+        working-directory: OpenPluginSDK
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # The same minimum-Rust check as msrv, on Linux.
+  msrv-linux:
+    name: MSRV check on Linux (Rust 1.85.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install Rust 1.85.0
+        uses: dtolnay/rust-toolchain@1.85.0
+      - name: Check the workspace on the minimum Rust version
+        working-directory: OpenPluginSDK
+        run: cargo +1.85.0 check --workspace --all-targets --locked
+
   msrv:
     name: MSRV check (Rust 1.85.0)
     runs-on: macos-latest

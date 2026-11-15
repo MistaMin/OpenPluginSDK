@@ -6,7 +6,10 @@
 //! `ParamInfo::parse` (a Hz value with a unit, a choice by name).
 
 #[cfg(not(target_os = "macos"))]
-fn main() {}
+fn main() {
+    // Native view tests need AppKit; there is no Linux (X11/Wayland) editor view yet.
+    println!("design_editor typing: skipped: macOS only (0 tests run)");
+}
 
 #[cfg(target_os = "macos")]
 #[path = "../../editor/tests/a11y_support/mod.rs"]

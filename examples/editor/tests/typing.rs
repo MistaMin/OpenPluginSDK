@@ -21,7 +21,10 @@
 //!   and through the real completion block of an `NSOpenPanel` that is never shown.
 
 #[cfg(not(target_os = "macos"))]
-fn main() {}
+fn main() {
+    // Native view tests need AppKit; there is no Linux (X11/Wayland) editor view yet.
+    println!("editor typing: skipped: macOS only (0 tests run)");
+}
 
 #[cfg(target_os = "macos")]
 mod a11y_support;

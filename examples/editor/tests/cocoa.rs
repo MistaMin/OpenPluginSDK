@@ -20,7 +20,10 @@
 //!   Escape move, use and clear focus, and the focus ring is drawn.
 
 #[cfg(not(target_os = "macos"))]
-fn main() {}
+fn main() {
+    // Native view tests need AppKit; there is no Linux (X11/Wayland) editor view yet.
+    println!("editor cocoa: skipped: macOS only (0 tests run)");
+}
 
 #[cfg(target_os = "macos")]
 fn main() {
