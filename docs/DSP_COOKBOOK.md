@@ -657,9 +657,110 @@ let mut vu = VuIec::new(sample_rate);             // 300 ms to 99 %, ~1.3 % over
 vu.process(left);
 ```
 
-- `PpmType` carries the integration and return time of each IEC 60268-10 type (Din and Nordic 5 ms, Ebu and Bbc 10 ms; 20 dB in 1.7 s, BBC 24 dB in 2.8 s) and the scale mapping. Measured bursts against the standard's table are in the `ppm.rs` documentation; the model is one stage and reads within about 1.5 dB of the table everywhere and within 0.4 dB at the defining points.
+- `PpmType` carries the integration and return time of each IEC 60268-10 type (Din and Nordic 5 ms and 20 dB in 1.7 s; Ebu and Bbc 10 ms and 24 dB in 2.8 s) and the scale mapping. The requirements, the model and the measured readings are in "PPM ballistics" below.
 - The K-meter reads RMS over 600 ms with a +3 dB offset so a full-scale sine reads 0 dBFS; zones are green to 0, yellow to +4, red above (`KZone`).
 - Use `VuIec` where the 300 ms rise matters; the older `VuMeter` is a one-pole and takes about 1.4 s to reach 99 %.
+
+### PPM ballistics
+
+`Ppm` is a quasi-peak meter: a short burst reads low by a specified amount, and the reading falls at a steady rate in dB. `Ppm::new(rate, kind)`, `next`, `process`, `level`, `level_dbfs` and `reset` are as before; `oversampling()` is new. It is `Copy`, allocates nothing, and a reading in silence ends at exactly zero. `MeterBank`'s `ppm` reading is a separate one-pole and is not this meter.
+
+**Requirements.** IEC 60268-10 is not free, so the table is built from public documents. Readings are for one isolated burst of 5 kHz tone (10 kHz for 0.5 ms and less), against the steady reading of the same tone.
+
+| Requirement | Type I (`Din`, `Nordic`) | Type II (`Ebu`, `Bbc`) |
+|---|---|---|
+| 100 ms burst | 0 dB (+/- 0.5, ours) | 0 dB +/- 0.5 |
+| 10 ms burst | -1 dB (+/- 0.5, ours) | -2 dB +/- 0.5 |
+| 5 ms burst | -2 dB (+/- 0.5, ours) | -4 dB +/- 0.75 |
+| 3 ms burst | -4 dB (+/- 0.75, ours) | not specified |
+| 1.5 ms burst | not specified | -9 dB +/- 1.0 |
+| 0.5 ms burst | not specified | -17 dB +/- 2.0 |
+| 0.4 ms burst | -15 dB (+/- 2.0, ours) | not specified |
+| Integration time (burst that reads -2 dB) | 5 ms | 10 +/- 2 ms |
+| Return | 20 dB in 1.7 +/- 0.3 s | 24 dB in 2.8 +/- 0.3 s, at about constant speed |
+| Delay time (1 kHz switched on) | not found | within 1 dB of steady in 150 ms |
+| Overswing (1 kHz switched on) | not found | at most 0.5 dB |
+| Reversibility (asymmetric tone, either polarity) | not found | at most 0.5 dB |
+| Frequency response, 31.5 Hz to 16 kHz | not found | +/- 0.3 dB |
+| Repeated bursts | not found | only for the "slow" mode, which `Ppm` does not have |
+
+Sources:
+
+- Type II: EBU Tech 3205-E, "The EBU standard peak-programme meter for the control of international transmissions", 2nd edition 1979 (tech.ebu.ch/docs/tech/tech3205.pdf): table 2 (bursts and tolerances), 3.3 (integration time), 3.8 (delay), 3.9 (overswing), 3.10 (return), 2.3 and 2.4. Its introduction says IEC types IIa (BBC) and IIb (EBU) "differ only in respect of the scale divisions and marking", so `Bbc` has the same ballistics.
+- Type I bursts: the table in Wikipedia's "Peak programme meter" (citing IEC 60268-10:1991) and ITU-T J.15 (1988) table 1, item 3 (10 ms -1 dB, 5 ms -2 dB, 0.4 ms -15 dB). Type I return: ITU-R BS.645-2 (1992) table 1 (1.7 s for 20 dB) and the Wikipedia table (1.7 +/- 0.3 s).
+- No public source gives tolerances for the Type I bursts. The ones marked "ours" are Tech 3205-E's tolerance at the same depth of reading.
+
+Where the sources disagree:
+
+- DIN 45406 gives the Type I return as 1.5 s for 20 dB and 2.5 s for 40 dB (ITU-T J.15 table 1; maker's data for DIN instruments; German Wikipedia "Aussteuerungsmesser"), IEC 60268-10 Type I as 1.7 +/- 0.3 s for 20 dB (maker's data for Nordic instruments adds 3.5 s for 40 dB). `Ppm` uses 1.7 s at constant speed, so 40 dB takes 3.4 s; 1.5 s is inside the IEC tolerance, and DIN 45406's faster second 20 dB is not modelled.
+- DIN 45406 stated its integration time as 10 ms to 90 % (-1 dB); IEC states the same meter as 5 ms to 80 % (-2 dB). Both are rows of the same table.
+- The BBC meter's return is 26 dB in 3 s in ITU-R BS.645-2 and ITU-T J.15, and 24 dB in 2.8 s (scale mark 7 to 1) as IEC Type IIa: 8.67 against 8.57 dB/s.
+- The English Wikipedia table, read without its column layout, looks as if 1.5 ms -9 dB were a Type I row; it is Type II (Tech 3205-E table 2).
+
+**What was wrong before.** The old meter was one diode-and-capacitor stage with its time constant set to half the nominal integration time over ln 5. Measured the same way as the table below, at 44.1, 48, 96 and 192 kHz:
+
+| | Requirement | Old reading | Verdict |
+|---|---|---|---|
+| Type II 10 ms | -2 +/- 0.5 | -2.26 (`Bbc` -2.31) | passes |
+| Type II 5 ms | -4 +/- 0.75 | -4.80 to -4.90 | fails by up to 0.15 dB |
+| Type II 1.5 ms | -9 +/- 1.0 | -11.72 to -11.97 | fails by up to 2.0 dB |
+| Type II 0.5 ms | -17 +/- 2.0 | -19.66 to -20.30 | fails by up to 1.3 dB |
+| `Ebu` return | 24 dB in 2.8 +/- 0.3 s | 24 dB in 2.04 s (it used Type I's 20 dB in 1.7 s) | fails |
+| Type I 10, 5, 3 ms | -1, -2, -4 | -0.89, -2.35, -4.13 | within 0.37 dB |
+| Type I 0.4 ms | -15 | -16.07 to -16.94 | up to 1.94 dB off |
+| Steady 1 kHz sine | reads its peak | -0.18 dB (Type I), -0.28 dB (Type II) | uncalibrated |
+| Sine at fs/4, 45 degrees (11.025 and 12 kHz) | +/- 0.3 dB | -3.01 dB | fails |
+
+The causes: one stage cannot follow the Type II table, which rises faster in the first millisecond and slower after 5 ms than one capacitor does; the time constant came from the nominal integration time and not from the burst table; the reading was never calibrated on tone, so a steady sine read below its peak; the rectifier saw only sample peaks; and `Ebu` had the Type I return. The old test table also listed 1.5 ms -9 dB under Type I, where the old reading of -7.6 dB looked 1.4 dB off; that row is Type II's. Rate dependence was not a cause: readings agreed to 0.05 dB between rates except for the 0.4 and 0.5 ms bursts at 44.1 kHz.
+
+**The model and its derivation.** Each stage is a capacitor charged through a resistor and an ideal diode from the rectified signal `v = |x|` and discharged at a constant rate in dB:
+
+```text
+if v > y { y += (v - y) * (1 - exp(-1 / (tau * fs))) } else { y *= release }
+```
+
+For a tone whose period is short against `tau`, the average over one cycle of the charging current `max(|sin| - y, 0)` gives
+
+```text
+dy/dt = g(y) / tau,    g(y) = (2 / pi) * (sqrt(1 - y^2) - y * acos(y))
+```
+
+with `y` relative to the tone's peak. A burst of length `T` therefore reads `y` where `T / tau = u(y)`, the integral of `dy / g(y)` from 0 to `y`:
+
+| Reading | -1 dB | -2 dB | -4 dB | -9 dB | -15 dB | -17 dB |
+|---|---|---|---|---|---|---|
+| `u` | 6.654 | 3.918 | 2.082 | 0.780 | 0.325 | 0.250 |
+
+The standard defines the integration time as the burst that reads 2 dB low, so `tau` comes from this table and not from the nominal value: one stage with a 5 ms integration time has `tau` near 5 / 3.918 = 1.28 ms, not 5 ms / ln 5 = 3.1 ms. Dividing each row's burst length by its `u`:
+
+- Type I: 10, 5, 3 and 0.4 ms give 1.50, 1.28, 1.44 and 1.23 ms. One stage fits; `tau` = 1.42 ms has the smallest worst error.
+- Type II: 10, 5, 1.5 and 0.5 ms give 2.55, 2.40, 1.92 and 2.00 ms, falling with burst length: no single stage fits. Two stages in parallel do. The reading is `0.75 * y1 + 0.25 * y2` with `tau1` = 1.5 ms and `tau2` = 10 ms, from a search over the weight and both constants for the smallest worst error relative to the table's tolerances. Both stages fall at the same rate, so the return stays a straight line in dB, and neither can exceed the peak, so there is no overswing.
+
+On a steady tone a stage settles below the peak, where the charge near each crest equals the discharge over the rest of the cycle: `g(y) / tau = lambda * y * (1 - (2 / pi) * acos(y))`, with `lambda` the discharge rate in nepers per second. `Ppm::new` solves this for both stages and scales the reading so that a steady sine reads its peak, as the instrument is calibrated on tone. The burst readings above are against that steady reading. A square wave or DC of the same peak then reads up to 0.23 dB (Type II) or 0.17 dB (Type I) high. The release is `exp(-lambda / fs)` per detector step with `lambda = (dB / seconds) * ln(10) / 20`.
+
+The rectifier runs on an oversampled signal: 8x below 88.2 kHz, 4x below 176.4 kHz, 2x below 352.8 kHz (a Kaiser-windowed sinc designed here, 16 taps per phase, beta 7; the reading lags by 8 samples). Sample peaks understate a high tone, by 3 dB for a sine at a quarter of the rate sampled at 45 degrees, and the stages then run at 352.8 kHz or more at every rate, which is why the readings below hardly move with the rate. The cost at 48 kHz is 128 multiplies and 16 stage updates per sample.
+
+**Measured** (`ppm.rs` tests, one per row, each at 44.1, 48, 96 and 192 kHz; the range is over those rates, bursts starting at a zero crossing and at a crest, and four sub-sample offsets):
+
+| Requirement | Type I reading | Type II reading |
+|---|---|---|
+| 100 ms | 0.00 | -0.06 |
+| 10 ms | -0.77 to -0.78 (wanted -1) | -2.01 to -2.02 (wanted -2 +/- 0.5) |
+| 5 ms | -2.09 to -2.13 (wanted -2) | -3.76 to -3.80 (wanted -4 +/- 0.75) |
+| 3 ms | -3.72 to -3.80 (wanted -4) | -5.64 to -5.72 (no requirement) |
+| 1.5 ms | -6.92 to -7.08 (no requirement) | -9.07 to -9.24 (wanted -9 +/- 1.0) |
+| 0.5 ms | -13.58 to -14.24 (no requirement) | -15.93 to -16.61 (wanted -17 +/- 2.0) |
+| 0.4 ms | -15.21 to -16.38 (wanted -15) | -17.59 to -18.76 (no requirement) |
+| Return | 20 dB in 1.700 s, 40 dB in 3.400 s | 24 dB in 2.800 s |
+| Time to within 1 dB (1 kHz) | 8.9 ms | 19.5 ms (limit 150 ms) |
+| Overswing | none | none (limit 0.5 dB) |
+| Polarity difference | 0.000 dB | 0.000 dB (limit 0.5 dB) |
+| Steady 1 kHz sine re its peak | +0.003 dB | +0.002 dB |
+| Steady sine, 100 Hz to 16 kHz and fs/4 at 45 degrees (11.025, 12 kHz) | within 0.03 dB | within 0.02 dB (limit 0.3 dB) |
+| Steady 31.5 Hz (the reading moves between crests) | +0.07 to -0.10 dB | +0.05 to -0.06 dB |
+| 10 ms bursts every 100 ms (no requirement) | -0.29 dB | -0.57 dB |
+
+The spread on the 0.4 and 0.5 ms rows is the test signal's own: a gated 10 kHz tone of 18 samples at 44.1 kHz is a different signal at each offset; at 192 kHz the spread is 0.07 dB. A -18 dBFS 1 kHz tone with alignment at -18 dBFS reads TEST on the `Ebu` and `Nordic` scales, 4 on `Bbc` and -9 on `Din`, within 0.05 dB. This is an engineering model after the public requirements, not a type approval against IEC 60268-10.
 
 ### Correlation and goniometer
 
