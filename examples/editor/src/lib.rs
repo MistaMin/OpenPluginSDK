@@ -425,6 +425,18 @@ impl Editor for GainEditor {
         self.controls.set_modifiers(modifiers);
     }
 
+    fn accessibility_nodes(&self) -> Vec<openplugin::core::editor::AccessNode> {
+        self.controls.accessibility_nodes()
+    }
+
+    fn accessibility_action(&mut self, node: usize, action: openplugin::core::editor::AccessAction) -> bool {
+        self.controls.accessibility_action(node, action)
+    }
+
+    fn accessibility_focus(&mut self, node: usize) -> bool {
+        self.controls.accessibility_focus(node)
+    }
+
     fn wants_keys(&self) -> bool {
         self.controls.wants_keys()
     }

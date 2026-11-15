@@ -369,6 +369,48 @@ impl SizeRange {
     }
 }
 
+/// What a screen reader is told an accessibility node is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessRole {
+    /// A value along a range: knob, fader, choice.
+    Slider,
+    /// Two states: on or off.
+    Switch,
+    /// A momentary push.
+    Button,
+}
+
+/// What a screen reader asks a node to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccessAction {
+    /// One step up (VoiceOver: Control-Option-Up).
+    Increment,
+    /// One step down.
+    Decrement,
+    /// Press (VoiceOver: Control-Option-Space): flip a switch, push a button.
+    Press,
+}
+
+/// One thing a screen reader can find in an editor: a control with a name, a
+/// value as text, a role and a place. What [`Editor::accessibility_nodes`]
+/// returns.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccessNode {
+    /// The name read first (the parameter's name).
+    pub label: String,
+    /// The value as text (`ParamInfo::format`).
+    pub value: String,
+    pub role: AccessRole,
+    /// A [`AccessRole::Switch`] is on.
+    pub on: bool,
+    /// Where it is, in editor points, origin top left.
+    pub rect: DamageRect,
+    /// The node has the editor's keyboard focus.
+    pub focused: bool,
+    /// False for a read-only control: it is listed but takes no actions.
+    pub enabled: bool,
+}
+
 /// The plugin's editor. Main thread only; it is never sent to another thread.
 pub trait Editor {
     /// The current size in points (logical pixels). A fixed editor never
@@ -447,6 +489,30 @@ pub trait Editor {
     fn mouse_up(&mut self, _x: f32, _y: f32) {}
     /// Wheel or trackpad scroll; positive `dy` is away from the user.
     fn wheel(&mut self, _x: f32, _y: f32, _dy: f32) {}
+
+    /// What a screen reader sees: one node per control, in reading order, with
+    /// the control's place in editor points. The view turns them into
+    /// accessibility elements and asks again whenever it needs them, so the
+    /// answer is always current. The default is none, which leaves the editor
+    /// as one opaque image to a screen reader. Editors built on the control
+    /// registry of `openplugin-dri` forward this to it.
+    fn accessibility_nodes(&self) -> Vec<AccessNode> {
+        Vec::new()
+    }
+
+    /// A screen reader acts on node `node` (an index into
+    /// [`Self::accessibility_nodes`]). The editor does what the same input
+    /// would do with the mouse, as gestures through its [`EditorHost`], and
+    /// returns whether it did anything. The default does nothing.
+    fn accessibility_action(&mut self, _node: usize, _action: AccessAction) -> bool {
+        false
+    }
+
+    /// A screen reader moves its cursor to node `node`: take keyboard focus
+    /// there. True when it did. The default does nothing.
+    fn accessibility_focus(&mut self, _node: usize) -> bool {
+        false
+    }
 }
 
 /// Makes the plugin's editor. Passed to `export_clap!`, `export_lv2!` and
@@ -685,6 +751,14 @@ mod tests {
         assert_eq!(probe.size_range(), SizeRange::fixed(1, 1));
         probe.resize(50, 50);
         assert_eq!(probe.size(), (1, 1));
+    }
+
+    #[test]
+    fn default_editor_has_no_accessibility_nodes_and_ignores_actions() {
+        let mut probe = Probe(Vec::new());
+        assert!(probe.accessibility_nodes().is_empty());
+        assert!(!probe.accessibility_action(0, AccessAction::Increment));
+        assert!(!probe.accessibility_focus(0));
     }
 
     #[test]

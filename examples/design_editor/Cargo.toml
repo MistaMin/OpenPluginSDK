@@ -11,3 +11,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 openplugin = { workspace = true }
+
+# Runs on the main thread, which AppKit needs.
+[[test]]
+name = "a11y"
+harness = false
