@@ -70,7 +70,33 @@ Both are for the message thread (they allocate), never the audio thread, and nei
 
 ABI channel order is canonical; shells reorder. Every bus the ABI carries (main in, main out, sidechain) lists its channels in the SDK's order: the CLAP surround order of `openplugin_core::layout` (`SpeakerLayout::surround_map`), ambisonic buses in ACN. The ABI never exposes a host's order (VST3 speaker arrangements, Audio Unit layout tags, Pro Tools film order). A shell reorders at its own edge, between the host's buffers and the pointer arrays it hands to `op_shell_process_events`.
 
-`op_shell_layout(index, &layout)` describes layout `index` (no instance needed). `OpLayout.input`, `.output` and `.sidechain` are `OpBus` values with a `kind` (`OP_BUS_ABSENT`, `MONO`, `STEREO`, `SURROUND`, `AMBISONIC`, `DISCRETE`, the `SpeakerLayout` kinds), a `channels` count, and `roles[i]`, the CLAP surround id of channel `i` (FL 0, FR 1, FC 2, LFE 3, BL 4, BR 5, and so on). Stereo is FL, FR. `roles[i]` is `OP_ROLE_NONE` (0xFF) for mono, ambisonic and discrete buses and past channel 16. A shell builds its reorder table from these roles and does not repeat `layout.rs`. `name` is the layout's label. A missing sidechain is `OP_BUS_ABSENT` with 0 channels.
+`op_shell_layout(index, &layout)` describes layout `index` (no instance needed). `OpLayout.input`, `.output` and `.sidechain` are `OpBus` values with a `kind` (`OP_BUS_ABSENT`, `MONO`, `STEREO`, `SURROUND`, `AMBISONIC`, `DISCRETE`, the `SpeakerLayout` kinds), a `channels` count, and `roles[i]`, the SDK role id of channel `i` (the CLAP surround ids 0 to 17, then 18 to 21 for top side and wide channels) (FL 0, FR 1, FC 2, LFE 3, BL 4, BR 5, and so on). Stereo is FL, FR. `roles[i]` is `OP_ROLE_NONE` (0xFF) for mono, ambisonic and discrete buses and past channel 16. A shell builds its reorder table from these roles and does not repeat `layout.rs`. `name` is the layout's label. A missing sidechain is `OP_BUS_ABSENT` with 0 channels.
+
+#### Canonical order of every layout
+
+Role ids: 0 FL, 1 FR, 2 FC, 3 LFE, 4 BL, 5 BR, 6 FLC, 7 FRC, 8 BC, 9 SL, 10 SR, 11 TC, 12 TFL, 13 TFC, 14 TFR, 15 TBL, 16 TBC, 17 TBR (the CLAP `CLAP_SURROUND_*` ids), then the SDK-only ids 18 TSL, 19 TSR (top side, the overhead pair of the x.y.2 beds; Dolby "top middle" Ltm/Rtm), 20 FLW, 21 FRW (front wides). CLAP has no ids for 18 to 21, so a layout that uses them (5.1.2, 7.1.2, 9.1.6) cannot be expressed through the CLAP surround extension: `SpeakerLayout::clap_expressible` is false, `surround_mask` and `clap_map` return `None`, and the CLAP entry must not offer them.
+
+| Layout | Channels | Order |
+|---|---|---|
+| Mono | 1 | no role |
+| Stereo | 2 | FL FR |
+| LCR | 3 | FL FR FC |
+| Quad | 4 | FL FR BL BR |
+| 5.0 | 5 | FL FR FC BL BR |
+| 5.1 | 6 | FL FR FC LFE BL BR |
+| 6.1 | 7 | FL FR FC LFE BL BR BC |
+| 7.1 | 8 | FL FR FC LFE SL SR BL BR |
+| 7.1.4 | 12 | FL FR FC LFE SL SR BL BR TFL TFR TBL TBR |
+| 5.1.2 | 8 | FL FR FC LFE BL BR TSL TSR |
+| 5.1.4 | 10 | FL FR FC LFE BL BR TFL TFR TBL TBR |
+| 7.1.2 | 10 | FL FR FC LFE SL SR BL BR TSL TSR |
+| 9.1.6 | 16 | FL FR FC LFE SL SR BL BR FLW FRW TFL TFR TSL TSR TBL TBR |
+
+The order is the SDK's own, not a host's: bed (L R C LFE), then the sides and backs, then the wides, then the heights from front to back, each pair left before right. It matches the Dolby Atmos home bed channel order (L R C LFE Lss Rss Lrs Rrs, wides, then front, top and rear heights) as the author recalls it; no standard document was available to check against, so treat the 9.1.6 and top side placements as the SDK's choice. ITU-R BS.2051 names the same speakers with different labels (for example U+030 for a front height) and a different order. 9.1.6 fills `OpBus::roles[16]` exactly; no layout exceeds 16 channels.
+
+Role helpers on `SpeakerLayout` (all allocation-free; `index_of`, `role_at`, `is_lfe`, `roles` are `const`): `index_of(role)`, `role_at(i)`, `roles()`, `is_lfe(i)`, `non_lfe()` (indices), `pairs()` ((left, right) indices) and `unpaired()` (centre, back and top centre, LFE; every channel of a bus with no roles). Plugin code looks channels up by role and never hard-codes an index.
+
+Shell tables for the new beds (VST3 `kSpeakerTsl`-style arrangements, Audio Unit tags, AAX stem formats) are a follow-up; until then the shells do not offer 5.1.2, 5.1.4, 7.1.2 or 9.1.6.
 
 ### Layout selection
 
