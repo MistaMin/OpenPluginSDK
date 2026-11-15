@@ -25,6 +25,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 - `openplugin_dri::DesignEditor`: an editor built from a GoodLookin design CSV, each row bound to a parameter by id; `examples/design_editor`.
 - `docs/PUBLISHING.md`, `CHANGELOG.md`, `docs/VERSIONING.md` and `docs/API_REVIEW.md`; crate metadata (authors, homepage, keywords, categories, readme, documentation) inherited by every crate; GoodLookin DRI named by version as well as path.
 - `docs/ROADMAP.md` for macOS to 1.0 and `docs/ROADMAP_WINDOWS_LINUX.md`.
+- `openplugin-port`, a new crate and binary, the first part of the porting toolkit: `openplugin-port scan <plugin>` loads an existing CLAP, VST3 or Audio Unit (each in a child process, with a timeout, so a crashing plugin cannot take the scanner down) and reads an AAX bundle's ids from its page table. It writes a versioned JSON manifest (ids, buses, latency, tail, and every parameter's id, name, range, default, step count, flags and value strings) and a Rust snippet with a `ParamInfo` table, a `PluginInfo` and the build settings, with `TODO` marks for identity the SDK cannot pin yet. Described in `docs/PORTING.md`.
 
 ### Changed
 
