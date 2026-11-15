@@ -96,7 +96,7 @@ pub fn emit_result<T: serde::Serialize>(result: &Result<T, String>) -> ! {
     let _ = writeln!(out, "{MARK}{json}");
     let _ = out.flush();
     // The plugin's own teardown is the likeliest thing to crash; skip it.
-    unsafe { sys::_exit(0) }
+    sys::exit_now(0)
 }
 
 fn child_probe(args: &[String]) -> Result<ProbeResult, String> {

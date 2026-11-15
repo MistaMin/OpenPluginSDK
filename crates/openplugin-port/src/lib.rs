@@ -9,6 +9,10 @@
 //! the scanner.
 
 pub mod aax;
+#[cfg(target_os = "macos")]
+pub mod au;
+#[cfg(not(target_os = "macos"))]
+#[path = "au_unsupported.rs"]
 pub mod au;
 pub mod bundle;
 pub mod capture;

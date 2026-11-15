@@ -163,11 +163,11 @@ struct Session {
 
 fn open(job: &Job) -> Result<Session, String> {
     let handle = sys::load_bundle(&job.path)?;
-    let entry = sys::bundle_function(handle, "bundleEntry");
+    let entry = sys::bundle_function(handle, sys::MODULE_ENTRY);
     if !entry.is_null() {
-        let f: unsafe extern "C" fn(sys::CFBundleRef) -> bool = unsafe { std::mem::transmute(entry) };
+        let f: unsafe extern "C" fn(sys::ModuleRef) -> bool = unsafe { std::mem::transmute(entry) };
         if !unsafe { f(handle) } {
-            return Err("bundleEntry returned false".into());
+            return Err("the module entry point returned false".into());
         }
     }
     let get = sys::bundle_function(handle, "GetPluginFactory");

@@ -35,7 +35,7 @@ fn example_dylib() -> &'static Path {
             .expect("run cargo");
         assert!(status.success(), "building the example failed");
         let target = std::env::var_os("CARGO_TARGET_DIR").map(|t| root.join(t)).unwrap_or_else(|| root.join("target"));
-        let dylib = target.join("debug").join("libexample_editor.dylib");
+        let dylib = target.join("debug").join(format!("{}example_editor{}", std::env::consts::DLL_PREFIX, std::env::consts::DLL_SUFFIX));
         assert!(dylib.is_file(), "{} was not built", dylib.display());
         dylib
     })

@@ -1,6 +1,5 @@
-//! The few system calls the probes need, declared by hand: `dlopen`, a little
-//! CoreFoundation, and the AudioToolbox calls that host one Audio Unit. Kept
-//! to what is used, so the crate needs no binding generator.
+//! macOS: `dlopen`, a little CoreFoundation, and the AudioToolbox calls that
+//! host one Audio Unit. Only macOS work edits this file; see `sys/mod.rs`.
 
 #![allow(non_camel_case_types, non_snake_case, dead_code, clippy::not_unsafe_ptr_arg_deref)]
 
@@ -16,6 +15,17 @@ unsafe extern "C" {
 
 pub const RTLD_NOW: c_int = 2;
 pub const RTLD_LOCAL: c_int = 4;
+
+/// The VST3 module entry point, `bundleEntry(CFBundleRef)`.
+pub const MODULE_ENTRY: &str = "bundleEntry";
+
+/// What `load_bundle` returns and the module entry point takes: the CFBundle.
+pub type ModuleRef = CFBundleRef;
+
+/// Leave the process at once, without running any teardown.
+pub fn exit_now(code: c_int) -> ! {
+    unsafe { _exit(code) }
+}
 
 /// `dlopen` a file; the error text from `dlerror` on failure.
 pub fn open_library(path: &Path) -> Result<*mut c_void, String> {

@@ -8,6 +8,11 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
 
 ## [Unreleased]
 
+### Changed
+
+- `openplugin-port` builds on Linux. Its system calls are one file per system (`src/sys/macos.rs`, `linux.rs`, `windows.rs`) behind one switch in `src/sys/mod.rs`; the macOS file is the 0.4.0-beta code unchanged. On Linux the VST3 probes load `<name>.vst3/Contents/<arch>-linux/<name>.so` and call `ModuleEntry`, Audio Unit calls return "Audio Units are macOS-only", and the tests find the example library by the platform's library name. Windows has a placeholder that compiles and reports that loading plug-ins is not supported yet. A failed VST3 entry point now reads "the module entry point returned false" (was "bundleEntry returned false"). `openplugin-testing` links its examples test on Linux with `--allow-multiple-definition`, because two example plug-ins each export `clap_entry`.
+- New `docs/PLATFORMS.md`: platform code lives in files of its own, and work for one platform edits only that platform's files; and a `CLAUDE.md` with the repo's rules for coding agents.
+
 ## [0.4.0-beta] - 2026-11-15
 
 Commits `a708cac` to `v0.4.0-beta`. Format conformance on macOS (roadmap 0.4), the 0.5 editor work, 0.6 (one plugin in every format: shell ABI 2 to 6, parity of VST3, the Audio Unit, AAX and LV2, parameter groups, telling the host about changes, one channel order with the Atmos beds, downmix and the surround adapter), most of 0.7, the porting tools, the DSP library, and the first 1.0 tasks. Tested in REAPER, OpenGrid9 and Pro Tools ([docs/HOST_TESTS.md](docs/HOST_TESTS.md)).
