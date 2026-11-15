@@ -40,7 +40,7 @@ Not included: the licence texts (`LICENSE-MIT`, `LICENSE-APACHE`) sit at the rep
 
 ## Version
 
-The version is the pre-release `0.3.1-beta`. Cargo does not pick pre-releases for `openplugin = "0.3"`; users write `openplugin = "0.3.1-beta"`. The roadmap's 1.0 item (frozen API, changelog) is a separate step from getting the crates on the registry.
+The version is the pre-release `0.4.0-beta`. Cargo does not pick pre-releases for `openplugin = "0.4"`; users write `openplugin = "0.4.0-beta"`. The roadmap's 1.0 item (frozen API, changelog) is a separate step from getting the crates on the registry.
 
 ## Commands
 
@@ -75,8 +75,8 @@ A dry run of crates 2 to 6 only works once the crates before it are published, b
 
 ```sh
 cargo new check-openplugin && cd check-openplugin
-cargo add openplugin@0.3.1-beta
+cargo add openplugin@0.4.0-beta
 cargo build
 ```
 
-A published version cannot be replaced. If something is wrong, `cargo yank --version 0.3.1-beta <crate>` hides it from new projects, and the fix goes out as the next version.
+A published version cannot be replaced. If something is wrong, `cargo yank --version 0.4.0-beta <crate>` hides it from new projects, and the fix goes out as the next version.

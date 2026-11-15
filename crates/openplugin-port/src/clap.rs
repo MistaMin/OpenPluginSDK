@@ -16,7 +16,7 @@ pub use render::render;
 
 static HOST_NAME: &[u8] = b"openplugin-port\0";
 static EMPTY: &[u8] = b"\0";
-static HOST_VERSION: &[u8] = b"0.3.1\0";
+static HOST_VERSION: &[u8] = b"0.4.0\0";
 
 unsafe extern "C" fn host_get_extension(_host: *const clap_host, _id: *const c_char) -> *const c_void {
     std::ptr::null()

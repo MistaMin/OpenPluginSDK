@@ -34,7 +34,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "example-editor"
-version = "0.3.1-beta"
+version = "0.4.0-beta"
 dependencies = [
  "openplugin",
  "openplugin-core",
@@ -73,10 +73,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "itoa"
+version = "1.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
+
+[[package]]
 name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
+
+[[package]]
+name = "memchr"
+version = "2.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "num-complex"
@@ -113,7 +125,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openplugin"
-version = "0.3.1-beta"
+version = "0.4.0-beta"
 dependencies = [
  "openplugin-core",
  "openplugin-dri",
@@ -124,14 +136,14 @@ dependencies = [
 
 [[package]]
 name = "openplugin-core"
-version = "0.3.1-beta"
+version = "0.4.0-beta"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "openplugin-dri"
-version = "0.3.1-beta"
+version = "0.4.0-beta"
 dependencies = [
  "goodlookindri",
  "goodlookindri-shell",
@@ -142,22 +154,23 @@ dependencies = [
 
 [[package]]
 name = "openplugin-dsp"
-version = "0.3.1-beta"
+version = "0.4.0-beta"
 dependencies = [
  "openplugin-core",
  "rustfft",
+ "serde_json",
 ]
 
 [[package]]
 name = "openplugin-ffi"
-version = "0.3.1-beta"
+version = "0.4.0-beta"
 dependencies = [
  "openplugin-core",
 ]
 
 [[package]]
 name = "openplugin-targets"
-version = "0.3.1-beta"
+version = "0.4.0-beta"
 dependencies = [
  "log",
  "openplugin-core",
@@ -251,6 +264,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.154"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "strength_reduce"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -325,3 +351,9 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

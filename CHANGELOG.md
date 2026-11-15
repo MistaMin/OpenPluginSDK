@@ -2,13 +2,15 @@
 
 All notable changes to OpenPluginSDK are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions are described in [docs/VERSIONING.md](docs/VERSIONING.md).
 
-Entries describe what changes for someone writing a plugin with the SDK, and are written from the git history. Each release names its commit range. Only `v0.1.0-beta.1` is tagged; the later releases are identified by the commit that bumped the version in `Cargo.toml`. Breaking changes are marked **Breaking**.
+Entries describe what changes for someone writing a plugin with the SDK, and are written from the git history. Each release names its commit range. `v0.1.0-beta.1` and `v0.4.0-beta` are tagged; the releases between them are identified by the commit that bumped the version in `Cargo.toml`. Breaking changes are marked **Breaking**.
 
 Before 1.0 the SDK does not promise compatibility between releases: any release may break. Breaking changes are listed under Changed or Removed and marked.
 
 ## [Unreleased]
 
-Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS format conformance and the first 0.5 and 1.0 tasks.
+## [0.4.0-beta] - 2026-11-15
+
+Commits `a708cac` to `v0.4.0-beta`. Format conformance on macOS (roadmap 0.4), the 0.5 editor work, 0.6 (one plugin in every format: shell ABI 2 to 6, parity of VST3, the Audio Unit, AAX and LV2, parameter groups, telling the host about changes, one channel order with the Atmos beds, downmix and the surround adapter), most of 0.7, the porting tools, the DSP library, and the first 1.0 tasks. Tested in REAPER, OpenGrid9 and Pro Tools ([docs/HOST_TESTS.md](docs/HOST_TESTS.md)).
 
 ### Added
 
@@ -203,7 +205,8 @@ Commit `90691a3` (tagged `v0.1.0-beta.1`). The first release.
 - GoodLookin DRI drawing (knobs, faceplates, meters) and `DrawList`.
 - Licensed MIT OR Apache-2.0.
 
-[Unreleased]: https://github.com/MistaMin/OpenPluginSDK/compare/a708cac...HEAD
+[Unreleased]: https://github.com/MistaMin/OpenPluginSDK/compare/v0.4.0-beta...HEAD
+[0.4.0-beta]: https://github.com/MistaMin/OpenPluginSDK/compare/a708cac...v0.4.0-beta
 [0.3.1-beta]: https://github.com/MistaMin/OpenPluginSDK/compare/2b1d828...a708cac
 [0.3.0-beta]: https://github.com/MistaMin/OpenPluginSDK/compare/6671df8...2b1d828
 [0.2.0-beta]: https://github.com/MistaMin/OpenPluginSDK/compare/8ab9e16...6671df8

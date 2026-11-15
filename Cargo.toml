@@ -19,7 +19,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.1-beta"
+version = "0.4.0-beta"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -30,13 +30,13 @@ keywords = ["audio", "plugin", "vst3", "clap", "aax"]
 categories = ["multimedia::audio", "gui"]
 
 [workspace.dependencies]
-openplugin-core = { path = "crates/openplugin-core", version = "0.3.1-beta" }
-openplugin-dsp = { path = "crates/openplugin-dsp", version = "0.3.1-beta" }
-openplugin-dri = { path = "crates/openplugin-dri", version = "0.3.1-beta" }
-openplugin-targets = { path = "crates/openplugin-targets", version = "0.3.1-beta" }
-openplugin-ffi = { path = "crates/openplugin-ffi", version = "0.3.1-beta" }
-openplugin-testing = { path = "crates/openplugin-testing", version = "0.3.1-beta" }
-openplugin = { path = "crates/openplugin", version = "0.3.1-beta" }
+openplugin-core = { path = "crates/openplugin-core", version = "0.4.0-beta" }
+openplugin-dsp = { path = "crates/openplugin-dsp", version = "0.4.0-beta" }
+openplugin-dri = { path = "crates/openplugin-dri", version = "0.4.0-beta" }
+openplugin-targets = { path = "crates/openplugin-targets", version = "0.4.0-beta" }
+openplugin-ffi = { path = "crates/openplugin-ffi", version = "0.4.0-beta" }
+openplugin-testing = { path = "crates/openplugin-testing", version = "0.4.0-beta" }
+openplugin = { path = "crates/openplugin", version = "0.4.0-beta" }
 goodlookindri = { path = "../GoodLookinDri", version = "0.2.0" }
 goodlookindri-shell = { path = "../GoodLookinDri/shell", version = "0.2.0" }
 

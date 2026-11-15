@@ -75,7 +75,7 @@ Tasks 1 to 5 are done: plugin state reaches VST3 (a versioned trailer), the Audi
 5. **CLAP state beside the audio thread.** The CLAP adapter calls `save_state`/`load_state` from the main thread without synchronisation, the race the shell gate fixed. Give CLAP the same guarantee. Owns `crates/openplugin-targets/src/clap.rs`. Proof: a concurrency test with `process` running during saves and loads.
 6. **Host smoke tests.** A scripted REAPER run with the example (CLAP and VST3) that loads it from a build folder through a separate REAPER configuration, automates a parameter, saves the project, reopens it and checks the value, opens and closes the editor. Nothing is installed into plug-in folders; the Audio Unit run waits for an install the owner approves. Owns `scripts/host_smoke/*`, `docs/HOST_TESTS.md`.
 
-Then **0.4.0**: version bump, notes, CI green.
+**0.4.0** is released as `v0.4.0-beta` (15 November 2026), together with the 0.5, 0.6 and 0.7 work finished by then.
 
 ## 0.5: a dependable editor layer
 
