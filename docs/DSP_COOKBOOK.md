@@ -141,7 +141,7 @@ The pieces, from small to large:
 | `GainComputer` | Static curve in dB: compressor, expander, gate; soft knee, ratio up to infinity, range, gate hysteresis. |
 | `Dynamics` | Any number of channels, one linked detector, one gain for all of them; sidechain input and filter hook. |
 | `Limiter` | Lookahead brickwall with a true-peak ceiling and a reported latency. |
-| `TruePeak` | The 4x (BS.1770 structure) or 8x detector the limiter uses, usable on its own for a meter. |
+| `TruePeak` | A 4x (BS.1770 structure) or 8x true-peak detector for one channel, accurate up to 0.4 fs. (The limiter has its own, longer detector.) |
 
 Time constants are true time constants: after `attack_ms` a step has covered 63.2 % of its way (tested to 3 %).
 
@@ -247,21 +247,32 @@ limiter.process(&mut [left, right]);
 let gr = limiter.gain_reduction_db();
 ```
 
-How it works: each frame, every channel is measured with an 8x interpolated true-peak detector (the BS.1770-4 Annex 2 idea, a longer filter; see `true_peak.rs`), the largest value across channels sets one gain for all channels, a sliding minimum over the lookahead makes the gain arrive before the peak, and a moving average over the lookahead turns the corner into linear ramps, so the gain never clicks and mathematically cannot exceed what the peak requires. The audio is delayed by the lookahead plus the detector's delay (`latency_samples()`), and the gain recovers exponentially with the release time.
+How it works: each frame, every channel is measured by a detector that evaluates three reconstruction filters and takes the largest reading (a Hann-windowed sinc of 48 samples each side at 8 points per sample with a sinusoidal fit of the crest between points, the 4x filter of `TruePeakMeter`, and the 12-tap BS.1770 structure of `TruePeak::new`). The largest value across channels sets one gain for all channels, a sliding minimum over the lookahead makes the gain arrive before the peak, and a moving average over the lookahead turns the corner into linear ramps, so the gain never clicks. The audio is delayed by the lookahead plus the detector's 48 samples (`latency_samples()`: 120 at 48 kHz with 1.5 ms; it was the lookahead plus 9 before the detector was replaced), and the gain recovers exponentially with the release time.
 
-What the ceiling means, measured against an independent 16x interpolator in `tests/dynamics.rs`:
+Why three filters: the true peak of material with energy near Nyquist depends on the reconstruction filter. On full-band white noise a 16-tap interpolator (the limiter's old detector) reads up to 2.6 dB lower than a 96-tap one, and the 24-tap filter of `TruePeakMeter` reads between 2.1 dB lower and 1.3 dB higher, interval by interval. That was the cause of the 1.7 dB excess this section used to report. A limiter can only promise its ceiling for named filters, so it names three and holds all of them.
 
-| Signal | Excess over the ceiling |
-| --- | --- |
-| fs/4 sine at 45 degrees, bursts of it | below 0.002 dB |
-| noise band-limited to 0.4 fs, square-ish bursts, sweep | below 0.03 dB |
-| sines at 0.43 fs | 0.05 dB |
-| hard (not band-limited) square wave | 0.07 dB |
-| full-band white noise | 1.7 dB |
+The margin: a gain multiplied into the samples is not quite a gain on the reconstructed waveform (neighbouring samples carry slightly different gains), by an amount that grows with the speed of the gain and with the energy near Nyquist: measured up to 4.3 dB divided by the lookahead in samples, on white noise. In true-peak mode the limiter therefore aims `4.5 / lookahead samples` dB under the ceiling (0.06 dB at 1.5 ms and 48 kHz, 0.10 dB at 1 ms and 44.1 kHz, never more than 1 dB; `margin_db()` returns it). Material within that margin of the ceiling is turned down by up to that much.
 
-Full-band white noise is the one weak case: it carries energy right up to Nyquist, where an ideal brick-wall reconstruction and any short detector filter disagree. A real converter's reconstruction filter rolls off before Nyquist and sees less. If you need a margin on such material, set the ceiling lower.
+What the ceiling means, measured in `tests/true_peak_ceiling.rs` at 44.1, 48, 96 and 192 kHz with ceilings of -1 and -6 dBFS, every signal 3.5 to 6 dB over full scale, 1.5 ms lookahead and 50 ms release. Two references read the output: a Hann-windowed sinc of 48 samples each side evaluated at 16 points per sample in f64, and `TruePeakMeter`. The figures are the worst case over the rates and ceilings, in dB relative to the ceiling (negative is under it):
 
-`set_true_peak(false)` limits sample peaks only: cheaper, but intersample peaks (an fs/4 sine at 45 degrees is 3 dB over) pass through.
+| Signal | 16x reference | `TruePeakMeter` | 16x reference, old detector |
+| --- | --- | --- | --- |
+| full-band white noise | -0.011 | -0.031 | +1.914 |
+| pink noise | -0.015 | -0.041 | +0.607 |
+| hard square, 1 kHz | -0.022 | -0.158 | +0.109 |
+| hard square, period 7 samples | -0.016 | -0.214 | +0.378 |
+| sweep, 20 Hz to 0.499 fs | -0.016 | -0.016 | +0.012 |
+| impulses (single, opposite pair, alternating run) | -0.013 | -0.016 | +0.620 |
+| hard-clipped drum hits | -0.012 | -0.031 | +1.989 |
+| fs/4 sine at 45 degrees | -0.016 | -0.031 | -0.003 |
+
+With a 1 ms lookahead and a 20 ms release the worst case is -0.014 dB (it was +2.108 dB, on the drum hits). The test asserts at most +0.1 dB.
+
+What it does not promise: a reconstruction filter that is none of the three can read full-band noise higher. On the limited white noise a Hann sinc of 24 samples each side reads 0.14 dB over the ceiling and one of 200 samples each side 0.42 dB over (the same test prints both; before the change they read 1.49 and 2.20 dB over). Material band-limited below about 0.45 fs reads the same on all of them. If you must satisfy an unknown meter on such material, set the ceiling lower. The short BS.1770 filter's pass band is not flat, so a plain sine can be held up to 0.11 dB under the ceiling.
+
+Cost (Apple M1 Max, `tests/limiter_bench.rs`, noise into a -20 dB ceiling): 69 to 85 ns per sample and channel in true-peak mode (0.69 % of one core for stereo at 48 kHz, 2.8 % at 192 kHz), against 61 to 72 ns for the old detector measured in the same run, and 5 to 15 ns in sample-peak mode. The detector's three filters are symmetric, so their mirrored phases are computed from sums and differences of sample pairs: 420 multiply-adds per sample and channel in place of 792.
+
+`set_true_peak(false)` limits sample peaks only, with no margin: about a tenth of the CPU, but intersample peaks (an fs/4 sine at 45 degrees is 3 dB over) pass through. The latency is the same in both modes.
 
 Return the limiter's latency from `Plugin::latency`, and run a `SoftBypass` or `Delta` with the same figure so that bypass and the dry path line up.
 
@@ -1369,9 +1380,24 @@ clip.process(&mut [&mut left, &mut right]);
 let latency = clip.latency_samples(); // return from Plugin::latency
 ```
 
-The curve is linear up to `ceiling - knee`, then `x_k + w tanh((x - x_k)/w)` with `w` the knee width (C1, never reaching the ceiling), or a hard clamp for knee 0. It runs at 2x or 4x on `LinearPhaseOversampler`, then through the crate's lookahead true-peak `Limiter` (1 ms lookahead, 20 ms release) that removes what the decimation filter's ringing adds back, and a final sample clamp. `latency_samples()` is the oversampler's 64 plus the limiter's delay (121 at 48 kHz). Why the limiter: without it a hard-clipped 11 kHz sine at 4x measured 1.8 dB over the ceiling, and clamping samples to the ceiling is no cure (samples pinned at an fs/4 tone's 45-degree phase have an inter-sample peak 3 dB higher).
+The curve is linear up to `ceiling - knee`, then `x_k + w tanh((x - x_k)/w)` with `w` the knee width (C1, never reaching the ceiling), or a hard clamp for knee 0. It runs at 2x or 4x on `LinearPhaseOversampler`, then through the crate's lookahead true-peak `Limiter` (1 ms lookahead, 20 ms release) that removes what the decimation filter's ringing adds back, and a final sample clamp. `latency_samples()` is the oversampler's 64 plus the limiter's delay (1 ms plus 48 samples): 160 at 48 kHz, 156 at 44.1 kHz (it was 121 at 48 kHz before the limiter's detector was replaced). Why the limiter: without it a hard-clipped 11 kHz sine at 4x measured 1.8 dB over the ceiling, and clamping samples to the ceiling is no cure (samples pinned at an fs/4 tone's 45-degree phase have an inter-sample peak 3 dB higher).
 
-True-peak result against an independent 16x Hann-windowed-sinc interpolator (ceilings -1 and -6 dBFS, knees 0 and 6 dB, 2x and 4x): the sample peak never exceeds the ceiling; the true-peak excess over the ceiling is held to a stated tolerance of **0.6 dB** for tones, sweeps and square waves (measured: 1 kHz sine -0.03 dB, fs/4 sine at 45 degrees 0.00, 11 kHz sine 0.00, 3 kHz square +0.10, a 20 Hz to 24 kHz sweep +0.50 at the -6 dB ceiling) and **1.7 dB** for full-band white noise driven hard into the clip (measured +1.48). The noise figure is the limiter's known open item (its detector under-reads full-band noise), not the clip. Below the ceiling the block is a delayed wire (error 1e-6).
+True-peak result, measured in `tests/true_peak_ceiling.rs` like the limiter's (44.1, 48, 96 and 192 kHz, ceilings -1 and -6 dBFS, inputs 3.5 to 6 dB over full scale; a 16x Hann-windowed-sinc reference and `TruePeakMeter`; worst case over rates and ceilings, dB relative to the ceiling), at 4x with a hard clip:
+
+| Signal | 16x reference | `TruePeakMeter` | 16x reference, old limiter |
+| --- | --- | --- | --- |
+| full-band white noise | -0.022 | -0.042 | +1.352 |
+| pink noise | -0.021 | -0.027 | +0.934 |
+| hard square, 1 kHz | -0.025 | -0.093 | +0.077 |
+| hard square, period 7 samples | -0.027 | -0.195 | +0.341 |
+| sweep, 20 Hz to 0.499 fs | -0.023 | -0.023 | +0.364 |
+| impulses | -0.020 | -0.023 | +0.737 |
+| hard-clipped drum hits | -0.023 | -0.030 | +1.174 |
+| fs/4 sine at 45 degrees | -0.024 | -0.047 | -0.003 |
+
+At 2x with a 6 dB knee the worst case is -0.017 dB. The test asserts at most +0.1 dB for every signal, and `tests/multiband.rs` asserts the same on its own six signals (2x and 4x, knees 0 and 6 dB; worst -0.062 dB). The sample peak never exceeds the ceiling. The limiter inside aims its margin (4.5 dB divided by its lookahead in samples: 0.09 dB at 48 kHz, 0.02 dB at 192 kHz) under the ceiling, so a signal clipped flat comes out that much below it. As for the limiter, a reconstruction filter other than the three it evaluates can read full-band noise a few tenths of a dB higher. Below the ceiling the block is a delayed wire (error 1e-6).
+
+Cost (Apple M1 Max, `tests/limiter_bench.rs`): 1.17 to 1.23 microseconds per sample and channel at 4x (11 % of one core for stereo at 48 kHz, 45 % at 192 kHz), against 1.16 to 1.21 before. Nearly all of it is the linear-phase oversampler; the limiter is about 6 % of it.
 
 ## Time and pitch
 

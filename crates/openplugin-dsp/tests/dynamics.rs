@@ -510,12 +510,37 @@ fn intersample_peak_is_caught_where_a_sample_peak_limiter_fails() {
     assert!(tp <= ceiling * 1.006, "true-peak mode holds the ceiling ({tp} vs {ceiling})");
 }
 
+/// Sample-peak mode measures the sample that is about to leave the delay line,
+/// so even the fastest release cannot let a lone peak through.
+#[test]
+fn sample_peak_mode_holds_the_sample_ceiling_with_the_fastest_release() {
+    let ceiling = 10f32.powf(-1.0 / 20.0);
+    for fs in [44_100.0f32, 48_000.0, 192_000.0] {
+        let mut lim = Limiter::prepare(fs, 1, 1.0, 1.0);
+        lim.set_ceiling_db(-1.0);
+        lim.set_true_peak(false);
+        let mut x: Vec<f32> = (0..20_000)
+            .map(|n| match n % 701 {
+                0 => 2.0,
+                350 => -3.0,
+                351 => 2.5,
+                _ => 0.1 * (n as f32 * 0.3).sin(),
+            })
+            .collect();
+        lim.process(&mut [&mut x]);
+        let top = x.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(top <= ceiling * 1.000_01, "{fs}: sample peak {top} over {ceiling}");
+        assert!(top > ceiling * 0.99, "{fs}: the peaks reach the ceiling ({top})");
+    }
+}
+
 #[test]
 fn limiter_is_transparent_below_the_ceiling_and_reports_its_latency() {
     let mut lim = Limiter::prepare(FS, 2, 2.0, 100.0);
     lim.set_ceiling_db(-0.1);
     let latency = lim.latency_samples();
-    assert_eq!(latency, lim.lookahead_samples() + 9);
+    // The lookahead plus the detector's 48 frames.
+    assert_eq!(latency, lim.lookahead_samples() + 48);
     assert_eq!(lim.lookahead_samples(), 96);
     let input: Vec<f32> = (0..5000).map(|n| 0.5 * (n as f32 * 0.05).sin()).collect();
     let mut l = input.clone();
@@ -612,7 +637,7 @@ fn limiter_works_at_other_sample_rates() {
         let mut lim = Limiter::prepare(fs, 1, 1.0, 50.0);
         lim.set_ceiling_db(-2.0);
         let lat = lim.latency_samples();
-        let want = (fs * 0.001).round() as usize + 9;
+        let want = (fs * 0.001).round() as usize + 48;
         assert_eq!(lat, want, "{fs}");
         let mut x: Vec<f32> = (0..(fs as usize / 2)).map(|n| 1.5 * (std::f32::consts::FRAC_PI_2 * n as f32 + 0.8).sin()).collect();
         lim.process(&mut [&mut x]);
@@ -621,24 +646,24 @@ fn limiter_works_at_other_sample_rates() {
     }
 }
 
-/// A hard square wave is not band-limited: its "true peak" depends on the
-/// reconstruction filter (an ideal brick-wall rings by about 9 %). The detector
-/// uses a smooth short filter like the standard's, so against an ideal
-/// reconstruction it can read a little low. Stated, not hidden.
+/// A hard square wave is not band-limited: an ideal brick-wall reconstruction
+/// rings by about 9 %. The detector's long filter sees that ringing, so the
+/// ceiling holds against the 16x reference here too.
 #[test]
 fn hard_square_wave_excess_is_small_against_an_ideal_reconstruction() {
     let input: Vec<f32> = (0..24_000).map(|n| if (n / 37) % 2 == 0 { 1.4 } else { -1.4 }).collect();
     let (out, latency) = run_limiter(&input, -1.0, 1.5, 50.0);
     let tp = reference_true_peak(&out[latency..]);
     let excess_db = 20.0 * (tp / 10f64.powf(-1.0 / 20.0)).log10();
-    eprintln!("hard square: excess {excess_db:+.3} dB over an ideal brick-wall reconstruction");
-    assert!(excess_db < 0.35, "{excess_db}");
+    eprintln!("hard square: excess {excess_db:+.3} dB over the ceiling by the 16x reference");
+    assert!(excess_db < 0.1, "{excess_db}");
 }
 
-/// Full-band white noise is the worst case for any short interpolator: it has
-/// energy right up to Nyquist, where an ideal brick-wall reconstruction and a
-/// 16-tap detector disagree. The ceiling is missed by a bounded, stated amount
-/// (a real DAC's anti-imaging filter rolls off before Nyquist, so it sees less).
+/// Full-band white noise has energy right up to Nyquist, where a short
+/// detector filter reads low (the old 16-tap detector let this case through by
+/// 1.5 dB here and up to 1.9 dB in `tests/true_peak_ceiling.rs`). The limiter's
+/// detector now includes a filter as long as the reference's, and the ceiling
+/// holds. `tests/true_peak_ceiling.rs` has the full matrix of signals and rates.
 #[test]
 fn full_band_noise_excess_is_bounded() {
     let mut rng = Rng(11);
@@ -646,6 +671,6 @@ fn full_band_noise_excess_is_bounded() {
     let (out, latency) = run_limiter(&input, -1.0, 1.5, 50.0);
     let tp = reference_true_peak(&out[latency..]);
     let excess_db = 20.0 * (tp / 10f64.powf(-1.0 / 20.0)).log10();
-    eprintln!("full-band noise: excess {excess_db:+.3} dB over an ideal brick-wall reconstruction");
-    assert!(excess_db < 2.0, "{excess_db}");
+    eprintln!("full-band noise: excess {excess_db:+.3} dB over the ceiling by the 16x reference");
+    assert!(excess_db < 0.1, "{excess_db}");
 }

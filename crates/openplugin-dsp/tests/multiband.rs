@@ -489,8 +489,7 @@ fn clipper_holds_the_true_peak_ceiling() {
                     eprintln!("{name}: crate detector {:+.3} dB re ceiling", db(f64::from(own) / ceiling));
                     assert!(sp <= 1e-6, "{name}: sample peak over ceiling by {sp} dB");
                     eprintln!("{name} x{factor} knee {knee} ceil {ceiling_db}: {excess:+.3}");
-                    let tol = if name.starts_with("noise") { NOISE_TOLERANCE_DB } else { TOLERANCE_DB };
-                    assert!(excess < tol, "{name} x{factor} knee {knee} ceil {ceiling_db}: {excess:+.4} dB over");
+                    assert!(excess < TOLERANCE_DB, "{name} x{factor} knee {knee} ceil {ceiling_db}: {excess:+.4} dB over");
                 }
             }
         }
@@ -498,10 +497,10 @@ fn clipper_holds_the_true_peak_ceiling() {
     eprintln!("clipper: worst true-peak excess {worst:+.4} dB, worst sample excess {worst_sample:+.6} dB");
 }
 
-/// Stated true-peak tolerance over the ceiling, dB (see module docs).
-const TOLERANCE_DB: f64 = 0.6;
-/// Full-band white noise: the limiter's documented weakness (up to 1.7 dB).
-const NOISE_TOLERANCE_DB: f64 = 1.7;
+/// True-peak tolerance over the ceiling, dB, for every signal including
+/// full-band white noise (`tests/true_peak_ceiling.rs` runs more signals, at
+/// four sample rates, against two references).
+const TOLERANCE_DB: f64 = 0.1;
 
 #[test]
 fn clipper_guard_and_transparency() {

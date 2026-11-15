@@ -1,5 +1,5 @@
 //! A multichannel true-peak meter (hold, running maximum, oversampling chosen by rate).
-//! The limiter's per-sample detector is [`crate::true_peak::TruePeak`].
+//! The limiter's detector (`intersample.rs`) evaluates this meter's 4x filter among others.
 //!
 //! True-peak meter after ITU-R BS.1770-4 Annex 2, with hold.
 //!
@@ -67,6 +67,13 @@ impl Interpolator {
         }
         Self { factor, phases }
     }
+}
+
+/// The 4x interpolator's phases, for the limiter's detector
+/// ([`crate::intersample`]): `[p][k]` multiplies `x[n - k]` and gives the
+/// point `n - 12 + p/4`.
+pub(crate) fn interpolator_4x() -> [[f32; TAPS_PER_PHASE]; MAX_FACTOR] {
+    Interpolator::new(4).phases
 }
 
 #[derive(Clone, Debug)]
