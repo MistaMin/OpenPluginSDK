@@ -15,9 +15,15 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <new>
 #include <vector>
+#ifdef OP_STUB_PARAMS
+// Built over the stand-in ABI (AAXAllocLatencyProof): the ABI 2 paths can be driven there.
+#include "host_fakes.h"
+#include "proof_stub.h"
+#endif
 
 extern "C" {
 // libsystem_malloc calls this for every allocation event when it is non-null.
@@ -149,6 +155,12 @@ static void expect_clean(Counts counts, const char* what) {
     }
 }
 
+#ifdef OP_STUB_PARAMS
+static const char* const kExtra = " plus, on the stand-in ABI, MIDI in and out, parameter events, transport, sidechain, a 5.1 stem and a note effect";
+#else
+static const char* const kExtra = "";
+#endif
+
 int main() {
     using namespace openplugin_aax;
 
@@ -255,12 +267,87 @@ int main() {
         }
     }
 
+#ifdef OP_STUB_PARAMS
+    // ABI 2: MIDI in and out, parameter events, the transport, a sidechain, a 5.1 stem and a note effect
+    // through the callback, with the counters armed. The fakes are built, and their buffers reserved, first.
+    {
+        auto bus = [](uint32_t kind, std::vector<uint8_t> roles) {
+            OpBus b{};
+            b.kind = kind;
+            b.channels = static_cast<uint32_t>(roles.size());
+            std::memset(b.roles, OP_ROLE_NONE, sizeof b.roles);
+            for (size_t i = 0; i < roles.size(); ++i) b.roles[i] = roles[i];
+            return b;
+        };
+        const OpBus st = bus(OP_BUS_STEREO, {0, 1});
+        const OpBus five = bus(OP_BUS_SURROUND, {0, 1, 2, 3, 4, 5});
+        const OpBus side = bus(OP_BUS_MONO, {OP_ROLE_NONE});
+        struct Case { const char* what; uint32_t kind, ports; OpLayout layout; AAX_EStemFormat stem; uint32_t inCh, outCh; bool sidechain; };
+        OpLayout instrument{}, fx{}, surround{}, note{};
+        instrument.output = st;
+        fx.input = st; fx.output = st; fx.sidechain = side;
+        surround.input = five; surround.output = five;
+        const Case cases[] = {
+            {"instrument", OP_KIND_INSTRUMENT, OP_NOTE_PORT_INPUT | OP_NOTE_PORT_OUTPUT, instrument, AAX_eStemFormat_Stereo, 2, 2, false},
+            {"effect with sidechain", OP_KIND_EFFECT, 0, fx, AAX_eStemFormat_Stereo, 3, 2, true},
+            {"5.1 effect", OP_KIND_EFFECT, 0, surround, AAX_eStemFormat_5_1, 6, 6, false},
+            {"note effect", OP_KIND_NOTE_EFFECT, OP_NOTE_PORT_INPUT | OP_NOTE_PORT_OUTPUT, note, AAX_eStemFormat_Stereo, 2, 2, false},
+        };
+        for (const Case& c : cases) {
+            op_stub_configure(c.kind, c.ports, 1, &c.layout);
+            for (int32_t blockFrames : {512, 3000}) {
+                ProcessState state;
+                require(state.prepareStems(48000.0, c.stem, c.stem), "prepare (events)");
+                PacketBuffer packet(op_stub_param_count());
+                std::vector<std::vector<float>> in(c.inCh, std::vector<float>(static_cast<size_t>(blockFrames), 0.1f));
+                std::vector<std::vector<float>> out(c.outCh, std::vector<float>(static_cast<size_t>(blockFrames), 0.f));
+                std::vector<float*> inPtr, outPtr;
+                for (auto& ch : in) inPtr.push_back(ch.data());
+                for (auto& ch : out) outPtr.push_back(ch.data());
+                FakeTransport transport;
+                transport.ticks = 960000 * 12;
+                transport.sample = 48000;
+                FakeMidiNode midiIn, midiOut, transportNode;
+                transportNode.transport = &transport;
+                midiOut.reserve(8192);
+                std::vector<AAX_CMidiPacket> packets;
+                for (int i = 0; i < 400; ++i) {
+                    const auto at = static_cast<uint32_t>((i * 37) % blockFrames);
+                    packets.push_back(i % 3 == 0 ? midiPacket(at, 3, 0x90, 40 + i % 40, 100) : i % 3 == 1 ? midiPacket(at, 3, 0xB0, 1, i % 128) : midiPacket(at, 3, 0x80, 40 + i % 40, 0));
+                }
+                midiIn.setInput(packets);
+                int32_t sideChain = 2;
+                int32_t frames = blockFrames;
+                ProcessState* statePtr = &state;
+                Context context{inPtr.data(), outPtr.data(), &frames, packet.get(), &statePtr,
+                                c.ports & OP_NOTE_PORT_INPUT ? &midiIn : nullptr, c.ports & OP_NOTE_PORT_OUTPUT ? &midiOut : nullptr,
+                                &transportNode, c.sidechain ? &sideChain : nullptr};
+                Context* contexts[1] = {&context};
+                char what[128];
+                std::snprintf(what, sizeof what, "%s, %d frames, MIDI, transport, sidechain", c.what, blockFrames);
+                for (int i = 0; i < 12; ++i) {
+                    packet.plain()[0] = 0.25f + 0.05f * static_cast<float>(i % 7);  // a parameter event nearly every call
+                    midiOut.posted.clear();
+                    arm();
+                    openplugin_aax::process(contexts, contexts + 1);
+                    expect_clean(disarm(), what);
+                }
+                require(c.ports & OP_NOTE_PORT_OUTPUT ? !midiOut.posted.empty() : midiOut.posted.empty(), "MIDI went out when it should");
+            }
+        }
+        OpLayout stereoFx{};
+        stereoFx.input = st;
+        stereoFx.output = st;
+        op_stub_configure(OP_KIND_EFFECT, 0, 1, &stereoFx);
+    }
+#endif
+
     malloc_logger = nullptr;
     require(g_total == 0, "allocation total is not zero");
     {
         Fixture probe(1, 1);
         std::printf("AAX allocation proof: reported latency %u samples, %u parameters\n", op_shell_latency(probe.state.engine), info.param_count);
     }
-    std::printf("AAX allocation proof: %lu armed process calls (mono and stereo; 1, 512 and 3000 frames; default, changing, non-finite and oversized packets; bypass on and off, crossfades across calls, bypassed refused packets), 0 allocations by operator new and by malloc: PASS\n", g_calls);
+    std::printf("AAX allocation proof: %lu armed process calls (mono and stereo%s; 1, 512 and 3000 frames; default, changing, non-finite and oversized packets; bypass on and off, crossfades across calls, bypassed refused packets), 0 allocations by operator new and by malloc: PASS\n", g_calls, kExtra);
     return 0;
 }

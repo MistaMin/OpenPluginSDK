@@ -37,29 +37,37 @@ class Parameters final : public AAX_CEffectParameters {
     // GenerateCoefficients call posts, as AAX requires.
     mutable PacketBuffer posted_;
     bool dirty_ = true;
+    std::atomic<bool> offline_{false};
 public:
     static AAX_CEffectParameters* AAX_CALLBACK create() { return new Parameters; }
     AAX_Result EffectInit() override {
         if (!Controller()) return AAX_ERROR_NOT_INITIALIZED;
         AAX_CSampleRate rate = 0;
-        AAX_EStemFormat format = AAX_eStemFormat_None;
+        AAX_EStemFormat input = AAX_eStemFormat_None;
+        AAX_EStemFormat output = AAX_eStemFormat_None;
         AAX_Result result = Controller()->GetSampleRate(&rate);
         if (result != AAX_SUCCESS) return result;
-        result = Controller()->GetInputStemFormat(&format);
+        result = Controller()->GetInputStemFormat(&input);
         if (result != AAX_SUCCESS) return result;
-        const uint32_t channels = format == AAX_eStemFormat_Mono ? 1u : format == AAX_eStemFormat_Stereo ? 2u : 0u;
-        result = build(rate, channels);
+        result = Controller()->GetOutputStemFormat(&output);
+        if (result != AAX_SUCCESS) return result;
+        result = buildStems(rate, input, output);
         if (result != AAX_SUCCESS) return result;
         dirty_ = true;
         return Controller()->SetSignalLatency(static_cast<int32_t>(op_shell_latency(state_.engine)));
     }
     // Everything EffectInit does that does not need an AAX controller.
     AAX_Result build(double rate, uint32_t channels) {
+        const AAX_EStemFormat stem = channels == 1 ? AAX_eStemFormat_Mono : channels == 2 ? AAX_eStemFormat_Stereo : AAX_eStemFormat_None;
+        return buildStems(rate, stem, stem);
+    }
+    AAX_Result buildStems(double rate, AAX_EStemFormat input, AAX_EStemFormat output) {
         OpShellInfo info{};
-        if (!op_shell_info(&info) || info.abi != OP_SHELL_ABI || info.param_count == 0 || info.param_count > kMaxParams)
+        if (!abiOk() || !op_shell_info(&info) || info.param_count == 0 || info.param_count > kMaxParams)
             return AAX_ERROR_INVALID_ARGUMENT;
         AAX_Result result = AAX_SUCCESS;
-        if (!state_.prepare(rate, channels)) return AAX_ERROR_INVALID_ARGUMENT;
+        if (!state_.prepareStems(rate, input, output)) return AAX_ERROR_INVALID_ARGUMENT;
+        op_shell_set_offline(state_.engine, offline_ ? 1u : 0u);
         ids_.assign(info.param_count, std::string());
         posted_ = PacketBuffer(info.param_count);
         for (uint32_t i = 0; i < info.param_count; ++i) {
@@ -212,6 +220,18 @@ public:
         const char* id = index == kProofBypass ? cDefaultMasterBypassID : index < ids_.size() ? ids_[index].c_str() : nullptr;
         return id && UpdateParameterNormalizedValue(id, normalized, AAX_eUpdateSource_Unspecified) == AAX_SUCCESS;
     }
+    // The host's offline bounce (AAX_eNotificationEvent_Entering/ExitingOfflineMode, Pro Tools 11 and
+    // later) reaches the plugin as set_offline. AudioSuite is a different plug-in type and is not
+    // described. The call is lock-free and safe from the notification's thread.
+    AAX_Result NotificationReceived(AAX_CTypeID type, const void* data, uint32_t size) override {
+        if (type == AAX_eNotificationEvent_EnteringOfflineMode || type == AAX_eNotificationEvent_ExitingOfflineMode) {
+            offline_ = type == AAX_eNotificationEvent_EnteringOfflineMode;
+            if (state_.engine) op_shell_set_offline(state_.engine, offline_ ? 1u : 0u);
+            return AAX_SUCCESS;
+        }
+        return AAX_CEffectParameters::NotificationReceived(type, data, size);
+    }
+    void* engine() const { return state_.engine; }
     AAX_Result ResetFieldData(AAX_CFieldIndex field, void* destination, uint32_t size) const override {
         if (field == stateField) {
             if (!destination || size != sizeof(ProcessState*)) return AAX_ERROR_INVALID_ARGUMENT;
@@ -320,6 +340,9 @@ private:
 };
 AAX_CEffectParameters* AAX_CALLBACK createParameters() { return Parameters::create(); }
 bool proofInit(AAX_CEffectParameters* p, double rate, uint32_t channels) { return static_cast<Parameters*>(p)->build(rate, channels) == AAX_SUCCESS; }
+bool proofInitStems(AAX_CEffectParameters* p, double rate, AAX_EStemFormat input, AAX_EStemFormat output) { return static_cast<Parameters*>(p)->buildStems(rate, input, output) == AAX_SUCCESS; }
+bool proofNotify(AAX_CEffectParameters* p, AAX_CTypeID event) { return static_cast<Parameters*>(p)->NotificationReceived(event, nullptr, 0) == AAX_SUCCESS; }
+void* proofEngine(AAX_CEffectParameters* p) { return static_cast<Parameters*>(p)->engine(); }
 bool proofSetPlain(AAX_CEffectParameters* p, uint32_t index, float value) { return static_cast<Parameters*>(p)->proofSetPlain(index, value); }
 bool proofSetBypass(AAX_CEffectParameters* p, bool on) { return static_cast<Parameters*>(p)->proofSetBypass(on); }
 bool proofTakePacket(AAX_CEffectParameters* p, PacketBuffer* out) { return static_cast<Parameters*>(p)->proofTakePacket(out); }

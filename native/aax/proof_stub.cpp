@@ -13,6 +13,8 @@
 // chunk bytes. A load checks all of it first; a chunk starting with 0xFF is
 // refused, as a plugin's load_state may refuse one. op_stub_* are test hooks.
 #include "op_shell.h"
+#include "proof_stub.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <new>
@@ -28,7 +30,39 @@
 namespace {
 constexpr uint32_t kParams = OP_STUB_PARAMS;
 constexpr uint32_t kLatency = OP_STUB_LATENCY;
+// ABI 2 state shared by every instance: what the plugin declares.
+struct Declared {
+    uint32_t kind = OP_KIND_EFFECT;
+    uint32_t ports = 0;
+    std::vector<OpLayout> layouts;
+    uint32_t abi = OP_SHELL_ABI;
+    bool tag = false;
+    char category[128] = "Fx";
+    Declared() {
+        OpLayout stereo{};
+        stereo.input.kind = stereo.output.kind = OP_BUS_STEREO;
+        stereo.input.channels = stereo.output.channels = 2;
+        for (auto* bus : {&stereo.input, &stereo.output}) {
+            std::memset(bus->roles, OP_ROLE_NONE, sizeof bus->roles);
+            bus->roles[0] = 0;
+            bus->roles[1] = 1;
+        }
+        std::strcpy(stereo.name, "Stereo");
+        layouts.push_back(stereo);
+    }
+};
+Declared& declared() {
+    static Declared d;
+    return d;
+}
+constexpr uint32_t kMaxMidi = 256;
 struct Stub {
+    uint32_t channels = 2;       // op_shell_create's channel count (the ABI 1 engine)
+    int32_t layout = -1;         // selected layout, -1 until op_shell_set_layout
+    float amp = 0.f;             // note level
+    StubSeen seen{};
+    OpMidiEvent midi[kMaxMidi];
+    uint32_t midiCount = 0;
     std::vector<float> plain;
     std::vector<uint8_t> chunk;
     uint32_t growOnQuery = 0;  // bytes the chunk grows by right after the next size query
@@ -50,7 +84,7 @@ extern "C" {
 uint32_t op_shell_info(OpShellInfo* out) {
     if (!out) return 0;
     std::memset(out, 0, sizeof(*out));
-    out->abi = OP_SHELL_ABI;
+    out->abi = declared().abi;
     out->param_count = kParams;
     out->manufacturer_id = 0x6f706d31;
     out->product_id = 0x6f707031;
@@ -63,7 +97,7 @@ uint32_t op_shell_info(OpShellInfo* out) {
     put(out->name, sizeof(out->name), "AAX Proof Stub");
     put(out->vendor, sizeof(out->vendor), "OpenPlugin proofs");
     put(out->version, sizeof(out->version), "0.0.0");
-    put(out->category, sizeof(out->category), "Fx");
+    put(out->category, sizeof(out->category), declared().category);
     put(out->id, sizeof(out->id), "proof.aax-stub");
     return 1;
 }
@@ -81,10 +115,12 @@ uint32_t op_shell_param(uint32_t index, OpParamDesc* out) {
 }
 double op_shell_to_plain(uint32_t, double normalized) { return normalized; }
 double op_shell_to_normalized(uint32_t, double plain) { return plain; }
-void* op_shell_create(double, uint32_t, uint32_t) {
+void* op_shell_create(double, uint32_t, uint32_t channels) {
     auto* stub = new (std::nothrow) Stub;
-    if (stub)
+    if (stub) {
+        stub->channels = channels;
         for (uint32_t i = 0; i < kParams; ++i) stub->plain[i] = static_cast<float>(defaultFor(i));
+    }
     return stub;
 }
 void op_shell_destroy(void* instance) { delete static_cast<Stub*>(instance); }
@@ -163,6 +199,141 @@ uint32_t op_stub_loads(void* instance) { return instance ? static_cast<Stub*>(in
 void op_stub_grow_on_query(void* instance, uint32_t bytes) {
     if (instance) static_cast<Stub*>(instance)->growOnQuery = bytes;
 }
+// ---- ABI 2 ----
+uint32_t op_shell_abi_version(void) { return declared().abi; }
+uint32_t op_shell_kind(void) { return declared().kind; }
+uint32_t op_shell_note_ports(void) { return declared().ports; }
+uint32_t op_shell_layout_count(void) { return static_cast<uint32_t>(declared().layouts.size()); }
+uint32_t op_shell_layout(uint32_t index, OpLayout* out) {
+    if (!out || index >= declared().layouts.size()) return 0;
+    *out = declared().layouts[index];
+    return 1;
+}
+uint32_t op_shell_set_layout(void* instance, uint32_t index) {
+    if (!instance || index >= declared().layouts.size()) return 0;
+    static_cast<Stub*>(instance)->layout = static_cast<int32_t>(index);
+    return 1;
+}
+uint32_t op_shell_layout_selected(void* instance) {
+    return instance && static_cast<Stub*>(instance)->layout > 0 ? static_cast<uint32_t>(static_cast<Stub*>(instance)->layout) : 0;
+}
+void op_shell_set_offline(void* instance, uint32_t offline) {
+    if (instance) static_cast<Stub*>(instance)->seen.offline = offline;
+}
+uint32_t op_shell_midi_dropped(const void*) { return 0; }
+uint32_t op_shell_midi_out(void* instance, OpMidiEvent* out, uint32_t capacity) {
+    if (!instance) return 0;
+    Stub& stub = *static_cast<Stub*>(instance);
+    const uint32_t n = std::min(capacity, stub.midiCount);
+    for (uint32_t i = 0; i < n; ++i) out[i] = stub.midi[i];
+    // What is not read stays for the next call; shift the rest down.
+    for (uint32_t i = n; i < stub.midiCount; ++i) stub.midi[i - n] = stub.midi[i];
+    stub.midiCount -= n;
+    return n;
+}
+// A note-driven stand-in: note on sets a level (velocity / 127) from its sample, note off clears it;
+// the level is added to every output channel. A note or raw MIDI event is echoed on the MIDI output (notes
+// an octave up). The first sidechain channel is added to output 0.
+uint32_t op_shell_process_events(void* instance, const OpProcess* args) {
+    if (!instance || !args || args->struct_size < sizeof(OpProcess)) return 0;
+    Stub& stub = *static_cast<Stub*>(instance);
+    StubSeen& seen = stub.seen;
+    OpBus in{}, out{}, side{};
+    if (stub.layout >= 0) {
+        in = declared().layouts[stub.layout].input;
+        out = declared().layouts[stub.layout].output;
+        side = declared().layouts[stub.layout].sidechain;
+    } else {
+        in.kind = out.kind = OP_BUS_STEREO;
+        in.channels = out.channels = stub.channels;
+    }
+    ++seen.calls;
+    seen.frames = args->frames;
+    seen.inputChannels = args->input_channels;
+    seen.outputChannels = args->output_channels;
+    seen.sidechainChannels = args->sidechain ? args->sidechain_channels : 0;
+    if (args->input_channels != in.channels || args->output_channels != out.channels ||
+        (args->sidechain && side.kind == OP_BUS_ABSENT)) {
+        ++seen.refused;
+        return 0;
+    }
+    if (args->transport) {
+        ++seen.transportCalls;
+        seen.transport = *args->transport;
+    } else {
+        ++seen.transportMissing;
+    }
+    for (uint32_t k = 0; k < OP_STUB_CHANNELS; ++k) seen.input0[k] = k < args->input_channels ? args->inputs[k][0] : 0.f;
+    seen.sidechain0 = args->sidechain && args->sidechain_channels ? args->sidechain[0][0] : 0.f;
+    stub.midiCount = 0;
+    const auto record = [&](const OpEvent& e) {
+        if (seen.logCount >= OP_STUB_LOG) return;
+        StubLogEvent& l = seen.log[seen.logCount++];
+        l.position = seen.frameCounter + e.offset;
+        l.kind = e.kind;
+        l.index = e.index;
+        l.value = e.value;
+        l.channel = e.channel;
+        l.note = e.note;
+        l.velocity = e.velocity;
+        std::memcpy(l.midi, e.midi, 4);
+    };
+    const auto echo = [&](uint32_t offset, uint8_t a, uint8_t b, uint8_t c) {
+        if (stub.midiCount < kMaxMidi) {
+            OpMidiEvent& m = stub.midi[stub.midiCount++];
+            m.offset = offset;
+            m.data[0] = a;
+            m.data[1] = b;
+            m.data[2] = c;
+            m.data[3] = 0;
+        }
+    };
+    for (uint32_t i = 0; i < args->event_count; ++i) record(args->events[i]);
+    for (uint32_t i = 0; i < args->frames; ++i) {
+        // Events at sample i, in the order they were given.
+        for (uint32_t e = 0; e < args->event_count; ++e) {
+            const OpEvent& ev = args->events[e];
+            if (ev.offset != i) continue;
+            switch (ev.kind) {
+            case OP_EVENT_NOTE_ON:
+                stub.amp = static_cast<float>(ev.velocity) / 127.f;
+                echo(i, static_cast<uint8_t>(0x90 | ev.channel), static_cast<uint8_t>(ev.note + 12), ev.velocity);
+                break;
+            case OP_EVENT_NOTE_OFF:
+                stub.amp = 0.f;
+                echo(i, static_cast<uint8_t>(0x80 | ev.channel), static_cast<uint8_t>(ev.note + 12), ev.velocity);
+                break;
+            case OP_EVENT_MIDI: echo(i, ev.midi[0], ev.midi[1], ev.midi[2]); break;
+            case OP_EVENT_PARAM_PLAIN:
+            case OP_EVENT_PARAM_NORMALIZED:
+                if (ev.index < kParams) stub.plain[ev.index] = ev.value;
+                break;
+            }
+        }
+        float gain = kParams > 1 ? stub.plain[0] + 0.5f * stub.plain[kParams - 1] : stub.plain[0];
+        if (!stub.chunk.empty()) gain *= 1.f + static_cast<float>(stub.chunk[0]) / 512.f;
+        for (uint32_t k = 0; k < args->output_channels; ++k) {
+            float v = (k < args->input_channels ? args->inputs[k][i] * gain : 0.f) + stub.amp;
+            if (declared().tag) v += 100.f * static_cast<float>(k + 1);
+            if (k == 0 && args->sidechain && args->sidechain_channels) v += args->sidechain[0][i];
+            args->outputs[k][i] = v;
+        }
+    }
+    seen.frameCounter += args->frames;
+    return 1;
+}
+void op_stub_configure(uint32_t kind, uint32_t ports, uint32_t count, const OpLayout* layouts) {
+    declared().kind = kind;
+    declared().ports = ports;
+    declared().layouts.assign(layouts, layouts + count);
+}
+void op_stub_set_abi(uint32_t version) { declared().abi = version; }
+void op_stub_tag(uint32_t on) { declared().tag = on != 0; }
+void op_stub_set_category(const char* category) { put(declared().category, sizeof declared().category, category); }
+void op_stub_seen(void* instance, StubSeen* out) {
+    if (instance && out) *out = static_cast<Stub*>(instance)->seen;
+}
+uint32_t op_stub_param_count(void) { return kParams; }
 #if OP_HAS_TAIL
 double op_shell_tail_seconds(void*) { return 0.0; }
 #endif
