@@ -637,8 +637,9 @@ pub trait Editor {
     /// The editor wants the view to open a native text field. Called after
     /// every input call and tick; return the request once and `None` after.
     /// The view shows a field over [`TextEdit::rect`] with the text selected.
-    /// Return commits it through [`Self::text_edit_commit`]; Escape, or the
-    /// field losing focus, calls [`Self::text_edit_cancel`]. While the field
+    /// Return (and keypad Enter) commits it through [`Self::text_edit_commit`];
+    /// Escape calls [`Self::text_edit_cancel`]. The field losing focus commits
+    /// the text if `text_edit_commit` accepts it, and otherwise cancels. While the field
     /// is open every key goes to it and none reaches the editor or the host.
     /// The default never asks.
     fn take_text_edit(&mut self) -> Option<TextEdit> {
@@ -652,8 +653,8 @@ pub trait Editor {
         false
     }
 
-    /// The field closed without a commit (Escape, focus lost, a click
-    /// elsewhere, a resize). No gesture is sent.
+    /// The field closed without a commit (Escape, invalid text when focus was
+    /// lost, a click on the view, a resize). No gesture is sent.
     fn text_edit_cancel(&mut self) {}
 
     /// The places that show a tooltip. The view keeps one tooltip rectangle

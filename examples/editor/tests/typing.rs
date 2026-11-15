@@ -6,7 +6,11 @@
 //!   focused knob) opens the native text field over it with the formatted
 //!   value; Return, heard as the field's delegate hears it, commits through
 //!   `ParamInfo::parse` as begin, perform, end at a recording `EditorHost`;
-//!   Escape and focus loss cancel; invalid text keeps the field open; keys
+//!   Escape cancels; focus loss commits valid text and drops invalid text;
+//!   invalid text on Return keeps the field open; Return, keypad Enter and
+//!   Escape also work through `-[NSApplication sendEvent:]` (the key monitor,
+//!   for hosts that take those keys), which is removed on close, view
+//!   removal and drop; keys
 //!   typed while it is open reach neither the editor nor the host;
 //!   Option-double-click resets.
 //! - Tooltips: one tooltip rectangle per control, at the control's place, with
@@ -25,10 +29,12 @@ mod a11y_support;
 #[cfg(target_os = "macos")]
 fn main() {
     mac::typing_a_value();
+    mac::return_enter_escape_through_the_key_monitor();
+    mac::focus_loss_and_teardown();
     mac::tooltips_follow_layout_and_values();
     mac::dropped_files_reach_the_editor();
     mac::file_dialog_requests();
-    println!("typing (editor): 4 passed");
+    println!("typing (editor): 6 passed");
 }
 
 #[cfg(target_os = "macos")]
@@ -86,13 +92,27 @@ mod mac {
             assert!(!rig.has_field() && rig.gestures().is_empty());
             assert_eq!(seen(gain).value, "-6.0 dB");
 
-            // So does losing focus.
+            // Losing focus commits valid text...
             rig.click(kx, ky, 2, 0);
             rig.gestures();
             assert!(rig.has_field());
             rig.set_field_text(c"12");
             rig.field_end_editing();
+            assert!(!rig.has_field());
+            assert_eq!(rig.gestures(), ["begin 0", "perform 0 12.000", "end 0"]);
+            assert_eq!(seen(gain).value, "12.0 dB");
+            // ...and drops invalid text without a sound or a stuck field.
+            rig.click(kx, ky, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"banana");
+            rig.field_end_editing();
             assert!(!rig.has_field() && rig.gestures().is_empty());
+            assert_eq!(seen(gain).value, "12.0 dB");
+            // Put the value back for the rest.
+            rig.click(kx, ky, 2, 0);
+            rig.set_field_text(c"-6 dB");
+            assert!(rig.field_command(c"insertNewline:"));
+            rig.gestures();
 
             // Invalid text is refused: the field stays open and nothing is sent.
             rig.click(kx, ky, 2, 0);
@@ -140,6 +160,128 @@ mod mac {
             rig.view.as_ref().unwrap().resize(360, 240);
             run_loop(0.1);
             assert!(!rig.has_field());
+        }
+    }
+
+    /// Return, keypad Enter and Escape reach the open field through the application's
+    /// event path (`-[NSApplication sendEvent:]`, where local monitors run), as in a host
+    /// that takes those keys for itself.
+    pub fn return_enter_escape_through_the_key_monitor() {
+        use openplugin::dri::cocoa::{field_key, key_monitor_count, FieldKey};
+        // The decision, as a pure function.
+        assert_eq!(field_key(36, true), FieldKey::Commit);
+        assert_eq!(field_key(76, true), FieldKey::Commit);
+        assert_eq!(field_key(53, true), FieldKey::Cancel);
+        for code in [36, 76, 53] {
+            assert_eq!(field_key(code, false), FieldKey::Pass, "not the field's keyboard");
+        }
+        for code in [0, 51, 126, 48, 49, 123] {
+            assert_eq!(field_key(code, true), FieldKey::Pass, "{code}");
+        }
+        unsafe {
+            assert_eq!(key_monitor_count(), 0);
+            let mut rig = Rig::new(make_editor);
+            let lay = layout(WIDTH, HEIGHT);
+            let (kx, ky) = centre(lay.knob);
+            let gain = children(rig.raw())[0];
+
+            // Open: one monitor.
+            rig.click(kx, ky, 2, 0);
+            rig.gestures();
+            assert!(rig.has_field());
+            assert_eq!(key_monitor_count(), 1);
+
+            // Another key passes through: the field stays, nothing is sent.
+            rig.set_field_text(c"-3");
+            rig.app_key(0, c"a", 0);
+            assert!(rig.has_field() && rig.gestures().is_empty());
+            assert_eq!(key_monitor_count(), 1);
+
+            // Return commits.
+            rig.set_field_text(c"-3");
+            rig.app_key(36, c"\r", 0);
+            assert!(!rig.has_field());
+            assert_eq!(rig.gestures(), ["begin 0", "perform 0 -3.000", "end 0"]);
+            assert_eq!(seen(gain).value, "-3.0 dB");
+            assert_eq!(key_monitor_count(), 0, "closed: no monitor");
+
+            // Keypad Enter commits.
+            rig.click(kx, ky, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"5");
+            rig.app_key(76, c"\u{3}", 0);
+            assert!(!rig.has_field());
+            assert_eq!(rig.gestures(), ["begin 0", "perform 0 5.000", "end 0"]);
+            assert_eq!(key_monitor_count(), 0);
+
+            // Escape cancels.
+            rig.click(kx, ky, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"20");
+            rig.app_key(53, c"\u{1b}", 0);
+            assert!(!rig.has_field() && rig.gestures().is_empty());
+            assert_eq!(seen(gain).value, "5.0 dB");
+            assert_eq!(key_monitor_count(), 0);
+
+            // Invalid text on Return: the field stays (red, beep), the monitor stays, nothing is sent.
+            rig.click(kx, ky, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"banana");
+            rig.app_key(36, c"\r", 0);
+            assert!(rig.has_field() && rig.gestures().is_empty());
+            assert_eq!(key_monitor_count(), 1);
+            // Closed by a click on the view: monitor gone.
+            rig.click(5.0, 5.0, 1, 0);
+            assert!(!rig.has_field());
+            assert_eq!(key_monitor_count(), 0);
+
+            // Dropped with the field open: the monitor goes with the view.
+            rig.click(kx, ky, 2, 0);
+            assert!(rig.has_field());
+            assert_eq!(key_monitor_count(), 1);
+            rig.view = None;
+            assert_eq!(key_monitor_count(), 0, "dropped view leaves no monitor");
+        }
+    }
+
+    /// Losing focus through the window, and the view leaving its window, with the monitor
+    /// returning to zero each time.
+    pub fn focus_loss_and_teardown() {
+        use openplugin::dri::cocoa::key_monitor_count;
+        unsafe {
+            let rig = Rig::new(make_editor);
+            let lay = layout(WIDTH, HEIGHT);
+            let (kx, ky) = centre(lay.knob);
+            let gain = children(rig.raw())[0];
+
+            // The window resigning key commits valid text.
+            rig.click(kx, ky, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"-9 dB");
+            assert_eq!(key_monitor_count(), 1);
+            rig.resign_key();
+            assert!(!rig.has_field());
+            assert_eq!(rig.gestures(), ["begin 0", "perform 0 -9.000", "end 0"]);
+            assert_eq!(seen(gain).value, "-9.0 dB");
+            assert_eq!(key_monitor_count(), 0);
+
+            // ...and discards invalid text.
+            rig.click(kx, ky, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"nonsense");
+            rig.resign_key();
+            assert!(!rig.has_field() && rig.gestures().is_empty());
+            assert_eq!(key_monitor_count(), 0);
+
+            // The view leaving its window commits valid text and leaves no monitor.
+            rig.click(kx, ky, 2, 0);
+            rig.gestures();
+            rig.set_field_text(c"2");
+            assert_eq!(key_monitor_count(), 1);
+            rig.remove_view_from_window();
+            assert!(!rig.has_field());
+            assert_eq!(rig.gestures(), ["begin 0", "perform 0 2.000", "end 0"]);
+            assert_eq!(key_monitor_count(), 0);
         }
     }
 

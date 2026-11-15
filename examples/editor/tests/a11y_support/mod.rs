@@ -285,6 +285,42 @@ impl Rig {
         }
     }}
 
+    /// A key down through `-[NSApplication sendEvent:]`, where AppKit runs local
+    /// event monitors, as it does for a key typed in a host.
+    pub unsafe fn app_key(&self, code: u16, chars: &CStr, flags: usize) { unsafe {
+        let number = send!(isize, self.window, c"windowNumber");
+        let event = send!(
+            Id,
+            class(c"NSEvent"),
+            c"keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:",
+            usize = 10usize,
+            CGPoint = CGPoint { x: 0.0, y: 0.0 },
+            usize = flags,
+            f64 = 0.0,
+            isize = number,
+            Id = std::ptr::null_mut(),
+            Id = ns_string(chars),
+            Id = ns_string(chars),
+            i8 = 0,
+            u16 = code
+        );
+        assert!(!event.is_null());
+        let app = send!(Id, class(c"NSApplication"), c"sharedApplication");
+        send!((), app, c"sendEvent:", Id = event);
+    }}
+
+    /// Post `NSWindowDidResignKeyNotification` for the rig's window.
+    pub unsafe fn resign_key(&self) { unsafe {
+        let center = send!(Id, class(c"NSNotificationCenter"), c"defaultCenter");
+        send!((), center, c"postNotificationName:object:", Id = ns_string(c"NSWindowDidResignKeyNotification"), Id = self.window);
+    }}
+
+    /// Take the view out of its window (the window gets an empty content view).
+    pub unsafe fn remove_view_from_window(&self) { unsafe {
+        let empty = send!(Id, send!(Id, class(c"NSView"), c"alloc"), c"init");
+        send!((), self.window, c"setContentView:", Id = empty);
+    }}
+
     /// The text field's string, or `<none>`.
     pub unsafe fn field_text(&self) -> String { unsafe {
         match self.view.as_ref().and_then(|v| v.text_field()) {
