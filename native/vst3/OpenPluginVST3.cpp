@@ -24,8 +24,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <string>
 #include <vector>
 
@@ -132,15 +134,139 @@ FUID fuid_from(const uint8_t bytes[16]) {
     return FUID::fromTUID(cid);
 }
 
+// ---- Parameter text -----------------------------------------------------------
+// The host asks the controller for the text of a value (getParamStringByValue)
+// and for the value of a typed text (getParamValueByString). The plugin owns
+// both texts (op_shell_param_format / op_shell_param_parse, main thread); the
+// controller only converts between UTF-8, VST3's UTF-16 and normalized values.
+
+// UTF-8 to UTF-16, at most `capacity - 1` units plus a NUL. A text cut by the
+// capacity never ends inside a surrogate pair. Malformed bytes become U+FFFD.
+void utf8_to_utf16(const char* text, size_t length, TChar* out, size_t capacity) {
+    if (capacity == 0) return;
+    size_t count = 0;
+    size_t i = 0;
+    while (i < length) {
+        const uint8_t lead = static_cast<uint8_t>(text[i]);
+        uint32_t cp = 0xFFFD;
+        size_t extra = 0;
+        if (lead < 0x80) cp = lead;
+        else if (lead >= 0xC2 && lead < 0xE0) { cp = lead & 0x1F; extra = 1; }
+        else if (lead >= 0xE0 && lead < 0xF0) { cp = lead & 0x0F; extra = 2; }
+        else if (lead >= 0xF0 && lead < 0xF5) { cp = lead & 0x07; extra = 3; }
+        size_t used = 1;
+        if (extra) {
+            bool good = i + extra < length;  // all continuation bytes present
+            for (size_t k = 1; k <= extra && good; ++k) {
+                const uint8_t next = static_cast<uint8_t>(text[i + k]);
+                if ((next & 0xC0) != 0x80) good = false;
+                else cp = (cp << 6) | (next & 0x3F);
+            }
+            const bool overlong = (extra == 2 && cp < 0x800) || (extra == 3 && cp < 0x10000);
+            if (good && !overlong && cp <= 0x10FFFF && !(cp >= 0xD800 && cp < 0xE000)) used = extra + 1;
+            else cp = 0xFFFD;
+        }
+        const size_t need = cp > 0xFFFF ? 2 : 1;
+        if (count + need + 1 > capacity) break;
+        if (cp > 0xFFFF) {
+            cp -= 0x10000;
+            out[count++] = static_cast<TChar>(0xD800 + (cp >> 10));
+            out[count++] = static_cast<TChar>(0xDC00 + (cp & 0x3FF));
+        } else {
+            out[count++] = static_cast<TChar>(cp);
+        }
+        i += used;
+    }
+    out[count] = 0;
+}
+
+// UTF-16 to UTF-8; unpaired surrogates become U+FFFD.
+std::string utf16_to_utf8(const TChar* text) {
+    std::string out;
+    for (size_t i = 0; text && text[i];) {
+        uint32_t cp = static_cast<uint16_t>(text[i++]);
+        if (cp >= 0xD800 && cp < 0xDC00 && static_cast<uint16_t>(text[i]) >= 0xDC00 && static_cast<uint16_t>(text[i]) < 0xE000) {
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (static_cast<uint16_t>(text[i++]) - 0xDC00);
+        } else if (cp >= 0xD800 && cp < 0xE000) {
+            cp = 0xFFFD;
+        }
+        if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+    }
+    return out;
+}
+
+// The plugin's text for plain value `plain` of parameter `index`.
+std::string shell_format(uint32_t index, double plain) {
+    char small[128];
+    const size_t length = op_shell_param_format(index, plain, small, sizeof(small));
+    if (length < sizeof(small)) return std::string(small, length);
+    std::string big(length + 1, '\0');
+    const size_t again = op_shell_param_format(index, plain, big.data(), big.size());
+    big.resize(std::min(again, big.size() - 1));
+    return big;
+}
+
 class ShellParameter final : public Parameter {
 public:
     ShellParameter(const TChar* title, const TChar* units, ParamID tag, ParamValue normalized, int32 stepCount, int32 flags)
         : Parameter(title, tag, units, normalized, stepCount, flags), index_(tag) {}
     ParamValue toPlain(ParamValue normalized) const SMTG_OVERRIDE { return op_shell_to_plain(index_, normalized); }
     ParamValue toNormalized(ParamValue plain) const SMTG_OVERRIDE { return op_shell_to_normalized(index_, plain); }
+    // The plugin's own text for the plain value ("6.0 dB"), not the
+    // normalized number the SDK prints.
+    void toString(ParamValue normalized, String128 string) const SMTG_OVERRIDE {
+        const std::string text = shell_format(index_, toPlain(normalized));
+        utf8_to_utf16(text.data(), text.size(), string, 128);
+    }
+    bool fromString(const TChar* string, ParamValue& normalized) const SMTG_OVERRIDE {
+        const std::string text = utf16_to_utf8(string);
+        double plain = 0.0;
+        if (!op_shell_param_parse(index_, text.c_str(), &plain) || !std::isfinite(plain)) return false;
+        const double value = toNormalized(plain);
+        if (!std::isfinite(value)) return false;
+        normalized = std::min(1.0, std::max(0.0, value));
+        return true;
+    }
     OBJ_METHODS(ShellParameter, Parameter)
 private:
     ParamID index_;
+};
+
+// Bypass reads "Off" and "On" instead of 0.0000 and 1.0000.
+class BypassParameter final : public Parameter {
+public:
+    explicit BypassParameter(ParamID tag)
+        : Parameter(STR16("Bypass"), tag, nullptr, 0.0, 1, ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass) {}
+    void toString(ParamValue normalized, String128 string) const SMTG_OVERRIDE {
+        const char* text = normalized >= 0.5 ? "On" : "Off";
+        utf8_to_utf16(text, std::strlen(text), string, 128);
+    }
+    bool fromString(const TChar* string, ParamValue& normalized) const SMTG_OVERRIDE {
+        std::string text = utf16_to_utf8(string);
+        for (auto& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
+        size_t start = 0;
+        while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) ++start;
+        text.erase(0, start);
+        if (text == "on" || text == "1" || text == "yes" || text == "true") { normalized = 1.0; return true; }
+        if (text == "off" || text == "0" || text == "no" || text == "false") { normalized = 0.0; return true; }
+        return false;
+    }
+    OBJ_METHODS(BypassParameter, Parameter)
 };
 
 // The host bypass parameter. Its ID is far outside 0..n-1 so the plugin's own
@@ -1036,7 +1162,7 @@ public:
             parameters.addParameter(new ShellParameter(title, unit, i, desc.default_normalized, steps, flags));
         }
         count_ = info.param_count;
-        parameters.addParameter(STR16("Bypass"), nullptr, 1, 0.0, ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass, kBypassId);
+        parameters.addParameter(new BypassParameter(kBypassId));
         midiIn_ = (op_shell_note_ports() & OP_NOTE_PORT_INPUT) != 0;
         if (midiIn_) {
             for (uint32_t channel = 0; channel < 16; ++channel) {

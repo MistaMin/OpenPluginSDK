@@ -6,6 +6,7 @@
 // their offsets, then the ABI 1 process on the first two channels.
 #pragma once
 #include "op_shell.h"
+#include "stub_text.h"
 #include <cstring>
 #include <initializer_list>
 

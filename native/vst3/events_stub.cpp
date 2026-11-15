@@ -13,6 +13,7 @@
 // Variants (STUB_VARIANT): 0 effect with a sidechain and surround layouts,
 // 1 instrument, 2 note effect (no audio at all).
 #include "events_probe.h"
+#include "stub_text.h"
 #include <cmath>
 #include <cstring>
 #include <new>
