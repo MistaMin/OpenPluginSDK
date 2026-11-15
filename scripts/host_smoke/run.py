@@ -25,6 +25,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import wave
 
@@ -166,6 +167,30 @@ def reaper_config(cfgdir, build):
     return ini
 
 
+def dismiss_dialogs(pid, stop):
+    """A fresh REAPER configuration asks once whether to pick an audio device. Answer No for this one
+    process (by pid, so no other REAPER is touched). Needs Accessibility access for the terminal."""
+    script = (
+        'tell application "System Events"\n'
+        '  try\n'
+        '    tell (first process whose unix id is %d)\n'
+        '      repeat with w in windows\n'
+        '        try\n'
+        '          set t to (name of every static text of w) as string\n'
+        '          if t contains "audio device" then click button "No" of w\n'
+        '        end try\n'
+        '      end repeat\n'
+        '    end tell\n'
+        '  end try\n'
+        'end tell\n' % pid)
+    while not stop.is_set():
+        try:
+            run(["/usr/bin/osascript", "-e", script], timeout=20)
+        except Exception:
+            pass
+        stop.wait(2.0)
+
+
 def reaper_format(fmt, build, root):
     d = fresh_dir(os.path.join(root, "reaper_" + fmt))
     wav_in = os.path.join(d, "input_sine.wav")
@@ -174,15 +199,25 @@ def reaper_format(fmt, build, root):
     env = dict(os.environ)
     env.update(OPSMOKE_DIR=d, OPSMOKE_FORMAT=fmt.upper(), OPSMOKE_WAV=wav_in,
                CLAP_PATH=build, VST3_PATH=build)
-    cmd = [REAPER_BIN, "-newinst", "-nosplash", "-cfgfile", ini, os.path.join(HERE, "reaper_smoke.lua")]
+    # REAPER runs Scripts/__startup.lua of its resource folder at start; this one only loads our script
+    startup = os.path.join(os.path.dirname(ini), "Scripts", "__startup.lua")
+    os.makedirs(os.path.dirname(startup), exist_ok=True)
+    with open(startup, "w") as f:
+        f.write("dofile([==[%s]==])\n" % os.path.join(HERE, "reaper_smoke.lua"))
+    cmd = [REAPER_BIN, "-newinst", "-nosplash", "-cfgfile", ini]
     log("REAPER %s: %s" % (fmt, " ".join(cmd)))
     p = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    stop = threading.Event()
+    watcher = threading.Thread(target=dismiss_dialogs, args=(p.pid, stop), daemon=True)
+    watcher.start()
     try:
-        out, _ = p.communicate(timeout=1500)
+        out, _ = p.communicate(timeout=600)
     except subprocess.TimeoutExpired:
         p.kill()  # our own child only
         out, _ = p.communicate()
         out += "\n[killed after timeout]"
+    stop.set()
+    safe_remove(startup)  # the configuration must not run the script on its own later
     with open(os.path.join(d, "reaper.log"), "w") as f:
         f.write(out or "")
     jp = os.path.join(d, "reaper_%s.json" % fmt.upper())
@@ -354,7 +389,7 @@ def register_au():
 
 def auval(strict):
     cmd = ["/usr/bin/auval"] + (["-strict"] if strict else []) + ["-v", "aufx", "ExGn", "OpGd"]
-    rc, out = run(cmd, timeout=900)
+    rc, out = run(cmd, timeout=600)
     last = [ln for ln in out.splitlines() if ln.strip()][-3:]
     return {"name": "auval" + (" -strict" if strict else ""),
             "ok": rc == 0 and "AU VALIDATION SUCCEEDED" in out,
