@@ -438,6 +438,9 @@ if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
   want="$(echo "$ARCHS" | tr ' ' '\n' | sort | tr '\n' ' ')"
   for b in ${BUNDLES[@]+"${BUNDLES[@]}"}; do
     while IFS= read -r f; do
+      # PACE's wraptool adds its own universal __Pace_Eden bundle to the AAX; that
+      # binary is PACE's, not built here, so only the plugin's own binaries are checked.
+      case "$f" in *"/__Pace_Eden.bundle/"*) echo "architectures (PACE, not checked): $f"; continue ;; esac
       have="$(lipo -archs "$f" 2>/dev/null || true)"
       if [ -z "$have" ]; then continue; fi   # not a Mach-O file
       sorted="$(echo "$have" | tr ' ' '\n' | sort | tr '\n' ' ')"
