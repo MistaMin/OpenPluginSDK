@@ -96,17 +96,17 @@ fn synthesis_blocks_do_not_allocate() {
     for order in [BlepOrder::Two, BlepOrder::Four, BlepOrder::Six, BlepOrder::Eight] {
         for o in osc.iter_mut() {
             *o = o.with_order(order);
-            for i in 0..512 {
+            for (i, slot) in out.iter_mut().enumerate() {
                 o.set_pulse_width(0.1 + 0.8 * (i as f32 / 512.0));
                 let hz = if i % 97 == 0 { f32::NAN } else { 100.0 + i as f32 * 37.0 };
                 let sync = if i % 5 == 0 { Some(0.37) } else { None };
-                out[i] = o.next_sync(hz, 44_100.0, sync);
+                *slot = o.next_sync(hz, 44_100.0, sync);
             }
         }
     }
     // Wavetable.
-    for i in 0..512 {
-        out[i] = wt.next(&table, 20.0 + i as f32 * 40.0, 48_000.0);
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = wt.next(&table, 20.0 + i as f32 * 40.0, 48_000.0);
     }
     // Envelope: retrigger, legato, both curves, events.
     for mode in [RetriggerMode::Retrigger, RetriggerMode::Legato] {

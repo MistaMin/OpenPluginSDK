@@ -214,7 +214,7 @@ impl Adsr {
         (secs(seconds) * self.sample_rate).round() as u64
     }
 
-    fn to_samples(&self, seconds: f64) -> u64 {
+    fn seconds_to_len(&self, seconds: f64) -> u64 {
         (seconds * self.sample_rate).round() as u64
     }
 
@@ -223,7 +223,7 @@ impl Adsr {
         if self.mode == RetriggerMode::Legato && self.is_gated() {
             return;
         }
-        let len = self.to_samples(self.attack * (1.0 - self.level));
+        let len = self.seconds_to_len(self.attack * (1.0 - self.level));
         self.begin(Stage::Attack, self.level, 1.0, len);
         self.settle();
     }
@@ -233,7 +233,7 @@ impl Adsr {
         if !self.is_gated() {
             return;
         }
-        let len = self.to_samples(self.release);
+        let len = self.seconds_to_len(self.release);
         self.begin(Stage::Release, self.level, 0.0, len);
         self.settle();
     }
@@ -271,11 +271,11 @@ impl Adsr {
             self.level = self.to;
             match self.stage {
                 Stage::Attack => {
-                    let len = self.to_samples(self.hold);
+                    let len = self.seconds_to_len(self.hold);
                     self.begin(Stage::Hold, 1.0, 1.0, len);
                 }
                 Stage::Hold => {
-                    let len = self.to_samples(self.decay);
+                    let len = self.seconds_to_len(self.decay);
                     self.begin(Stage::Decay, 1.0, self.sustain, len);
                 }
                 Stage::Decay => {

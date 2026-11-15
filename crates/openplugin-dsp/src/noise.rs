@@ -180,8 +180,9 @@ impl PinkNoise {
     }
 
     /// Power response of the ladder in dB at `hz`, including the output
-    /// normalisation. It falls 3 dB per octave from a few times
-    /// [`PINK_LOW_HZ`] up to near Nyquist; used to verify the design.
+    /// normalisation. It falls 3 dB per octave (within 0.15 dB) from a few times
+    /// [`PINK_LOW_HZ`] up to about 0.3 of the sample rate, then bends down
+    /// toward Nyquist; used to verify the design.
     pub fn response_db(&self, hz: f32) -> f32 {
         let w = 2.0 * std::f64::consts::PI * f64::from(hz) / f64::from(self.sample_rate);
         (10.0 * self.magnitude_sq(w).max(1e-300).log10()) as f32

@@ -19,6 +19,7 @@
 //! - [`Downmix`], [`Upmix`]: surround to stereo or mono by channel role (BS.775 / A/52), and the passive stereo upmix.
 //! - [`Dither`]: RPDF/TPDF dither to 8..=24 bits with noise shaping and auto-blank.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
+//! - [`BandlimitedOsc`], [`WavetableOsc`], [`Adsr`], [`PinkNoise`], [`VoiceAllocator`], [`SincKernel`]: synthesis (PolyBLEP/BLAMP oscillators with hard sync, mip-mapped wavetables, envelopes, noise, voice stealing and glide, a windowed-sinc resampler).
 
 pub mod adaa;
 pub mod adsr;

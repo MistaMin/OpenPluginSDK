@@ -412,3 +412,189 @@ is what the all-pass compensation equalises.
 - Nothing allocates, including the `configure`/`set` calls
   (`crates/openplugin-dsp/tests/filters_no_alloc.rs` counts allocations with a
   global allocator while every filter runs and is modulated).
+
+## Synthesis
+
+The synthesis blocks make an instrument: band-limited oscillators, wavetables, envelopes, noise, a voice allocator and a sinc resampler for samples. Every one takes the real sample rate, allocates nothing once built, and treats NaN or a negative frequency as zero. `crates/openplugin-dsp/tests/synth_conformance.rs` is a complete eight-voice synth made of them (saw, square, pulse, triangle, pink noise, glide, mono/legato, sustain pedal) that passes `openplugin-testing`'s conformance kit.
+
+### Band-limited oscillators
+
+```rust
+use openplugin_dsp::{BandlimitedOsc, BlWave, BlepOrder};
+
+struct Voice { osc: BandlimitedOsc }
+
+impl Voice {
+    fn new() -> Self {
+        // Order Four is the default: 2 samples of latency, 20 dB or more below the naive saw's aliasing at every pitch.
+        Self { osc: BandlimitedOsc::new(BlWave::Pulse).with_order(BlepOrder::Four) }
+    }
+
+    fn render(&mut self, hz: f32, width: f32, sample_rate: f32, out: &mut [f32]) {
+        for v in out {
+            self.osc.set_pulse_width(width); // may change every sample (PWM)
+            *v = self.osc.next(hz, sample_rate);
+        }
+    }
+}
+```
+
+Hard sync: the master's `last_wrap()` is the fraction of the sample at which it wrapped; give it to the slave.
+
+```rust
+let mut master = BandlimitedOsc::new(BlWave::Saw);
+let mut slave = BandlimitedOsc::new(BlWave::Saw);
+// per sample; sweep slave_hz for the classic sync sound:
+master.next(master_hz, sample_rate);
+let y = slave.next_sync(slave_hz, sample_rate, master.last_wrap());
+```
+
+How it works: the naive waveform is corrected at each step (PolyBLEP, Välimäki and Huovilainen 2007) and each slope change (PolyBLAMP, for the triangle) by the residual of a band-limited step, a polynomial of the distance in samples (Välimäki, Pekonen and Nam 2012). The kernels are B-splines of width 2, 4, 6 or 8 samples (`BlepOrder`), checked in the tests against an independent recursion. The output is `latency()` samples late (1 to 4); that is what lets the correction reach the samples before a step and what makes sync and PWM exact between samples.
+
+Choices:
+
+- Aliased power relative to the fundamental, measured with coherent FFTs at 44.1 kHz (`tests/synth_proof.rs`, dB; each wider order buys about 9 dB):
+
+  | wave, f0 | naive | order 2 | order 4 | order 6 | order 8 | wavetable |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | saw 100 Hz | -23.4 | -39.5 | -49.4 | -58.6 | -67.5 | -90.8 |
+  | saw 1 kHz | -13.5 | -30.2 | -40.5 | -50.2 | -59.5 | -135.0 |
+  | saw 5 kHz | -6.5 | -23.2 | -33.9 | -44.1 | -54.1 | -144.3 |
+  | square 2 kHz | -13.8 | -32.4 | -44.6 | -56.2 | -67.7 | |
+  | square 5 kHz | -9.1 | -23.9 | -34.1 | -44.1 | -54.2 | |
+  | triangle 1 kHz | -48.1 | -60.4 | -70.1 | -79.3 | -88.3 | |
+  | triangle 5 kHz | -26.3 | -38.0 | -48.0 | -58.1 | -68.1 | |
+
+  Hard sync (500 Hz master, slave 2.71x): -1.8 dB naive, -27.6 dB band-limited at order 4. The sync jump is the weakest case; use a wider order or oversample for bright sync leads.
+- PolyBLEP lowers aliasing, it does not remove it. For a clean saw at the top of the range pick order 6 or 8, or use the wavetable oscillator.
+- DC and level are the waveform's: saw, square and triangle have zero mean, a pulse has mean `2 w - 1`, peaks are 1.0 within the BLEP overshoot.
+
+### Wavetables
+
+```rust
+use openplugin_core::worker::{loader, Loader, Slot};
+use openplugin_dsp::{WavetableOsc, WavetableSet};
+
+struct Synth {
+    jobs: Loader<WavetableSet>,
+    table: Slot<WavetableSet>,
+    osc: WavetableOsc,
+}
+
+impl Synth {
+    fn new() -> Self {
+        // The audio thread starts with a cheap sine.
+        let (jobs, table) = loader(WavetableSet::sine(), 2);
+        Self { jobs, table, osc: WavetableOsc::new() }
+    }
+
+    /// Main thread: building runs FFTs and allocates, so it goes to the worker.
+    fn load_cycle(&mut self, cycle: Vec<f32>) {
+        let _ = self.jobs.submit(move || {
+            WavetableSet::from_cycle(&cycle, 2048).unwrap_or_else(|_| WavetableSet::sine())
+        });
+    }
+
+    fn process(&mut self, hz: f32, sample_rate: f32, out: &mut [f32]) {
+        self.table.poll(); // swaps in a finished table without a lock or an allocation
+        for v in out {
+            *v = self.osc.next(self.table.get(), hz, sample_rate);
+        }
+    }
+}
+```
+
+A `WavetableSet` holds one octave level per halving of the harmonic count (256, 128, ... 1 for 2048 points); the oscillator reads the level with the most harmonics that stay below Nyquist at the current `hz / sample_rate`, with cubic interpolation. Tables are sample-rate independent, so the same set serves 44.1 kHz and 384 kHz. `from_harmonics`, `saw` and `square` build a set from a spectrum. The measured floor is in the table above.
+
+### Envelopes
+
+```rust
+use openplugin_dsp::{Adsr, Curve, Gate, RetriggerMode};
+
+let mut env = Adsr::new(sample_rate);
+env.set_ahdsr(0.005, 0.0, 0.15, 0.6, 0.4); // attack, hold, decay (s), sustain level, release (s); hold 0 is an ADSR
+env.set_curves(Curve::Linear, Curve::Exponential, Curve::Exponential);
+env.set_mode(RetriggerMode::Legato); // a gate_on while held is ignored
+
+// In process: gate events with block offsets, applied at their sample.
+env.process(&mut level[..frames], &[(0, Gate::On), (200, Gate::Off)]);
+```
+
+Choices:
+
+- Segments are whole samples (`round(seconds * sample_rate)`) and reach their target on the last one: the peak is sample `attack`, the sustain level is sample `attack + hold + decay`, and the level is exactly 0.0 `release` samples after `gate_off`. The tests check this at five sample rates and both curve shapes.
+- The exponential shape is the RC curve normalised to end on target, so a long release never lingers near zero. `set_curvature` (default 5) sets how bent it is.
+- A retrigger attacks from the current level, so there is no click; the attack time is scaled by the distance left to climb.
+- The sustain level is read each sample while sustaining. If it is automated, pass it through a smoother.
+
+### Noise
+
+```rust
+use openplugin_dsp::{PinkNoise, WhiteNoise};
+
+let mut white = WhiteNoise::new(0x5EED);            // uniform in [-1, 1), repeatable
+let mut pink = PinkNoise::new(sample_rate, 0x5EED); // RMS 0.2, power falls 3 dB per octave
+pink.set_sample_rate(new_rate);                      // in prepare, if the rate changes
+let sample = white.next() * 0.5 + pink.next();
+```
+
+Pink noise is white noise through a pole/zero ladder whose poles and zeros are recomputed for the real sample rate (a generalisation of Paul Kellet's filter, whose coefficients are fixed for 44.1 kHz). Measured over 10 Hz to 100 kHz at 384 kHz (four decades): slope -2.99 dB per octave, no half-octave band more than about 0.5 dB off the fit; 10 Hz to 25 kHz at 96 kHz: -2.98 dB per octave. The slope holds to about 0.3 of the sample rate and then bends down toward Nyquist. Below 4 Hz the spectrum levels off, so there is no drift.
+
+### Voice allocation
+
+```rust
+use openplugin_dsp::{Adsr, BandlimitedOsc, GlideMode, StealPolicy, VoiceAllocator};
+
+#[derive(Default)]
+struct SynthVoice { osc: Option<BandlimitedOsc>, env: Option<Adsr> }
+
+let mut voices = VoiceAllocator::<SynthVoice, 8>::new(sample_rate);
+voices.set_policy(StealPolicy::Quietest);
+voices.set_glide(0.08, GlideMode::LegatoOnly);
+
+// note_on(offset, note, velocity):
+if let Some(a) = voices.note_on(note, velocity) {
+    let v = voices.voice_mut(a.voice).unwrap();
+    if a.retrigger { /* v.state.env: gate_on() */ }
+}
+// note_off:
+if let Some(i) = voices.note_off(note).released { /* gate_off on voice i's envelope */ }
+// per sample, per active voice: v.advance(1); let hz = v.hz();
+// when a released voice's envelope is idle: voices.free(i);
+// once per block, for StealPolicy::Quietest: voices.set_level(i, envelope_level * velocity);
+```
+
+Choices:
+
+- Stealing order: the same held note retriggers its voice; then a free voice; then a voice already in its release tail; then a held voice, picked by the policy: `Oldest`, `Quietest` (lowest level set with `set_level`), or `SameNote` (also reuses a tail of the same note, else the oldest).
+- `VoiceMode::Mono` and `Legato` use voice 0 with a held-key stack and last-note priority: letting go of the top key returns to the older one. Mono retriggers the envelope on each change; Legato only when no key was held (`Allocation::retrigger`).
+- Glide is linear in semitones and takes exactly `glide * sample_rate` samples (rounded) whatever the interval, and lands on the note.
+- The sustain pedal (`set_sustain_pedal`) defers releases; it and `all_notes_off` call back with each voice to release, so nothing allocates.
+- The per-voice state `S` is yours (oscillators, envelope, filter) and is never touched by the allocator.
+
+### Sample playback
+
+```rust
+use openplugin_dsp::{playback_ratio, Quality, SincKernel, SincPlayer};
+
+// prepare (allocates the table once; share it between voices):
+let kernel = SincKernel::new(Quality::High);
+// note on:
+let mut player = SincPlayer::new();
+player.start(playback_ratio(root_hz, note_hz, file_sample_rate, host_rate));
+player.set_loop(Some((loop_start, loop_end))); // or None for a one-shot
+// per sample:
+let y = player.next(&kernel, &sample_data);
+// pitch bend: player.set_ratio(new_ratio);
+```
+
+The kernel is a Kaiser-windowed sinc stored as a table of 256 to 2048 phases per input sample (a polyphase decomposition) with linear interpolation between phases. Reading up in pitch (ratio above 1) stretches the kernel so material that would fold above the new Nyquist is filtered first; the ratio is limited to 1/64 to 16. Weights are normalised, so a constant reads back exactly.
+
+| `Quality` | taps | passband edge (cycles/sample) | ripple | stopband (measured) |
+| --- | --- | --- | --- | --- |
+| `Low` | 16 | 0.27 | 0.016 dB | -59.1 dB |
+| `Medium` | 32 | 0.34 | 0.0015 dB | -80.0 dB |
+| `High` | 64 | 0.40 | 0.0002 dB | -99.9 dB |
+| `Best` | 128 | 0.44 | 0.00002 dB | -118.9 dB |
+
+Folding test (a 0.30 cycles/sample tone read at ratio 1.7 would land above Nyquist): the residue is -60.4, -84.4, -101.3 and -132.3 dB for the four qualities, and a tone that stays in band keeps unit gain to within 0.14 % (`Low`) or better. `SincConfig` sets the taps, attenuation and phases by hand.

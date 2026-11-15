@@ -140,7 +140,7 @@ fn aliasing_of_hard_sync() {
         for i in 0..N + 64 {
             master.next_normalized(dm, None);
             let v = if band_limited {
-                slave.next_normalized(ds, if sync_on { master.last_wrap().map(|t| t) } else { None })
+                slave.next_normalized(ds, if sync_on { master.last_wrap() } else { None })
             } else {
                 // Naive: reset at the sample after the master wraps.
                 master_phase += dm;

@@ -54,7 +54,7 @@ pub enum Quality {
     Medium,
     /// 64 taps, 100 dB.
     High,
-    /// 128 taps, 120 dB.
+    /// 128 taps, 120 dB design target (measured -118.9 dB).
     Best,
 }
 
@@ -168,7 +168,7 @@ impl SincKernel {
     pub fn kernel_at(&self, x: f64) -> f32 {
         let u = x.abs() * self.phases as f64;
         let max = (self.half * self.phases) as f64;
-        if !(u < max) {
+        if u.is_nan() || u >= max {
             return 0.0;
         }
         let i = u as usize;

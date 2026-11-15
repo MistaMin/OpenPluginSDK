@@ -116,7 +116,7 @@ fn truncated_power_sum(n: usize, p: i32, x: f64) -> f64 {
 pub fn blep_residual(order: BlepOrder, x: f64) -> f64 {
     let n = order.width();
     let ax = x.abs();
-    if !(ax < n as f64 * 0.5) {
+    if ax.is_nan() || ax >= n as f64 * 0.5 {
         return 0.0;
     }
     // H(-ax); for x < 0 that is H(x), for x > 0, H(x) - 1 = -H(-x).
@@ -130,7 +130,7 @@ pub fn blep_residual(order: BlepOrder, x: f64) -> f64 {
 pub fn blamp_residual(order: BlepOrder, x: f64) -> f64 {
     let n = order.width();
     let ax = x.abs();
-    if !(ax < n as f64 * 0.5) {
+    if ax.is_nan() || ax >= n as f64 * 0.5 {
         return 0.0;
     }
     truncated_power_sum(n, n as i32 + 1, -ax)

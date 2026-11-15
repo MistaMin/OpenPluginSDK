@@ -207,7 +207,7 @@ impl WavetableSet {
     /// The level used at `cycles_per_sample` (`hz / sample_rate`).
     pub fn level_for(&self, cycles_per_sample: f64) -> usize {
         let top = (self.size / 8) as f64;
-        if !(cycles_per_sample > 0.0) {
+        if cycles_per_sample.is_nan() || cycles_per_sample <= 0.0 {
             return 0;
         }
         let ds = cycles_per_sample.min(0.5);
