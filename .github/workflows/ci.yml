@@ -43,6 +43,11 @@ jobs:
       - name: Run the workspace tests
         working-directory: OpenPluginSDK
         run: cargo test --workspace
+      # The C++ bridge's fault tests need a test-only feature (an operator new that
+      # reports to Rust's allocator), so the workspace run above skips them.
+      - name: C++ bridge fault tests
+        working-directory: OpenPluginSDK
+        run: cargo test -p example-cpp-bridge --features test-faults
       - name: Clippy, warnings as errors
         working-directory: OpenPluginSDK
         run: cargo clippy --workspace --all-targets -- -D warnings
