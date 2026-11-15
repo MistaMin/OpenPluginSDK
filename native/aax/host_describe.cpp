@@ -321,6 +321,19 @@ int main() {
         for (size_t i = 0; i < e.components.size(); ++i)
             require(d.added[0]->components[i]->processProps->get(AAX_eProperty_PlugInID_Native) == e.components[i]->processProps->get(AAX_eProperty_PlugInID_Native), "stable IDs");
     }
+    {   // The Atmos beds: 5.1.2, 7.1.2 and 9.1.6 are described, a bus of unmapped roles is not.
+        const OpBus b512 = bus(OP_BUS_SURROUND, {0, 1, 2, 3, 4, 5, 18, 19});
+        const OpBus b712 = bus(OP_BUS_SURROUND, {0, 1, 2, 3, 9, 10, 4, 5, 18, 19});
+        const OpBus b916 = bus(OP_BUS_SURROUND, {0, 1, 2, 3, 9, 10, 4, 5, 20, 21, 12, 14, 18, 19, 15, 17});
+        const OpBus odd = bus(OP_BUS_SURROUND, {0, 1, 2, 3, 4, 5, 6, 7});
+        configure(OP_KIND_EFFECT, 0, {layout(b512, b512), layout(b712, b712), layout(b916, b916), layout(odd, odd)});
+        Collection c;
+        describeOne("atmos", AAX_SUCCESS, c);
+        const Effect& e = *c.added[0];
+        require(find(e, AAX_eStemFormat_5_1_2, AAX_eStemFormat_5_1_2) && find(e, AAX_eStemFormat_7_1_2, AAX_eStemFormat_7_1_2) &&
+                find(e, AAX_eStemFormat_9_1_6, AAX_eStemFormat_9_1_6), "5.1.2, 7.1.2 and 9.1.6 stems");
+        require(e.components.size() == 3, "the bus with unmapped roles is not offered");
+    }
     {   // A plugin none of whose layouts has an AAX stem is not described.
         configure(OP_KIND_EFFECT, 0, {layout(bus(OP_BUS_DISCRETE, {OP_ROLE_NONE, OP_ROLE_NONE, OP_ROLE_NONE, OP_ROLE_NONE}), bus(OP_BUS_DISCRETE, {OP_ROLE_NONE, OP_ROLE_NONE, OP_ROLE_NONE, OP_ROLE_NONE}))});
         Collection c;

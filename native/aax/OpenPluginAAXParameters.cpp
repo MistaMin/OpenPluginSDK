@@ -6,7 +6,10 @@
 #include "AAX_CEffectParameters.h"
 #include "AAX_CLinearTaperDelegate.h"
 #include "AAX_CLogTaperDelegate.h"
-#include "AAX_CNumberDisplayDelegate.h"
+#include "AAX_CString.h"
+#include "AAX_IDisplayDelegate.h"
+#include <algorithm>
+#include <cmath>
 #include "AAX_CParameter.h"
 #include "AAX_Errors.h"
 #include <atomic>
@@ -27,6 +30,77 @@ PacketBuffer defaults() {
     }
     return packet;
 }
+}
+// The plugin's own parameter text (shell ABI 3), not the SDK's number display. Main
+// thread only: both ABI calls may allocate, and AAX asks for parameter text through
+// the data model's main-thread entry points, never from the audio callback.
+std::string shellText(uint32_t index, double plain) {
+    char small[128];
+    const size_t length = op_shell_param_format(index, plain, small, sizeof small);
+    if (length < sizeof small) return std::string(small, length);
+    std::string big(length + 1, '\0');
+    const size_t again = op_shell_param_format(index, plain, &big[0], big.size());
+    big.resize(std::min(again, big.size() - 1));
+    return big;
+}
+// The ABI has no short form of a parameter's text, so a short request is answered
+// from the full text, in this order, taking the first that fits `maxChars` bytes:
+// the whole text; the text without spaces ("6.0 dB" -> "6.0dB"); the number alone
+// when the text starts with one ("6.0"); the text cut on a UTF-8 boundary. Bytes,
+// not characters, are counted, so the result never exceeds what the host asked for
+// however it counts. A negative limit is refused.
+bool fitText(const std::string& text, int32_t maxChars, std::string* out) {
+    if (!out || maxChars < 0) return false;
+    const size_t limit = static_cast<size_t>(maxChars);
+    *out = text;
+    if (text.size() <= limit) return true;
+    std::string packed;
+    for (char c : text) if (c != ' ') packed += c;
+    if (packed.size() <= limit) {
+        *out = packed;
+        return true;
+    }
+    const size_t space = text.find(' ');
+    if (space != std::string::npos && space > 0 && space <= limit) {
+        const char first = text[0];
+        if ((first >= '0' && first <= '9') || first == '-' || first == '+' || first == '.') {
+            *out = text.substr(0, space);
+            return true;
+        }
+    }
+    size_t cut = limit;
+    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) --cut;  // never inside a sequence
+    while (cut > 0 && text[cut - 1] == ' ') --cut;
+    *out = text.substr(0, cut);
+    return true;
+}
+namespace {
+// Display delegate of every shell parameter. The real value is the plain value, so the
+// plugin's text for it is exactly what its own display shows (choice and toggle labels
+// included). The taper stays the SDK's linear or log one.
+class ShellDisplay final : public AAX_IDisplayDelegate<float> {
+    uint32_t index_;
+public:
+    explicit ShellDisplay(uint32_t index) : index_(index) {}
+    ShellDisplay* Clone() const override { return new ShellDisplay(*this); }
+    bool ValueToString(float value, AAX_CString* out) const override {
+        if (!out) return false;
+        *out = AAX_CString(shellText(index_, value));
+        return true;
+    }
+    bool ValueToString(float value, int32_t maxNumChars, AAX_CString* out) const override {
+        std::string fitted;
+        if (!out || !fitText(shellText(index_, value), maxNumChars, &fitted)) return false;
+        *out = AAX_CString(fitted);
+        return true;
+    }
+    bool StringToValue(const AAX_CString& text, float* value) const override {
+        double plain = 0.0;
+        if (!value || !op_shell_param_parse(index_, text.Get(), &plain) || !std::isfinite(plain)) return false;
+        *value = static_cast<float>(plain);
+        return true;
+    }
+};
 }
 class Parameters final : public AAX_CEffectParameters {
     mutable ProcessState state_;
@@ -83,20 +157,20 @@ public:
                 parameter = std::make_unique<AAX_CParameter<float>>(
                     ids_[i].c_str(), AAX_CString(desc.name), initial,
                     AAX_CLogTaperDelegate<float, 0>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
-                    AAX_CNumberDisplayDelegate<float>(), true);
+                    ShellDisplay(i), true);
                 parameter->SetType(AAX_eParameterType_Continuous);
             } else if ((desc.flags & OP_PARAM_DISCRETE) && desc.steps > 1) {
                 parameter = std::make_unique<AAX_CParameter<float>>(
                     ids_[i].c_str(), AAX_CString(desc.name), initial,
                     AAX_CLinearTaperDelegate<float>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
-                    AAX_CNumberDisplayDelegate<float>(), true);
+                    ShellDisplay(i), true);
                 parameter->SetNumberOfSteps(static_cast<uint32_t>(desc.steps));
                 parameter->SetType(AAX_eParameterType_Discrete);
             } else {
                 parameter = std::make_unique<AAX_CParameter<float>>(
                     ids_[i].c_str(), AAX_CString(desc.name), initial,
                     AAX_CLinearTaperDelegate<float>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
-                    AAX_CNumberDisplayDelegate<float>(), true);
+                    ShellDisplay(i), true);
                 // The step count stays at the AAX default for a continuous parameter.
                 // The AAX Validator rejects 10001 ("Number of parameter steps exceeds limit").
                 parameter->SetType(AAX_eParameterType_Continuous);
@@ -110,6 +184,16 @@ public:
         bypass->SetType(AAX_eParameterType_Discrete);
         mParameterManager.AddParameter(bypass.release());
         return result;
+    }
+    // AAX_CParameter ignores the length in GetValueString(max, ...); this honours it.
+    AAX_Result GetParameterValueString(AAX_CParamID id, AAX_IString* out, int32_t maxLength) const override {
+        const AAX_IParameter* parameter = mParameterManager.GetParameterByID(id);
+        if (!parameter) return AAX_ERROR_INVALID_PARAMETER_ID;
+        if (!out) return AAX_ERROR_NULL_ARGUMENT;
+        AAX_CString text;
+        if (!parameter->GetStringFromNormalizedValue(parameter->GetNormalizedValue(), maxLength, text)) return AAX_ERROR_INVALID_STRING_CONVERSION;
+        *out = text;
+        return AAX_SUCCESS;
     }
     // State chunk: one chunk of ours replaces the SDK default (which keeps doubles
     // by id and accepts anything). See OpenPluginAAXState.h for the layout.
@@ -191,6 +275,18 @@ public:
     bool proofSetPlain(uint32_t index, float value) {
         auto* parameter = index < ids_.size() ? mParameterManager.GetParameterByID(ids_[index].c_str()) : nullptr;
         return parameter && parameter->SetValueWithFloat(value);
+    }
+    // Text through the host entry points (GetParameterStringFromValue / GetParameterValueFromString).
+    bool proofText(uint32_t index, double normalized, int32_t maxChars, std::string* out) const {
+        if (index >= ids_.size() || !out) return false;
+        AAX_CString text;
+        if (GetParameterStringFromValue(ids_[index].c_str(), normalized, &text, maxChars) != AAX_SUCCESS) return false;
+        *out = text.Get();
+        return true;
+    }
+    bool proofValue(uint32_t index, const char* text, double* normalized) const {
+        return index < ids_.size() && text && normalized &&
+               GetParameterValueFromString(ids_[index].c_str(), normalized, AAX_CString(text)) == AAX_SUCCESS;
     }
     bool proofSetBypass(bool on) {
         auto* parameter = mParameterManager.GetParameterByID(cDefaultMasterBypassID);
@@ -346,6 +442,8 @@ void* proofEngine(AAX_CEffectParameters* p) { return static_cast<Parameters*>(p)
 bool proofSetPlain(AAX_CEffectParameters* p, uint32_t index, float value) { return static_cast<Parameters*>(p)->proofSetPlain(index, value); }
 bool proofSetBypass(AAX_CEffectParameters* p, bool on) { return static_cast<Parameters*>(p)->proofSetBypass(on); }
 bool proofTakePacket(AAX_CEffectParameters* p, PacketBuffer* out) { return static_cast<Parameters*>(p)->proofTakePacket(out); }
+bool proofText(AAX_CEffectParameters* p, uint32_t index, double normalized, int32_t maxChars, std::string* out) { return static_cast<Parameters*>(p)->proofText(index, normalized, maxChars, out); }
+bool proofValue(AAX_CEffectParameters* p, uint32_t index, const char* text, double* normalized) { return static_cast<Parameters*>(p)->proofValue(index, text, normalized); }
 bool proofUpdate(AAX_CEffectParameters* p, uint32_t index, double normalized) { return static_cast<Parameters*>(p)->proofUpdate(index, normalized); }
 bool proofPacket(AAX_CEffectParameters* p, PacketBuffer* out) { return static_cast<Parameters*>(p)->proofPacket(out); }
 }

@@ -592,9 +592,23 @@ if(OP_BUILD_AAX)
   target_include_directories(AAXDescribeProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
   target_compile_definitions(AAXDescribeProof PRIVATE OP_STUB_PARAMS=1 OP_STUB_LATENCY=0)
   target_link_libraries(AAXDescribeProof PRIVATE openplugin_aax_sdk)
+  # AAXTextProof: the plugin's own parameter text through the real AAX_CEffectParameters, over the
+  # example (Gain, Warm). AAXTextStubProof: the same over a stand-in ABI with a choice, a toggle and
+  # multi-byte text (OP_STUB_TEXT in aax/proof_stub.cpp).
+  add_executable(AAXTextProof aax/host_text.cpp aax/OpenPluginAAXParameters.cpp aax/OpenPluginAAXState.cpp aax/OpenPluginAAXProcess.cpp)
+  target_include_directories(AAXTextProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_link_libraries(AAXTextProof PRIVATE openplugin_aax_sdk)
+  op_link_rust(AAXTextProof)
+  add_executable(AAXTextStubProof aax/host_text.cpp aax/OpenPluginAAXParameters.cpp aax/OpenPluginAAXState.cpp
+    aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXTextStubProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXTextStubProof PRIVATE OP_STUB_PARAMS=4 OP_STUB_LATENCY=0 OP_STUB_TEXT=1 OP_TEXT_STUB=1)
+  target_link_libraries(AAXTextStubProof PRIVATE openplugin_aax_sdk)
   add_executable(AAXBundleProof aax/host_bundle.cpp)
   target_link_libraries(AAXBundleProof PRIVATE "-framework CoreFoundation")
   add_dependencies(AAXBundleProof OpenPluginAAX)
+  add_test(NAME aax_text_proof COMMAND AAXTextProof)
+  add_test(NAME aax_text_stub_proof COMMAND AAXTextStubProof)
   add_test(NAME aax_process_proof COMMAND AAXProof)
   add_test(NAME aax_state_proof COMMAND AAXStateProof)
   add_test(NAME aax_alloc_proof COMMAND AAXAllocProof)
