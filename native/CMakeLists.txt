@@ -50,6 +50,8 @@ else()
 endif()
 if(OP_EDITOR)
   add_compile_definitions(OP_HAS_EDITOR=1)
+  # The shells use the size range and resize calls of op_editor.h.
+  add_compile_definitions(OP_EDITOR_RESIZE=1)
   # Objective-C class names are global in the host process.
   string(MAKE_C_IDENTIFIER "${OP_PRODUCT}_${OP_VERSION}" OP_CLASS_SUFFIX)
 else()
