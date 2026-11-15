@@ -123,3 +123,36 @@ pub fn load_bundle(path: &Path) -> Result<ModuleRef, String> {
 pub fn bundle_function(module: ModuleRef, name: &str) -> *mut c_void {
     symbol(module as *mut c_void, name)
 }
+
+// ---------- VST3 as COM ----------
+
+/// `kNoInterface` and `kNotImplemented` in a VST3 module built for Windows. The
+/// VST3 SDK is COM compatible there (`COM_COMPATIBLE` in `funknown.h`), so its
+/// result codes are COM's `E_NOINTERFACE` and `E_NOTIMPL`, not the small numbers
+/// the other systems use. `kResultOk` (0) and `kResultFalse` (1) are the same everywhere.
+pub const VST3_NO_INTERFACE: i32 = 0x8000_4002_u32 as i32;
+pub const VST3_NOT_IMPLEMENTED: i32 = 0x8000_4001_u32 as i32;
+
+/// An interface id written as the four 32-bit words of `DECLARE_CLASS_IID`, laid
+/// out as the SDK lays it out on Windows (`INLINE_UID` with `COM_COMPATIBLE`): a
+/// COM `GUID`, whose first 32-bit field and next two 16-bit fields are in the
+/// machine's little-endian byte order; the last eight bytes are as written.
+pub const fn vst3_iid(a: u32, b: u32, c: u32, d: u32) -> [u8; 16] {
+    let (a, c, d) = (a.to_le_bytes(), c.to_be_bytes(), d.to_be_bytes());
+    let (b1, b2) = (((b >> 16) as u16).to_le_bytes(), (b as u16).to_le_bytes());
+    [a[0], a[1], a[2], a[3], b1[0], b1[1], b2[0], b2[1], c[0], c[1], c[2], c[3], d[0], d[1], d[2], d[3]]
+}
+
+#[cfg(test)]
+mod tests {
+    /// FUnknown is COM's IUnknown, `00000000-0000-0000-C000-000000000046`; the
+    /// second id has no byte that repeats, so every position is checked.
+    #[test]
+    fn a_vst3_iid_is_a_com_guid() {
+        assert_eq!(super::vst3_iid(0x0000_0000, 0x0000_0000, 0xC000_0000, 0x0000_0046), [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46]);
+        assert_eq!(
+            super::vst3_iid(0x0011_2233, 0x4455_6677, 0x8899_AABB, 0xCCDD_EEFF),
+            [0x33, 0x22, 0x11, 0x00, 0x55, 0x44, 0x77, 0x66, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]
+        );
+    }
+}

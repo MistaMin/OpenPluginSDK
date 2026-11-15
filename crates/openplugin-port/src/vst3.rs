@@ -19,11 +19,24 @@ use render::ProcessData;
 type Tuid = [u8; 16];
 type TResult = i32;
 const OK: TResult = 0;
+#[cfg(not(windows))]
 const NO_INTERFACE: TResult = -1;
+#[cfg(not(windows))]
 const NOT_IMPLEMENTED: TResult = 3;
+// A VST3 module built for Windows follows COM: its result codes are HRESULTs and
+// the first three fields of an id are in the machine's byte order (`sys/windows.rs`).
+#[cfg(windows)]
+const NO_INTERFACE: TResult = sys::VST3_NO_INTERFACE;
+#[cfg(windows)]
+const NOT_IMPLEMENTED: TResult = sys::VST3_NOT_IMPLEMENTED;
+#[cfg(windows)]
+const fn iid(a: u32, b: u32, c: u32, d: u32) -> Tuid {
+    sys::vst3_iid(a, b, c, d)
+}
 
 /// An interface id written as the four 32-bit words of `DECLARE_CLASS_IID`
 /// (big-endian byte order, as on macOS).
+#[cfg(not(windows))]
 const fn iid(a: u32, b: u32, c: u32, d: u32) -> Tuid {
     let (a, b, c, d) = (a.to_be_bytes(), b.to_be_bytes(), c.to_be_bytes(), d.to_be_bytes());
     [a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], c[0], c[1], c[2], c[3], d[0], d[1], d[2], d[3]]
