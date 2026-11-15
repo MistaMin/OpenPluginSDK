@@ -8,13 +8,37 @@ use std::panic::AssertUnwindSafe;
 use std::sync::{Mutex, OnceLock};
 
 use openplugin_core::{
-    sample_rate_supported, AaxIds, Category, EditorState, ParamFlags, ParamInfo, PluginInfo, Taper,
-    Unit,
+    sample_rate_supported, AaxIds, Category, EditorState, IoConfig, NotePorts, ParamFlags,
+    ParamInfo, PluginInfo, PortKind, SpeakerLayout, Taper, Unit,
 };
 
 use crate::{FfiInstance, Plugin};
 
-pub const ABI: u32 = 1;
+/// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
+pub const ABI: u32 = 2;
+pub use crate::block::{
+    OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
+    EVENT_PARAM_NORMALIZED, EVENT_PARAM_PLAIN, MAX_EVENTS, MAX_MIDI_OUT, TRANSPORT_HAS_BEATS,
+    TRANSPORT_HAS_SECONDS, TRANSPORT_HAS_SIGNATURE, TRANSPORT_HAS_TEMPO, TRANSPORT_PLAYING,
+    TRANSPORT_RECORDING,
+};
+
+pub const KIND_EFFECT: u32 = 0;
+pub const KIND_INSTRUMENT: u32 = 1;
+pub const KIND_NOTE_EFFECT: u32 = 2;
+pub const NOTE_PORT_INPUT: u32 = 1;
+pub const NOTE_PORT_OUTPUT: u32 = 2;
+/// Bus kinds in [`OpBus::kind`], the order of `PortKind`.
+pub const BUS_ABSENT: u32 = 0;
+pub const BUS_MONO: u32 = 1;
+pub const BUS_STEREO: u32 = 2;
+pub const BUS_SURROUND: u32 = 3;
+pub const BUS_AMBISONIC: u32 = 4;
+pub const BUS_DISCRETE: u32 = 5;
+/// [`OpBus::roles`] entry for a channel with no role id.
+pub const ROLE_NONE: u8 = 0xFF;
+/// Channels whose role [`OpBus`] reports.
+pub const ROLE_SLOTS: usize = 16;
 pub const PARAM_LOG: u32 = 1;
 pub const PARAM_DISCRETE: u32 = 2;
 pub const PARAM_AUTOMATABLE: u32 = 4;
@@ -49,6 +73,28 @@ pub struct OpParamDesc {
     pub name: [u8; 64],
     pub unit: [u8; 16],
     pub id: [u8; 64],
+}
+
+/// One bus of a layout. Channels are always in the SDK's canonical order:
+/// `roles[i]` is the CLAP surround id (`SURROUND_*` in `openplugin-core`) of
+/// channel `i`, or [`ROLE_NONE`] for mono, ambisonic, discrete buses and
+/// channels past [`ROLE_SLOTS`].
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OpBus {
+    pub kind: u32,
+    pub channels: u32,
+    pub roles: [u8; ROLE_SLOTS],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OpLayout {
+    pub input: OpBus,
+    pub output: OpBus,
+    /// `kind` is [`BUS_ABSENT`] and `channels` 0 when there is no sidechain.
+    pub sidechain: OpBus,
+    pub name: [u8; 64],
 }
 
 pub struct ShellInstance {
@@ -141,6 +187,161 @@ pub unsafe fn tail_seconds(ptr: *const ShellInstance) -> f64 {
         0.0
     } else {
         unsafe { (*ptr).ffi.tail_seconds() }
+    }
+}
+
+// These queries build a plugin each call instead of caching in a generic
+// static (which would be shared by every plugin type in a process). They run
+// on the main thread, when a shell is described, never on the audio path.
+fn plugin_layouts<P: Plugin + Default>() -> &'static [IoConfig] {
+    P::default().supported_layouts()
+}
+
+fn plugin_note_ports<P: Plugin + Default>() -> NotePorts {
+    P::default().note_ports()
+}
+
+/// What the plugin is: an instrument (`is_instrument` or the Instrument
+/// category), a note effect (not an instrument, writes notes, and no layout
+/// has an audio output), else an effect.
+pub fn kind<P: Plugin + Default>() -> u32 {
+    let plugin = P::default();
+    let info = plugin.info();
+    if info.is_instrument || info.category == Category::Instrument {
+        KIND_INSTRUMENT
+    } else if plugin_note_ports::<P>().output
+        && plugin_layouts::<P>().iter().all(|l| l.output == SpeakerLayout::Absent)
+    {
+        KIND_NOTE_EFFECT
+    } else {
+        KIND_EFFECT
+    }
+}
+
+/// [`NOTE_PORT_INPUT`] and [`NOTE_PORT_OUTPUT`] bits.
+pub fn note_ports<P: Plugin + Default>() -> u32 {
+    let ports = plugin_note_ports::<P>();
+    u32::from(ports.input) * NOTE_PORT_INPUT + u32::from(ports.output) * NOTE_PORT_OUTPUT
+}
+
+pub fn layout_count<P: Plugin + Default>() -> u32 {
+    plugin_layouts::<P>().len().min(u32::MAX as usize) as u32
+}
+
+fn bus_of(layout: SpeakerLayout) -> OpBus {
+    let mut roles = [ROLE_NONE; ROLE_SLOTS];
+    match (layout.surround_map(), layout) {
+        (Some(map), _) => {
+            for (slot, id) in roles.iter_mut().zip(map) {
+                *slot = *id;
+            }
+        }
+        (None, SpeakerLayout::Stereo) => {
+            roles[0] = openplugin_core::layout::SURROUND_FL;
+            roles[1] = openplugin_core::layout::SURROUND_FR;
+        }
+        _ => {}
+    }
+    OpBus {
+        kind: match layout.kind() {
+            PortKind::Empty => BUS_ABSENT,
+            PortKind::Mono => BUS_MONO,
+            PortKind::Stereo => BUS_STEREO,
+            PortKind::Surround => BUS_SURROUND,
+            PortKind::Ambisonic => BUS_AMBISONIC,
+            PortKind::Discrete => BUS_DISCRETE,
+        },
+        channels: u32::from(layout.channels().unwrap_or(0)),
+        roles,
+    }
+}
+
+/// Fill `out` with layout `index`. 0 for a null `out` or an index past the end.
+///
+/// # Safety
+/// `out` is null or writable for one [`OpLayout`].
+pub unsafe fn write_layout<P: Plugin + Default>(index: u32, out: *mut OpLayout) -> u32 {
+    if out.is_null() {
+        return 0;
+    }
+    let Some(config) = plugin_layouts::<P>().get(index as usize).copied() else {
+        return 0;
+    };
+    let mut layout = OpLayout {
+        input: bus_of(config.input),
+        output: bus_of(config.output),
+        sidechain: bus_of(config.sidechain.unwrap_or(SpeakerLayout::Absent)),
+        name: [0; 64],
+    };
+    put(&mut layout.name, &config.name());
+    unsafe { out.write(layout) };
+    1
+}
+
+/// Select layout `index` on an instance, before the host starts blocks.
+/// Allocates. 0 for a null instance, a bad index, a refusal or a timeout.
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`].
+pub unsafe fn set_layout(ptr: *mut ShellInstance, index: u32) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let done = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.select_layout(index) }));
+    u32::from(matches!(done, Ok(true)))
+}
+
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`].
+pub unsafe fn layout_selected(ptr: *mut ShellInstance) -> u32 {
+    if ptr.is_null() {
+        0
+    } else {
+        unsafe { (*ptr).ffi.layout_index() }
+    }
+}
+
+/// Offline (bounce) flag; applied at the start of the next block.
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`].
+pub unsafe fn set_offline(ptr: *mut ShellInstance, offline: u32) {
+    if !ptr.is_null() {
+        unsafe { (*ptr).ffi.set_offline_flag(offline != 0) };
+    }
+}
+
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`]; `args` is null or a valid [`OpProcess`].
+pub unsafe fn process_events(ptr: *mut ShellInstance, args: *const OpProcess) -> u32 {
+    if ptr.is_null() || args.is_null() {
+        return 0;
+    }
+    let ran = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+        (*ptr).ffi.process_block(&*args)
+    }));
+    u32::from(matches!(ran, Ok(true)))
+}
+
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`]; `out` is null or writable for `capacity` events.
+pub unsafe fn midi_out(ptr: *mut ShellInstance, out: *mut OpMidiEvent, capacity: u32) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let got = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
+        (*ptr).ffi.pull_midi_out(out, capacity)
+    }));
+    got.unwrap_or(0)
+}
+
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`].
+pub unsafe fn midi_dropped(ptr: *const ShellInstance) -> u32 {
+    if ptr.is_null() {
+        0
+    } else {
+        unsafe { (*ptr).ffi.take_midi_dropped() }
     }
 }
 
@@ -483,17 +684,27 @@ pub unsafe fn process(
     if ptr.is_null() {
         return 0;
     }
+    if frames > 0 && (in_left.is_null() || out_left.is_null()) {
+        return 0;
+    }
     let tracing = trace::on();
     let input = if tracing { unsafe { trace::peak(in_left, frames).max(trace::peak(in_right, frames)) } } else { 0.0 };
-    let ran = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
-        (*ptr).ffi.process_io(
-            in_left,
-            in_right,
-            out_left,
-            out_right,
-            frames as usize,
-        )
-    }));
+    let inputs = [in_left, in_right];
+    let outputs = [out_left, out_right];
+    let args = OpProcess {
+        struct_size: std::mem::size_of::<OpProcess>() as u32,
+        frames,
+        inputs: inputs.as_ptr(),
+        input_channels: if in_right.is_null() { 1 } else { 2 },
+        output_channels: if out_right.is_null() { 1 } else { 2 },
+        outputs: outputs.as_ptr(),
+        sidechain: std::ptr::null(),
+        sidechain_channels: 0,
+        event_count: 0,
+        events: std::ptr::null(),
+        transport: std::ptr::null(),
+    };
+    let ran = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.process_block(&args) }));
     let ok = matches!(ran, Ok(true));
     if tracing {
         let output = unsafe { trace::peak(out_left, frames).max(trace::peak(out_right, frames)) };

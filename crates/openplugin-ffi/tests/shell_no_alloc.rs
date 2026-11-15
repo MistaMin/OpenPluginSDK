@@ -177,6 +177,148 @@ impl Plugin for GainToggle {
     }
 }
 
+/// Takes notes, echoes them as MIDI, reads a sidechain and the transport.
+/// Nothing in it allocates.
+struct Echo {
+    gain: f32,
+    queue: [Option<(u32, [u8; 3])>; 8],
+    tempo: f64,
+}
+
+impl Default for Echo {
+    fn default() -> Self {
+        Self { gain: 1.0, queue: [None; 8], tempo: 0.0 }
+    }
+}
+
+impl Plugin for Echo {
+    fn info(&self) -> &'static PluginInfo {
+        &INFO
+    }
+    fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+    fn reset(&mut self) {}
+    fn set_param(&mut self, id: &str, value: f32) -> bool {
+        if id == "gain" {
+            self.gain = db_to_linear(PARAMS[0].clamp(value));
+            true
+        } else {
+            id == "on"
+        }
+    }
+    fn param(&self, _: &str) -> Option<f32> {
+        Some(0.0)
+    }
+    fn set_transport(&mut self, t: &openplugin_core::Transport) {
+        self.tempo = t.tempo;
+    }
+    fn note_on_channel(&mut self, offset: usize, channel: u8, note: u8, velocity: u8) {
+        if let Some(slot) = self.queue.iter_mut().find(|s| s.is_none()) {
+            *slot = Some((offset as u32, [0x90 | channel, note, velocity]));
+        }
+    }
+    fn pull_midi(&mut self) -> Option<(u32, [u8; 3])> {
+        self.queue.iter_mut().find_map(|s| s.take())
+    }
+    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        for channel in io.iter_mut() {
+            for sample in channel[..frames].iter_mut() {
+                *sample *= self.gain;
+            }
+        }
+    }
+    fn process_buses(&mut self, io: &mut [Vec<f32>], side: Option<&[Vec<f32>]>, frames: usize) {
+        self.process(io, frames);
+        if let Some(side) = side {
+            for channel in io.iter_mut() {
+                for (i, sample) in channel[..frames].iter_mut().enumerate() {
+                    *sample += side[0][i] * 0.25;
+                }
+            }
+        }
+    }
+}
+
+/// The events path: notes, raw MIDI, parameter changes at offsets, transport,
+/// sidechain, MIDI out, offline, and every refusal. One armed section.
+fn events_do_not_allocate() {
+    let instance = shell::create::<Echo>(48_000.0, 512, 2);
+    assert!(!instance.is_null());
+    let input = [0.5f32; 512];
+    let side = [1.0f32; 512];
+    let mut out_l = [0.0f32; 512];
+    let mut out_r = [0.0f32; 512];
+    let ins = [input.as_ptr(), input.as_ptr()];
+    let outs = [out_l.as_mut_ptr(), out_r.as_mut_ptr()];
+    let sides = [side.as_ptr()];
+    let mut events = [shell::OpEvent::default(); 64];
+    for (k, event) in events.iter_mut().enumerate() {
+        event.offset = (k as u32 * 7) % 512;
+        match k % 5 {
+            0 => {
+                event.kind = shell::EVENT_NOTE_ON;
+                event.note = 60;
+                event.velocity = 90;
+            }
+            1 => {
+                event.kind = shell::EVENT_NOTE_OFF;
+                event.note = 60;
+            }
+            2 => {
+                event.kind = shell::EVENT_MIDI;
+                event.midi = [0xB0, 1, k as u8, 0];
+            }
+            3 => {
+                event.kind = shell::EVENT_PARAM_PLAIN;
+                event.value = (k % 12) as f32;
+            }
+            _ => {
+                event.kind = shell::EVENT_PARAM_NORMALIZED;
+                event.value = 0.5;
+            }
+        }
+    }
+    let transport = shell::OpTransport {
+        flags: shell::TRANSPORT_PLAYING | shell::TRANSPORT_HAS_TEMPO,
+        tempo: 120.0,
+        ..shell::OpTransport::default()
+    };
+    let args = shell::OpProcess {
+        struct_size: std::mem::size_of::<shell::OpProcess>() as u32,
+        frames: 512,
+        inputs: ins.as_ptr(),
+        input_channels: 2,
+        output_channels: 2,
+        outputs: outs.as_ptr(),
+        sidechain: sides.as_ptr(),
+        sidechain_channels: 1,
+        event_count: events.len() as u32,
+        events: events.as_ptr(),
+        transport: &transport,
+    };
+    let mut refused = args;
+    refused.event_count = shell::MAX_EVENTS as u32 + 1;
+    let mut midi = [shell::OpMidiEvent::default(); 32];
+    let mut pulled = 0;
+    let ran = measured("events: notes, params, transport, sidechain, midi out", || unsafe {
+        shell::set_offline(instance, 1);
+        let mut ran = 0;
+        for _ in 0..4 {
+            ran += shell::process_events(instance, &args);
+            pulled += shell::midi_out(instance, midi.as_mut_ptr(), 32);
+            shell::midi_dropped(instance);
+        }
+        // Refusals allocate nothing either.
+        assert_eq!(shell::process_events(instance, &refused), 0);
+        assert_eq!(shell::process_events(instance, std::ptr::null()), 0);
+        assert_eq!(shell::process_events(std::ptr::null_mut(), &args), 0);
+        assert_eq!(shell::midi_out(instance, std::ptr::null_mut(), 4), 0);
+        ran
+    });
+    assert_eq!(ran, 4);
+    assert!(pulled > 0, "no MIDI came out");
+    unsafe { shell::destroy(instance) };
+}
+
 #[test]
 fn shell_audio_and_parameter_setters_do_not_allocate() {
     assert_allocator_counts();
@@ -440,4 +582,6 @@ fn shell_audio_and_parameter_setters_do_not_allocate() {
 
     // `destroy` and its table update run outside the measured section.
     unsafe { shell::destroy(instance) };
+
+    events_do_not_allocate();
 }

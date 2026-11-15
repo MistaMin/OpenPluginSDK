@@ -36,6 +36,61 @@ The crate type includes `staticlib`. The native build links that archive. It doe
 
 Class IDs are 16 bytes from a 128-bit mix of the plugin id. VST3 prints them with `FUID::toString`, 32 hex digits. The processor id and the controller id differ. AAX manufacturer, product, mono, and stereo ids are four-byte values from that mix with bit `0x20` set in each byte so none is zero.
 
+## Events, transport, buses and kind (ABI 2)
+
+`op_shell_process` stays as it was and is now `op_shell_process_events` with no events, no sidechain and a stereo (or mono) bus. The new entry point carries everything a note-driven or multi-bus plugin needs, so each C++ shell can map its host's events onto it. Declarations are in `native/include/op_shell.h`; the Rust side is `crates/openplugin-ffi/src/block.rs` and `shell.rs`.
+
+| Call | Thread | Allocates |
+|---|---|---|
+| `op_shell_abi_version`, `op_shell_kind`, `op_shell_note_ports`, `op_shell_layout_count`, `op_shell_layout` | message | yes (they build a plugin to ask it) |
+| `op_shell_set_layout`, `op_shell_layout_selected` | message, before the first block | yes (new scratch) |
+| `op_shell_set_offline` | any | no |
+| `op_shell_process_events` | audio | no |
+| `op_shell_midi_out`, `op_shell_midi_dropped` | audio thread, after the block | no |
+
+### Versioning
+
+`OP_SHELL_ABI` in the header is the ABI version the shell was written for; `op_shell_abi_version()` and `OpShellInfo.abi` are the version of the library. The rule:
+
+- A version only adds: functions, enum values, struct fields at the end of a struct that carries `struct_size`. Nothing is removed, renamed or changed in meaning. Adding anything raises the number (1 was everything up to save/load state, 2 adds this section).
+- A shell built against `OP_SHELL_ABI = N` works with any library of version N or higher, and must refuse a library below N (`op_shell_abi_version() < OP_SHELL_ABI`) instead of calling symbols that are missing. The shells that existed before ABI 2 compare `info.abi` for equality; they are built from the same header as the library, so that still holds.
+- A change that cannot be additive gets new symbol names (a new prefix), so a mismatch fails at load instead of misbehaving.
+
+### Channel order
+
+ABI channel order is canonical; shells reorder. Every bus the ABI carries (main in, main out, sidechain) lists its channels in the SDK's order: the CLAP surround order of `openplugin_core::layout` (`SpeakerLayout::surround_map`), ambisonic buses in ACN. The ABI never exposes a host's order (VST3 speaker arrangements, Audio Unit layout tags, Pro Tools film order). A shell reorders at its own edge, between the host's buffers and the pointer arrays it hands to `op_shell_process_events`.
+
+`op_shell_layout(index, &layout)` describes layout `index` (no instance needed). `OpLayout.input`, `.output` and `.sidechain` are `OpBus` values with a `kind` (`OP_BUS_ABSENT`, `MONO`, `STEREO`, `SURROUND`, `AMBISONIC`, `DISCRETE`, the `SpeakerLayout` kinds), a `channels` count, and `roles[i]`, the CLAP surround id of channel `i` (FL 0, FR 1, FC 2, LFE 3, BL 4, BR 5, and so on). Stereo is FL, FR. `roles[i]` is `OP_ROLE_NONE` (0xFF) for mono, ambisonic and discrete buses and past channel 16. A shell builds its reorder table from these roles and does not repeat `layout.rs`. `name` is the layout's label. A missing sidechain is `OP_BUS_ABSENT` with 0 channels.
+
+### Layout selection
+
+`op_shell_layout_count()` is how many layouts the plugin offers; index 0 is its default. `op_shell_set_layout(instance, index)` selects one before the first block: it calls `Plugin::set_layout` and `prepare_layout`, and resizes the main and sidechain scratch to the layout's widths (main width is the larger of input and output, at least 1). It allocates and waits for a running block (at most two seconds), so it belongs to the activation step on the main thread. It returns 0, changing nothing, for a bad index, a layout the plugin refuses, or a timeout. `op_shell_create` still takes a channel count of 1 or 2; a shell that wants more selects a layout afterwards. `op_shell_layout_selected` reads the index back.
+
+### The block
+
+```c
+OpProcess args = { sizeof args, frames, inputs, in_ch, out_ch, outputs,
+                   sidechain, side_ch, event_count, events, &transport };
+op_shell_process_events(instance, &args);
+OpMidiEvent out[64];
+uint32_t n = op_shell_midi_out(instance, out, 64);
+```
+
+- Audio is planar pointer arrays. `inputs` may be NULL with `input_channels` 0 (an instrument gets silence). One input channel feeds every channel of a wider engine bus. A NULL channel pointer reads as silence on an input and is skipped on an output. Inputs may alias outputs. Non-finite input samples read as 0.
+- `struct_size` is `sizeof(OpProcess)` as the shell compiled it. A smaller value is refused, so fields can be appended later.
+- Events (`OpEvent`): note on, note off (channel, note, velocity), raw 3-byte MIDI, and a parameter change as a plain or normalized value, each at a sample `offset` below `frames`. The list may be in any order; it is stably sorted. Delivery follows the CLAP bridge: the block is cut at each distinct offset, the events at that offset are applied (notes and MIDI reach the plugin at offset 0 of the next piece, parameters reach the plane), then the next piece is processed, so a parameter change is sample-accurate. Raw MIDI `0x9n` and `0x8n` reach `note_on_channel` / `note_off`, anything else `Plugin::midi`.
+- Transport (`OpTransport`): `flags` carry playing and recording and say which fields the host knows (`OP_TRANSPORT_HAS_TEMPO`, `HAS_SIGNATURE`, `HAS_BEATS`, `HAS_SECONDS`); unknown fields take the `Transport` defaults. NULL keeps the previous transport and does not call `Plugin::set_transport`.
+- Sidechain: `sidechain` and `sidechain_channels` (or NULL and 0). It reaches `Plugin::process_buses`; a plugin whose layouts have none ignores it. Channels the host did not send read as silence.
+- MIDI output: after the block, `op_shell_midi_out(instance, out, capacity)` copies up to `capacity` `OpMidiEvent` (offset in the block, three bytes) into the caller's buffer and returns the count; call again for more. The engine keeps `OP_MAX_MIDI_OUT` (1024) events per block; extra events are dropped and counted by `op_shell_midi_dropped`. The next block clears what was not read. No allocation.
+- Offline: `op_shell_set_offline(instance, 1)` reaches `Plugin::set_offline` at the start of the next block, with the same momentary-parameter release as CLAP.
+- Kind: `op_shell_kind()` is `OP_KIND_INSTRUMENT` when `PluginInfo::is_instrument` is set or the category is `Instrument`; `OP_KIND_NOTE_EFFECT` when the plugin is not an instrument, writes notes (`note_ports().output`) and none of its layouts has an audio output; otherwise `OP_KIND_EFFECT`. `op_shell_note_ports()` returns `OP_NOTE_PORT_INPUT` and `OP_NOTE_PORT_OUTPUT` bits. No new `PluginInfo` field was needed.
+
+### Refusals
+
+`op_shell_process_events` returns 0 and touches no audio, no plugin and no parameter for: a NULL instance or `args`, a `struct_size` below the current struct, a NULL array with a non-zero count, more than 64 channels in any bus, more than `OP_MAX_EVENTS` (1024) events, or `frames` above the size given to `op_shell_create`. An individual bad event is skipped and the block still runs: an offset at or past `frames`, an unknown kind, a channel above 15, a note or velocity above 127, a raw message that is not a status byte plus two data bytes, a non-finite parameter value. A parameter index past the end is ignored by the plane. A block that starts during a state call is passed through dry (events lost) and returns 1, as for `op_shell_process`.
+
+Tests: `crates/openplugin-ffi/tests/shell_events.rs` (notes, sorted and split delivery, MIDI out in pages, parameter changes at offsets, transport, sidechain, layouts and roles, selection, offline, kind, the old entry point, hostile input) and the events section of `shell_no_alloc.rs` (zero allocations and frees in the whole events path, refusals included).
+
 ## Plugin state
 
 `op_shell_save_state` and `op_shell_load_state` carry the whole plugin state across the ABI: the parameter plane and the plugin's own chunk (`Plugin::save_state` / `load_state`) in one opaque blob, the OPCH session of `openplugin_core::encode_session`. A shell stores the blob as its host state and hands it back later. The VST3 shell (see VST3 state), the Audio Unit shell (see Audio Unit state) and the AAX shell (its state chunk, payload version 2) call them.
@@ -48,7 +103,7 @@ uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t lengt
 
 - Save: `out` NULL with `capacity` 0 is a size query. The call returns `OP_STATE_TOO_SMALL` and writes the length to `*needed` (which may be NULL). Allocate that many bytes and call again. `OP_STATE_OK` means the blob is written and `*needed` is its length. If the state grew in between, the second call returns `OP_STATE_TOO_SMALL` again with the new size, so loop until OK. A short buffer is never written. `OP_STATE_FAILED` is a null instance, a null `out` with capacity above 0, a plugin that panics, a state over 4 GiB, or a timeout (below).
 - Load: returns 1 or 0. It is all or nothing. The envelope (magic, version, every length, the parameter count, finite values) is checked before the plugin is touched. A corrupt, truncated, extended or foreign blob, an empty one, a null pointer, or a chunk the plugin's `load_state` refuses returns 0 and leaves the parameters and the plugin as they were. A plugin whose `load_state` returns false must have changed nothing itself: the SDK cannot undo a plugin's partial write. A bare OPST parameter plane (what the shells wrote before) still loads, and leaves the plugin's chunk alone.
-- ABI: `OP_SHELL_ABI` stays 1. Nothing existing changed, and a shell that does not call the new symbols builds as before. Both are declared in `op_shell.h` without a guard; a plugin built with `export_shell!` always exports them.
+- ABI: this was added without changing anything existing (`OP_SHELL_ABI` was 1 then; it is 2 since the events block, see Versioning), and a shell that does not call the new symbols builds as before. Both are declared in `op_shell.h` without a guard; a plugin built with `export_shell!` always exports them.
 
 ### Threading
 

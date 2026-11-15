@@ -13,6 +13,8 @@
 //! `op_shell_save_state` / `op_shell_load_state` for the whole plugin state.
 
 pub use openplugin_ffi::shell::{
+    kind, layout_count, layout_selected, midi_dropped, midi_out, note_ports, process_events,
+    set_layout, set_offline, write_layout, OpLayout, OpMidiEvent, OpProcess,
     create, destroy, editor_state, get_normalized, get_plain, latency, load_state, process,
     reset, save_state, set_normalized, set_plain, tail_seconds, to_normalized, to_plain, trace, write_info,
     write_param, OpParamDesc, OpShellInfo, ShellInstance, ABI, AAX_MAX_PARAMS, PARAM_AUTOMATABLE,
@@ -362,6 +364,68 @@ macro_rules! export_shell {
         }
     };
     ($plugin:ty) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_abi_version() -> u32 {
+            $crate::shell::ABI
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_kind() -> u32 {
+            $crate::shell::kind::<$plugin>()
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_note_ports() -> u32 {
+            $crate::shell::note_ports::<$plugin>()
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_layout_count() -> u32 {
+            $crate::shell::layout_count::<$plugin>()
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_layout(index: u32, out: *mut $crate::shell::OpLayout) -> u32 {
+            unsafe { $crate::shell::write_layout::<$plugin>(index, out) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_set_layout(instance: *mut ::std::ffi::c_void, index: u32) -> u32 {
+            unsafe { $crate::shell::set_layout(instance as *mut $crate::shell::ShellInstance, index) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_layout_selected(instance: *mut ::std::ffi::c_void) -> u32 {
+            unsafe { $crate::shell::layout_selected(instance as *mut $crate::shell::ShellInstance) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_set_offline(instance: *mut ::std::ffi::c_void, offline: u32) {
+            unsafe { $crate::shell::set_offline(instance as *mut $crate::shell::ShellInstance, offline) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_process_events(
+            instance: *mut ::std::ffi::c_void,
+            args: *const $crate::shell::OpProcess,
+        ) -> u32 {
+            unsafe { $crate::shell::process_events(instance as *mut $crate::shell::ShellInstance, args) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_midi_out(
+            instance: *mut ::std::ffi::c_void,
+            out: *mut $crate::shell::OpMidiEvent,
+            capacity: u32,
+        ) -> u32 {
+            unsafe { $crate::shell::midi_out(instance as *mut $crate::shell::ShellInstance, out, capacity) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_midi_dropped(instance: *const ::std::ffi::c_void) -> u32 {
+            unsafe { $crate::shell::midi_dropped(instance as *const $crate::shell::ShellInstance) }
+        }
+
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_tail_seconds(instance: *mut ::std::ffi::c_void) -> f64 {
             $crate::shell::tail_seconds(instance as *const $crate::shell::ShellInstance)
