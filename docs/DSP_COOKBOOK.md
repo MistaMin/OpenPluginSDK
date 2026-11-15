@@ -684,7 +684,7 @@ The two halves share one core `Seqlock`: the writer does two atomic increments a
 Three blocks, all wet-only (they output the reverb, not the dry signal: mix them with the dry path yourself, or run them on a send), stereo in and stereo out, allocated in `new`, free of allocation, denormals and NaN afterwards (a non-finite input sample counts as zero).
 
 - `FdnReverb` is a feedback delay network after Jot and Chaigne (AES 1991): 8 or 16 delay lines of prime length (so mutually prime), a Householder or Hadamard feedback matrix, and per-line absorption filters set from the decay time at three frequencies by Jot's rule (a line of `m` samples gets gain `10^(-3 m / (fs RT60))`). Smooth, dense, and the decay times you ask for are the ones you measure.
-- `PlateReverb` is Dattorro's plate (JAES 1997), written from the paper's topology with its delay lengths rescaled from 29761 Hz to the real rate. Brighter and more diffuse, with the characteristic fast build-up; one decay time plus damping.
+- `PlateReverb` is Dattorro's plate (J. Audio Eng. Soc. 45(9), 1997), checked against the paper's figure and tables, with its delay lengths rescaled from 29761 Hz to the real rate. Brighter and more diffuse, with the characteristic fast build-up; one decay time plus damping. See "The plate against Dattorro's paper" below.
 - `EarlyReflections` is a tapped delay with panned taps and five built-in patterns (`SmallRoom`, `LargeRoom`, `Hall`, `Dense`, `Slap`) or your own list of up to 32 taps. `FdnReverb` carries one (`early_mut()`, level starts at 0); it also works alone, or in front of a `PlateReverb`.
 
 ```rust
@@ -736,12 +736,62 @@ impl MyReverb {
 Choices and limits:
 
 - Decay times are clamped (FDN 0.05 to 600 s, plate 0.1 to 120 s) and a reverb is stable at every setting: the loop gain is held below one for any combination of times, sizes and frequencies. `set_freeze(true)` fades the input out over about 10 ms, removes damping and sets every band to 10 000 s, so the tail holds with bounded level; report `Tail::Infinite` while frozen.
-- Measured decay (Schroeder backward integration, -5 to -35 dB fit, octave bands, 44.1, 48 and 96 kHz): the FDN is within 3.1 % of the setting at 125 Hz, 1 kHz and 8 kHz, with and without modulation, 8 or 16 lines, either matrix; the plate within 3.6 % at 1 s, 2.5 s and 5 s. The numbers are in `tests/reverb_proof.rs`. Settings far apart between neighbouring bands (for example 4 s next to 0.4 s) can be 5 to 7 % off at the band between, because the absorption is made of first-order shelves.
+- Measured decay (Schroeder backward integration, -5 to -35 dB fit, octave bands, 44.1, 48 and 96 kHz): the FDN is within 3.1 % of the setting at 125 Hz, 1 kHz and 8 kHz, with and without modulation, 8 or 16 lines, either matrix; the plate, in the 1 kHz octave with the modulation off, within 2.4 % at 2.5 s and 5 s and 10.1 % long at 1 s (its own section below has the broadband numbers and the reason). The numbers are in `tests/reverb_proof.rs`. Settings far apart between neighbouring bands (for example 4 s next to 0.4 s) can be 5 to 7 % off at the band between, because the absorption is made of first-order shelves.
 - `set_reference_hz` moves the three frequencies at which the FDN times hold (default 125, 1000 and 8000 Hz).
 - `set_size` scales the FDN delay lengths (0.2 to 4) and, by Jot's rule, does not change the decay time; the lines glide to the new lengths (at most a 2 % pitch bend), so a size knob does not click. `set_predelay_ms` glides the same way.
 - Modulation exists to break up fixed modes (metallic ringing). It uses allpass-interpolated reads, which keep unit gain at all frequencies, so it does not shorten the high band. Keep depth at or below 0.5 for a natural tail; at 0 the output is exactly repeatable.
 - Level: the FDN's wet level grows with decay time, as in a real room. Set the mix by ear and leave headroom.
 - `set_sample_rate` (FDN) reallocates and clears the tail. Do not call it from `process`.
+
+### The plate against Dattorro's paper
+
+Source: Jon Dattorro, "Effect Design, Part 1: Reverberator and Other Filters", J. Audio Eng. Soc., vol. 45, no. 9, pp. 660-684, September 1997: figure 1 (the topology), table 1 (default parameters) and table 2 (output taps). `plate.rs` was compared with the paper line by line; `tests/plate_paper.rs` holds the paper's numbers typed from the paper and fails if the code leaves them.
+
+```rust
+use openplugin_dsp::PlateReverb;
+
+let mut plate = PlateReverb::new(sample_rate);
+plate.set_rt60(2.5);            // seconds, or set_decay(0.5) for the paper's coefficient
+plate.set_damping_hz(6_000.0);  // or set_damping(0.0005)
+plate.set_bandwidth_hz(12_000.0); // or set_bandwidth(0.9995)
+plate.set_modulation(0.5, 1.0); // depth 0.5 = peak excursion 8 of the paper's 16 samples, 1 Hz
+// plate.set_paper_defaults(); // table 1 as printed
+let (wet_l, wet_r) = plate.process_frame(in_l, in_r);
+```
+
+What the code matches exactly:
+
+- The signal path of figure 1: `(xL + xR) / 2`, pre-delay, the bandwidth one-pole `y = bandwidth x + (1 - bandwidth) y[-1]`, four input diffusers (142 and 107 samples at input diffusion 1 = 0.750, then 379 and 277 at input diffusion 2 = 0.625), and the tank: two halves, each a sum of the diffused input and `decay` times the end of the other half, a modulated diffuser (672 left, 908 right, decay diffusion 1 = 0.70), a delay (4453, 4217), the damping one-pole `y = (1 - damping) x + damping y[-1]`, a multiplication by `decay`, a second diffuser (1800, 2656, decay diffusion 2) and a delay (3720, 3163).
+- The lattice and its signs: `w = x - g z`, `y = z + g w` for the input diffusers and decay diffusion 2, and the reversed sign the figure marks for decay diffusion 1, `w = x + g z`, `y = z - g w`.
+- Decay diffusion 2 = `decay + 0.15`, floor 0.25, ceiling 0.50.
+- Table 2: all fourteen taps, their lines, positions and signs, each times 0.6. Left: `+node48_54[266] +node48_54[2974] -node55_59[1913] +node59_63[1996] -node24_30[1990] -node31_33[187] -node33_39[1066]`. Right: `+node24_30[353] +node24_30[3627] -node31_33[1228] +node33_39[2673] -node48_54[2111] -node55_59[335] -node59_63[121]`.
+- Modulation (section 1.3.7): the taps of the two decay diffusion 1 lines move sinusoidally, the two oscillators in quadrature, read with allpass interpolation; EXCURSION = 16 samples is the largest peak excursion, and the default (depth 0.5 at 1 Hz) is the paper's "on the order of 1 Hz, peak excursion of about 8 samples".
+- Other sample rates: every length and tap is the paper's number times `fs / 29761`, rounded to the nearest sample (4453 becomes 6598 at 44.1 kHz, 7182 at 48 kHz, 14364 at 96 kHz and 28728 at 192 kHz); the excursion is scaled without rounding because the modulated taps are interpolated. The loop is 21 589 samples, 0.7254 s, at any rate. `PlateReverb::geometry()` returns the lengths and taps in use.
+
+Proof (`tests/plate_paper.rs` and the unit tests in `plate.rs`): at 29761 Hz the lengths and taps equal the paper's; at 44.1, 48, 96 and 192 kHz they equal the scaled values; with every diffusion coefficient at zero an impulse gives exactly seven impulses per channel, each at the time its place in figure 1 implies and with table 2's sign; with the paper's coefficients the left output starts at sample 266 and the right at 353 (scaled at other rates) with the value `0.6 x bandwidth x 0.75^2 x 0.625^2 x -0.70 = -0.0922`, followed by the input diffusers' echoes 107, 142, 214 and 249 samples later with the weights the lattice gives.
+
+Deliberate deviations:
+
+- Parameters in hertz and seconds. `new` starts from a 2 s decay, 16 kHz bandwidth and 9 kHz damping, not table 1's coefficients, because a coefficient is a different sound at each sample rate. The mappings: `bandwidth = 1 - exp(-2 pi fc / fs)`, `damping = exp(-2 pi fc / fs)` (a corner at or above `0.45 fs` turns the filter off), `decay = 10^(-3 k T / (4 RT60))` with `T` the loop time and `k = 1.07` (below). `set_decay`, `set_damping`, `set_bandwidth` and `set_paper_defaults` take the paper's coefficients directly; the last call wins.
+- Modulation shape: none. The paper asks for a sinusoid in quadrature and that is what runs; only the depth is a control (0 to the paper's 16 samples). The interpolator is the first-order allpass the paper recommends, in Thiran's form.
+- The paper's magnitude truncation (section 1.3.4) is a remedy for limit cycles in fixed-point lattices. In floating point every value written into a loop is flushed to zero below 1e-20 instead; after a burst the output reaches exact zero (15.4 s later at the paper's defaults) and no subnormal number appears on the way.
+- Outside the paper: freeze, wet stereo width, a gliding pre-delay, and non-finite input counted as zero.
+
+Measured decay. The loop multiplies by `decay` four times per `T`, which implies `T60 = -3 T / (4 log10 decay)`: 1.807 s at the paper's `decay = 0.50`. Measured by Schroeder backward integration of the whole response (-5 to -35 dB fit, mean of left and right, the paper's bandwidth and damping):
+
+| decay | implied T60 | measured, modulation off | measured, default modulation |
+|---|---|---|---|
+| 0.20 | 0.778 s | 0.865 s (1.111) | 0.864 s (1.109) |
+| 0.35 | 1.193 s | 1.334 s (1.118) | 1.333 s (1.117) |
+| 0.50 | 1.807 s | 1.984 s (1.098) | 1.931 s (1.068) |
+| 0.65 | 2.908 s | 3.202 s (1.101) | 3.050 s (1.049) |
+| 0.80 | 5.614 s | 6.174 s (1.100) | 5.783 s (1.030) |
+| 0.90 | 11.890 s | 13.060 s (1.098) | 12.037 s (1.012) |
+| 0.95 | 24.423 s | 26.768 s (1.096) | 24.550 s (1.005) |
+
+These are at 29761 Hz; 48 kHz is within 0.6 % of each. The decay is longer than implied because a diffuser is allpass only for steady tones: the resonances that fall where its group delay is long decay more slowly, and they are what remains late. Modulation moves the resonances, and long tails return to the implied time; so, unlike in the FDN, modulation here shortens a long tail by up to 8 %. `set_rt60` uses `k = 1.07`, between the two columns: from 1 s to 10 s at 29.761, 44.1, 48, 96 and 192 kHz the broadband T60 is within 4.3 % of the setting with the modulation off and within 5.0 % at the default modulation. At 1 s and below the tank loses 47 dB or more in one pass of its 0.73 s loop, the response is the first pass through the diffusers and not an exponential tail, and a T60 figure means little (the 1 kHz octave reads 1.10 s at a 1 s setting).
+
+Echo density (Abel and Huang's measure, 1 is Gaussian noise) at 40, 120, 300, 700 and 1400 ms: 0.50, 0.69, 0.82, 0.95, 1.03 at 29761 Hz and 0.38, 0.55, 0.79, 0.98, 0.97 at 48 kHz. The interchannel correlation of the two outputs for a mono input is within 0.006 of zero, for an impulse and for noise, with and without modulation.
 
 ## Synthesis
 
