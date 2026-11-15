@@ -1,0 +1,25 @@
+[package]
+name = "example-cpp-bridge"
+description = "A Rust plugin that calls existing C++ DSP through cxx: the bridge pattern of docs/CPP_BRIDGE.md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+# Test only. Adds fault hooks to the C++ side (allocation on the audio path,
+# exceptions, a counted `operator new`). Never enable it in a shipped build.
+test-faults = []
+
+[dependencies]
+openplugin = { workspace = true }
+cxx = "=1.0.198"
+
+[build-dependencies]
+cxx-build = "=1.0.198"
+
+[dev-dependencies]
+openplugin-testing = { workspace = true }

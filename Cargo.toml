@@ -13,6 +13,7 @@ members = [
     "examples/editor",
     "examples/design_editor",
     "examples/perf_guide",
+    "examples/cpp_bridge",
 ]
 resolver = "2"
 
