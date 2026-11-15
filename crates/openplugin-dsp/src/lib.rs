@@ -22,6 +22,8 @@
 //! - [`ModDelay`], [`Interpolation`]: fractional, per-sample modulated delay (Hermite, Lagrange, Thiran allpass).
 //! - [`Lfo`]: sine, triangle, saw, square, sample-and-hold and smoothed random, free-running or locked to the host [`openplugin_core::Transport`].
 //! - [`Chorus`], [`Flanger`], [`Phaser`]: modulation effect building blocks.
+//! - [`utility`]: mid/side, width, pan laws, balance, polarity, smoothed dB gain, [`DenormalGuard`].
+//! - [`TruePeakMeter`], [`Ppm`] (EBU, DIN, Nordic, BBC), [`KMeter`], [`VuIec`], [`EbuMeter`], and the lock-free [`scope_feed`] for correlation and goniometer.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 
 pub mod adaa;
@@ -44,6 +46,7 @@ pub mod gain_comp;
 pub mod gain_computer;
 pub mod lfo;
 pub mod linear_phase;
+pub mod kmeter;
 pub mod loudness;
 pub mod matched;
 pub mod meter;
@@ -55,11 +58,15 @@ pub mod partitioned;
 pub mod phaser;
 pub mod pcm;
 pub mod pitch;
+pub mod ppm;
+pub mod true_peak;
 pub mod rate;
+pub mod scope;
 pub mod saturation;
 pub mod svf;
+pub mod utility;
 pub mod voice;
-pub mod true_peak;
+pub mod true_peak_meter;
 pub mod spectrum;
 pub mod stft;
 pub mod window;
@@ -90,10 +97,18 @@ pub use gain_comp::GainComp;
 pub use interp::{group_delay, phase_delay, Interpolation};
 pub use lfo::{Feel, Lfo, LfoRate, LfoShape, NoteDivision};
 pub use linear_phase::{LinearPhaseOversampler, OversampleError};
-pub use loudness::{KWeighting, Loudness, LoudnessMatch};
 pub use matched::{MatchedBiquad, MatchedKind};
-pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuMeter};
 pub use moddelay::{Glide, ModDelay};
+pub use kmeter::{KMeter, KScale, KZone};
+pub use loudness::{bs1770_weight, EbuMeter, EbuScale, KWeighting, Loudness, LoudnessMatch, Target};
+pub use ppm::{Ppm, PpmType};
+pub use scope::{scope_feed, ScopeFrame, ScopeReader, ScopeWriter, SCOPE_POINTS};
+pub use true_peak_meter::TruePeakMeter;
+pub use utility::{
+    balance_gains, db_to_gain, gain_to_db, ms_decode, ms_encode, polarity, stereo_width, DenormalGuard, Gain,
+    PanLaw, Panner,
+};
+pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuIec, VuMeter};
 pub use musical::{
     ms_from_samples, ms_per_beat, samples_from_ms, samples_from_ticks, samples_per_beat,
 };

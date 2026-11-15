@@ -14,9 +14,34 @@
 //!   signal at the loudness of a reference (the plugin's input), measured
 //!   over a sliding K-weighted window, gated, clamped, and glided.
 //!
-//! Channel weights are 1 for every channel (mono, left, right). Nothing here
-//! allocates after `new`, and nothing panics on non-finite input (it counts
-//! as silence).
+//! # Channel weights
+//!
+//! [`Loudness::new`] measures two channels (or one) at weight 1. For a
+//! surround bus, [`Loudness::for_layout`] or [`Loudness::with_roles`] weights
+//! each channel by its role ([`bs1770_weight`]): ITU-R BS.1770-4, table 3 and
+//! equation (2), gives 1.0 to L, R and C, 1.41 (+1.5 dB) to Ls and Rs, and
+//! leaves the LFE out; roles are the `SURROUND_*` ids of
+//! `openplugin_core::layout`, never channel indices. BS.1770-4 does not
+//! assign weights to side/back pairs or heights. Choices made here and not
+//! from the Recommendation: the 7.1 side and back surrounds and the 6.1 back
+//! centre take the surround weight 1.41 (they are surround channels); height
+//! channels and the wide fronts take 1.0. The weight multiplies the mean
+//! square of the K-weighted channel (power), as in equation (2).
+//!
+//! # EBU Mode
+//!
+//! [`Loudness`] also provides what EBU Tech 3341 (v4, 2023) asks of an EBU
+//! Mode meter: momentary (400 ms, ungated), short-term (3 s, ungated),
+//! integrated (gated), maximum momentary and short-term, the loudness range of
+//! EBU Tech 3342 (v4, 2023) ([`Loudness::loudness_range_lu`]), and
+//! start/pause ([`Loudness::set_integrating`]) and reset of the integrated
+//! value and the range together. Momentary and short-term are evaluated every
+//! 10 ms, so maxima are exact to 10 ms (tests 13 and 14 of Tech 3341 need
+//! 20 ms). [`EbuMeter`] wraps this with the +9 and +18 scales and the
+//! relative (LU) readouts. [`Target`] lists named loudness targets.
+//!
+//! Nothing here allocates after `new`, and nothing panics on non-finite input
+//! (it counts as silence).
 
 /// Below every gate: what a meter reports with no signal.
 pub const SILENCE_LUFS: f32 = f32::NEG_INFINITY;
@@ -117,21 +142,28 @@ impl KWeighting {
     }
 }
 
-/// K-weighted energy summed over channels, collected in 100 ms steps.
+/// K-weighted energy summed over channels, collected in fixed steps.
 #[derive(Clone, Debug)]
 struct Steps {
-    filters: [KWeighting; 2],
+    filters: Vec<KWeighting>,
+    weights: Vec<f64>,
     step_len: usize,
     in_step: usize,
     acc: f64,
 }
 
 impl Steps {
+    /// Stereo, weight 1, 100 ms steps (the loudness-match path).
     fn new(sample_rate: f32) -> Self {
+        Self::with_config(sample_rate, 0.1, &[1.0, 1.0])
+    }
+
+    fn with_config(sample_rate: f32, step_seconds: f64, weights: &[f64]) -> Self {
         let fs = rate_of(sample_rate);
         Self {
-            filters: [KWeighting::new(sample_rate), KWeighting::new(sample_rate)],
-            step_len: (fs * 0.1).round().max(1.0) as usize,
+            filters: weights.iter().map(|_| KWeighting::new(sample_rate)).collect(),
+            weights: weights.to_vec(),
+            step_len: (fs * step_seconds).round().max(1.0) as usize,
             in_step: 0,
             acc: 0.0,
         }
@@ -145,12 +177,14 @@ impl Steps {
         self.acc = 0.0;
     }
 
-    /// Feed one frame. Returns the mean energy of a finished 100 ms step.
+    /// Feed one frame. Returns the mean energy of a finished step.
     #[inline]
     fn push(&mut self, channels: &[&[f32]], frame: usize) -> Option<f64> {
-        for (filter, channel) in self.filters.iter_mut().zip(channels.iter().take(2)) {
+        for ((filter, weight), channel) in self.filters.iter_mut().zip(self.weights.iter()).zip(channels.iter()) {
             let y = filter.process(channel.get(frame).copied().unwrap_or(0.0));
-            self.acc += y * y;
+            if *weight != 0.0 {
+                self.acc += weight * y * y;
+            }
         }
         self.in_step += 1;
         if self.in_step < self.step_len {
@@ -205,56 +239,36 @@ const HIST_LOW: f64 = ABSOLUTE_GATE_LUFS;
 const HIST_HIGH: f64 = 10.0;
 const BINS: usize = ((HIST_HIGH - HIST_LOW) / BIN_LU) as usize;
 
-/// Momentary, short-term and integrated loudness of one stereo (or mono) bus.
+/// BS.1770-4 channel weight for a `SURROUND_*` role (or `ROLE_MONO`).
+/// See the module documentation for what is from the Recommendation.
+pub fn bs1770_weight(role: u8) -> f64 {
+    use openplugin_core::layout::*;
+    match role {
+        SURROUND_LFE => 0.0,
+        SURROUND_BL | SURROUND_BR | SURROUND_SL | SURROUND_SR | SURROUND_BC => 1.41,
+        _ => 1.0,
+    }
+}
+
+/// A histogram of loudness values in 0.1 LU bins above the absolute gate,
+/// with the energy per bin for the relative gate.
 #[derive(Clone, Debug)]
-pub struct Loudness {
-    steps: Steps,
-    window: Window,
-    /// Gating blocks per 0.1 LU bin above the absolute gate, and their energy.
+struct Histogram {
     counts: Box<[u64]>,
     energies: Box<[f64]>,
 }
 
-impl Loudness {
-    pub fn new(sample_rate: f32) -> Self {
-        Self {
-            steps: Steps::new(sample_rate),
-            window: Window::new(30),
-            counts: vec![0; BINS].into_boxed_slice(),
-            energies: vec![0.0; BINS].into_boxed_slice(),
-        }
+impl Histogram {
+    fn new() -> Self {
+        Self { counts: vec![0; BINS].into_boxed_slice(), energies: vec![0.0; BINS].into_boxed_slice() }
     }
 
-    pub fn reset(&mut self) {
-        self.steps.reset();
-        self.window.reset();
+    fn clear(&mut self) {
         self.counts.fill(0);
         self.energies.fill(0.0);
     }
 
-    /// Restart the integrated measurement only.
-    pub fn reset_integrated(&mut self) {
-        self.counts.fill(0);
-        self.energies.fill(0.0);
-    }
-
-    /// Feed a block: one slice per channel (one or two are read), all the same length.
-    pub fn push(&mut self, channels: &[&[f32]]) {
-        let frames = channels.first().map(|c| c.len()).unwrap_or(0);
-        for frame in 0..frames {
-            if let Some(energy) = self.steps.push(channels, frame) {
-                self.window.push(energy);
-                // A 400 ms gating block ends every 100 ms (75 % overlap).
-                if self.window.filled >= 4 {
-                    if let Some(block) = self.window.mean(4) {
-                        self.gate_block(block);
-                    }
-                }
-            }
-        }
-    }
-
-    fn gate_block(&mut self, energy: f64) {
+    fn add(&mut self, energy: f64) {
         let lufs = lufs_of(energy);
         if lufs.is_nan() || lufs < HIST_LOW {
             return;
@@ -262,6 +276,176 @@ impl Loudness {
         let bin = (((lufs - HIST_LOW) / BIN_LU) as usize).min(BINS - 1);
         self.counts[bin] += 1;
         self.energies[bin] += energy;
+    }
+
+    /// First bin at or above the relative gate `gate_lu` below the mean.
+    fn first_bin(&self, gate_lu: f64) -> Option<usize> {
+        let (count, energy) =
+            self.counts.iter().zip(self.energies.iter()).fold((0u64, 0.0f64), |(c, e), (n, x)| (c + n, e + x));
+        if count == 0 {
+            return None;
+        }
+        let threshold = lufs_of(energy / count as f64) + gate_lu;
+        Some(if threshold <= HIST_LOW { 0 } else { (((threshold - HIST_LOW) / BIN_LU).ceil() as usize).min(BINS) })
+    }
+
+    /// Gated mean loudness (BS.1770 integrated), `None` if nothing passes.
+    fn gated_mean(&self, gate_lu: f64) -> Option<f64> {
+        let first = self.first_bin(gate_lu)?;
+        let (count, energy) = self.counts[first..]
+            .iter()
+            .zip(self.energies[first..].iter())
+            .fold((0u64, 0.0f64), |(c, e), (n, x)| (c + n, e + x));
+        if count == 0 {
+            None
+        } else {
+            Some(lufs_of(energy / count as f64))
+        }
+    }
+
+    /// EBU Tech 3342 loudness range: 95th minus 10th percentile above the
+    /// -20 LU relative gate (`round((n-1) p/100)` as in its reference code).
+    fn range(&self) -> Option<f64> {
+        let first = self.first_bin(LRA_GATE_LU)?;
+        let n: u64 = self.counts[first..].iter().sum();
+        if n == 0 {
+            return None;
+        }
+        let pick = |percent: f64| -> f64 {
+            let k = ((n - 1) as f64 * percent / 100.0).round() as u64;
+            let mut seen = 0u64;
+            for (offset, &c) in self.counts[first..].iter().enumerate() {
+                seen += c;
+                if seen > k {
+                    return HIST_LOW + (first + offset) as f64 * BIN_LU + BIN_LU * 0.5;
+                }
+            }
+            HIST_HIGH
+        };
+        Some(pick(95.0) - pick(10.0))
+    }
+}
+
+/// Relative gate of the loudness range, EBU Tech 3342.
+pub const LRA_GATE_LU: f64 = -20.0;
+
+/// Momentary, short-term, integrated loudness, range and maxima of one bus.
+///
+/// Evaluated every 10 ms (windows of 400 ms and 3 s). Integrated loudness
+/// gates 400 ms blocks every 100 ms (75 % overlap); the range uses the 3 s
+/// values every 100 ms.
+#[derive(Clone, Debug)]
+pub struct Loudness {
+    steps: Steps,
+    window: Window,
+    step_count: u64,
+    running_steps: u64,
+    integrated: Histogram,
+    range: Histogram,
+    integrating: bool,
+    max_momentary: f64,
+    max_short: f64,
+}
+
+const STEP_SECONDS: f64 = 0.01;
+const MOMENTARY_STEPS: usize = 40;
+const SHORT_STEPS: usize = 300;
+const GATE_EVERY: u64 = 10;
+
+impl Loudness {
+    /// Two channels (or one) at weight 1.
+    pub fn new(sample_rate: f32) -> Self {
+        Self::from_weights(sample_rate, &[1.0, 1.0])
+    }
+
+    fn from_weights(sample_rate: f32, weights: &[f64]) -> Self {
+        Self {
+            steps: Steps::with_config(sample_rate, STEP_SECONDS, weights),
+            window: Window::new(SHORT_STEPS),
+            step_count: 0,
+            running_steps: 0,
+            integrated: Histogram::new(),
+            range: Histogram::new(),
+            integrating: true,
+            max_momentary: 0.0,
+            max_short: 0.0,
+        }
+    }
+
+    /// Weight channels by role, in channel order (see [`bs1770_weight`]).
+    pub fn with_roles(sample_rate: f32, roles: &[u8]) -> Self {
+        let weights: Vec<f64> = roles.iter().map(|&r| bs1770_weight(r)).collect();
+        Self::from_weights(sample_rate, &weights)
+    }
+
+    /// A meter for an SDK layout with a speaker map (including `Mono` and `Stereo`).
+    pub fn for_layout(sample_rate: f32, layout: openplugin_core::SpeakerLayout) -> Option<Self> {
+        Some(Self::with_roles(sample_rate, crate::downmix::roles_of(layout)?))
+    }
+
+    /// Clear everything, filters and maxima included.
+    pub fn reset(&mut self) {
+        self.steps.reset();
+        self.window.reset();
+        self.step_count = 0;
+        self.reset_integrated();
+        self.reset_max();
+    }
+
+    /// Restart the integrated measurement and the loudness range together
+    /// (Tech 3341, 2.2), keeping the 3 s window and the maxima.
+    pub fn reset_integrated(&mut self) {
+        self.integrated.clear();
+        self.range.clear();
+        self.running_steps = 0;
+    }
+
+    /// Forget the maximum momentary and short-term values.
+    pub fn reset_max(&mut self) {
+        self.max_momentary = 0.0;
+        self.max_short = 0.0;
+    }
+
+    /// Running (`true`, default) or stand-by (`false`): in stand-by the
+    /// momentary and short-term values and maxima still follow the input, but
+    /// the integrated value and the range hold (Tech 3341, 2.2).
+    pub fn set_integrating(&mut self, running: bool) {
+        self.integrating = running;
+    }
+
+    pub fn is_integrating(&self) -> bool {
+        self.integrating
+    }
+
+    /// Feed a block: one slice per channel, all the same length. Channels
+    /// beyond the meter's channel count are ignored.
+    pub fn push(&mut self, channels: &[&[f32]]) {
+        let frames = channels.first().map(|c| c.len()).unwrap_or(0);
+        for frame in 0..frames {
+            let Some(energy) = self.steps.push(channels, frame) else { continue };
+            self.window.push(energy);
+            self.step_count += 1;
+            let momentary = if self.window.filled >= MOMENTARY_STEPS { self.window.mean(MOMENTARY_STEPS) } else { None };
+            let short = if self.window.filled >= SHORT_STEPS { self.window.mean(SHORT_STEPS) } else { None };
+            if let Some(m) = momentary {
+                self.max_momentary = self.max_momentary.max(m);
+            }
+            if let Some(sh) = short {
+                self.max_short = self.max_short.max(sh);
+            }
+            if self.integrating {
+                self.running_steps += 1;
+                // A 400 ms gating block ends every 100 ms (75 % overlap).
+                if self.step_count % GATE_EVERY == 0 {
+                    if let Some(m) = momentary {
+                        self.integrated.add(m);
+                    }
+                    if let Some(sh) = short {
+                        self.range.add(sh);
+                    }
+                }
+            }
+        }
     }
 
     fn report(energy: Option<f64>) -> f32 {
@@ -273,33 +457,41 @@ impl Loudness {
 
     /// 400 ms loudness, LUFS.
     pub fn momentary_lufs(&self) -> f32 {
-        if self.window.filled < 4 {
+        if self.window.filled < MOMENTARY_STEPS {
             return SILENCE_LUFS;
         }
-        Self::report(self.window.mean(4))
+        Self::report(self.window.mean(MOMENTARY_STEPS))
     }
 
     /// 3 s loudness, LUFS. Reads over what is there until 3 s have passed.
     pub fn short_term_lufs(&self) -> f32 {
-        Self::report(self.window.mean(30))
+        Self::report(self.window.mean(SHORT_STEPS))
     }
 
     /// Gated loudness since the last reset, LUFS.
     pub fn integrated_lufs(&self) -> f32 {
-        let (count, energy) = self.counts.iter().zip(self.energies.iter()).fold((0u64, 0.0f64), |(c, e), (n, x)| (c + n, e + x));
-        if count == 0 {
-            return SILENCE_LUFS;
-        }
-        let threshold = lufs_of(energy / count as f64) + RELATIVE_GATE_LU;
-        let first = if threshold <= HIST_LOW { 0 } else { (((threshold - HIST_LOW) / BIN_LU).ceil() as usize).min(BINS) };
-        let (count, energy) = self.counts[first..]
-            .iter()
-            .zip(self.energies[first..].iter())
-            .fold((0u64, 0.0f64), |(c, e), (n, x)| (c + n, e + x));
-        if count == 0 {
-            return SILENCE_LUFS;
-        }
-        lufs_of(energy / count as f64) as f32
+        self.integrated.gated_mean(RELATIVE_GATE_LU).map_or(SILENCE_LUFS, |v| v as f32)
+    }
+
+    /// Loudness range (EBU Tech 3342), LU; 0 until there is data.
+    pub fn loudness_range_lu(&self) -> f32 {
+        self.range.range().map_or(0.0, |v| v as f32)
+    }
+
+    /// Tech 3341 asks a meter to flag the range as unsettled for the first
+    /// 60 s of a measurement: `true` once 60 s have run since the last reset.
+    pub fn range_settled(&self) -> bool {
+        self.running_steps >= 6_000
+    }
+
+    /// Largest momentary loudness since `reset_max`, LUFS.
+    pub fn max_momentary_lufs(&self) -> f32 {
+        Self::report(Some(self.max_momentary))
+    }
+
+    /// Largest short-term loudness (full 3 s windows only) since `reset_max`.
+    pub fn max_short_term_lufs(&self) -> f32 {
+        Self::report(Some(self.max_short))
     }
 }
 
@@ -464,6 +656,174 @@ impl LoudnessMatch {
                 *s = if s.is_finite() { *s * gain } else { 0.0 };
             }
         }
+    }
+}
+
+/// The two display scales of EBU Tech 3341 (2.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EbuScale {
+    /// -18 LU to +9 LU (-41 to -14 LUFS at the -23 LUFS target). The default.
+    Plus9,
+    /// -36 LU to +18 LU (-59 to -5 LUFS).
+    Plus18,
+}
+
+impl EbuScale {
+    /// `(low, high)` in LU.
+    pub fn range_lu(self) -> (f32, f32) {
+        match self {
+            Self::Plus9 => (-18.0, 9.0),
+            Self::Plus18 => (-36.0, 18.0),
+        }
+    }
+}
+
+/// A named loudness target.
+///
+/// The values are as the documents state them: EBU R 128 (v4, 2020):
+/// programme loudness -23.0 LUFS, permitted deviation +/- 0.5 LU (+/- 1.0 LU
+/// for live programmes), maximum true-peak level -1 dBTP. ATSC A/85:2013:
+/// -24 LKFS +/- 2 dB, true peak at most -2 dBTP. Streaming targets (EBU R 128
+/// s1, AES TD1004) are left out: their values are not stated here because
+/// they could not be checked against the documents.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Target {
+    pub name: &'static str,
+    pub loudness_lufs: f32,
+    pub tolerance_lu: f32,
+    pub max_true_peak_dbtp: f32,
+}
+
+impl Target {
+    pub const EBU_R128: Self =
+        Self { name: "EBU R 128", loudness_lufs: -23.0, tolerance_lu: 0.5, max_true_peak_dbtp: -1.0 };
+    pub const ATSC_A85: Self =
+        Self { name: "ATSC A/85", loudness_lufs: -24.0, tolerance_lu: 2.0, max_true_peak_dbtp: -2.0 };
+
+    pub const ALL: [Self; 2] = [Self::EBU_R128, Self::ATSC_A85];
+
+    /// Whether an integrated reading and a true peak meet the target.
+    pub fn met_by(&self, integrated_lufs: f32, true_peak_dbtp: f32) -> bool {
+        (integrated_lufs - self.loudness_lufs).abs() <= self.tolerance_lu && true_peak_dbtp <= self.max_true_peak_dbtp
+    }
+}
+
+/// An EBU Mode meter (EBU Tech 3341): loudness, range, maxima and true peak,
+/// with relative (LU) and absolute (LUFS) readouts on the +9 or +18 scale.
+#[derive(Clone, Debug)]
+pub struct EbuMeter {
+    loudness: Loudness,
+    true_peak: crate::true_peak_meter::TruePeakMeter,
+    channels: usize,
+    target_lufs: f32,
+    scale: EbuScale,
+}
+
+impl EbuMeter {
+    /// Channels by role, in channel order; target -23 LUFS, `+9` scale.
+    pub fn new(sample_rate: f32, roles: &[u8]) -> Self {
+        Self {
+            loudness: Loudness::with_roles(sample_rate, roles),
+            true_peak: crate::true_peak_meter::TruePeakMeter::new(sample_rate, roles.len()),
+            channels: roles.len(),
+            target_lufs: -23.0,
+            scale: EbuScale::Plus9,
+        }
+    }
+
+    /// Stereo.
+    pub fn stereo(sample_rate: f32) -> Self {
+        Self::new(sample_rate, &[openplugin_core::layout::SURROUND_FL, openplugin_core::layout::SURROUND_FR])
+    }
+
+    pub fn set_target(&mut self, target: Target) {
+        self.target_lufs = target.loudness_lufs;
+    }
+
+    pub fn set_scale(&mut self, scale: EbuScale) {
+        self.scale = scale;
+    }
+
+    pub fn scale(&self) -> EbuScale {
+        self.scale
+    }
+
+    /// The loudness meter underneath (maxima, running state, and so on).
+    pub fn loudness(&self) -> &Loudness {
+        &self.loudness
+    }
+
+    pub fn loudness_mut(&mut self) -> &mut Loudness {
+        &mut self.loudness
+    }
+
+    pub fn push(&mut self, channels: &[&[f32]]) {
+        self.loudness.push(channels);
+        for (i, ch) in channels.iter().take(self.channels).enumerate() {
+            self.true_peak.process(i, ch);
+        }
+    }
+
+    /// Start (`true`) or pause the integrated value and the range.
+    pub fn set_running(&mut self, running: bool) {
+        self.loudness.set_integrating(running);
+    }
+
+    /// Reset integrated loudness, range and maximum true peak together.
+    pub fn reset(&mut self) {
+        self.loudness.reset_integrated();
+        self.true_peak.reset_max();
+    }
+
+    fn rel(&self, lufs: f32) -> f32 {
+        if lufs.is_finite() {
+            lufs - self.target_lufs
+        } else {
+            f32::NEG_INFINITY
+        }
+    }
+
+    pub fn momentary_lufs(&self) -> f32 {
+        self.loudness.momentary_lufs()
+    }
+    pub fn short_term_lufs(&self) -> f32 {
+        self.loudness.short_term_lufs()
+    }
+    pub fn integrated_lufs(&self) -> f32 {
+        self.loudness.integrated_lufs()
+    }
+    /// Relative readouts, LU re the target.
+    pub fn momentary_lu(&self) -> f32 {
+        self.rel(self.momentary_lufs())
+    }
+    pub fn short_term_lu(&self) -> f32 {
+        self.rel(self.short_term_lufs())
+    }
+    pub fn integrated_lu(&self) -> f32 {
+        self.rel(self.integrated_lufs())
+    }
+    pub fn max_momentary_lufs(&self) -> f32 {
+        self.loudness.max_momentary_lufs()
+    }
+    pub fn max_short_term_lufs(&self) -> f32 {
+        self.loudness.max_short_term_lufs()
+    }
+    pub fn loudness_range_lu(&self) -> f32 {
+        self.loudness.loudness_range_lu()
+    }
+    /// Maximum true peak of all channels since `reset`, dBTP.
+    pub fn max_true_peak_dbtp(&self) -> f32 {
+        self.true_peak.max_all_dbtp()
+    }
+
+    /// Where a relative reading falls on the selected scale: 0 at the bottom,
+    /// 1 at the top, clamped; `None` for silence.
+    pub fn scale_position(&self, lu: f32) -> Option<f32> {
+        if !lu.is_finite() {
+            return None;
+        }
+        let (low, high) = self.scale.range_lu();
+        Some(((lu - low) / (high - low)).clamp(0.0, 1.0))
     }
 }
 

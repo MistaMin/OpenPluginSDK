@@ -3,6 +3,8 @@
 //! [`MeterBank`] is the stereo quasi-peak / VU / RMS / gain-reduction bank from
 //! Water Channel. 0 VU is a steady -18 dBFS sine (peak-amplitude convention).
 //! These are engineering ballistics, not an IEC or ANSI certification.
+//! [`VuMeter`] is a one-pole 300 ms approximation and does not meet the
+//! 300 ms-to-99 % rise of IEC 60268-17; [`VuIec`] does (second-order needle).
 //! Gain reduction must come from the compressor envelope. It is not estimated
 //! from the input/output ratio.
 
@@ -51,6 +53,100 @@ impl VuMeter {
             -100.0
         } else {
             20.0 * self.envelope.log10()
+        }
+    }
+}
+
+/// A VU meter after IEC 60268-17 (and ANSI C16.5): the needle is a
+/// second-order mechanical system driven by the rectified signal.
+///
+/// The standard asks that a steady tone starting from rest bring the needle
+/// to 99 % of its final reading in 300 ms, with an overshoot of 1 % to
+/// 1.5 %. [`VuMeter`] above is a one-pole of 300 ms time constant, which
+/// takes about 1.4 s to reach 99 % and has no overshoot, so it does not meet
+/// that; it is kept as it was. `VuIec` models the needle as
+/// `H(s) = wn^2 / (s^2 + 2 z wn s + wn^2)` with damping `z = 0.8107`
+/// (overshoot `exp(-pi z / sqrt(1 - z^2))` = 1.3 %) and `wn` set at
+/// construction so the step response first crosses 99 % at 300 ms. It is
+/// discretised with the bilinear transform. The input is the full-wave
+/// rectified (average-responding) signal scaled by `pi / (2 sqrt 2)`, so a
+/// steady sine reads its RMS, the VU convention.
+#[derive(Clone, Debug)]
+pub struct VuIec {
+    b: [f64; 3],
+    a: [f64; 2],
+    z: [f64; 2],
+    y: f64,
+}
+
+/// Time (in units of 1 / wn) at which a second-order step response with
+/// damping `zeta` first reaches `fraction` of its final value.
+fn second_order_rise(zeta: f64, fraction: f64) -> f64 {
+    let wd = (1.0 - zeta * zeta).sqrt();
+    let step = |t: f64| 1.0 - (-zeta * t).exp() * ((wd * t).cos() + zeta / wd * (wd * t).sin());
+    let (mut lo, mut hi) = (0.0f64, std::f64::consts::PI / wd); // first peak is at pi/wd
+    for _ in 0..80 {
+        let mid = 0.5 * (lo + hi);
+        if step(mid) < fraction {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+impl VuIec {
+    /// Damping giving a 1.3 % overshoot.
+    pub const DAMPING: f64 = 0.8107;
+    /// Seconds to 99 % of a steady tone's reading.
+    pub const RISE_SECONDS: f64 = 0.3;
+
+    pub fn new(sample_rate: f32) -> Self {
+        let fs = f64::from(crate::rate::effective_rate(sample_rate));
+        let zeta = Self::DAMPING;
+        let wn = second_order_rise(zeta, 0.99) / Self::RISE_SECONDS;
+        // Bilinear: s = 2 fs (1 - z^-1) / (1 + z^-1).
+        let k = 2.0 * fs;
+        let a0 = k * k + 2.0 * zeta * wn * k + wn * wn;
+        let b0 = wn * wn / a0;
+        Self {
+            b: [b0, 2.0 * b0, b0],
+            a: [(2.0 * wn * wn - 2.0 * k * k) / a0, (k * k - 2.0 * zeta * wn * k + wn * wn) / a0],
+            z: [0.0; 2],
+            y: 0.0,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.z = [0.0; 2];
+        self.y = 0.0;
+    }
+
+    /// One sample; returns the needle position (linear, RMS-calibrated).
+    #[inline]
+    pub fn next(&mut self, x: f32) -> f32 {
+        let rect = if x.is_finite() { f64::from(x.abs()) } else { 0.0 } * (std::f64::consts::PI / (2.0 * std::f64::consts::SQRT_2));
+        let y = self.b[0] * rect + self.z[0];
+        self.z[0] = self.b[1] * rect - self.a[0] * y + self.z[1];
+        self.z[1] = self.b[2] * rect - self.a[1] * y;
+        self.y = y;
+        y as f32
+    }
+
+    pub fn process(&mut self, block: &[f32]) -> f32 {
+        for &x in block {
+            self.next(x);
+        }
+        self.y as f32
+    }
+
+    /// Needle position in dB re full scale, floor -100.
+    pub fn level_db(&self) -> f32 {
+        if self.y <= 1e-5 {
+            -100.0
+        } else {
+            (20.0 * self.y.log10()) as f32
         }
     }
 }
@@ -395,5 +491,60 @@ mod bank_tests {
         let readings = meters.readings();
         assert!((readings.input_peak[0] - readings.input_rms[0] - 3.0103).abs() < 0.02);
         assert!((readings.input_rms[0] - readings.output_rms[0] - 6.0206).abs() < 0.02);
+    }
+}
+
+#[cfg(test)]
+mod vu_iec_tests {
+    use super::*;
+
+    /// IEC 60268-17: 99 % of the final reading in 300 ms, overshoot 1 % to 1.5 %.
+    #[test]
+    fn needle_rises_in_300_ms_with_about_one_percent_overshoot() {
+        for rate in [44_100.0f32, 48_000.0, 96_000.0] {
+            let mut vu = VuIec::new(rate);
+            let mut peak = 0.0f32;
+            let mut t99 = None;
+            let total = (rate * 3.0) as usize;
+            // A rectified constant is the step the standard describes; the
+            // calibration scale pi / (2 sqrt 2) is divided out.
+            let drive = (2.0 * std::f64::consts::SQRT_2 / std::f64::consts::PI) as f32;
+            let mut last = 0.0;
+            for n in 0..total {
+                last = vu.next(drive);
+                peak = peak.max(last);
+                if t99.is_none() && last >= 0.99 {
+                    t99 = Some(n as f32 / rate);
+                }
+            }
+            let t99 = t99.expect("never reached 99 %");
+            assert!((t99 - 0.3).abs() < 0.01, "{rate} Hz: 99 % at {t99} s");
+            assert!((last - 1.0).abs() < 1e-3, "settles at 1.0, got {last}");
+            let overshoot = (peak - 1.0) * 100.0;
+            assert!((1.0..=1.5).contains(&overshoot), "{rate} Hz: overshoot {overshoot} %");
+        }
+    }
+
+    #[test]
+    fn a_steady_sine_reads_its_rms() {
+        let rate = 48_000.0f32;
+        let mut vu = VuIec::new(rate);
+        let mut last = 0.0;
+        for n in 0..(rate as usize * 2) {
+            last = vu.next((std::f32::consts::TAU * 1000.0 * n as f32 / rate).sin());
+        }
+        let rms = 1.0 / std::f32::consts::SQRT_2;
+        assert!((last - rms).abs() < 0.005, "{last}");
+    }
+
+    /// The legacy meter does not meet the standard; recorded so the reason
+    /// for `VuIec` stays on the page.
+    #[test]
+    fn the_one_pole_vu_meter_is_too_slow_for_iec() {
+        let rate = 48_000.0f32;
+        let mut vu = VuMeter::new();
+        vu.set_sample_rate(rate);
+        vu.process_samples(&vec![1.0; (rate * 0.3) as usize]);
+        assert!(vu.level_db() < -0.2, "one-pole is at 63 % at 300 ms, not 99 %");
     }
 }
