@@ -52,6 +52,7 @@ Each option has an environment variable (shown in `--help`), so a plugin can kee
 | `--standalone-bin` | The plugin's bin that runs standalone. Required for `standalone` |
 | `--features` | cargo features for the plugin crate |
 | `--editor`, `--tail`, `--aax-pages` | Maps to `OP_EDITOR`, `OP_TAIL` and `OP_AAX_PAGES` in the shells. Off by default |
+| `--pkg` | Also build an installer package, `<out>/<Name>-<version>.pkg` (see Installer package). `OP_PKG=1` |
 | `--archs` | `arm64`, `x86_64` or `universal`. Default: the host's |
 | `--deployment-target` | Minimum macOS version. Default 11.0 |
 | `--vst3-sdk`, `--au-sdk`, `--aax-sdk` | SDK checkouts, or `VST3_SDK`, `AU_SDK`, `AAX_SDK`. Each is needed only for its own format. They are never copied into the output |
@@ -79,6 +80,33 @@ scripts/build_plugin.sh --dry-run --manifest-path examples/editor/Cargo.toml ...
 
 The AAX bundle links the Avid SDK and is not redistributable as source. The VST3 bundle carries the VST3 SDK licence file and the AAX bundle the AAX one, as the shells' CMake does.
 
+## Installer package
+
+`--pkg` (or `OP_PKG=1`) makes `build_plugin.sh` call `scripts/make_pkg.sh` after the bundles are signed. It wraps the formats that were built, and only those, in a macOS installer:
+
+- One component package per format, from `pkgbuild`, each with its own identifier (`<bundle-id>.pkg.<format>`) and bundles marked not relocatable, so a plug-in always lands in its folder.
+- One distribution package, from `productbuild`, with a Distribution XML in which the user ticks the formats to install.
+
+| Format | Install location |
+|---|---|
+| CLAP | `/Library/Audio/Plug-Ins/CLAP` |
+| LV2 | `/Library/Audio/Plug-Ins/LV2` |
+| VST3 | `/Library/Audio/Plug-Ins/VST3` |
+| Audio Unit | `/Library/Audio/Plug-Ins/Components` |
+| AAX | `/Library/Application Support/Avid/Audio/Plug-Ins` |
+| Standalone app | `/Applications` |
+
+Signing is read from the environment, like the rest of the script:
+
+| Variable | Effect |
+|---|---|
+| `INSTALLER_IDENTITY` | A `Developer ID Installer: ...` identity. The component and distribution packages are signed with it and a secure timestamp. Unset: the package is unsigned, the script says so, and macOS will warn when it is opened |
+| `NOTARY_PROFILE` | With `--pkg`, the distribution package is also submitted with `notarytool`, waited for, stapled and validated. Needs `INSTALLER_IDENTITY` (and `CODESIGN_IDENTITY`, as for the bundles) |
+
+`make_pkg.sh` also runs on its own over a folder of bundles (`scripts/make_pkg.sh --help`). Its staging folder is `<work-dir>/pkg`; it deletes only paths inside it and refuses an empty one. Every path is quoted, so folders with spaces work. The script only builds and signs packages: it never runs `installer`, opens a package or uses `sudo`.
+
+`scripts/test_pkg.sh --work-dir DIR` builds the example plugin with `--pkg`, expands the package with `pkgutil --expand-full` into the work folder and checks, for every format, that the component package exists, installs into the right folder, is not relocatable, has a choice in the Distribution XML, and holds the bundle in its payload. Nothing is installed. It needs `VST3_SDK`, `AU_SDK` and `AAX_SDK` for those formats, or `--formats clap,lv2`.
+
 ## Checks run on the example
 
 On 15 November 2026, `examples/editor` was built for every format with `--archs arm64` and no signing identity. Then, independently of the script:
@@ -89,4 +117,6 @@ On 15 November 2026, `examples/editor` was built for every format with `--archs 
 - No binary contained a build, workspace, SDK or home path, and the LV2 library's install name was `@loader_path/ExampleGain.dylib`.
 - A `--archs universal` build of the CLAP and LV2 produced an `x86_64 arm64` binary that passed the same `clap-validator` run.
 
-Not covered: the standalone path (the example has no standalone binary), real Developer ID signing, notarisation and PACE signing (shown with `--dry-run` only), and Intel hardware.
+- `--pkg` on the example, every format except standalone, from a work folder under `/Volumes/Developer 2/...` (a space in the path), unsigned: `scripts/test_pkg.sh` passed, with all five bundles in their component packages at the install locations above.
+
+Not covered: installing the package, a signed or notarised package (shown with `make_pkg.sh --dry-run` only), the standalone path (the example has no standalone binary), real Developer ID signing, notarisation and PACE signing (shown with `--dry-run` only), and Intel hardware.
