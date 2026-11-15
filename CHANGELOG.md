@@ -12,6 +12,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 
 ### Added
 
+- `openplugin_dsp::downmix`: `Downmix` folds any SDK layout with a speaker map (Mono, Stereo, LCR, Quad, 5.0, 5.1, 6.1, 7.1, 7.1.4) to stereo or mono by channel role, and `Upmix` spreads stereo to any layout. 5.x to stereo follows ITU-R BS.775-3 and ATSC A/52 (centre and surrounds at -3 dB, LFE dropped). 6.1, 7.1 and height folds are documented choices, not standards. Centre, surround, height and LFE levels in dB at run time, optional peak normalisation, a precomputed matrix, and no allocation in `process`.
 - `op_shell_save_state` and `op_shell_load_state` in the shell ABI. They carry the parameters and the plugin's own chunk (`Plugin::save_state` / `load_state`) in one blob, all or nothing. `OP_SHELL_ABI` stays 1; nothing existing changed. The VST3 shell carries the blob in its component state (a trailer after the version 1 fields), the Audio Unit in its class-info dictionary (key `OpenPluginState`), and AAX in state chunk version 2; states written by earlier versions still load.
 - `openplugin_ffi::STATE_WAIT` (two seconds) and `FfiInstance::try_save_bytes`, the bounded form of `save_bytes`.
 - VST3: a `kIsBypass` host bypass parameter. VST3, the Audio Unit and AAX bypass by delaying the dry signal by the reported latency with a 10 ms crossfade, and the plugin keeps running. CLAP's `PARAM_IS_BYPASS` reaches `Plugin::set_host_bypass`.
