@@ -5,7 +5,7 @@
 # The proofs load the SDK example (examples/editor, "Example Gain"). Build and
 # run them from the repository root; the SDK checkouts stay outside this tree:
 #
-#   CARGO_BUILD_JOBS=2 cargo build --release --lib -p example-editor
+#   CARGO_BUILD_JOBS=2 cargo build --release --lib -p example-editor -p example-role-tags
 #   cmake -S native -B build-shell -DCMAKE_BUILD_TYPE=Release \
 #     -DOP_RUST_LIB="$PWD/target/release/libexample_editor.a" \
 #     -DOP_VST3_SDK=/path/to/vst3sdk \
@@ -19,6 +19,8 @@
 #   ctest --test-dir build-shell --output-on-failure
 #
 # OP_TAIL=ON is what makes vst3_proof and au_proof exercise the tail report.
+# The channel order proofs (vst3_roles_proof, au_roles_proof, aax_roles_proof) load
+# Role Tags (examples/role_tags) instead; without its library they are not built.
 cmake_minimum_required(VERSION 3.20)
 project(OpenPluginShell LANGUAGES C CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 17)
@@ -62,9 +64,33 @@ if(NOT EXISTS "${OP_RUST_LIB}")
   message(FATAL_ERROR "OP_RUST_LIB must be the built static library")
 endif()
 
+# The channel order proof (0.6 task 8) links Role Tags (examples/role_tags) in place of
+# the example: build it with `cargo build --release --lib -p example-role-tags`. When
+# OP_ROLE_LIB is not given, libexample_role_tags.a next to OP_RUST_LIB is used if it
+# is there; without it the role proofs are not built (and say so).
+set(OP_ROLE_LIB "" CACHE FILEPATH "Rust static library of examples/role_tags, for the role proofs")
+if(NOT OP_ROLE_LIB)
+  get_filename_component(OP_RUST_LIB_DIR "${OP_RUST_LIB}" DIRECTORY)
+  if(EXISTS "${OP_RUST_LIB_DIR}/libexample_role_tags.a")
+    set(OP_ROLE_LIB "${OP_RUST_LIB_DIR}/libexample_role_tags.a")
+  endif()
+endif()
+if(OP_ROLE_LIB AND EXISTS "${OP_ROLE_LIB}")
+  set(OP_ROLE_PROOFS ON)
+  message(STATUS "Role proofs over ${OP_ROLE_LIB}")
+else()
+  set(OP_ROLE_PROOFS OFF)
+  message(STATUS "Role proofs not built: no libexample_role_tags.a (cargo build --release --lib -p example-role-tags)")
+endif()
+
+# Links the Rust library: OP_RUST_LIB, or the archive given as the second argument.
 function(op_link_rust target_name)
+  set(rust_lib "${OP_RUST_LIB}")
+  if(ARGC GREATER 1)
+    set(rust_lib "${ARGV1}")
+  endif()
   target_link_libraries(${target_name} PRIVATE
-    "${OP_RUST_LIB}"
+    "${rust_lib}"
     "-framework CoreFoundation"
     "-framework Foundation"
     "-framework Security"
@@ -244,6 +270,30 @@ if(OP_BUILD_VST3)
     add_test(NAME vst3_noalloc_events_proof COMMAND VST3NoAllocProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Events>")
     add_dependencies(VST3NoAllocProof OpenPluginVST3Events)
     add_test(NAME vst3_events_proof COMMAND VST3EventsProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Events>" "$<TARGET_BUNDLE_DIR:OpenPluginVST3Synth>" "$<TARGET_BUNDLE_DIR:OpenPluginVST3Notes>")
+    # Channel order proof: the shell over Role Tags, every layout from mono to 9.1.6.
+    if(OP_ROLE_PROOFS)
+      set(OP_PRODUCT_SAVED "${OP_PRODUCT}")
+      set(OP_PRODUCT "Role Tags")
+      configure_file(vst3/Info.plist.in "${CMAKE_BINARY_DIR}/vst3-roles-Info.plist" @ONLY)
+      set(OP_PRODUCT "${OP_PRODUCT_SAVED}")
+      add_library(OpenPluginVST3Roles MODULE
+        vst3/OpenPluginVST3.cpp
+        "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
+      target_include_directories(OpenPluginVST3Roles PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+      set_target_properties(OpenPluginVST3Roles PROPERTIES
+        OUTPUT_NAME "Role Tags"
+        BUNDLE TRUE
+        BUNDLE_EXTENSION vst3
+        PREFIX ""
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-roles-Info.plist")
+      target_link_libraries(OpenPluginVST3Roles PRIVATE sdk)
+      op_link_rust(OpenPluginVST3Roles "${OP_ROLE_LIB}")
+      add_executable(VST3RolesProof vst3/roles_host.cpp)
+      target_include_directories(VST3RolesProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+      target_link_libraries(VST3RolesProof PRIVATE sdk "-framework CoreFoundation")
+      add_dependencies(VST3RolesProof OpenPluginVST3Roles)
+      add_test(NAME vst3_roles_proof COMMAND VST3RolesProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Roles>")
+    endif()
   endif()
   if(OP_EDITOR)
     # The editor in the VST3 shell. OP_EDITOR_PROOF_CLICK is "x;y;param":
@@ -492,6 +542,38 @@ if(OP_BUILD_AU)
       "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeFx>" "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeInst>"
       "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeMidiFx>" "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeNewer>"
       "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeOlder>")
+    # Channel order proof: the shell over Role Tags, every layout from mono to 9.1.6.
+    if(OP_ROLE_PROOFS)
+      function(op_au_roles_plist)
+        set(OP_PRODUCT "RoleTags")
+        set(OP_BUNDLE_ID "com.opengrid.test.roletags")
+        set(OP_VERSION "1")
+        set(OP_MANUFACTURER "OpenPlugin")
+        set(OP_AU_SUBTYPE "RlTg")
+        set(OP_AU_MANUFACTURER "OpTs")
+        set(OP_AU_TYPE "aufx")
+        configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-roles-Info.plist" @ONLY)
+      endfunction()
+      op_au_roles_plist()
+      add_library(OpenPluginAURoles MODULE au/OpenPluginAU.cpp)
+      op_au_set_type(OpenPluginAURoles aufx)
+      target_compile_features(OpenPluginAURoles PRIVATE cxx_std_23)
+      target_include_directories(OpenPluginAURoles PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+      set_target_properties(OpenPluginAURoles PROPERTIES
+        OUTPUT_NAME "RoleTags"
+        BUNDLE TRUE
+        BUNDLE_EXTENSION component
+        PREFIX ""
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-roles-Info.plist")
+      target_link_libraries(OpenPluginAURoles PRIVATE openplugin_au_sdk)
+      op_link_rust(OpenPluginAURoles "${OP_ROLE_LIB}")
+      add_executable(AURolesProof au/roles_host.cpp)
+      target_compile_features(AURolesProof PRIVATE cxx_std_23)
+      target_include_directories(AURolesProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/au")
+      target_link_libraries(AURolesProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+      add_dependencies(AURolesProof OpenPluginAURoles)
+      add_test(NAME au_roles_proof COMMAND AURolesProof "$<TARGET_BUNDLE_DIR:OpenPluginAURoles>")
+    endif()
   endif()
 endif()
 
@@ -629,6 +711,14 @@ if(OP_BUILD_AAX)
   target_include_directories(AAXTextStubProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
   target_compile_definitions(AAXTextStubProof PRIVATE OP_STUB_PARAMS=4 OP_STUB_LATENCY=0 OP_STUB_TEXT=1 OP_TEXT_STUB=1)
   target_link_libraries(AAXTextStubProof PRIVATE openplugin_aax_sdk)
+  # Channel order proof: the process callback over Role Tags, every layout from mono to 9.1.6.
+  if(OP_ROLE_PROOFS)
+    add_executable(AAXRolesProof aax/host_roles.cpp aax/OpenPluginAAXProcess.cpp)
+    target_include_directories(AAXRolesProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+    target_link_libraries(AAXRolesProof PRIVATE openplugin_aax_sdk)
+    op_link_rust(AAXRolesProof "${OP_ROLE_LIB}")
+    add_test(NAME aax_roles_proof COMMAND AAXRolesProof)
+  endif()
   add_executable(AAXBundleProof aax/host_bundle.cpp)
   target_link_libraries(AAXBundleProof PRIVATE "-framework CoreFoundation")
   add_dependencies(AAXBundleProof OpenPluginAAX)

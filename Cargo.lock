@@ -202,6 +202,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-role-tags"
+version = "0.3.1-beta"
+dependencies = [
+ "openplugin",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"

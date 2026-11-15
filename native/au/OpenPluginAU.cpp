@@ -136,6 +136,9 @@ struct MidiOutTarget {
 // How a block's channels are laid out, decided at Initialize.
 struct Plan {
     uint32_t layout = 0;
+    // The layout is selected on the new engine (op_shell_set_layout). False only for the
+    // one-channel engine of a plugin with no mono layout, which runs as it did on ABI 1.
+    bool select = true;
     uint32_t inChannels = 0;
     uint32_t outChannels = 0;
     uint32_t scChannels = 0;
@@ -439,7 +442,9 @@ public:
             lastError_.store(kAudioUnitErr_FormatNotSupported, std::memory_order_relaxed);
             return kAudioUnitErr_FormatNotSupported;
         }
-        if (!layouts_.empty() && op_shell_layout_selected(engine_) != plan.layout && !op_shell_set_layout(engine_, plan.layout)) {
+        // Always selected, layout 0 included: a new engine reports layout 0 but has not been
+        // prepared for it (the plugin saw only prepare with one or two channels).
+        if (!layouts_.empty() && plan.select && !op_shell_set_layout(engine_, plan.layout)) {
             destroy();
             lastError_.store(kAudioUnitErr_FormatNotSupported, std::memory_order_relaxed);
             return kAudioUnitErr_FormatNotSupported;
@@ -762,6 +767,7 @@ private:
         if (plan.outChannels == 1 && (!hasMainIn_ || plan.inChannels == 1)) {
             plan.scChannels = 0;
             plan.layout = 0;
+            plan.select = false;
             return true;
         }
         return false;

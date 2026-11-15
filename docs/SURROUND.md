@@ -77,4 +77,4 @@ A fold layout is surround in, stereo out (`IoConfig { input: Surround51, output:
 - parameters, state, latency and tail; layouts are pooled and refuse what they do not list;
 - the conformance kit passes (linked, with fold layouts), and `process` does not allocate in any mode.
 
-Not covered yet: the VST3, Audio Unit and AAX shell tables for the surround layouts (roadmap 0.6 task 8 follow-ups), so "in every format" waits on those.
+The shell tables are done: every surround layout the adapter publishes (5.0, 5.1, 7.1, 7.1.4, 5.1.4) has a VST3 arrangement, Audio Unit tags and an AAX stem, and CLAP names all of them; the channel order proof (roadmap 0.6 task 8, `examples/role_tags`, `docs/SHELL.md` Proof) shows every role at its index through each. LV2 runs stereo only. Not covered yet: the adapter itself through the shells, and its fold layouts (surround in, stereo out), which the role proof does not declare; so "in every format" is not claimed.
