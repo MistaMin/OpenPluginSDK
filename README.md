@@ -247,6 +247,8 @@ What counts as a breaking change, and how versions and deprecations work: [docs/
 
 Every public item with a keep, rename, hide or remove recommendation for the 1.0 freeze: [docs/API_REVIEW.md](docs/API_REVIEW.md).
 
+Guides for plugin developers: testing a plugin with the conformance kit and the benchmark harness, [docs/TESTING_PLUGINS.md](docs/TESTING_PLUGINS.md); making it cheap (real-time rules, denormals, vectorising, fast approximations, oversampling cost, with measured before/after examples), [docs/PERFORMANCE.md](docs/PERFORMANCE.md); and keeping it from breaking (stable filters, NaN policy, panics, threads, host behaviours, soak and fuzz, with the test that enforces each rule), [docs/STABILITY.md](docs/STABILITY.md). The measured examples are in [`examples/perf_guide`](examples/perf_guide).
+
 ---
 
 ## License

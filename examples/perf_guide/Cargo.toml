@@ -1,0 +1,20 @@
+[package]
+name = "example-perf-guide"
+description = "Measured examples for docs/PERFORMANCE.md and docs/STABILITY.md, run with the SDK's bench harness and conformance kit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "perf_guide"
+
+[[bin]]
+name = "perf_guide"
+path = "src/main.rs"
+
+[dependencies]
+openplugin-core = { workspace = true }
+openplugin-dsp = { workspace = true }
+openplugin-testing = { path = "../../crates/openplugin-testing" }

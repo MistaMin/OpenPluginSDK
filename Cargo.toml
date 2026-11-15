@@ -12,6 +12,7 @@ members = [
     "examples/console_eq",
     "examples/editor",
     "examples/design_editor",
+    "examples/perf_guide",
 ]
 resolver = "2"
 
