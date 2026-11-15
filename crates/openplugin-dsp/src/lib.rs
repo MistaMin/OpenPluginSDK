@@ -66,7 +66,6 @@ pub mod true_peak;
 pub mod rate;
 pub mod scope;
 pub mod plate;
-pub mod rate;
 mod reverb_common;
 pub mod saturation;
 pub mod svf;
