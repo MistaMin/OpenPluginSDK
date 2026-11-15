@@ -64,7 +64,15 @@ int main(int argc, char** argv) {
     proof_text_of(unit, kMode, &nan, &ok);
     CHECK(!ok);
     CHECK(!proof_value_strings(unit, 77, &labels));
+    // The stand-in has no parameter groups: no parameter is in a clump and no clump has a name,
+    // exactly as before groups existed.
+    for (UInt32 id : {kLevel, kSwitch, kMode, kSteps}) CHECK((info(id).flags & kAudioUnitParameterFlag_HasClump) == 0 && info(id).clumpID == 0);
+    AudioUnitParameterNameInfo clump{};
+    clump.inID = 1;
+    clump.inDesiredLength = kAudioUnitParameterName_Full;
+    UInt32 clumpSize = sizeof(clump);
+    CHECK(AudioUnitGetProperty(unit, kAudioUnitProperty_ParameterClumpName, kAudioUnitScope_Global, 0, &clump, &clumpSize) != noErr);
     CHECK(AudioComponentInstanceDispose(unit) == noErr);
-    std::puts("AU text proof: choice labels (indexed), toggle labels, dB text and typed values through the plug-in, stepped numbers not indexed, bad requests refused: PASS");
+    std::puts("AU text proof: choice labels (indexed), toggle labels, dB text and typed values through the plug-in, stepped numbers not indexed, bad requests refused, no clumps without groups: PASS");
     return 0;
 }

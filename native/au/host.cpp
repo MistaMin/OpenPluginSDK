@@ -65,6 +65,71 @@ static void check_parameters(AudioUnit unit) {
         CHECK(std::fabs(value - desc.default_plain) < 1e-5);
     }
 }
+static std::string abi_group(uint32_t index) {
+    char buf[512];
+    const size_t length = op_shell_param_group(index, buf, sizeof(buf));
+    CHECK(length < sizeof(buf));
+    return std::string(buf, length);
+}
+static std::string utf8_of(CFStringRef text) {
+    char buf[1024] = {};
+    CHECK(text && CFStringGetCString(text, buf, sizeof(buf), kCFStringEncodingUTF8));
+    return buf;
+}
+// What the host reads for clump `id` asking for at most `length` characters (0: the full name).
+static OSStatus clump_name(AudioUnit unit, UInt32 id, SInt32 length, std::string& out) {
+    AudioUnitParameterNameInfo request{};
+    request.inID = id;
+    request.inDesiredLength = length;
+    UInt32 size = sizeof(request);
+    const OSStatus status = AudioUnitGetProperty(unit, kAudioUnitProperty_ParameterClumpName, kAudioUnitScope_Global, 0, &request, &size);
+    if (status == noErr) {
+        out = utf8_of(request.outName);
+        CFRelease(request.outName);
+    }
+    return status;
+}
+// Parameter groups (ABI 5) as clumps: one clump per distinct group path, numbered from 1 in the
+// order the groups first appear, named by the whole path; a top-level parameter has no clump.
+// A plugin without groups has no clump flags and no clump names, as before groups existed.
+static void check_clumps(AudioUnit unit) {
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
+    std::vector<std::string> expected;
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        const std::string group = abi_group(i);
+        AudioUnitParameterInfo host{};
+        UInt32 hostSize = sizeof(host);
+        CHECK(AudioUnitGetProperty(unit, kAudioUnitProperty_ParameterInfo, kAudioUnitScope_Global, i, &host, &hostSize) == noErr);
+        if (group.empty()) {
+            CHECK((host.flags & kAudioUnitParameterFlag_HasClump) == 0);
+            CHECK(host.clumpID == 0);
+            continue;
+        }
+        auto known = std::find(expected.begin(), expected.end(), group);
+        if (known == expected.end()) known = expected.insert(expected.end(), group);
+        CHECK((host.flags & kAudioUnitParameterFlag_HasClump) != 0);
+        CHECK(host.clumpID == static_cast<UInt32>(known - expected.begin()) + 1);
+        std::printf("AU parameter %u \"%s\": clump %u\n", i, host.name, static_cast<unsigned>(host.clumpID));
+    }
+    for (size_t n = 0; n < expected.size(); ++n) {
+        const UInt32 id = static_cast<UInt32>(n) + 1;
+        std::string name;
+        CHECK(clump_name(unit, id, kAudioUnitParameterName_Full, name) == noErr);
+        CHECK(name == expected[n]);
+        // A short name is the last name of the path, cut to the length asked for.
+        const size_t slash = expected[n].rfind('/');
+        const std::string last = slash == std::string::npos ? expected[n] : expected[n].substr(slash + 1);
+        std::string shortName;
+        CHECK(clump_name(unit, id, 3, shortName) == noErr);
+        CHECK(shortName == (expected[n].size() <= 3 ? expected[n] : last.substr(0, 3)));
+        std::printf("AU clump %u: \"%s\" (3 characters: \"%s\")\n", static_cast<unsigned>(id), name.c_str(), shortName.c_str());
+    }
+    std::string none;
+    CHECK(clump_name(unit, static_cast<UInt32>(expected.size()) + 1, kAudioUnitParameterName_Full, none) != noErr);
+    CHECK(clump_name(unit, kAudioUnitClumpID_System, kAudioUnitParameterName_Full, none) != noErr);
+    std::printf("AU clumps: %zu, read back by ID and name\n", expected.size());
+}
 // The Audio Unit shows the plug-in's own parameter text (op_shell_param_format / op_shell_param_parse),
 // not the number: the example's Gain at +6 dB reads what ParamInfo::format gives, a typed "6 dB"
 // reads 6.0, and the toggle reads its labels.
@@ -164,6 +229,7 @@ int main(int argc, char** argv) {
         CHECK(reference.instance);
         AudioUnit unit = proof_make_unit(component, channels);
         check_parameters(unit);
+        check_clumps(unit);
         const int gainId = find_param(unit, "Gain");
         const int warmId = find_param(unit, "Warm");
         CHECK(gainId >= 0 && warmId >= 0);

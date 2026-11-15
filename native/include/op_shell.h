@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 4,
+    OP_SHELL_ABI = 5,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -244,6 +244,19 @@ enum {
 // when delivered; 0 for a NULL instance, or when it gave up and delivered
 // nothing. Safe to call while the audio thread is inside op_shell_process.
 uint32_t op_shell_set_track_info(void* instance, const char* name_utf8, uint32_t rgba, uint32_t flags);
+
+// ---- ABI 5: parameter groups -----------------------------------------------
+// The group parameter `index` is listed under: names separated by '/',
+// outermost first ("Filter/Envelope"), "" for the top level. Writes it to
+// `buf` as UTF-8 with a NUL (room for `cap` bytes) and returns the length of
+// the whole path in bytes, not counting the NUL; it was cut when that is
+// >= `cap`. A cut falls on a UTF-8 boundary and the NUL is always written
+// when `buf` is set and `cap` > 0; `buf` NULL with `cap` 0 asks for the
+// length. An unknown `index` returns 0 and writes an empty string. A path is
+// at most 255 bytes, no name in it is empty, and no name starts or ends with
+// a space. No instance needed; any thread, no allocation after the first
+// descriptor read.
+size_t op_shell_param_group(uint32_t index, char* buf, size_t cap);
 
 #if OP_HAS_TAIL
 // Optional, with -DOP_TAIL=ON: how long the output rings after the input

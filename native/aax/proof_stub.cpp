@@ -402,6 +402,11 @@ int op_shell_param_parse(uint32_t index, const char* text, double* out_plain) {
 #endif
     return 1;
 }
+// ---- ABI 5: parameter groups. None: every parameter is top level. ----
+size_t op_shell_param_group(uint32_t, char* buf, size_t cap) {
+    if (buf && cap) buf[0] = '\0';
+    return 0;
+}
 #if OP_HAS_TAIL
 double op_shell_tail_seconds(void*) { return 0.0; }
 #endif

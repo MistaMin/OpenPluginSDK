@@ -15,7 +15,7 @@ use openplugin_core::{
 use crate::{FfiInstance, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
-pub const ABI: u32 = 4;
+pub const ABI: u32 = 5;
 pub use crate::block::{
     OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
     EVENT_PARAM_NORMALIZED, EVENT_PARAM_PLAIN, MAX_EVENTS, MAX_MIDI_OUT, TRANSPORT_HAS_BEATS,
@@ -598,6 +598,16 @@ pub unsafe fn param_format<P: Plugin + Default>(index: u32, plain: f64, buf: *mu
     .ok()
     .flatten()
     .unwrap_or_default();
+    unsafe { copy_text(&text, buf, cap) }
+}
+
+/// Copies `text` and a NUL into `buf` (room for `cap` bytes), cut on a UTF-8
+/// boundary, and returns `text.len()`. Writes nothing when `buf` is NULL or
+/// `cap` is 0.
+///
+/// # Safety
+/// `buf` is null or points to `cap` writable bytes.
+unsafe fn copy_text(text: &str, buf: *mut u8, cap: usize) -> usize {
     if !buf.is_null() && cap > 0 {
         let mut count = text.len().min(cap - 1);
         while !text.is_char_boundary(count) {
@@ -609,6 +619,28 @@ pub unsafe fn param_format<P: Plugin + Default>(index: u32, plain: f64, buf: *mu
         }
     }
     text.len()
+}
+
+// ---- ABI 5: parameter groups ----------------------------------------------
+
+/// The group path of parameter `index` (`ParamInfo::host_group`: names
+/// separated by `/`, outermost first, `""` for the top level and for a path
+/// `check_group` refuses) as UTF-8 plus a NUL in `buf` (room for `cap`
+/// bytes). Returns the length of the whole path in bytes, not counting the
+/// NUL; it was cut when that is `cap` or more. A cut falls on a UTF-8
+/// boundary and the NUL is always written when `buf` is set and `cap > 0`.
+/// `buf` NULL with `cap` 0 asks for the length. An unknown `index` (or a
+/// panic) returns 0 and writes an empty string. Does not allocate after the
+/// first descriptor read; any thread.
+///
+/// # Safety
+/// `buf` is null or points to `cap` writable bytes.
+pub unsafe fn param_group<P: Plugin + Default>(index: u32, buf: *mut u8, cap: usize) -> usize {
+    let group = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        plugin_info::<P>().params.get(index as usize).map_or("", |param| param.host_group())
+    }))
+    .unwrap_or("");
+    unsafe { copy_text(group, buf, cap) }
 }
 
 /// Reads `text` (NUL-terminated UTF-8) as a value of parameter `index`
@@ -997,9 +1029,9 @@ mod tests {
     static CHOICES: [&str; 3] = ["Raum", "Größe ✓", "Plate"];
     static PARAMS: [ParamInfo; 4] = [
         ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),
-        ParamInfo::new("freq", "Freq", 20.0, 20_000.0, 1_000.0, Unit::Hz).with_taper(Taper::Log),
-        ParamInfo::new("mode", "Mode", 0.0, 2.0, 0.0, Unit::Choice).with_choices(&CHOICES),
-        ParamInfo::new("warm", "Warm", 0.0, 1.0, 0.0, Unit::Toggle),
+        ParamInfo::new("freq", "Freq", 20.0, 20_000.0, 1_000.0, Unit::Hz).with_taper(Taper::Log).with_group("Filter"),
+        ParamInfo::new("mode", "Mode", 0.0, 2.0, 0.0, Unit::Choice).with_choices(&CHOICES).with_group("Filter/Größe"),
+        ParamInfo::new("warm", "Warm", 0.0, 1.0, 0.0, Unit::Toggle).with_group("Filter//Bad"),
     ];
 
     static INFO: PluginInfo = PluginInfo {
@@ -1082,7 +1114,7 @@ mod tests {
 
     #[test]
     fn track_info_crosses_the_abi_and_reaches_the_plugin() {
-        assert_eq!(ABI, 4);
+        const { assert!(ABI >= 4, "set_track_info is ABI 4") };
         let instance = create::<Tracked>(48_000.0, 64, 2);
         assert!(!instance.is_null());
         // Name, colour as 0xRRGGBBAA and the kind bits arrive as given.
@@ -1236,6 +1268,32 @@ mod tests {
             buf.fill(0xAA);
             param_format::<Gain>(2, 1.0, buf.as_mut_ptr(), 4);
             assert_eq!(&buf[..4], &[b'G', b'r', 0, 0xAA]);
+        }
+    }
+
+    #[test]
+    fn param_group_reports_the_path_and_truncates_on_a_utf8_boundary() {
+        let group = |index: u32| {
+            let mut buf = [0xAAu8; 64];
+            let n = unsafe { param_group::<Gain>(index, buf.as_mut_ptr(), buf.len()) };
+            assert_eq!(buf[n], 0, "NUL after the path");
+            String::from_utf8(buf[..n].to_vec()).unwrap()
+        };
+        assert_eq!(group(0), "", "no group is the top level");
+        assert_eq!(group(1), "Filter");
+        assert_eq!(group(2), "Filter/Größe");
+        assert_eq!(group(3), "", "an invalid path is the top level");
+        unsafe {
+            // "Filter/Größe" is 14 bytes; ö is two bytes at 9..11.
+            assert_eq!(param_group::<Gain>(2, std::ptr::null_mut(), 0), 14);
+            let mut buf = [0xAAu8; 16];
+            assert_eq!(param_group::<Gain>(2, buf.as_mut_ptr(), 0), 14);
+            assert_eq!(buf[0], 0xAA, "cap 0 writes nothing");
+            assert_eq!(param_group::<Gain>(2, buf.as_mut_ptr(), 11), 14);
+            assert_eq!(&buf[..10], b"Filter/Gr\0", "the cut does not split the two bytes of ö");
+            assert_eq!(param_group::<Gain>(9, buf.as_mut_ptr(), buf.len()), 0);
+            assert_eq!(buf[0], 0, "an unknown index writes an empty string");
+            assert_eq!(param_group::<Gain>(u32::MAX, std::ptr::null_mut(), 0), 0);
         }
     }
 

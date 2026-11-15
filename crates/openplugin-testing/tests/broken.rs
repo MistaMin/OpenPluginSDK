@@ -8,6 +8,10 @@ openplugin_testing::install_allocator!();
 
 static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, Unit::None)];
 
+/// The same parameter in a group path no host can show (an empty name).
+static BAD_GROUP_PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, Unit::None).with_group("Filter//Env")];
+static BAD_GROUP_INFO: PluginInfo = PluginInfo { params: &BAD_GROUP_PARAMS, ..INFO };
+
 static INFO: PluginInfo = PluginInfo {
     id: "test.faulty",
     name: "Faulty",
@@ -33,6 +37,7 @@ enum Fault {
     NeverDecays,
     PoisonedByNan,
     Slow(u32),
+    BadGroup,
 }
 
 struct Faulty {
@@ -52,7 +57,11 @@ impl Faulty {
 
 impl Plugin for Faulty {
     fn info(&self) -> &'static PluginInfo {
-        &INFO
+        if self.fault == Fault::BadGroup {
+            &BAD_GROUP_INFO
+        } else {
+            &INFO
+        }
     }
     fn prepare(&mut self, _: f32, _: usize, _: usize) {
         self.calls = 0;
@@ -236,6 +245,15 @@ fn lying_latency_fails_latency_when_measured() {
     let report = run(Fault::LatencyLies, Options::quick());
     assert!(report.passed(), "{report}");
     only_with(Fault::LatencyLies, Check::Latency, Options { verify_latency_by_impulse: true, ..Options::quick() });
+}
+
+#[test]
+fn an_invalid_group_path_fails_param_fuzz() {
+    only(Fault::BadGroup, Check::ParamFuzz);
+    let report = run(Fault::BadGroup, Options::quick());
+    let failure = report.result(Check::ParamFuzz).first_failure.clone().expect("a failure");
+    assert_eq!(failure.case, "param-groups");
+    assert!(failure.message.contains("Filter//Env") && failure.message.contains("EmptyName"), "{}", failure.message);
 }
 
 #[test]

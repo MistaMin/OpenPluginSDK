@@ -32,10 +32,13 @@ use openplugin::dri::goodlookindri::{meters, switches};
 use openplugin::dri::{draw_faceplate_code, draw_knob_code, Area, Control, ControlKind, ControlSet, SceneCanvas};
 use openplugin::prelude::*;
 
+// Two groups, one nested in the other, so every format shows them: CLAP module
+// paths, LV2 port groups, VST3 units, Audio Unit clumps and AAX pages.
 static PARAMS: [ParamInfo; 2] = [
-    ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),
-    ParamInfo::new("warm", "Warm", 0.0, 1.0, 0.0, Unit::Toggle),
+    ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db).with_group("Output"),
+    ParamInfo::new("warm", "Warm", 0.0, 1.0, 0.0, Unit::Toggle).with_group("Output/Colour"),
 ];
+const _: () = assert!(openplugin::core::groups_valid(&PARAMS));
 
 pub static INFO: PluginInfo = PluginInfo {
     id: "com.opengrid.example.editor-gain",

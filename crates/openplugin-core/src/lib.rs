@@ -124,6 +124,110 @@ pub enum Taper {
     Log,
 }
 
+/// Separates the names in a [`ParamInfo::group`] path.
+pub const GROUP_SEPARATOR: char = '/';
+/// Longest [`ParamInfo::group`] path, in bytes.
+pub const GROUP_MAX_BYTES: usize = 255;
+
+/// Why [`check_group`] refused a group path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GroupError {
+    /// A name is empty: the path starts or ends with `/`, or has `//`.
+    EmptyName,
+    /// A name starts or ends with a space (`"Filter / Envelope"`).
+    UntrimmedName,
+    /// A control character (below U+0020, or U+007F) is in the path.
+    ControlCharacter,
+    /// The path is longer than [`GROUP_MAX_BYTES`].
+    TooLong,
+}
+
+/// Checks a group path: `""` (the top level), or names separated by `/`,
+/// none empty, none starting or ending with a space, no control characters,
+/// at most [`GROUP_MAX_BYTES`] bytes in all. `const`, so a parameter table
+/// can be checked at build time (see [`groups_valid`]).
+pub const fn check_group(path: &str) -> Result<(), GroupError> {
+    let bytes = path.as_bytes();
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    if bytes.len() > GROUP_MAX_BYTES {
+        return Err(GroupError::TooLong);
+    }
+    let mut start = 0;
+    let mut i = 0;
+    while i <= bytes.len() {
+        if i == bytes.len() || bytes[i] == b'/' {
+            if i == start {
+                return Err(GroupError::EmptyName);
+            }
+            if bytes[start] == b' ' || bytes[i - 1] == b' ' {
+                return Err(GroupError::UntrimmedName);
+            }
+            start = i + 1;
+        } else if bytes[i] < 0x20 || bytes[i] == 0x7f {
+            return Err(GroupError::ControlCharacter);
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Whether every parameter's group passes [`check_group`]. For a build-time
+/// check of a parameter table:
+///
+/// ```
+/// # use openplugin_core::{groups_valid, ParamInfo, Unit};
+/// static PARAMS: [ParamInfo; 2] = [
+///     ParamInfo::new("cutoff", "Cutoff", 20.0, 20_000.0, 1_000.0, Unit::Hz).with_group("Filter"),
+///     ParamInfo::new("attack", "Attack", 0.0, 1.0, 0.01, Unit::Seconds).with_group("Filter/Envelope"),
+/// ];
+/// const _: () = assert!(groups_valid(&PARAMS));
+/// ```
+pub const fn groups_valid(params: &[ParamInfo]) -> bool {
+    let mut i = 0;
+    while i < params.len() {
+        if check_group(params[i].group).is_err() {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Every group path a parameter table uses, each once, parents included and
+/// listed before their children: `"Filter/Envelope"` alone gives `"Filter"`,
+/// then `"Filter/Envelope"`. Paths come in the order their first parameter
+/// is declared. Empty when no parameter has a group. For format entries that
+/// declare groups up front (LV2 `pg:Group`, VST3 units); main thread.
+pub fn group_paths(params: &[ParamInfo]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for param in params {
+        let group = param.host_group();
+        if group.is_empty() {
+            continue;
+        }
+        for (at, _) in group.match_indices(GROUP_SEPARATOR).chain(std::iter::once((group.len(), ""))) {
+            let path = &group[..at];
+            if !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// The parent of a group path (`"Filter"` for `"Filter/Envelope"`), and `""`
+/// for a top-level group. The last name is [`group_name`].
+pub fn group_parent(path: &str) -> &str {
+    path.rfind(GROUP_SEPARATOR).map_or("", |at| &path[..at])
+}
+
+/// The last name of a group path (`"Envelope"` for `"Filter/Envelope"`).
+pub fn group_name(path: &str) -> &str {
+    path.rfind(GROUP_SEPARATOR).map_or(path, |at| &path[at + 1..])
+}
+
 /// Static description of a single plugin parameter.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ParamInfo {
@@ -141,6 +245,12 @@ pub struct ParamInfo {
     pub steps: u32,
     /// Host roles. [`ParamInfo::new`] sets [`ParamFlags::AUTOMATABLE`].
     pub flags: ParamFlags,
+    /// The group a host lists the parameter under: names separated by `/`,
+    /// outermost first (`"Filter/Envelope"`). Empty is the top level. Set it
+    /// with [`ParamInfo::with_group`]; [`check_group`] says what a valid path
+    /// is, and a host is shown an invalid one as the top level.
+    #[serde(skip_serializing_if = "str::is_empty")]
+    pub group: &'static str,
 }
 
 impl ParamInfo {
@@ -163,6 +273,7 @@ impl ParamInfo {
             choices: &[],
             steps: 0,
             flags: ParamFlags::AUTOMATABLE,
+            group: "",
         }
     }
 
@@ -187,6 +298,30 @@ impl ParamInfo {
     pub const fn with_flags(mut self, flags: ParamFlags) -> Self {
         self.flags = flags;
         self
+    }
+
+    /// List the parameter under a group: names separated by `/`, outermost
+    /// first, as in `"Filter/Envelope"`. `""` is the top level. A path that
+    /// [`check_group`] refuses is shown to hosts as the top level; assert
+    /// [`groups_valid`] on the parameter table to catch one at build time.
+    pub const fn with_group(mut self, group: &'static str) -> Self {
+        self.group = group;
+        self
+    }
+
+    /// The group path every format shows: [`Self::group`] when [`check_group`]
+    /// accepts it, otherwise `""` (the top level).
+    pub const fn host_group(&self) -> &'static str {
+        match check_group(self.group) {
+            Ok(()) => self.group,
+            Err(_) => "",
+        }
+    }
+
+    /// The names of [`Self::host_group`], outermost first; none at the top level.
+    pub fn group_names(&self) -> impl Iterator<Item = &'static str> {
+        let group = self.host_group();
+        group.split(GROUP_SEPARATOR).filter(move |_| !group.is_empty())
     }
 
     /// Add one flag. Read-only and not-realtime clear [`ParamFlags::AUTOMATABLE`].
@@ -740,6 +875,65 @@ mod tests {
         assert_eq!(gain.parse("loud"), None);
         assert_eq!(gain.parse("3 parsecs"), None);
         assert_eq!(gain.parse(""), None);
+    }
+
+    #[test]
+    fn group_paths_are_checked() {
+        assert_eq!(check_group(""), Ok(()));
+        assert_eq!(check_group("Filter"), Ok(()));
+        assert_eq!(check_group("Filter/Envelope"), Ok(()));
+        assert_eq!(check_group("Osc 1/Pitch Env"), Ok(()));
+        assert_eq!(check_group("Fülle/Hüllkurve"), Ok(()));
+        for bad in ["/", "/Filter", "Filter/", "Filter//Envelope"] {
+            assert_eq!(check_group(bad), Err(GroupError::EmptyName), "{bad:?}");
+        }
+        for bad in [" Filter", "Filter ", "Filter / Envelope", " "] {
+            assert_eq!(check_group(bad), Err(GroupError::UntrimmedName), "{bad:?}");
+        }
+        for bad in ["Fil\nter", "Filter\0", "Tab\there", "Del\x7f"] {
+            assert_eq!(check_group(bad), Err(GroupError::ControlCharacter), "{bad:?}");
+        }
+        let long = "a".repeat(GROUP_MAX_BYTES);
+        assert_eq!(check_group(&long), Ok(()));
+        assert_eq!(check_group(&format!("{long}a")), Err(GroupError::TooLong));
+    }
+
+    #[test]
+    fn a_parameter_without_a_group_is_top_level_and_an_invalid_group_shows_as_top_level() {
+        let plain = ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db);
+        assert_eq!(plain.group, "");
+        assert_eq!(plain.host_group(), "");
+        assert_eq!(plain.group_names().count(), 0);
+        let nested = plain.clone().with_group("Filter/Envelope");
+        assert_eq!(nested.host_group(), "Filter/Envelope");
+        assert_eq!(nested.group_names().collect::<Vec<_>>(), ["Filter", "Envelope"]);
+        let bad = plain.clone().with_group("Filter//Envelope");
+        assert_eq!(bad.group, "Filter//Envelope");
+        assert_eq!(bad.host_group(), "");
+        assert_eq!(bad.group_names().count(), 0);
+        assert!(groups_valid(&[plain.clone(), nested.clone()]));
+        assert!(!groups_valid(&[plain, bad]));
+    }
+
+    #[test]
+    fn group_paths_list_parents_first_in_declared_order() {
+        let p = |group| ParamInfo::new("p", "P", 0.0, 1.0, 0.0, Unit::None).with_group(group);
+        let params = [p("Osc/Pitch/Env"), p(""), p("Filter"), p("Osc"), p("Osc/Amp"), p("Bad//Path"), p("Filter/Env")];
+        assert_eq!(group_paths(&params), ["Osc", "Osc/Pitch", "Osc/Pitch/Env", "Filter", "Osc/Amp", "Filter/Env"]);
+        assert!(group_paths(&[p(""), p("x//y")]).is_empty());
+        assert_eq!(group_parent("Osc/Pitch/Env"), "Osc/Pitch");
+        assert_eq!(group_parent("Osc"), "");
+        assert_eq!(group_name("Osc/Pitch/Env"), "Env");
+        assert_eq!(group_name("Osc"), "Osc");
+    }
+
+    #[test]
+    fn an_ungrouped_parameter_serializes_as_before() {
+        let plain = ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db);
+        let text = serde_json::to_string(&plain).unwrap();
+        assert!(!text.contains("group"), "{text}");
+        let grouped = serde_json::to_string(&plain.with_group("Out")).unwrap();
+        assert!(grouped.contains("\"group\":\"Out\""), "{grouped}");
     }
 
     #[test]

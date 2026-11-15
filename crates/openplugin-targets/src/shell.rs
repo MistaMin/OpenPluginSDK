@@ -15,7 +15,7 @@
 pub use openplugin_ffi::shell::{
     kind, layout_count, layout_selected, midi_dropped, midi_out, note_ports, process_events,
     set_layout, set_offline, set_track_info, track_info_from_abi, write_layout, OpLayout, OpMidiEvent, OpProcess,
-    create, destroy, editor_state, get_normalized, get_plain, latency, load_state, param_format, param_parse, process,
+    create, destroy, editor_state, get_normalized, get_plain, latency, load_state, param_format, param_group, param_parse, process,
     reset, save_state, set_normalized, set_plain, tail_seconds, to_normalized, to_plain, trace, write_info,
     write_param, OpParamDesc, OpShellInfo, ShellInstance, ABI, AAX_MAX_PARAMS, PARAM_AUTOMATABLE,
     PARAM_DISCRETE, PARAM_LOG, STATE_MAX, STATE_OK, STATE_TOO_SMALL,
@@ -537,6 +537,16 @@ macro_rules! export_shell {
             out_plain: *mut f64,
         ) -> i32 {
             unsafe { $crate::shell::param_parse::<$plugin>(index, text, out_plain) }
+        }
+
+        // ---- ABI 5: parameter groups ----
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_param_group(
+            index: u32,
+            buf: *mut ::std::ffi::c_char,
+            cap: usize,
+        ) -> usize {
+            unsafe { $crate::shell::param_group::<$plugin>(index, buf as *mut u8, cap) }
         }
 
         #[unsafe(no_mangle)]

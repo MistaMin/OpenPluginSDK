@@ -29,6 +29,20 @@ Two host integrations that work from the editor and the host's own services, per
 
 Where the host shows no menu (or declines), the SDK shows its own in every format. The CLAP entry also no longer offers layouts CLAP cannot name: `audio-ports-config` skips any layout whose buses use a role without a `CLAP_SURROUND_*` id (5.1.2, 7.1.2 and 9.1.6, `SpeakerLayout::clap_expressible`), and the `surround` channel map is `SpeakerLayout::clap_map`. Config ids stay the layout's index, so the ids a host sees can skip numbers.
 
+## Parameter groups
+
+`ParamInfo::with_group("Filter/Envelope")` puts a parameter in a group; each format shows it its own way (details and the proofs in [SHELL.md](SHELL.md#parameter-groups-abi-5)):
+
+| Format | Group |
+|---|---|
+| CLAP | `clap_param_info.module`, the path itself |
+| LV2 | `pg:Group` per path, nested with `pg:subGroupOf`; `pg:group` on the control port |
+| VST3 | `IUnitInfo` units nested by path; `ParameterInfo::unitId` |
+| Audio Unit | a clump per path (`kAudioUnitParameterFlag_HasClump`), named by the whole path |
+| AAX | the page table only (`-DOP_AAX_PAGES=ON`): a group keeps to one control surface page where it fits |
+
+A plugin without groups is described as it was before groups existed.
+
 ## Validators in CI
 
 Real host sessions (REAPER and OpenGrid9, scripted) and their results are in [HOST_TESTS.md](HOST_TESTS.md).
