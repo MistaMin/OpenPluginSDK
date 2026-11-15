@@ -134,7 +134,7 @@ Then **0.7.0**.
 
 8. **Universal binaries, proven.** `--archs universal` already joins arm64 and x86_64 with `lipo`, but only the CLAP and LV2 were checked. Build every format universal, the AAX SDK library included, run the x86_64 slice of every proof, the format-parity test and `clap-validator` under Rosetta, and add a CI job that does the same. Owns `scripts/build_plugin.sh`, `native/CMakeLists.txt` architecture settings, CI. Proof: `lipo -archs` lists both slices in every bundle, and every proof passes on each slice.
 
-Status: tasks 1, 2, 4, 5, 6 and 7 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls; 8: every format builds universal and every proof passes on both slices, x86_64 under Rosetta) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
+Status: tasks 1, 2, 4, 5, 6, 7 and 8 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls; 8: every format builds universal and every proof passes on both slices, x86_64 under Rosetta) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
 
 The freeze itself and the crates.io publish are the owner's decisions.
 
