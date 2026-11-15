@@ -2,6 +2,7 @@
 //!
 //! Realtime-safe DSP building blocks:
 //! - [`Biquad`]: Robert Bristow-Johnson cookbook audio filters.
+//! - [`Svf`], [`MatchedBiquad`], [`Butterworth`], [`Crossover`] (Linkwitz-Riley), [`OnePoleFilter`], [`DcBlocker`], [`Allpass1`], [`Allpass2`]: TPT, analog-matched and classic filters (see `docs/DSP_COOKBOOK.md`).
 //! - [`Compressor`]: Log-domain dynamics processor with soft knee.
 //! - [`VuMeter`]: ANSI standard 300 ms ballistic level detector.
 //! - [`MeterBank`]: stereo peak, RMS, PPM, and VU, plus envelope gain reduction.
@@ -18,12 +19,15 @@ pub mod adaa;
 pub mod biquad;
 pub mod bypass;
 pub mod convolve;
+pub mod crossover;
 pub mod delta;
 pub mod delay;
 pub mod dynamics;
+pub mod filters;
 pub mod gain_comp;
 pub mod linear_phase;
 pub mod loudness;
+pub mod matched;
 pub mod meter;
 pub mod musical;
 pub mod oscillator;
@@ -32,6 +36,7 @@ pub mod pcm;
 pub mod pitch;
 pub mod rate;
 pub mod saturation;
+pub mod svf;
 pub mod voice;
 pub mod window;
 
@@ -39,12 +44,18 @@ pub use adaa::{Adaa2Taylor, ResidualAdaa1};
 pub use biquad::{Biquad, FilterType};
 pub use bypass::SoftBypass;
 pub use convolve::BlockConvolver;
+pub use crossover::{Crossover, LinkwitzRiley, LrOrder, MAX_BANDS};
 pub use delta::Delta;
 pub use delay::DelayLine;
 pub use dynamics::Compressor;
+pub use filters::{
+    Allpass1, Allpass2, Butterworth, ButterworthKind, DcBlocker, OnePoleFilter, OnePoleMode,
+    MAX_BUTTERWORTH_ORDER,
+};
 pub use gain_comp::GainComp;
 pub use linear_phase::{LinearPhaseOversampler, OversampleError};
 pub use loudness::{KWeighting, Loudness, LoudnessMatch};
+pub use matched::{MatchedBiquad, MatchedKind};
 pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuMeter};
 pub use musical::{
     ms_from_samples, ms_per_beat, samples_from_ms, samples_from_ticks, samples_per_beat,
@@ -55,5 +66,6 @@ pub use pcm::{f32_to_i16, f32_to_i32, i16_to_f32, i32_to_f32, lerp};
 pub use pitch::{hz_from_midi, midi_from_hz};
 pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
 pub use saturation::{saturate_sample, SaturationMode};
+pub use svf::{Svf, SvfMode};
 pub use voice::{Polyphony, SampleVoice};
 pub use window::{hann, WindowRms};
