@@ -19,10 +19,16 @@ pub const PARAM_IS_HIDDEN: u32 = 1 << 2;
 pub const PARAM_IS_READONLY: u32 = 1 << 3;
 pub const PARAM_IS_BYPASS: u32 = 1 << 4;
 pub const PARAM_IS_AUTOMATABLE: u32 = 1 << 5;
+pub const PARAM_IS_MODULATABLE: u32 = 1 << 10;
+pub const PARAM_IS_MODULATABLE_PER_NOTE_ID: u32 = 1 << 11;
+pub const PARAM_IS_MODULATABLE_PER_KEY: u32 = 1 << 12;
+pub const PARAM_IS_MODULATABLE_PER_CHANNEL: u32 = 1 << 13;
+pub const PARAM_IS_MODULATABLE_PER_PORT: u32 = 1 << 14;
 pub const PARAM_REQUIRES_PROCESS: u32 = 1 << 15;
 pub const CLAP_INVALID_ID: u32 = u32::MAX;
 pub const NOTE_DIALECT_CLAP: u32 = 1 << 0;
 pub const NOTE_DIALECT_MIDI: u32 = 1 << 1;
+pub const NOTE_DIALECT_MIDI_MPE: u32 = 1 << 2;
 pub const TRANSPORT_HAS_TEMPO: u32 = 1 << 0;
 pub const TRANSPORT_HAS_BEATS: u32 = 1 << 1;
 pub const TRANSPORT_HAS_SECONDS: u32 = 1 << 2;
@@ -34,9 +40,12 @@ pub const AMBISONIC_NORMALIZATION_SN3D: u32 = 1;
 
 pub const EVENT_NOTE_ON: u16 = 0;
 pub const EVENT_NOTE_OFF: u16 = 1;
+pub const EVENT_NOTE_CHOKE: u16 = 2;
+pub const EVENT_NOTE_EXPRESSION: u16 = 4;
 pub const EVENT_PARAM_VALUE: u16 = 5;
-pub const EVENT_PARAM_GESTURE_BEGIN: u16 = 6;
-pub const EVENT_PARAM_GESTURE_END: u16 = 7;
+pub const EVENT_PARAM_MOD: u16 = 6;
+pub const EVENT_PARAM_GESTURE_BEGIN: u16 = 7;
+pub const EVENT_PARAM_GESTURE_END: u16 = 8;
 pub const EVENT_MIDI: u16 = 10;
 
 pub const EXT_AUDIO_PORTS: &[u8] = b"clap.audio-ports\0";
@@ -139,6 +148,32 @@ pub struct clap_event_note {
     pub channel: i16,
     pub key: i16,
     pub velocity: f64,
+}
+
+/// `clap_event_note_expression`: `expression_id` is a `CLAP_NOTE_EXPRESSION_*`.
+#[repr(C)]
+pub struct clap_event_note_expression {
+    pub header: clap_event_header,
+    pub expression_id: i32,
+    pub note_id: i32,
+    pub port_index: i16,
+    pub channel: i16,
+    pub key: i16,
+    pub value: f64,
+}
+
+/// `clap_event_param_mod`: `amount` in plain units, for the notes the
+/// `note_id`, `port_index`, `channel` and `key` name (`-1`: any).
+#[repr(C)]
+pub struct clap_event_param_mod {
+    pub header: clap_event_header,
+    pub param_id: u32,
+    pub cookie: *mut c_void,
+    pub note_id: i32,
+    pub port_index: i16,
+    pub channel: i16,
+    pub key: i16,
+    pub amount: f64,
 }
 
 #[repr(C)]

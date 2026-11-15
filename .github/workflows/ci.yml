@@ -286,10 +286,11 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
       # The proofs load the SDK example (examples/editor, "Example Gain"); the role proof
-      # (vst3_roles_proof) loads Role Tags (examples/role_tags), found next to it.
-      - name: Build the example and Role Tags as static libraries
+      # (vst3_roles_proof) loads Role Tags (examples/role_tags) and the expression proof
+      # (vst3_expression_proof) Expression Synth (examples/expression_synth), found next to it.
+      - name: Build the example, Role Tags and Expression Synth as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
       # Only the VST3 shell: no Audio Unit or AAX SDK, no editor.
       - name: Configure the VST3 shell
         working-directory: OpenPluginSDK

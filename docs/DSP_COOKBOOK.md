@@ -1064,6 +1064,30 @@ Choices:
 - The sustain pedal (`set_sustain_pedal`) defers releases; it and `all_notes_off` call back with each voice to release, so nothing allocates.
 - The per-voice state `S` is yours (oscillators, envelope, filter) and is never touched by the allocator.
 
+### Per-note expression on the voices
+
+```rust
+use openplugin_core::{Expression, NoteRef};
+
+// Plugin::note_on_ref / note_off_ref (the host's note id, port, channel, key):
+voices.note_on_ref(note, velocity);
+while voices.note_off_ref(note).released.is_some() {}
+// Plugin::note_expression: reaches the voices whose note `note` names, and no other.
+voices.note_expression(note, expression, value);
+// Plugin::param_modulation for a POLY_MODULATION parameter, into slot 0:
+voices.poly_modulation(note, 0, amount);
+// per sample, per active voice:
+v.advance(1);                                       // glide and expression ramps
+let hz = v.hz();                                    // includes the voice's tuning
+let level = 0.25 + 0.75 * v.expression(Expression::Pressure);
+let tone = v.expression(Expression::Brightness) + v.modulation(0);
+```
+
+- Routing (`NoteRef::matches`, the CLAP wildcard rule): by note id when the event and the voice both have one, else by port, channel and key with `-1` matching anything. MPE gives each note its own channel, so channel and key find it; a key held on two channels is two voices.
+- Each value ramps linearly over `set_expression_smoothing` (5 ms by default) as `advance` runs; one sent before the voice's first sample (at the note-on's own sample, or MPE's initial bend, pressure and CC 74) is taken at once, so the note does not swoop. A new note starts neutral: unity volume, centre pan, no detune, zero for the rest.
+- `NoteExpressions` is the per-voice table on its own, for a voice list of your own; `Polyphony` has `note_on_ref` and `matching` too.
+- The format side (CLAP, VST3, MPE) is in [EXPRESSION.md](EXPRESSION.md); `examples/expression_synth` is a complete synth, proven in every format.
+
 ### Sample playback
 
 ```rust

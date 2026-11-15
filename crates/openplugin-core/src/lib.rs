@@ -13,9 +13,11 @@
 pub mod automation;
 pub mod build;
 pub mod editor;
+pub mod expression;
 pub mod foreign_state;
 pub mod layout;
 pub mod midi;
+pub mod mpe;
 pub mod notify;
 pub mod plane;
 pub mod preset;
@@ -37,6 +39,8 @@ pub use editor::{
     Editor, EditorFactory, EditorHost, EditorState, Frame, Gesture, GestureQueue, ParamMenu,
     ParamMenuAction, ValueMirror,
 };
+pub use expression::{Expression, ExpressionSet, NoteRef};
+pub use mpe::{MpeReceiver, MpeZones};
 pub use notify::HostNotifier;
 pub use plane::{ParamCursor, ParamPlane};
 pub use preset::{Preset, PresetBank};
@@ -734,6 +738,65 @@ pub trait Plugin: Send + 'static {
 
     /// Panic / All Notes Off.
     fn all_notes_off(&mut self) {}
+
+    /// The per-note expressions the plugin reacts to ([`expression`]). The
+    /// default is none, and [`Self::note_expression`] is then never called
+    /// by CLAP or VST3; the VST3 controller offers `INoteExpressionController`
+    /// only for a plugin that lists some. Read once when an instance is made.
+    fn note_expressions(&self) -> ExpressionSet {
+        ExpressionSet::NONE
+    }
+
+    /// MPE over MIDI ([`mpe`]). `Some(zones)` turns the plugin's MIDI input
+    /// into per-note events through an [`MpeReceiver`] starting with these
+    /// zones (an MPE Configuration Message from the controller changes them):
+    /// notes arrive through [`Self::note_on_ref`] and [`Self::note_off_ref`]
+    /// with their channel, and pitch bend, channel pressure and CC 74 as
+    /// [`Expression::Tuning`], [`Expression::Pressure`] and
+    /// [`Expression::Brightness`] through [`Self::note_expression`] (whatever
+    /// [`Self::note_expressions`] says). The default `None` is plain MIDI, as
+    /// before. Read once when an instance is made.
+    fn mpe_input(&self) -> Option<MpeZones> {
+        None
+    }
+
+    /// A note-on with the host's note id where it has one ([`NoteRef`]: id,
+    /// port, channel and key; the port, channel and key are 0 or more). The
+    /// default calls [`Self::note_on_channel`] with the channel (clamped to
+    /// 0..=15) and the key as the entries passed it before note ids existed,
+    /// so a plugin that does not override it sees what it saw before.
+    fn note_on_ref(&mut self, offset: usize, note: NoteRef, velocity: u8) {
+        let channel = note.channel.clamp(0, 15) as u8;
+        self.note_on_channel(offset, channel, note.key as u8, velocity);
+    }
+
+    /// A note-off for a note started by [`Self::note_on_ref`], with its
+    /// release velocity (0..=127). `note` may hold wildcards (`-1`), as a
+    /// CLAP host may send. The default calls [`Self::note_off`] with the key
+    /// as the entries did before (a wildcard key arrives there as 255).
+    fn note_off_ref(&mut self, offset: usize, note: NoteRef, velocity: u8) {
+        let _ = velocity;
+        self.note_off(offset, note.key as u8);
+    }
+
+    /// A per-note expression for the notes `note` names
+    /// ([`NoteRef::matches`]; wildcards reach several), in the units of
+    /// [`Expression::range`], already clamped and never NaN. The value is a
+    /// statement, not a step: it replaces the last one of that expression.
+    /// Called only for expressions in [`Self::note_expressions`] (or the MPE
+    /// three, with [`Self::mpe_input`]). `openplugin_dsp::voice_alloc` routes
+    /// it to the matching voices.
+    fn note_expression(&mut self, _offset: usize, _note: NoteRef, _expression: Expression, _value: f32) {}
+
+    /// Modulation of parameter `index` by `amount` in plain units, added to
+    /// the parameter's value for the notes `note` names (CLAP
+    /// `CLAP_EVENT_PARAM_MOD`). Called only for a parameter with
+    /// [`ParamFlags::MODULATABLE`] (then `note` is [`NoteRef::ALL`]: the whole
+    /// plugin) or [`ParamFlags::POLY_MODULATION`] (any `note`). A new amount
+    /// replaces the last one for those notes; `amount` is finite and at most
+    /// the parameter's range either way. Modulation is not saved and does not
+    /// move the parameter's value.
+    fn param_modulation(&mut self, _offset: usize, _index: usize, _note: NoteRef, _amount: f32) {}
 
     /// Factory programs. `0` means the host shows no program list.
     /// [`Self::preset_values`] is plain values in descriptor order and must

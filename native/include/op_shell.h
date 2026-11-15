@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 6,
+    OP_SHELL_ABI = 7,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -280,6 +280,67 @@ enum {
 // after a reset is the latency of those values.
 uint32_t op_shell_take_changes(void* instance);
 // ---- end of ABI 6 -----------------------------------------------------------
+
+// ---- ABI 7: per-note expression ---------------------------------------------
+// Notes with the host's note id, and per-note expressions addressed by that id
+// (VST3 kNoteExpressionValueEvent). Three event kinds for op_shell_process_events,
+// in the same OpEvent:
+//   OP_EVENT_NOTE_ON_ID, OP_EVENT_NOTE_OFF_ID: `channel`, `note`, `velocity` as
+//     OP_EVENT_NOTE_ON / OFF (the off's velocity is the release velocity);
+//     `index` is the host's note id as int32 bits, 0xFFFFFFFF (-1) for none.
+//     A note with an id never goes through MPE; one without (-1) does, for a
+//     plugin that asked for MPE, like OP_EVENT_NOTE_ON.
+//   OP_EVENT_NOTE_EXPRESSION: `index` the note id (or -1), `midi[0]` the
+//     expression (OP_EXPRESSION_*), `channel` and `note` the channel and key
+//     the expression is for, OP_NOTE_ANY for any (a host with ids sends
+//     OP_NOTE_ANY in both), `value` in the expression's own units
+//     (OpExpressionInfo.min .. max). Reaches the plugin only for an expression
+//     it lists (op_shell_expressions); the value is clamped, NaN is skipped.
+// A plugin that asked for MPE gets OP_EVENT_NOTE_ON, OP_EVENT_NOTE_OFF and
+// OP_EVENT_MIDI through the library's MPE receiver: MIDI is all the Audio Unit
+// and AAX shells pass, so they need nothing new for MPE.
+enum {
+    OP_EVENT_NOTE_ON_ID = 6,
+    OP_EVENT_NOTE_OFF_ID = 7,
+    OP_EVENT_NOTE_EXPRESSION = 8,
+    OP_NOTE_ANY = 0xFF,
+    // Expression ids: the CLAP note expression ids.
+    OP_EXPRESSION_VOLUME = 0,      // linear gain 0..4, 1 is unity (VST3 kVolumeTypeID: norm * 4)
+    OP_EXPRESSION_PAN = 1,         // 0 left, 0.5 centre, 1 right
+    OP_EXPRESSION_TUNING = 2,      // semitones -120..120
+    OP_EXPRESSION_VIBRATO = 3,     // 0..1
+    OP_EXPRESSION_EXPRESSION = 4,  // 0..1
+    OP_EXPRESSION_BRIGHTNESS = 5,  // 0..1
+    OP_EXPRESSION_PRESSURE = 6,    // 0..1
+    OP_EXPRESSION_COUNT = 7,
+    OP_EXPRESSION_BIPOLAR = 1      // OpExpressionInfo.flags: centred (pan, tuning)
+};
+// One expression as a host shows it. The range is linear in the expression's
+// own units, so a normalized value is (value - min) / (max - min).
+typedef struct OpExpressionInfo {
+    double min;
+    double max;
+    double default_value;
+    uint32_t flags;      // OP_EXPRESSION_BIPOLAR
+    uint32_t reserved;
+    char name[64];
+    char short_name[16];
+    char unit[16];
+} OpExpressionInfo;
+// Bit (1 << OP_EXPRESSION_*) for each expression the plugin reacts to; 0 for
+// none. No instance; message thread (it builds a plugin to ask it).
+uint32_t op_shell_expressions(void);
+// Fills `out` for expression `id`. Returns 1, or 0 writing nothing for a NULL
+// `out`, an unknown id or one the plugin does not list. No instance.
+uint32_t op_shell_expression_info(uint32_t id, OpExpressionInfo* out);
+// The text of `value` (the expression's units) with the length rules of
+// op_shell_param_format; an unknown id returns 0 and writes "". Message thread.
+size_t op_shell_expression_format(uint32_t id, double value, char* buf, size_t cap);
+// Reads NUL-terminated UTF-8 as a value of expression `id`, clamped. Returns 1,
+// or 0 leaving *out_value untouched for NULL, an unknown id, text over 1024
+// bytes, invalid UTF-8 or text that is not a value. Message thread.
+int op_shell_expression_parse(uint32_t id, const char* text, double* out_value);
+// ---- end of ABI 7 -----------------------------------------------------------
 
 #if OP_HAS_TAIL
 // Optional, with -DOP_TAIL=ON: how long the output rings after the input

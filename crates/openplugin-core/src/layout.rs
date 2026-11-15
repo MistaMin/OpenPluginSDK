@@ -549,6 +549,15 @@ impl ParamFlags {
     pub const PRESET_EXCLUDE: Self = Self(1 << 6);
     /// Changes latency or does work the audio thread cannot finish. Not automatable.
     pub const NOT_REALTIME: Self = Self(1 << 7);
+    /// The host may modulate the parameter for the whole plugin (CLAP
+    /// `CLAP_PARAM_IS_MODULATABLE`), delivered through
+    /// [`crate::Plugin::param_modulation`] with [`crate::NoteRef::ALL`].
+    pub const MODULATABLE: Self = Self(1 << 8);
+    /// The host may modulate the parameter per note: by note id, key, channel
+    /// and port (CLAP `CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID`, `_PER_KEY`,
+    /// `_PER_CHANNEL`, `_PER_PORT`), and for the whole plugin. Implies
+    /// [`Self::MODULATABLE`].
+    pub const POLY_MODULATION: Self = Self((1 << 8) | (1 << 9));
 
     pub const fn bits(self) -> u32 {
         self.0

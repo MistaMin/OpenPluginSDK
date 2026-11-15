@@ -11,6 +11,7 @@ L0: Core Contracts (openplugin-core)
     - Plugin trait, ParamInfo, Transport, Unit, Taper, Events
     - ParamPlane and ParamCursor: atomic parameter bits, audio thread pulls changes
     - MIDI parser with running status (note-on velocity 0 stays a note-on)
+    - Per-note expression: NoteRef (note id, port, channel, key), Expression, MPE receiver (RP-053) shared by every MIDI entry ([EXPRESSION.md](EXPRESSION.md))
     - Seqlock meter snapshots, SPSC gesture queue, one-pole smoother
     - Versioned OPST parameter snapshot, OPCH session chunk, and A/B compare
     - Speaker layouts from mono through 7.1.4 and seventh-order ambisonics, plus an optional sidechain
@@ -21,6 +22,7 @@ L1: Algorithms & DSP (openplugin-dsp)
     - Polyphase Half-Band Resamplers (2x, 4x Oversampling)
     - Linear-phase 1x/2x/4x oversampler (64-sample latency at 2x and 4x), dry delay, slow RMS gain comp
     - Note-to-Hz, samples-per-beat, phase oscillator, sample voice, fixed polyphony
+    - Voice allocator that routes per-note expression and polyphonic modulation to the matching voice, with ramps
 L2: Design Rust Interface (openplugin-dri)
     - Calls GoodLookin DRI for the 47 knob styles, 40 plates, meters, faders, and switches
 L3: Target Format Adapters (openplugin-targets)

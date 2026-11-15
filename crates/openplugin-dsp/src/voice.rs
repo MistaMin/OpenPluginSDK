@@ -4,6 +4,173 @@
 //! playhead. `instrument` (MIT) keeps a fixed voice array and steals the
 //! oldest note. Attack and release are counted in samples, not wall time.
 //! The audio thread does not allocate.
+//!
+//! Per-note expression: [`NoteExpressions`] holds one voice's expression values
+//! ([`Expression`]: volume, pan, tuning, vibrato, expression, brightness,
+//! pressure) and [`MOD_SLOTS`] polyphonic modulation amounts, each ramped
+//! linearly to a new value over a set number of samples, the way
+//! [`crate::voice_alloc`] glides pitch. [`Polyphony`] and
+//! [`crate::VoiceAllocator`] remember the [`NoteRef`] (host note id, port,
+//! channel, key) of the note each voice plays, and route an expression or a
+//! modulation to the voices whose note it names ([`NoteRef::matches`]): by
+//! note id when the host gave one, else by port, channel and key with `-1`
+//! as a wildcard.
+
+use openplugin_core::{Expression, NoteRef};
+
+/// Polyphonic modulation slots per voice. A plugin maps each modulatable
+/// parameter to a slot.
+pub const MOD_SLOTS: usize = 8;
+
+const RAMPS: usize = Expression::COUNT + MOD_SLOTS;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Ramp {
+    value: f32,
+    target: f32,
+    step: f32,
+    left: u32,
+}
+
+impl Ramp {
+    const fn at(value: f32) -> Self {
+        Self { value, target: value, step: 0.0, left: 0 }
+    }
+
+    fn set(&mut self, target: f32, samples: u32) {
+        self.target = target;
+        if samples == 0 || (target - self.value).abs() <= f32::EPSILON {
+            self.value = target;
+            self.left = 0;
+        } else {
+            self.step = (target - self.value) / samples as f32;
+            self.left = samples;
+        }
+    }
+
+    fn advance(&mut self, samples: u32) {
+        if self.left == 0 {
+            return;
+        }
+        if samples >= self.left {
+            self.left = 0;
+            self.value = self.target;
+        } else {
+            self.left -= samples;
+            // Closed form from the target, as the glide does: no drift.
+            self.value = self.target - self.step * self.left as f32;
+        }
+    }
+}
+
+/// One voice's per-note expressions and polyphonic modulation amounts.
+///
+/// A value set before the voice has advanced by a sample (the expression a
+/// host sends at the note-on's own sample, or MPE's initial state) is taken
+/// at once, so the note starts there (CLAP `events.h`: a note expression at
+/// the same sample as the note-on applies to all generated samples). Later
+/// values ramp linearly over the ramp length. No allocation; NaN and
+/// infinite values are refused.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoteExpressions {
+    ramps: [Ramp; RAMPS],
+    ramp_samples: u32,
+    fresh: bool,
+}
+
+impl Default for NoteExpressions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NoteExpressions {
+    /// Every expression at its neutral value ([`Expression::neutral`]), every
+    /// modulation 0, no ramp.
+    pub const fn new() -> Self {
+        let mut ramps = [Ramp::at(0.0); RAMPS];
+        let mut i = 0;
+        while i < Expression::COUNT {
+            ramps[i] = Ramp::at(Expression::ALL[i].neutral());
+            i += 1;
+        }
+        Self { ramps, ramp_samples: 0, fresh: true }
+    }
+
+    /// Back to neutral for a new note; keeps the ramp length.
+    pub fn start(&mut self) {
+        let samples = self.ramp_samples;
+        *self = Self::new();
+        self.ramp_samples = samples;
+    }
+
+    /// Ramp length for later changes, in samples (0: jump).
+    pub fn set_ramp(&mut self, samples: u32) {
+        self.ramp_samples = samples;
+    }
+
+    pub fn ramp(&self) -> u32 {
+        self.ramp_samples
+    }
+
+    fn samples(&self) -> u32 {
+        if self.fresh { 0 } else { self.ramp_samples }
+    }
+
+    /// Move `expression` to `value` (clamped to its range). False, and
+    /// nothing changes, for NaN or an infinity.
+    pub fn set(&mut self, expression: Expression, value: f32) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+        let (lo, hi) = expression.range();
+        let samples = self.samples();
+        self.ramps[expression.id()].set(value.clamp(lo, hi), samples);
+        true
+    }
+
+    /// Move modulation slot `slot` to `amount`. False for a slot past
+    /// [`MOD_SLOTS`] or a non-finite amount.
+    pub fn set_modulation(&mut self, slot: usize, amount: f32) -> bool {
+        if slot >= MOD_SLOTS || !amount.is_finite() {
+            return false;
+        }
+        let samples = self.samples();
+        self.ramps[Expression::COUNT + slot].set(amount, samples);
+        true
+    }
+
+    /// The current (ramped) value.
+    pub fn get(&self, expression: Expression) -> f32 {
+        self.ramps[expression.id()].value
+    }
+
+    /// The value the ramp is heading for.
+    pub fn target(&self, expression: Expression) -> f32 {
+        self.ramps[expression.id()].target
+    }
+
+    /// The current amount of modulation slot `slot`; 0 past [`MOD_SLOTS`].
+    pub fn modulation(&self, slot: usize) -> f32 {
+        if slot >= MOD_SLOTS { 0.0 } else { self.ramps[Expression::COUNT + slot].value }
+    }
+
+    /// Whether any value is still ramping.
+    pub fn is_ramping(&self) -> bool {
+        self.ramps.iter().any(|r| r.left > 0)
+    }
+
+    /// Move every ramp forward by `samples`.
+    pub fn advance(&mut self, samples: u32) {
+        if samples == 0 {
+            return;
+        }
+        self.fresh = false;
+        for ramp in &mut self.ramps {
+            ramp.advance(samples);
+        }
+    }
+}
 
 /// One voice over a mono slice the caller already owns.
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +256,7 @@ impl SampleVoice {
 #[derive(Clone, Copy, Debug)]
 struct Slot {
     note: u8,
+    reference: NoteRef,
     active: bool,
     released: bool,
     age: u64,
@@ -100,6 +268,7 @@ impl Slot {
     const fn idle() -> Self {
         Self {
             note: 0,
+            reference: NoteRef::ALL,
             active: false,
             released: false,
             age: 0,
@@ -130,7 +299,17 @@ impl<const N: usize> Polyphony<N> {
     }
 
     pub fn note_on(&mut self, note: u8) -> Option<usize> {
-        if N == 0 {
+        self.note_on_ref(NoteRef::key(note))
+    }
+
+    /// [`Self::note_on`] for a note with its id, port and channel, which the
+    /// slot remembers for [`Self::matching`] and [`Self::note_off_ref`]. A
+    /// key outside 0..=127 starts nothing.
+    pub fn note_on_ref(&mut self, reference: NoteRef) -> Option<usize> {
+        let Ok(note) = u8::try_from(reference.key) else {
+            return None;
+        };
+        if N == 0 || note > 127 {
             return None;
         }
         self.clock = self.clock.saturating_add(1);
@@ -148,6 +327,7 @@ impl<const N: usize> Polyphony<N> {
             });
         self.slots[index] = Slot {
             note,
+            reference,
             active: true,
             released: false,
             age: self.clock,
@@ -164,6 +344,31 @@ impl<const N: usize> Polyphony<N> {
                 slot.pos = 0;
             }
         }
+    }
+
+    /// Release every held slot whose note `target` names ([`NoteRef::matches`]).
+    pub fn note_off_ref(&mut self, target: NoteRef) {
+        for slot in &mut self.slots {
+            if slot.active && !slot.released && target.matches(slot.reference) {
+                slot.released = true;
+                slot.pos = 0;
+            }
+        }
+    }
+
+    /// The note a sounding slot plays; `None` for an idle slot.
+    pub fn note_ref(&self, index: usize) -> Option<NoteRef> {
+        self.slots.get(index).filter(|s| s.active).map(|s| s.reference)
+    }
+
+    /// Indices of the sounding slots (held or releasing) whose note `target`
+    /// names: where to send an expression or a modulation. Allocates nothing.
+    pub fn matching(&self, target: NoteRef) -> impl Iterator<Item = usize> + '_ {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter(move |(_, s)| s.active && target.matches(s.reference))
+            .map(|(i, _)| i)
     }
 
     pub fn note_off_all(&mut self) {
@@ -222,6 +427,50 @@ mod tests {
         assert!(!voice.stop(61));
         assert!(voice.stop(60));
         assert_eq!(voice.next(&pcm), 0.0);
+    }
+
+    #[test]
+    fn polyphony_routes_by_note_id_and_falls_back_to_channel_and_key() {
+        let mut bank = Polyphony::<4>::new(0, 0);
+        let a = bank.note_on_ref(NoteRef::new(10, 0, 1, 60)).unwrap();
+        let b = bank.note_on_ref(NoteRef::new(11, 0, 2, 60)).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(bank.matching(NoteRef::new(10, -1, -1, -1)).collect::<Vec<_>>(), vec![a]);
+        assert_eq!(bank.matching(NoteRef::new(-1, 0, 2, 60)).collect::<Vec<_>>(), vec![b]);
+        assert_eq!(bank.matching(NoteRef::new(99, -1, -1, -1)).count(), 0);
+        assert_eq!(bank.matching(NoteRef::ALL).count(), 2);
+        bank.note_off_ref(NoteRef::new(11, -1, -1, -1));
+        assert_eq!(bank.gain(b), 0.0);
+        assert_eq!(bank.gain(a), 1.0);
+        assert!(bank.note_on_ref(NoteRef::new(1, 0, 0, -1)).is_none());
+        assert_eq!(bank.note_ref(a), Some(NoteRef::new(10, 0, 1, 60)));
+    }
+
+    #[test]
+    fn expressions_start_neutral_jump_while_fresh_then_ramp() {
+        let mut e = NoteExpressions::new();
+        e.set_ramp(4);
+        assert_eq!(e.get(Expression::Volume), 1.0);
+        assert_eq!(e.get(Expression::Pan), 0.5);
+        assert!(e.set(Expression::Tuning, 2.0));
+        assert_eq!(e.get(Expression::Tuning), 2.0, "before the first sample a value is taken at once");
+        e.advance(1);
+        assert!(e.set(Expression::Tuning, 6.0));
+        assert_eq!(e.get(Expression::Tuning), 2.0);
+        e.advance(2);
+        assert_eq!(e.get(Expression::Tuning), 4.0);
+        e.advance(10);
+        assert_eq!(e.get(Expression::Tuning), 6.0);
+        assert!(!e.is_ramping());
+        assert!(!e.set(Expression::Pressure, f32::NAN));
+        assert!(e.set(Expression::Pressure, 9.0));
+        assert_eq!(e.target(Expression::Pressure), 1.0);
+        assert!(!e.set_modulation(MOD_SLOTS, 1.0));
+        assert!(e.set_modulation(0, -3.0));
+        e.advance(4);
+        assert_eq!(e.modulation(0), -3.0);
+        e.start();
+        assert_eq!((e.get(Expression::Tuning), e.modulation(0), e.ramp()), (0.0, 0.0, 4));
     }
 
     #[test]

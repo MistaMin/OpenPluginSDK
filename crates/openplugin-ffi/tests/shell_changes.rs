@@ -32,7 +32,7 @@ fn block(instance: *mut ShellInstance) {
 
 #[test]
 fn the_constants_are_the_notifier_bits() {
-    assert_eq!(shell::ABI, 6);
+    const { assert!(shell::ABI >= 6) };
     assert_eq!(CHANGE_LATENCY, HostNotifier::LATENCY);
     assert_eq!(CHANGE_PARAM_INFO, HostNotifier::PARAM_INFO);
     assert_eq!(unsafe { shell::take_changes(std::ptr::null()) }, 0);

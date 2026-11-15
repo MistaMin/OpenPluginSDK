@@ -65,12 +65,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 use openplugin_core::worker::{self, Executor, Step, Task, Waker};
 
 use openplugin_core::midi::{self, Message, Parser};
+use openplugin_core::mpe::{self, MpeReceiver};
 use openplugin_core::{
     sample_rate_supported, Category, EditorFactory, IoConfig, MeterFrame, ParamCursor, ParamInfo, ParamPlane,
     Plugin, Seqlock, Taper, Transport, Unit,
 };
 
-#[cfg(any(target_os = "macos", test))]
 use openplugin_core::EditorState;
 
 type CreateFn = fn() -> Box<dyn Plugin>;
@@ -743,7 +743,6 @@ struct Instance {
     has_position: bool,
     scratch: [Vec<f32>; 2],
     prepared: usize,
-    #[cfg(any(target_os = "macos", test))]
     editor_state: Option<EditorState>,
     bridge: Arc<Bridge>,
     /// The host's `worker:schedule`, if it offered one that works.
@@ -751,6 +750,8 @@ struct Instance {
     handle_key: usize,
     /// A callback into the plugin panicked; `run` outputs silence until `activate`.
     poisoned: bool,
+    /// The MPE receiver of a plugin that asked for MPE ([`Plugin::mpe_input`]).
+    mpe: Option<MpeReceiver>,
 }
 
 const PREPARED: usize = 8192;
@@ -825,8 +826,8 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
     }
     cursor.invalidate();
     cursor.pull(&plane, inner.as_mut());
-    #[cfg(any(target_os = "macos", test))]
     let editor_state = inner.editor_state();
+    let mpe = MpeReceiver::for_plugin(inner.as_ref());
     let controls = vec![std::ptr::null(); plane.len()];
     let sidechain = map.sidechain as usize;
     Some(Box::new(Instance {
@@ -852,11 +853,11 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
         has_position: false,
         scratch: [vec![0.0; PREPARED], vec![0.0; PREPARED]],
         prepared: PREPARED,
-        #[cfg(any(target_os = "macos", test))]
         editor_state,
         bridge,
         schedule,
         handle_key: 0,
+        mpe,
     }))
 }
 
@@ -950,6 +951,15 @@ fn handle_event(instance: &mut Instance, event: &AtomEvent<'_>) {
     if event.kind == urids.midi_event {
         // A fresh parser per event: LV2 MIDI events carry whole messages.
         if let Ok(Some((message, _))) = Parser::new().pull(event.body) {
+            // MPE: the whole message goes through the receiver (notes with
+            // their channel, pitch bend, pressure and CC 74 as expressions).
+            if let Some(receiver) = instance.mpe.as_mut() {
+                let mut bytes = [0u8; 3];
+                if !matches!(message, Message::SysEx(_)) && message.write_bytes(&mut bytes).is_some() {
+                    mpe::receive_into(receiver, instance.inner.as_mut(), 0, bytes);
+                }
+                return;
+            }
             match message {
                 Message::NoteOn { channel, note, velocity } => instance.inner.note_on_channel(0, channel.index(), note, velocity),
                 other => midi::deliver(instance.inner.as_mut(), 0, other),
@@ -1239,8 +1249,7 @@ pub fn descriptor(index: u32) -> *const Lv2Descriptor {
 /// # Safety
 /// `handle` is null or the handle a host passes as `instance-access`, which
 /// is a plugin instance in the same process.
-#[cfg(any(target_os = "macos", test))]
-unsafe fn instance_state(handle: *const c_void) -> Option<EditorState> {
+pub unsafe fn instance_state(handle: *const c_void) -> Option<EditorState> {
     let instance = unsafe { (handle as *const Instance).as_ref()? };
     if instance.magic != MAGIC {
         return None;

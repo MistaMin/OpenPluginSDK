@@ -206,7 +206,7 @@ pub use wdf::{
     Resistor, ResistiveVoltageSource, Series, SingleDiode, WdfPort,
 };
 pub use vocoder::{PhaseLocking, PitchShifter, TimeStretch, VocoderConfig};
-pub use voice::{Polyphony, SampleVoice};
+pub use voice::{NoteExpressions, Polyphony, SampleVoice, MOD_SLOTS};
 pub use voice_alloc::{
     Allocation, GlideMode, NoteOff, StealPolicy, Voice, VoiceAllocator, VoiceMode, VoicePhase,
 };
