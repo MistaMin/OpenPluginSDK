@@ -1,0 +1,16 @@
+[package]
+name = "example-role-tags"
+description = "Test plugin for the channel order proof: every channel carries a level that names its speaker role, in every format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# staticlib: the VST3, Audio Unit and AAX role proofs in native/ link it in place of the
+# example (native/CMakeLists.txt finds libexample_role_tags.a next to OP_RUST_LIB, or
+# takes -DOP_ROLE_LIB). rlib: the CLAP and LV2 proofs in tests/ call its exports.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+openplugin = { workspace = true }

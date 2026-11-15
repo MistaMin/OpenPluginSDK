@@ -52,20 +52,59 @@ bool load_info(OpShellInfo& info) {
 }
 
 // ---- Channel order at the edge ---------------------------------------------
-// The ABI lists channels in the SDK's canonical order (the CLAP surround ids).
-// A VST3 SpeakerArrangement is a bit set whose channels sit in ascending bit
-// order in the host's buffers. Bits 0..17 (L R C Lfe Ls Rs Lc Rc Cs Sl Sr Tc
-// Tfl Tfc Tfr Trl Trc Trr) are numbered exactly like the CLAP ids, so the role
-// of a speaker is its bit number and the host index of a role is the number of
-// lower bits set. Mono is kSpeakerM, ambisonics are the ACN speakers.
+// The ABI lists channels in the SDK's canonical order (the CLAP surround ids,
+// then the SDK-only top side and wide roles 18 to 21). A VST3 SpeakerArrangement
+// is a bit set whose channels sit in ascending bit order in the host's buffers.
+// Bits 0..17 (L R C Lfe Ls Rs Lc Rc Cs Sl Sr Tc Tfl Tfc Tfr Trl Trc Trr) are
+// numbered exactly like the CLAP ids, so the speaker of roles 0..17 is the bit of
+// the same number; the top side pair is kSpeakerTsl and kSpeakerTsr (bits 24, 25)
+// and the wides kSpeakerLw and kSpeakerRw (bits 59, 60). The host index of a role
+// is the number of lower bits set. Mono is kSpeakerM, ambisonics are the ACN
+// speakers.
 constexpr uint32_t kLegacyLayout = ~0u;  // not an ABI layout: create() channels only
-constexpr int kMaxVstRole = 17;
 constexpr uint32_t kMaxAmbisonicChannels = 25;  // VST3 names ACN 0..24.
+
+// The VST3 speaker of an SDK role; 0 for a role VST3 cannot name.
+constexpr Speaker speaker_of(uint8_t role) {
+    if (role <= 17) return static_cast<Speaker>(1) << role;
+    switch (role) {
+    case 18: return kSpeakerTsl;  // TSL, top side (Dolby top middle)
+    case 19: return kSpeakerTsr;  // TSR
+    case 20: return kSpeakerLw;   // FLW, front wide
+    case 21: return kSpeakerRw;   // FRW
+    default: return 0;
+    }
+}
+
+// The canonical role lists of SpeakerLayout::surround_map (docs/SHELL.md, Canonical
+// order) give the SDK's named VST3 arrangements, so a host that offers one of these
+// is offered the plugin's layout. 7.1 is k71Music (Ls Rs are the back pair, Sl Sr the
+// sides); 5.1.2 is the top side k51_2_TS, not k51_2 (front heights Tfl Tfr); 9.1.6 is
+// Dolby's k91_6_W with wides, not k91_6 (Lc Rc).
+template <size_t N> constexpr SpeakerArrangement arrangement_of_roles(const uint8_t (&roles)[N]) {
+    SpeakerArrangement out = 0;
+    for (size_t i = 0; i < N; ++i) out |= speaker_of(roles[i]);
+    return out;
+}
+constexpr uint8_t kRoles51[] = {0, 1, 2, 3, 4, 5};
+constexpr uint8_t kRoles71[] = {0, 1, 2, 3, 9, 10, 4, 5};
+constexpr uint8_t kRoles714[] = {0, 1, 2, 3, 9, 10, 4, 5, 12, 14, 15, 17};
+constexpr uint8_t kRoles512[] = {0, 1, 2, 3, 4, 5, 18, 19};
+constexpr uint8_t kRoles514[] = {0, 1, 2, 3, 4, 5, 12, 14, 15, 17};
+constexpr uint8_t kRoles712[] = {0, 1, 2, 3, 9, 10, 4, 5, 18, 19};
+constexpr uint8_t kRoles916[] = {0, 1, 2, 3, 9, 10, 4, 5, 20, 21, 12, 14, 18, 19, 15, 17};
+static_assert(arrangement_of_roles(kRoles51) == SpeakerArr::k51, "5.1");
+static_assert(arrangement_of_roles(kRoles71) == SpeakerArr::k71Music, "7.1");
+static_assert(arrangement_of_roles(kRoles714) == SpeakerArr::k71_4, "7.1.4");
+static_assert(arrangement_of_roles(kRoles512) == SpeakerArr::k51_2_TS, "5.1.2");
+static_assert(arrangement_of_roles(kRoles514) == SpeakerArr::k51_4, "5.1.4");
+static_assert(arrangement_of_roles(kRoles712) == SpeakerArr::k71_2, "7.1.2");
+static_assert(arrangement_of_roles(kRoles916) == SpeakerArr::k91_6_W, "9.1.6");
 
 SpeakerArrangement acn_bit(uint32_t k) { return static_cast<SpeakerArrangement>(1) << (k < 4 ? 20 + k : 34 + k); }
 
 // The arrangement that carries `bus`; false when VST3 cannot name it (discrete
-// buses, a repeated or out-of-range role, ambisonics beyond 4th order).
+// buses, a repeated or unnamed role, ambisonics beyond 4th order).
 bool arrangement_of(const OpBus& bus, SpeakerArrangement& out) {
     out = SpeakerArr::kEmpty;
     switch (bus.kind) {
@@ -75,9 +114,8 @@ bool arrangement_of(const OpBus& bus, SpeakerArrangement& out) {
     case OP_BUS_SURROUND: {
         if (bus.channels == 0 || bus.channels > OP_ROLE_SLOTS) return false;
         for (uint32_t i = 0; i < bus.channels; ++i) {
-            if (bus.roles[i] > kMaxVstRole) return false;
-            const SpeakerArrangement bit = static_cast<SpeakerArrangement>(1) << bus.roles[i];
-            if (out & bit) return false;
+            const SpeakerArrangement bit = speaker_of(bus.roles[i]);
+            if (bit == 0 || (out & bit)) return false;
             out |= bit;
         }
         return true;
@@ -93,9 +131,9 @@ bool arrangement_of(const OpBus& bus, SpeakerArrangement& out) {
 // map[i] = the host channel that carries canonical channel i of `bus`.
 void channel_map(const OpBus& bus, SpeakerArrangement arrangement, uint8_t* map) {
     for (uint32_t i = 0; i < bus.channels && i < OP_MAX_CHANNELS; ++i) {
-        if (bus.kind == OP_BUS_SURROUND && i < OP_ROLE_SLOTS && bus.roles[i] <= kMaxVstRole) {
-            const SpeakerArrangement below = (static_cast<SpeakerArrangement>(1) << bus.roles[i]) - 1;
-            map[i] = static_cast<uint8_t>(SpeakerArr::getChannelCount(arrangement & below));
+        const SpeakerArrangement bit = bus.kind == OP_BUS_SURROUND && i < OP_ROLE_SLOTS ? speaker_of(bus.roles[i]) : 0;
+        if (bit != 0) {
+            map[i] = static_cast<uint8_t>(SpeakerArr::getChannelCount(arrangement & (bit - 1)));
         } else {
             map[i] = static_cast<uint8_t>(i);
         }

@@ -18,10 +18,12 @@
 
 namespace opau {
 
-// CLAP surround ids, the values in OpBus::roles.
+// SDK role ids, the values in OpBus::roles: the CLAP surround ids, then the SDK-only
+// top side (Dolby top middle) and front wide pairs.
 enum Role : uint8_t {
     FL = 0, FR = 1, FC = 2, LFE = 3, BL = 4, BR = 5, FLC = 6, FRC = 7, BC = 8,
-    SL = 9, SR = 10, TC = 11, TFL = 12, TFC = 13, TFR = 14, TBL = 15, TBC = 16, TBR = 17
+    SL = 9, SR = 10, TC = 11, TFL = 12, TFC = 13, TFR = 14, TBL = 15, TBC = 16, TBR = 17,
+    TSL = 18, TSR = 19, FLW = 20, FRW = 21
 };
 
 constexpr AudioChannelLayoutTag makeTag(uint32_t id, uint32_t channels) { return (id << 16) | channels; }
@@ -52,6 +54,10 @@ inline const std::vector<TagDef>& tagTable() {
         {makeTag(195, 10), 10, {FL, FR, FC, LFE, BL, BR, TFL, TFR, TBL, TBR}},  // Atmos_5_1_4: L R C LFE Ls Rs Vhl Vhr Ltr Rtr
         {makeTag(192, 12), 12, {FL, FR, FC, LFE, SL, SR, BL, BR, TFL, TFR, TBL, TBR}},  // Atmos_7_1_4: L R C LFE Ls Rs Rls Rrs Vhl Vhr Ltr Rtr
         {makeTag(202, 12), 12, {FL, FR, BL, BR, SL, SR, FC, LFE, TFL, TFR, TBL, TBR}},  // Logic_Atmos_7_1_4_B: L R Rls Rrs Ls Rs C LFE Vhl Vhr Ltr Rtr
+        // The Atmos beds with top middle (Ltm Rtm: the SDK's top side pair) and wide channels.
+        {makeTag(194, 8), 8, {FL, FR, FC, LFE, BL, BR, TSL, TSR}},             // Atmos_5_1_2: L R C LFE Ls Rs Ltm Rtm
+        {makeTag(196, 10), 10, {FL, FR, FC, LFE, SL, SR, BL, BR, TSL, TSR}},   // Atmos_7_1_2: L R C LFE Ls Rs Rls Rrs Ltm Rtm
+        {makeTag(193, 16), 16, {FL, FR, FC, LFE, SL, SR, BL, BR, FLW, FRW, TFL, TFR, TSL, TSR, TBL, TBR}},  // Atmos_9_1_6: L R C LFE Ls Rs Rls Rrs Lw Rw Vhl Vhr Ltm Rtm Ltr Rtr
     };
     return table;
 }
@@ -59,7 +65,8 @@ inline const std::vector<TagDef>& tagTable() {
 // kAudioChannelLabel_* to the roles it can mean, best first. A label with two
 // candidates (Ls, Rs) takes the first one the bus has and has not used: a 5.1
 // bus has no side channels, so Ls is its back-left; a 7.1 bus has both, so Ls is
-// the side and Rls (33) is the back.
+// the side and Rls (33) is the back. LeftTopMiddle (49) and LeftTopSurround (60)
+// are both the SDK's top side TSL, as in the AAX shell; LeftWide (35) is FLW.
 struct LabelDef { uint32_t label; uint8_t roles[2]; };
 inline const std::vector<LabelDef>& labelTable() {
     static const std::vector<LabelDef> table = {
@@ -68,9 +75,10 @@ inline const std::vector<LabelDef>& labelTable() {
         {10, {SL, 0xFF}}, {11, {SR, 0xFF}}, {12, {TC, 0xFF}},
         {13, {TFL, 0xFF}}, {14, {TFC, 0xFF}}, {15, {TFR, 0xFF}},
         {16, {TBL, 0xFF}}, {17, {TBC, 0xFF}}, {18, {TBR, 0xFF}},
-        {33, {BL, 0xFF}}, {34, {BR, 0xFF}},
+        {33, {BL, 0xFF}}, {34, {BR, 0xFF}}, {35, {FLW, 0xFF}}, {36, {FRW, 0xFF}},
+        {49, {TSL, 0xFF}}, {51, {TSR, 0xFF}},
         {52, {TBL, 0xFF}}, {53, {TBC, 0xFF}}, {54, {TBR, 0xFF}},
-        {55, {SL, 0xFF}}, {56, {SR, 0xFF}}, {63, {BL, 0xFF}}, {64, {BR, 0xFF}},
+        {55, {SL, 0xFF}}, {56, {SR, 0xFF}}, {60, {TSL, 0xFF}}, {61, {TSR, 0xFF}}, {63, {BL, 0xFF}}, {64, {BR, 0xFF}},
     };
     return table;
 }

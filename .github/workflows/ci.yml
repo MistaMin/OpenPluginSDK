@@ -223,10 +223,11 @@ jobs:
           path: vst3sdk
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      # The proofs load the SDK example (examples/editor, "Editor Gain").
-      - name: Build the example as a static library
+      # The proofs load the SDK example (examples/editor, "Editor Gain"); the role proof
+      # (vst3_roles_proof) loads Role Tags (examples/role_tags), found next to it.
+      - name: Build the example and Role Tags as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor
+        run: cargo build --release --lib -p example-editor -p example-role-tags
       # Only the VST3 shell: no Audio Unit or AAX SDK, no editor.
       - name: Configure the VST3 shell
         working-directory: OpenPluginSDK
@@ -274,9 +275,10 @@ jobs:
           path: AudioUnitSDK
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Build the example plugin as a static library
+      # au_roles_proof links Role Tags (examples/role_tags), found next to the example.
+      - name: Build the example plugin and Role Tags as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor
+        run: cargo build --release --lib -p example-editor -p example-role-tags
       - name: Configure the Audio Unit shell only
         working-directory: OpenPluginSDK
         run: >
