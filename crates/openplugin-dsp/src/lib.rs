@@ -26,9 +26,12 @@
 //! - [`TruePeakMeter`], [`Ppm`] (EBU, DIN, Nordic, BBC), [`KMeter`], [`VuIec`], [`EbuMeter`], and the lock-free [`scope_feed`] for correlation and goniometer.
 //! - [`FdnReverb`], [`PlateReverb`], [`EarlyReflections`]: Jot-Chaigne feedback delay network, Dattorro plate, and tapped-delay early reflections.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
+//! - [`BandlimitedOsc`], [`WavetableOsc`], [`Adsr`], [`PinkNoise`], [`VoiceAllocator`], [`SincKernel`]: synthesis (PolyBLEP/BLAMP oscillators with hard sync, mip-mapped wavetables, envelopes, noise, voice stealing and glide, a windowed-sinc resampler).
 
 pub mod adaa;
+pub mod adsr;
 pub mod biquad;
+pub mod blosc;
 pub mod bypass;
 pub mod chorus;
 pub mod convolve;
@@ -55,6 +58,7 @@ pub mod matched;
 pub mod meter;
 pub mod moddelay;
 pub mod musical;
+pub mod noise;
 pub mod oscillator;
 pub mod oversampling;
 pub mod partitioned;
@@ -67,6 +71,7 @@ pub mod rate;
 pub mod scope;
 pub mod plate;
 mod reverb_common;
+pub mod resample;
 pub mod saturation;
 pub mod svf;
 pub mod utility;
@@ -74,11 +79,15 @@ pub mod voice;
 pub mod true_peak_meter;
 pub mod spectrum;
 pub mod stft;
+pub mod voice_alloc;
+pub mod wavetable;
 pub mod window;
 pub mod windows;
 
 pub use adaa::{Adaa2Taylor, ResidualAdaa1};
+pub use adsr::{Adsr, Ahdsr, Curve, Gate, RetriggerMode, Stage};
 pub use biquad::{Biquad, FilterType};
+pub use blosc::{blamp_residual, blep_residual, BandlimitedOsc, BlWave, BlepOrder};
 pub use bypass::SoftBypass;
 pub use chorus::{Chorus, MAX_CHORUS_MS, MAX_CHORUS_VOICES};
 pub use convolve::BlockConvolver;
@@ -119,6 +128,7 @@ pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuIec, VuMete
 pub use musical::{
     ms_from_samples, ms_per_beat, samples_from_ms, samples_from_ticks, samples_per_beat,
 };
+pub use noise::{PinkNoise, WhiteNoise, PINK_LOW_HZ, PINK_RMS};
 pub use oscillator::{Oscillator, Wave};
 pub use oversampling::{OversampleFactor, Oversampler2x};
 pub use dither::{Dither, DitherKind, NoiseShaping};
@@ -128,9 +138,14 @@ pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to
 pub use pitch::{hz_from_midi, midi_from_hz};
 pub use plate::PlateReverb;
 pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
+pub use resample::{playback_ratio, Quality, SincConfig, SincKernel, SincPlayer};
 pub use saturation::{saturate_sample, SaturationMode};
 pub use svf::{Svf, SvfMode};
 pub use voice::{Polyphony, SampleVoice};
+pub use voice_alloc::{
+    Allocation, GlideMode, NoteOff, StealPolicy, Voice, VoiceAllocator, VoiceMode, VoicePhase,
+};
+pub use wavetable::{WavetableError, WavetableOsc, WavetableSet};
 pub use window::{hann, WindowRms};
 pub use spectrum::{
     bin_frequency, log_frequency_bins, spectrum_feed, SpectrumAnalyzer, SpectrumConfig,
