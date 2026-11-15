@@ -29,6 +29,7 @@
 //! - [`design_kaiser`], [`design_least_squares`], [`linear_phase_eq`], [`minimum_phase_eq`], [`MinPhaseHalfband`]: FIR design off the audio thread (windowed sinc with Kaiser's formulas, least squares, linear and minimum phase from a magnitude curve, minimum-phase half-band oversampling).
 //! - [`TransistorLadder`], [`DiodeLadder`], [`Korg35`], the [`wdf`] building blocks with [`DiodeClipper`], and [`TapeHysteresis`]: virtual analog (zero-delay-feedback filters, wave digital filters, Jiles-Atherton tape).
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
+//! - [`PluckedString`], [`WaveguideString`], [`WaveguideBore`], [`ModalBank`]: physical models (Karplus-Strong with the Jaffe-Smith extensions, digital waveguides, modal resonators with bar, plate and membrane presets).
 //! - [`BandlimitedOsc`], [`WavetableOsc`], [`Adsr`], [`PinkNoise`], [`VoiceAllocator`], [`SincKernel`]: synthesis (PolyBLEP/BLAMP oscillators with hard sync, mip-mapped wavetables, envelopes, noise, voice stealing and glide, a windowed-sinc resampler).
 
 pub mod adaa;
@@ -74,6 +75,10 @@ pub mod partitioned;
 pub mod phaser;
 pub mod pcm;
 pub mod pitch;
+pub mod modal;
+mod phys_common;
+pub mod pluck;
+pub mod waveguide;
 pub mod ppm;
 pub mod true_peak;
 pub mod rate;
@@ -160,6 +165,13 @@ pub use phaser::{Phaser, MAX_PHASER_FEEDBACK, MAX_PHASER_STAGES};
 pub use partitioned::{ConvolutionIr, ConvolveError, ConvolverConfig, Layout, LongConvolver};
 pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to_f32, lerp};
 pub use pitch::{hz_from_midi, midi_from_hz};
+pub use modal::{
+    mode_ratios, Exciter, ModalBank, ModalPreset, PresetSettings, Strike, MAX_PRESET_MODES,
+    MEMBRANE_ZEROS,
+};
+pub use phys_common::{stiff_partial_hz, MAX_DISPERSION_SECTIONS};
+pub use pluck::{PluckedString, Tuning};
+pub use waveguide::{BoreEnd, WaveguideBore, WaveguideString};
 pub use plate::PlateReverb;
 pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
 pub use resample::{playback_ratio, Quality, SincConfig, SincKernel, SincPlayer};

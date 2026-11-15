@@ -1173,3 +1173,105 @@ os.process(&[input], &mut [&mut output[..]], |s| s[0] = tape.process_sample(s[0]
 ```
 
 The model is the Jiles-Atherton equations in normalised form, integrated in the field variable with fourth-order Runge-Kutta (substeps of at most 0.25 field units, 1 to 32), after Chowdhury (DAFx-19). Parameter values are our own, not the paper's; no head-gap or loss filter. Measured: at drive 1 the output against input is a closed loop (closure 1e-6) with remanent values of -0.233 and +0.233 at the input's zero crossings, and the loop area grows from 0.20 (width 0) to 0.53 (width 1). Harmonics grow with drive (odd harmonics dominate): THD 7.0 %, 9.6 %, 11.0 %, 13.3 %, 19.7 % at drives 0.25, 0.5, 1, 2, 4, and the output rms rises monotonically. Aliasing of a 7001 Hz sine at 48 kHz (energy outside the harmonics of the tone, relative to the fundamental): tape at drive 3, saturation 0.8: -17.8 dB at 1x and -43.2 dB with 4x `LinearPhaseOversampler`; transistor ladder at 12 kHz cutoff, drive 10: -14.9 dB and -41.1 dB.
+
+## Physical modelling
+
+Karplus-Strong strings, digital waveguides and modal banks make sound from a physical description instead of a table: a pitch and a decay time go in, a plucked, struck or blown tone comes out. All of them compute for the real sample rate, run in `f64`, never allocate after construction, flush denormals, ignore non-finite settings and read non-finite input as 0. Sources are in the module docs of `pluck.rs`, `waveguide.rs`, `modal.rs` and `phys_common.rs`; nothing is ported.
+
+### Plucked string (Karplus-Strong, Jaffe-Smith)
+
+```rust
+use openplugin_dsp::{hz_from_midi, PluckedString, Tuning};
+
+// prepare (allocates; one per voice):
+let mut string = PluckedString::new(sample_rate, 25.0); // lowest pitch it must reach
+string.set_stretch(0.1);       // Jaffe-Smith S: 0.5 is the original average, near 0 stays bright
+string.set_decay(2.5);         // seconds for the first partial to fall 60 dB
+string.set_pick_position(0.15);
+// note on:
+string.set_frequency(hz_from_midi(note as f32)); // the first partial
+string.pluck(velocity);        // 0..=1: velocity sets level and brightness
+// per sample (or string.process(&mut block)):
+let y = string.next();
+```
+
+The loop is an integer delay, a first-order allpass for the fractional delay (`Tuning::Allpass`, the default; `Tuning::Integer` is the original algorithm), the loss filter `(1 - S) + S z^-1` with a loop gain chosen for the T60, and up to eight dispersion allpasses when `set_stiffness(B)` is above 0. The tuning allpass is designed for the exact phase delay at the fundamental, counting the loss filter's delay (`a = sin(w (1 - d) / 2) / sin(w (1 + d) / 2)`), so the pitch is right to a hundredth of a cent. `next_with(x)` adds an outside excitation into the loop (a bow, an exciter).
+
+Limits to know: the loop gain never exceeds 1, so when the loss filter alone already decays faster than asked (high notes with `S` near 0.5) the real T60 is shorter than the setting; lower `S` for long high notes. `set_frequency` clamps to the prepared lowest pitch and to a quarter of the sample rate. The pick-position comb is an integer number of samples (`D = round(beta N)`) applied to an excitation that fills only the integer part of the loop, so its notches are shallower than the waveguide string's exact ones (27 dB below the neighbouring partials in the test, beta 0.2).
+
+Measured (`tests/physical_proof.rs`, release build; frequencies by a Hann-windowed DFT maximised by golden-section search):
+
+| Check | Result |
+| --- | --- |
+| Pitch, allpass tuning, MIDI 28 to 100 in steps of 4, at 44.1, 48, 96 and 192 kHz | worst error 0.008 cent |
+| Pitch, integer delay only, same grid | quantisation up to 33.4 cents off the note; the signal matches its own loop model (`partial_frequency`) within 0.12 cent |
+| Partials 2 to 4 (allpass tuning), notes 36 to 72 | within 0.002 cent of the loop's phase condition; within 0.03 cent of exact harmonics |
+| T60 of the first partial, 0.6 / 1.5 / 4 s, notes 36 to 72, 48 and 96 kHz | within 0.01 % |
+| Stiffness, `B = 1e-4`, 196 Hz at 96 kHz, partials 1 to 8 vs `f_k = k f_1 sqrt((1 + B k^2) / (1 + B))` | worst 0.20 cent with 4 sections (0.12 with 8) |
+| `B = 4e-4` | 1.56 cents with 4 sections (0.95 with 8); the formula itself moves partial 8 by 21.5 cents |
+| `B = 1e-3` | 5.2 cents with 4 sections (3.2 with 8); partial 8 moves 52.8 cents |
+| `B = 3e-3` | 17 cents with 4 sections (10 with 8): beyond what one coefficient can do |
+
+The dispersion coefficient is a least-squares fit at partials 2 to 12, weighted towards the low ones, so the error grows with the partial number and with `B`; piano-like values (`B` from 1e-4 to 1e-3 in the mid range) are the intended use, and the first partial is always tuned exactly. `stiff_partial_hz(f1, b, k)` gives the formula.
+
+### Digital waveguide string and bore
+
+```rust
+use openplugin_dsp::{BoreEnd, WaveguideBore, WaveguideString};
+
+let mut s = WaveguideString::new(sample_rate, 25.0);
+s.set_frequency(196.0);
+s.set_decay(3.0);
+s.set_pluck_position(0.2);   // fraction of the string
+s.set_pickup_position(0.35);
+s.pluck(0.8);                // triangular displacement, two half-amplitude waves
+let y = s.next();            // or s.next_with(x): x enters at set_input_position
+
+let mut tube = WaveguideBore::new(sample_rate, 25.0, BoreEnd::Closed, BoreEnd::Open);
+tube.set_frequency(261.6);   // lowest resonance
+let p = tube.next_with(excitation); // pressure at the right end
+```
+
+The string is a right-going and a left-going delay line with inverting ends; the loss filter, tuning and optional dispersion are lumped at the bridge. The bore has closed (+1) and open (-1) ends: open-open and closed-closed resonate at `f, 2f, 3f`, closed-open at `f, 3f, 5f` (the loop is then half as long for the same pitch; `physical_length(343.0)` gives the tube length). Positions are fractions of the string length, interpolated linearly between samples; pluck, input and pickup positions put comb notches at partials `k = m / beta`.
+
+| Check | Result |
+| --- | --- |
+| Pitch, MIDI 28 to 100 in steps of 6, 44.1 to 192 kHz | worst 0.017 cent |
+| Partial amplitudes vs `sin(pi k beta) sin(pi k q) / k^2` (pluck beta 0.2, pickup q 0.35), partials 2 to 9 | within 0.005 dB |
+| Pluck notches (partials 5 and 10) | 67.7 and 52.6 dB below the theory without a notch |
+| Input at 1/4 of the string, pickup at 0.35: partials 4 and 8 | 94.5 and 91.2 dB below partial 1 |
+| T60, three notes from 1 to 2.5 s | within 0.1 % |
+| Stiffness `B = 4e-4`, partials 1 to 8 | worst 1.56 cents |
+| Bore, open-open and closed-closed, harmonics 1 to 4 at 44.1 and 96 kHz | fundamental exact; harmonics within 0.01 cent |
+| Bore, closed-open | even harmonics 123 and 126 dB below the odd ones; fundamental exact |
+
+### Modal resonator bank
+
+```rust
+use openplugin_dsp::{Exciter, ModalBank, ModalPreset, PresetSettings, Strike};
+
+let mut bank = ModalBank::new(sample_rate, 32);          // allocates once
+bank.load_preset(ModalPreset::BarFreeFree, &PresetSettings {
+    f1: 440.0, t60: 3.0, decay_tilt: 0.7, gain_tilt: 0.0, modes: 5,
+});
+// or by hand: bank.set_mode(i, freq_hz, t60_seconds, gain);
+let mut hit = Exciter::new(sample_rate, Strike::Mallet { contact_ms: 0.5 });
+hit.trigger(velocity);
+// per sample:
+let y = bank.next(hit.next());
+```
+
+Each mode is `y[n] = 2 r cos(w) y[n-1] - r^2 y[n-2] + g sin(w) x[n]` with `r = 10^(-3 / (T60 fs))`, whose impulse response is exactly `g r^n sin(w (n + 1))`: the frequency, the 60 dB time and the amplitude are the settings, not approximations. Coefficients and states are `f64` in arrays (a 30 Hz mode at 192 kHz would detune in `f32`) and the bank sums four modes at a time: 0.8 ns per mode per sample (64 modes, 48 kHz, Apple Silicon, release). A mode at 0.49 of the sample rate or above is silenced.
+
+Presets give ratios from formulas: `BarFreeFree` and `BarClampedFree` (roots of `cos x cosh x = +-1` by Newton: 1, 2.757, 5.404, 8.933 and 1, 6.267, 17.55), `BarSimplySupported` (`n^2`), `Plate { aspect }` (simply supported rectangle, `m^2 + (n a/b)^2`, Leissa 1969) and `Membrane` (zeros of Bessel `J_m`, tabulated in `MEMBRANE_ZEROS` from Abramowitz and Stegun table 9.5; 28 modes up to 14.93). The test evaluates `J_m` by its integral form and checks that every tabulated value is a zero and that no zero below 14.93 is missing. `decay_tilt` makes higher modes die faster (`T60_k = T60_1 (f_1 / f_k)^tilt`) and `gain_tilt` shapes their level.
+
+`Exciter` makes `Strike::Impulse`, `Strike::NoiseBurst { ms }` and `Strike::Mallet { contact_ms }` (a half-sine force pulse of unit area; a short contact excites the high modes, a long one hardly does).
+
+| Check | Result |
+| --- | --- |
+| Free-free bar, clamped-free bar, 1:1.6 plate, 12-mode membrane; 44.1 and 96 kHz; isolated modes | frequency within 0.009 cent, T60 within 0.02 % of the specification |
+| Mode 5 of a free-free bar, level relative to mode 0 | impulse 1.000, 0.15 ms mallet 0.49, 2 ms mallet 0.002 |
+
+### Test instrument
+
+`tests/physical_conformance.rs` is a six-voice plucked-string instrument (notes in, mono out, decay, brightness and pick position as parameters; note-off shortens the decay) that passes the `openplugin-testing` conformance kit (228 sessions, including the allocation check). `tests/physical_no_alloc.rs` changes every setting and strikes every model while a counting allocator is armed: zero allocations and zero frees.
