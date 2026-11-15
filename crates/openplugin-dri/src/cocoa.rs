@@ -12,10 +12,19 @@
 //! the address of a static in this binary, so every loaded binary registers
 //! its own class and never runs another binary's methods.
 //!
+//! Size: the view follows the editor's size. [`EditorView::resize`] (CLAP
+//! `set_size`, LV2 `ui:resize`) and a host that sets the view's frame
+//! (`setFrameSize:`) both go to [`Editor::resize`] with a size inside the
+//! editor's [`SizeRange`]. Mouse positions are always in editor points, even
+//! while the frame and the editor differ for a moment. A resize that arrives
+//! while the editor is inside one of its own calls (a click that asked the
+//! host for a size, and the host answered at once) waits until that call ends.
+//!
 //! Main thread only.
 
 #![allow(unsafe_code, clippy::missing_safety_doc)]
 
+use openplugin_core::editor::SizeRange;
 use openplugin_core::Editor;
 use std::ffi::{c_char, c_void, CString};
 use std::ptr::null_mut;
@@ -51,6 +60,7 @@ unsafe extern "C" {
     fn objc_getClass(name: *const c_char) -> Class;
     fn sel_registerName(name: *const c_char) -> Sel;
     fn objc_msgSend();
+    fn objc_msgSendSuper();
     #[cfg(target_arch = "x86_64")]
     fn objc_msgSend_stret();
     fn objc_allocateClassPair(superclass: Class, name: *const c_char, extra: usize) -> Class;
@@ -144,8 +154,22 @@ pub type Poll = Box<dyn FnMut(&mut dyn Editor)>;
 struct State {
     editor: Box<dyn Editor>,
     poll: Option<Poll>,
+    /// The editor's size, which mouse positions are mapped to.
     size: (u32, u32),
     last: Instant,
+    /// The editor is inside one of its calls.
+    busy: bool,
+    /// A resize that came in while `busy`: width, height, and whether the
+    /// view's frame must follow (it must not when the host set the frame).
+    pending: Option<(u32, u32, bool)>,
+    /// The view is changing its own frame.
+    in_frame: bool,
+}
+
+#[repr(C)]
+struct ObjcSuper {
+    receiver: Id,
+    super_class: Class,
 }
 
 unsafe fn state<'a>(this: Id) -> Option<&'a mut State> { unsafe {
@@ -153,6 +177,65 @@ unsafe fn state<'a>(this: Id) -> Option<&'a mut State> { unsafe {
     object_getInstanceVariable(this, IVAR.as_ptr() as *const c_char, &mut p);
     (p as *mut State).as_mut()
 }}
+
+/// Run an editor call. A resize that arrived meanwhile is applied after it.
+unsafe fn guarded(this: Id, call: impl FnOnce(&mut State)) { unsafe {
+    let Some(st) = state(this) else { return };
+    st.busy = true;
+    call(st);
+    st.busy = false;
+    if let Some((w, h, frame)) = st.pending.take() {
+        apply(this, st, w, h, frame);
+    }
+}}
+
+/// Give the editor a size inside its range, and follow the size it ends up with.
+unsafe fn apply(this: Id, st: &mut State, width: u32, height: u32, frame: bool) { unsafe {
+    let (w, h) = st.editor.size_range().clamp(width, height);
+    st.editor.resize(w, h);
+    follow(this, st, frame);
+}}
+
+/// Make the view the editor's size if the editor's size changed.
+unsafe fn follow(this: Id, st: &mut State, frame: bool) { unsafe {
+    let now = st.editor.size();
+    if now == st.size || now.0 == 0 || now.1 == 0 {
+        return;
+    }
+    st.size = now;
+    if frame {
+        st.in_frame = true;
+        send!((), this, b"setFrameSize:\0", CGSize = CGSize { w: f64::from(now.0), h: f64::from(now.1) });
+        st.in_frame = false;
+    }
+    redraw(this);
+}}
+
+/// A size from outside: now, or after the editor's current call.
+unsafe fn resize_to(this: Id, width: u32, height: u32, frame: bool) { unsafe {
+    let Some(st) = state(this) else { return };
+    if st.busy {
+        st.pending = Some((width, height, frame));
+    } else {
+        apply(this, st, width, height, frame);
+    }
+}}
+
+extern "C" fn set_frame_size(this: Id, _cmd: Sel, size: CGSize) {
+    unsafe {
+        let sup = ObjcSuper { receiver: this, super_class: class(b"NSView\0") };
+        let f: unsafe extern "C" fn(*const ObjcSuper, Sel, CGSize) = std::mem::transmute(objc_msgSendSuper as unsafe extern "C" fn());
+        f(&sup, sel(b"setFrameSize:\0"), size);
+        let Some(st) = state(this) else { return };
+        if st.in_frame || !size.w.is_finite() || !size.h.is_finite() {
+            return;
+        }
+        let (w, h) = (size.w.round().clamp(1.0, 1e5) as u32, size.h.round().clamp(1.0, 1e5) as u32);
+        if (w, h) != st.size {
+            resize_to(this, w, h, false);
+        }
+    }
+}
 
 unsafe fn backing_scale(view: Id) -> f32 { unsafe {
     let window = send!(Id, view, b"window\0");
@@ -166,8 +249,11 @@ unsafe fn backing_scale(view: Id) -> f32 { unsafe {
 }}
 
 extern "C" fn draw_rect(this: Id, _cmd: Sel, _dirty: CGRect) {
+    unsafe { guarded(this, |st| draw(this, st)) }
+}
+
+unsafe fn draw(this: Id, st: &mut State) {
     unsafe {
-        let Some(st) = state(this) else { return };
         let bounds = send_rect(this, b"bounds\0");
         let scale = backing_scale(this).clamp(1.0, 3.0);
         let frame = st.editor.render(scale);
@@ -218,51 +304,58 @@ unsafe fn redraw(this: Id) { unsafe {
 
 extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
     unsafe {
-        let Some(st) = state(this) else { return };
-        let (x, y) = local(this, st.size, event);
-        let clicks = send!(isize, event, b"clickCount\0").max(1) as u32;
-        st.editor.mouse_down(x, y, clicks);
+        guarded(this, |st| {
+            let (x, y) = local(this, st.size, event);
+            let clicks = send!(isize, event, b"clickCount\0").max(1) as u32;
+            st.editor.mouse_down(x, y, clicks);
+        });
         redraw(this);
     }
 }
 
 extern "C" fn mouse_moved(this: Id, _cmd: Sel, event: Id) {
     unsafe {
-        let Some(st) = state(this) else { return };
-        let (x, y) = local(this, st.size, event);
-        st.editor.mouse_move(x, y);
+        guarded(this, |st| {
+            let (x, y) = local(this, st.size, event);
+            st.editor.mouse_move(x, y);
+        });
     }
 }
 
 extern "C" fn mouse_up(this: Id, _cmd: Sel, event: Id) {
     unsafe {
-        let Some(st) = state(this) else { return };
-        let (x, y) = local(this, st.size, event);
-        st.editor.mouse_up(x, y);
+        guarded(this, |st| {
+            let (x, y) = local(this, st.size, event);
+            st.editor.mouse_up(x, y);
+        });
         redraw(this);
     }
 }
 
 extern "C" fn scroll_wheel(this: Id, _cmd: Sel, event: Id) {
     unsafe {
-        let Some(st) = state(this) else { return };
-        let (x, y) = local(this, st.size, event);
-        let dy = send!(f64, event, b"scrollingDeltaY\0");
-        let precise = send!(i8, event, b"hasPreciseScrollingDeltas\0") != 0;
-        st.editor.wheel(x, y, (if precise { dy * 0.1 } else { dy }) as f32);
+        guarded(this, |st| {
+            let (x, y) = local(this, st.size, event);
+            let dy = send!(f64, event, b"scrollingDeltaY\0");
+            let precise = send!(i8, event, b"hasPreciseScrollingDeltas\0") != 0;
+            st.editor.wheel(x, y, (if precise { dy * 0.1 } else { dy }) as f32);
+        });
     }
 }
 
 extern "C" fn tick(this: Id, _cmd: Sel, _timer: Id) {
     unsafe {
-        let Some(st) = state(this) else { return };
-        if let Some(poll) = st.poll.as_mut() {
-            poll(st.editor.as_mut());
-        }
-        let now = Instant::now();
-        let dt = now.duration_since(st.last).as_secs_f32().min(0.1);
-        st.last = now;
-        st.editor.tick(dt);
+        guarded(this, |st| {
+            if let Some(poll) = st.poll.as_mut() {
+                poll(st.editor.as_mut());
+            }
+            let now = Instant::now();
+            let dt = now.duration_since(st.last).as_secs_f32().min(0.1);
+            st.last = now;
+            st.editor.tick(dt);
+            // An editor may change its own size (a poll hook resized it).
+            follow(this, st, true);
+        });
         redraw(this);
     }
 }
@@ -297,6 +390,7 @@ unsafe fn view_class() -> Class { unsafe {
         class_addMethod(cls, sel(name), imp, types.as_ptr() as *const c_char);
     };
     add(b"drawRect:\0", draw_rect as *const c_void, b"v@:{CGRect={CGPoint=dd}{CGSize=dd}}\0");
+    add(b"setFrameSize:\0", set_frame_size as *const c_void, b"v@:{CGSize=dd}\0");
     add(b"isFlipped\0", yes as *const c_void, b"c@:\0");
     add(b"isOpaque\0", yes as *const c_void, b"c@:\0");
     add(b"acceptsFirstResponder\0", yes as *const c_void, b"c@:\0");
@@ -334,7 +428,7 @@ impl EditorView {
             if view.is_null() {
                 return None;
             }
-            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now() }));
+            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), busy: false, pending: None, in_frame: false }));
             object_setInstanceVariable(view, IVAR.as_ptr() as *const c_char, state as *mut c_void);
 
             // Mouse-moved events need a tracking area: moved | active always | in visible rect.
@@ -376,9 +470,27 @@ impl EditorView {
         self.view
     }
 
-    /// The editor's size in points.
+    /// The editor's current size in points.
     pub fn size(&self) -> (u32, u32) {
         unsafe { self.state.as_ref().map(|s| s.size).unwrap_or((0, 0)) }
+    }
+
+    /// The sizes the editor can take.
+    pub fn size_range(&self) -> SizeRange {
+        match unsafe { self.state.as_ref() } {
+            Some(s) => s.editor.size_range(),
+            None => SizeRange::fixed(0, 0),
+        }
+    }
+
+    /// Move the editor and the view to `width` x `height` points, brought
+    /// into the editor's range. Returns the size the editor takes. If the
+    /// editor is inside one of its own calls, the change is made when that
+    /// call ends. A fixed editor stays as it is.
+    pub fn resize(&self, width: u32, height: u32) -> (u32, u32) {
+        let (w, h) = self.size_range().clamp(width, height);
+        unsafe { resize_to(self.view, w, h, true) };
+        (w, h)
     }
 
     /// Put the view inside a host's parent `NSView`.
@@ -437,19 +549,28 @@ pub fn run_window(title: &str, editor: Box<dyn Editor>, poll: Option<Poll>) -> i
         send!((), app, b"setActivationPolicy:\0", isize = 0);
         let Some(view) = EditorView::new(editor, poll) else { return 1 };
         let size = view.size();
+        let range = view.size_range();
         let frame = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { w: size.0 as f64, h: size.1 as f64 } };
-        // Titled | closable | miniaturizable; buffered backing.
+        // Titled | closable | miniaturizable (| resizable when the editor can be); buffered backing.
         let window = send!(
             Id,
             send!(Id, class(b"NSWindow\0") as Id, b"alloc\0"),
             b"initWithContentRect:styleMask:backing:defer:\0",
             CGRect = frame,
-            usize = 7,
+            usize = if range.is_fixed() { 7 } else { 15 },
             usize = 2,
             i8 = 0
         );
         if window.is_null() {
             return 1;
+        }
+        if !range.is_fixed() {
+            let pt = |(w, h): (u32, u32)| CGSize { w: f64::from(w), h: f64::from(h) };
+            send!((), window, b"setContentMinSize:\0", CGSize = pt(range.min));
+            send!((), window, b"setContentMaxSize:\0", CGSize = pt(range.max));
+            if let Some(aspect) = range.aspect_ratio() {
+                send!((), window, b"setContentAspectRatio:\0", CGSize = pt(aspect));
+            }
         }
         send!((), window, b"setTitle:\0", Id = ns_string(title));
         send!((), window, b"setContentView:\0", Id = view.raw());

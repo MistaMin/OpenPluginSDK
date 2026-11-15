@@ -25,17 +25,23 @@ use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
 use openplugin_targets::clap_abi::*;
 use openplugin_targets::ClapAdapter;
 
+// Per thread, so tests running in parallel (the negative control allocates on
+// purpose) never add to each other's counts.
 thread_local! {
     static COUNTING: Cell<bool> = const { Cell::new(false) };
+    static AUDIO_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
 }
-static AUDIO_ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+fn counted() -> usize {
+    AUDIO_ALLOCATIONS.with(Cell::get)
+}
 
 struct CountingAllocator;
 
 fn note_allocation() {
     // `try_with`: the slot may already be gone while a thread exits.
     if COUNTING.try_with(Cell::get).unwrap_or(false) {
-        AUDIO_ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
+        let _ = AUDIO_ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
     }
 }
 
@@ -295,7 +301,7 @@ fn start_audio(plugin: PluginPtr) -> Audio {
         let mut input = [vec![DRY; FRAMES], vec![DRY; FRAMES]];
         let mut report = AudioReport::default();
         // Everything is allocated; only the blocks are counted.
-        let before = AUDIO_ALLOCATIONS.load(Ordering::SeqCst);
+        let before = counted();
         COUNTING.with(|c| c.set(true));
         while !flag.load(Ordering::Relaxed) {
             let status = run_block(plugin.0, &mut out, &mut input);
@@ -310,7 +316,7 @@ fn start_audio(plugin: PluginPtr) -> Audio {
             }
         }
         COUNTING.with(|c| c.set(false));
-        report.allocations = AUDIO_ALLOCATIONS.load(Ordering::SeqCst) - before;
+        report.allocations = counted() - before;
         report
     });
     Audio { stop, handle }
@@ -435,12 +441,12 @@ fn audio_thread_does_not_allocate_during_saves_and_loads() {
 #[test]
 fn the_counter_sees_audio_thread_allocations() {
     let seen = std::thread::spawn(|| {
-        let before = AUDIO_ALLOCATIONS.load(Ordering::SeqCst);
+        let before = counted();
         COUNTING.with(|c| c.set(true));
         let boxed = std::hint::black_box(Box::new([0u8; 128]));
         COUNTING.with(|c| c.set(false));
         drop(boxed);
-        AUDIO_ALLOCATIONS.load(Ordering::SeqCst) - before
+        counted() - before
     })
     .join()
     .unwrap();

@@ -52,6 +52,12 @@ Use `frame_layered` for anything with a plate. A 0.2 plate is shaded per pixel a
 
 The view repaints 30 times a second on the main thread, so an editor of any size needs the layer. Change the key when the static look changes, or call `invalidate_layer`.
 
+## Resizable editors
+
+`SceneCanvas::resize(width, height)` sets a new size in points. The next frame has the new pixel size, and the cached layer is dropped, so `frame_layered` paints the plate again at that size and then reuses it. The same size changes nothing, and going back to an earlier size repaints it once. The layer's cache key already includes the pixel size, so a canvas that is resized without `resize` repaints too; `resize` is the call that changes the size the editor draws for.
+
+Draw from the editor's current size, not from constants: pass the width and height to `draw_faceplate_code`, and scale the positions, radii and text sizes of the parts by one factor. `examples/editor` has a `layout(width, height)` function that returns the scale and the hit areas, and uses the same function to draw and to hit-test, so a click lands on what is drawn. Painting the plate costs the most (310 ms at 1080 × 700 points above), and it happens once per size, so a host that sends many sizes during a drag pays for each one. Keep the size range modest, or draw the plate more cheaply while the size is changing. See [EDITOR.md](EDITOR.md) for the contract.
+
 `DrawList::commands` stays for hosts that only draw basic shapes. It is GoodLookin DRI's `Scene::lower_basic`, with each lit knob drawn again in the classic tier, because a basic host has no images.
 
 `cargo run -p example-editor --bin snapshot -- out.ppm 2 6 1` writes the example editor to an image. With `OP_SNAPSHOT_FRAMES=60` set, it also prints the time per frame.

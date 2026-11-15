@@ -47,7 +47,7 @@ pub(crate) fn paint_lock() -> MutexGuard<'static, ()> {
     PAINT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// A reusable drawing surface of a fixed size in points.
+/// A reusable drawing surface of a size in points ([`Self::resize`] changes it).
 pub struct SceneCanvas {
     width: f32,
     height: f32,
@@ -85,6 +85,18 @@ impl SceneCanvas {
 
     pub fn size(&self) -> (f32, f32) {
         (self.width, self.height)
+    }
+
+    /// Draw at a new size in points. The next frame has the new pixel size,
+    /// and the static layer is dropped so [`Self::frame_layered`] paints it
+    /// again at that size. The same size changes nothing.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        let (width, height) = (width.max(1.0), height.max(1.0));
+        if (width, height) != (self.width, self.height) {
+            self.width = width;
+            self.height = height;
+            self.invalidate_layer();
+        }
     }
 
     /// Paint with `paint` at `scale` device pixels per point and return the
@@ -217,6 +229,33 @@ mod tests {
         layered.invalidate_layer();
         layered.frame_layered(1.0, 8, |_| layer_runs += 1, |_| {});
         assert_eq!(layer_runs, 4, "a new scale, a new key and an invalidation repaint it");
+    }
+
+    #[test]
+    fn resize_repaints_the_layer_at_the_new_size() {
+        let mut canvas = SceneCanvas::new(60.0, 40.0);
+        canvas.set_background(0x000000);
+        let mut runs = 0;
+        let plate = |dl: &mut DrawList| draw_faceplate_code(dl, 60.0, 40.0, "Navy");
+        let small = canvas.frame_layered(1.0, 1, |dl| { runs += 1; plate(dl) }, |_| {}).pixels.to_vec();
+        assert_eq!(small.len(), 60 * 40);
+        canvas.resize(120.0, 80.0);
+        assert_eq!(canvas.size(), (120.0, 80.0));
+        let plate_big = |dl: &mut DrawList| draw_faceplate_code(dl, 120.0, 80.0, "Navy");
+        let big = canvas.frame_layered(1.0, 1, |dl| { runs += 1; plate_big(dl) }, |_| {});
+        assert_eq!((big.width, big.height), (120, 80));
+        // The plate covers the larger surface: its far corner is painted, not background.
+        assert_ne!(big.pixels[119 + 79 * 120], 0, "painted at the new size");
+        assert_eq!(runs, 2, "a new size repaints the layer");
+        // The same size again keeps the layer.
+        canvas.resize(120.0, 80.0);
+        canvas.frame_layered(1.0, 1, |_| runs += 1, |_| {});
+        assert_eq!(runs, 2);
+        // Back to the first size: repainted, and the pixels equal the first frame.
+        canvas.resize(60.0, 40.0);
+        let again = canvas.frame_layered(1.0, 1, |dl| { runs += 1; plate(dl) }, |_| {}).pixels.to_vec();
+        assert_eq!(runs, 3);
+        assert!(again == small);
     }
 
     #[test]

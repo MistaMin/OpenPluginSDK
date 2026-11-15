@@ -14,6 +14,12 @@
 //! back through `port_event`, and with `instance-access` it is bound to the
 //! engine's [`EditorState`]. [`manifest_ttl`] and [`plugin_ttl`] write the
 //! description files from the parameter table ([`write_bundle`]).
+//!
+//! Size: a fixed editor lists `ui:noUserResize`; a resizable one lists
+//! `ui:resize` as extension data instead ([`write_bundle_for_editor`] reads
+//! the editor's range). The host resizes the editor with `ui:resize`
+//! (`extension_data`), and the editor asks the host for a size through the
+//! host's `ui:resize` feature.
 //! [`Lv2Harness`] drives the same render path in-process.
 
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -322,8 +328,10 @@ pub use ui::{lv2ui_descriptor, Lv2UiDescriptor};
 mod ui {
     //! `ui:CocoaUI`: the editor in an `NSView`, handed to the host as the widget.
     use super::*;
-    use openplugin_core::{EditorHost, Gesture};
+    use openplugin_core::{Editor, EditorHost, Gesture};
     use openplugin_dri::cocoa::EditorView;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
     pub type WriteFn = unsafe extern "C" fn(controller: *mut c_void, port: u32, size: u32, protocol: u32, buffer: *const c_void);
 
@@ -357,6 +365,24 @@ mod ui {
     struct Resize {
         handle: *mut c_void,
         ui_resize: Option<unsafe extern "C" fn(handle: *mut c_void, width: i32, height: i32) -> i32>,
+    }
+
+    /// The `ui:resize` the UI itself offers the host through `extension_data`.
+    struct OfferedResize(Resize);
+    // Plain function pointer and a null handle; the host passes the UI's own handle.
+    unsafe impl Sync for OfferedResize {}
+    static OFFERED: OfferedResize = OfferedResize(Resize { handle: std::ptr::null_mut(), ui_resize: Some(host_resizes) });
+
+    /// The host sets the editor's size. 0 on success; non-zero if the size is
+    /// outside the editor's range (a fixed editor takes only its own size).
+    unsafe extern "C" fn host_resizes(handle: *mut c_void, width: i32, height: i32) -> i32 {
+        let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return 1 };
+        let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else { return 1 };
+        if !ui.view.size_range().contains(w, h) {
+            return 1;
+        }
+        ui.view.resize(w, h);
+        0
     }
 
     struct Ui {
@@ -429,12 +455,36 @@ mod ui {
             }
             next = unsafe { next.add(1) };
         }
-        let Some(mut editor) = factory(host_for(Link { write, controller, touch })) else {
+        // A size the host agreed to, for the view to apply on its next tick.
+        let granted: Rc<Cell<Option<(u32, u32)>>> = Rc::new(Cell::new(None));
+        let ask = {
+            let granted = granted.clone();
+            let (handle, call) = match unsafe { resize.as_ref() } {
+                Some(r) => (r.handle as usize, r.ui_resize),
+                None => (0, None),
+            };
+            move |w: u32, h: u32| -> bool {
+                let Some(call) = call else { return false };
+                let (Ok(wi), Ok(hi)) = (i32::try_from(w), i32::try_from(h)) else { return false };
+                if unsafe { call(handle as *mut c_void, wi, hi) } != 0 {
+                    return false;
+                }
+                granted.set(Some((w, h)));
+                true
+            }
+        };
+        let Some(mut editor) = factory(host_for(Link { write, controller, touch }).with_resize(ask)) else {
             return std::ptr::null_mut();
         };
         editor.bind(unsafe { instance_state(instance) });
         let count = param_count();
-        let Some(view) = EditorView::new(editor, None) else { return std::ptr::null_mut() };
+        let poll = Box::new(move |editor: &mut dyn Editor| {
+            if let Some((w, h)) = granted.take() {
+                let (w, h) = editor.size_range().clamp(w, h);
+                editor.resize(w, h);
+            }
+        });
+        let Some(view) = EditorView::new(editor, Some(poll)) else { return std::ptr::null_mut() };
         if !parent.is_null() {
             unsafe { view.attach(parent) };
         }
@@ -471,7 +521,10 @@ mod ui {
         }
     }
 
-    unsafe extern "C" fn extension_data(_uri: *const c_char) -> *const c_void {
+    unsafe extern "C" fn extension_data(uri: *const c_char) -> *const c_void {
+        if !uri.is_null() && unsafe { CStr::from_ptr(uri) }.to_bytes() == b"http://lv2plug.in/ns/extensions/ui#resize" {
+            return &OFFERED.0 as *const Resize as *const c_void;
+        }
         std::ptr::null()
     }
 
@@ -583,6 +636,15 @@ pub fn manifest_ttl(plugin: &dyn Plugin, binary_stem: &str, with_ui: bool) -> St
 
 /// `<binary_stem>.ttl`: the plugin, its ports, and its editor.
 pub fn plugin_ttl(plugin: &dyn Plugin, with_ui: bool) -> String {
+    plugin_ttl_sized(plugin, with_ui.then_some(false))
+}
+
+/// [`plugin_ttl`] for an editor of known size behaviour: `ui` is `None` for no
+/// editor, `Some(false)` for a fixed-size one (`ui:noUserResize`), and
+/// `Some(true)` for one the host can resize (`ui:resize` extension data).
+pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
+    let with_ui = ui.is_some();
+    let resizable = ui == Some(true);
     let info = plugin.info();
     let uri = plugin_uri(plugin);
     let mut out = String::new();
@@ -668,9 +730,14 @@ pub fn plugin_ttl(plugin: &dyn Plugin, with_ui: bool) -> String {
     if with_ui {
         let _ = writeln!(out, "\n<{uri}#ui>");
         out.push_str("    a ui:CocoaUI ;\n");
-        out.push_str(
-            "    lv2:optionalFeature <http://lv2plug.in/ns/ext/instance-access> , ui:parent , ui:touch , ui:resize , ui:noUserResize .\n",
-        );
+        if resizable {
+            out.push_str("    lv2:optionalFeature <http://lv2plug.in/ns/ext/instance-access> , ui:parent , ui:touch , ui:resize ;\n");
+            out.push_str("    lv2:extensionData ui:resize .\n");
+        } else {
+            out.push_str(
+                "    lv2:optionalFeature <http://lv2plug.in/ns/ext/instance-access> , ui:parent , ui:touch , ui:resize , ui:noUserResize .\n",
+            );
+        }
     }
     out
 }
@@ -681,6 +748,24 @@ pub fn write_bundle(plugin: &dyn Plugin, dir: &std::path::Path, binary_stem: &st
     let with_ui = with_ui && cfg!(target_os = "macos");
     std::fs::write(dir.join("manifest.ttl"), manifest_ttl(plugin, binary_stem, with_ui))?;
     std::fs::write(dir.join(format!("{binary_stem}.ttl")), plugin_ttl(plugin, with_ui))
+}
+
+/// [`write_bundle`] for a plugin whose editor is made by `editor`: the editor
+/// is asked for its size range, and the description lists `ui:noUserResize`
+/// only if it is fixed. Without an editor (`None`, or one that cannot be made)
+/// no editor is described.
+pub fn write_bundle_for_editor(
+    plugin: &dyn Plugin,
+    dir: &std::path::Path,
+    binary_stem: &str,
+    editor: Option<EditorFactory>,
+) -> std::io::Result<()> {
+    let resizable = editor
+        .and_then(|make| make(openplugin_core::EditorHost::detached()))
+        .map(|e| !e.size_range().is_fixed());
+    let ui = if cfg!(target_os = "macos") { resizable } else { None };
+    std::fs::write(dir.join("manifest.ttl"), manifest_ttl(plugin, binary_stem, ui.is_some()))?;
+    std::fs::write(dir.join(format!("{binary_stem}.ttl")), plugin_ttl_sized(plugin, ui))
 }
 
 /// In-process stereo LV2 run. Ports are owned vectors: 0 and 1 in, 2 and 3 out.
@@ -920,6 +1005,11 @@ mod tests {
         assert!(ttl.contains("units:unit units:db"));
         assert!(ttl.contains("a ui:CocoaUI"));
         assert!(ttl.trim_end().ends_with('.'));
+        // A fixed editor lists ui:noUserResize; a resizable one offers ui:resize instead.
+        assert!(ttl.contains("ui:noUserResize") && !ttl.contains("lv2:extensionData ui:resize"));
+        let sized = plugin_ttl_sized(&Wide, Some(true));
+        assert!(!sized.contains("noUserResize") && sized.contains("lv2:extensionData ui:resize .") && sized.trim_end().ends_with('.'));
+        assert!(!plugin_ttl_sized(&Wide, None).contains("a ui:CocoaUI"));
         // Every port block is closed and separated.
         assert_eq!(ttl.matches("lv2:index").count(), 8);
         assert_eq!(ttl.matches(" ] ,\n").count(), 7);

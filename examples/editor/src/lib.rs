@@ -4,7 +4,9 @@
 //! [`Plugin::editor_state`]. The editor is drawn with GoodLookin DRI 0.2 and
 //! rasterised by [`SceneCanvas`]: a Navy plate, a lit Brit knob for the gain
 //! (drag it up or down, Shift for fine; double-click resets), a bat toggle for Warm (click it),
-//! and an LED ladder. Hit areas and drags live in a [`ControlSet`]. Its changes go through [`EditorHost`] as gestures, and the host's
+//! and an LED ladder. It resizes from 180x120 to 480x320, keeping 3:2, and a
+//! double-click on the bare plate asks the host for a larger or the opening size.
+//! Hit areas and drags live in a [`ControlSet`]. Its changes go through [`EditorHost`] as gestures, and the host's
 //! values come back through [`Editor::param_changed`]. The same editor runs in
 //! CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), and the VST3, Audio Unit and AAX
 //! shells (`op_editor_*`). The factory presets are text files in `presets/`,
@@ -13,7 +15,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use openplugin::core::editor::Modifiers;
+use openplugin::core::editor::{Modifiers, SizeRange};
 use openplugin::core::{Editor, EditorHost, EditorState, Frame, PresetBank};
 use openplugin::dri::goodlookindri::color::Color as GlColor;
 use openplugin::dri::goodlookindri::scene::{Rect, Scene};
@@ -146,12 +148,52 @@ impl Plugin for EditorGain {
 
 pub const WIDTH: u32 = 240;
 pub const HEIGHT: u32 = 160;
-/// Hit areas in points (x, y, w, h): the knob, the toggle, the meter.
+/// The smallest and largest size, in points. The shape stays 3:2.
+pub const MIN_SIZE: (u32, u32) = (180, 120);
+pub const MAX_SIZE: (u32, u32) = (480, 320);
+/// The larger size a double-click on the plate asks for.
+pub const LARGE_SIZE: (u32, u32) = (360, 240);
+/// Hit areas at the opening size, in points (x, y, w, h): the knob, the toggle, the meter.
 pub const KNOB: (f32, f32, f32, f32) = (25.0, 38.0, 60.0, 60.0);
 pub const SWITCH: (f32, f32, f32, f32) = (118.0, 40.0, 34.0, 56.0);
 pub const METER: (f32, f32, f32, f32) = (190.0, 20.0, 18.0, 120.0);
 /// How far a drag moves the knob from end to end, in points.
 const DRAG_RANGE: f32 = 150.0;
+
+/// The hit areas at one size, in points. The layout constants are scaled by
+/// the largest factor that fits and centred, so any size has a valid layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    /// Points per point of the opening layout.
+    pub scale: f32,
+    pub knob: (f32, f32, f32, f32),
+    pub switch: (f32, f32, f32, f32),
+    pub meter: (f32, f32, f32, f32),
+    /// Where the "WARM" legend sits (centre x, baseline y).
+    pub legend: (f32, f32),
+}
+
+/// The layout for an editor of `width` x `height` points.
+pub fn layout(width: u32, height: u32) -> Layout {
+    let scale = (width as f32 / WIDTH as f32).min(height as f32 / HEIGHT as f32).max(0.01);
+    let ox = (width as f32 - WIDTH as f32 * scale) * 0.5;
+    let oy = (height as f32 - HEIGHT as f32 * scale) * 0.5;
+    let place = |r: (f32, f32, f32, f32)| (ox + r.0 * scale, oy + r.1 * scale, r.2 * scale, r.3 * scale);
+    Layout {
+        scale,
+        knob: place(KNOB),
+        switch: place(SWITCH),
+        meter: place(METER),
+        legend: (ox + (SWITCH.0 + SWITCH.2 * 0.5) * scale, oy + (SWITCH.1 + SWITCH.3 + 16.0) * scale),
+    }
+}
+
+/// The two controls at a layout, with the knob's drag range scaled with it.
+fn controls_for(host: EditorHost, lay: &Layout) -> ControlSet {
+    ControlSet::new(host)
+        .with(Control::knob(Area::from_tuple(lay.knob), 0, &PARAMS[0]).drag_range(DRAG_RANGE * lay.scale))
+        .with(Control::toggle(Area::from_tuple(lay.switch), 1, &PARAMS[1]))
+}
 
 fn rect(r: (f32, f32, f32, f32)) -> Rect {
     Rect::new(r.0, r.1, r.2, r.3)
@@ -160,18 +202,27 @@ fn rect(r: (f32, f32, f32, f32)) -> Rect {
 /// The editor: GoodLookin DRI parts on a [`SceneCanvas`], with its hit areas
 /// and gestures in a [`ControlSet`].
 pub struct GainEditor {
+    host: EditorHost,
     controls: ControlSet,
+    modifiers: Modifiers,
     shared: Option<Arc<Shared>>,
     level: f32,
+    size: (u32, u32),
     canvas: SceneCanvas,
 }
 
 impl GainEditor {
     pub fn new(host: EditorHost) -> Self {
-        let controls = ControlSet::new(host)
-            .with(Control::knob(Area::from_tuple(KNOB), 0, &PARAMS[0]).drag_range(DRAG_RANGE))
-            .with(Control::toggle(Area::from_tuple(SWITCH), 1, &PARAMS[1]));
-        Self { controls, shared: None, level: 0.0, canvas: SceneCanvas::new(WIDTH as f32, HEIGHT as f32) }
+        let controls = controls_for(host.clone(), &layout(WIDTH, HEIGHT));
+        Self {
+            host,
+            controls,
+            modifiers: Modifiers::NONE,
+            shared: None,
+            level: 0.0,
+            size: (WIDTH, HEIGHT),
+            canvas: SceneCanvas::new(WIDTH as f32, HEIGHT as f32),
+        }
     }
 
     pub fn values(&self) -> [f32; 2] {
@@ -191,7 +242,27 @@ pub fn make_editor(host: EditorHost) -> Option<Box<dyn Editor>> {
 
 impl Editor for GainEditor {
     fn size(&self) -> (u32, u32) {
-        (WIDTH, HEIGHT)
+        self.size
+    }
+
+    fn size_range(&self) -> SizeRange {
+        SizeRange::between(MIN_SIZE, MAX_SIZE).with_aspect(WIDTH, HEIGHT)
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        let size = self.size_range().clamp(width, height);
+        if size == self.size {
+            return;
+        }
+        self.size = size;
+        self.canvas.resize(size.0 as f32, size.1 as f32);
+        // New hit areas at the new size; the values carry over without a gesture.
+        let values = self.values();
+        self.controls = controls_for(self.host.clone(), &layout(size.0, size.1));
+        self.controls.set_modifiers(self.modifiers);
+        for (index, value) in values.iter().enumerate() {
+            self.controls.param_changed(index, *value);
+        }
     }
 
     fn bind(&mut self, state: Option<EditorState>) {
@@ -212,8 +283,10 @@ impl Editor for GainEditor {
     fn render(&mut self, scale: f32) -> Frame<'_> {
         let level_db = 20.0 * self.level.max(1e-6).log10();
         let controls = &self.controls;
-        // The plate is static: painted once per scale, then reused under the moving parts.
-        let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, WIDTH as f32, HEIGHT as f32, "Navy");
+        let lay = layout(self.size.0, self.size.1);
+        let (width, height) = (self.size.0 as f32, self.size.1 as f32);
+        // The plate is static: painted once per size and scale, then reused under the moving parts.
+        let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, width, height, "Navy");
         self.canvas.frame_layered(scale, 0, plate, |dl| {
             let mut parts = Scene::new();
             for c in controls.iter() {
@@ -233,26 +306,37 @@ impl Editor for GainEditor {
                     ControlKind::Toggle => {
                         switches::draw_toggle(&mut parts, rect((x, y, w, h)), c.is_on(), switches::ToggleStyle::Bat, GlColor(0xffe08030));
                         parts.text(
-                            openplugin::dri::goodlookindri::scene::Point::new(x + w * 0.5, y + h + 16.0),
+                            openplugin::dri::goodlookindri::scene::Point::new(lay.legend.0, lay.legend.1),
                             "WARM",
                             GlColor(0xffffffff),
-                            11.0,
+                            11.0 * lay.scale,
                             true,
                         );
                     }
                     _ => {}
                 }
             }
-            meters::draw_led_ladder(&mut parts, rect(METER), false, level_db, level_db, 16);
+            meters::draw_led_ladder(&mut parts, rect(lay.meter), false, level_db, level_db, 16);
             dl.append(parts);
         })
     }
 
     fn modifiers_changed(&mut self, modifiers: Modifiers) {
+        self.modifiers = modifiers;
         self.controls.set_modifiers(modifiers);
     }
 
     fn mouse_down(&mut self, x: f32, y: f32, clicks: u32) {
+        let on_control = self.controls.iter().any(|c| c.area.contains(x, y));
+        let lay = layout(self.size.0, self.size.1);
+        let (mx, my, mw, mh) = lay.meter;
+        let on_meter = x >= mx && x < mx + mw && y >= my && y < my + mh;
+        if !on_control && !on_meter && clicks >= 2 {
+            // The bare plate: ask the host to switch between the two sizes.
+            let (w, h) = if self.size.0 >= LARGE_SIZE.0 { (WIDTH, HEIGHT) } else { LARGE_SIZE };
+            self.host.request_resize(&self.size_range(), w, h);
+            return;
+        }
         self.controls.mouse_down(x, y, clicks);
     }
 

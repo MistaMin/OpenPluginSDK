@@ -8,7 +8,7 @@ fn main() {
         eprintln!("usage: lv2_ttl <folder> <library stem>");
         std::process::exit(2);
     };
-    if let Err(e) = openplugin::targets::lv2::write_bundle(&EditorGain::default(), std::path::Path::new(dir), stem, true) {
+    if let Err(e) = openplugin::targets::lv2::write_bundle_for_editor(&EditorGain::default(), std::path::Path::new(dir), stem, Some(example_editor::make_editor)) {
         eprintln!("{dir}: {e}");
         std::process::exit(1);
     }
