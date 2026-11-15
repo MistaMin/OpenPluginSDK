@@ -125,6 +125,11 @@ struct Audio {
     midi_read: usize,
     /// Index into `supported_layouts` last selected.
     layout_index: u32,
+    /// [`Plugin::note_expressions`], read once at creation.
+    expressions: openplugin_core::ExpressionSet,
+    /// The MPE receiver of a plugin that asked for MPE ([`Plugin::mpe_input`]):
+    /// note and raw MIDI events go through it.
+    mpe: Option<openplugin_core::MpeReceiver>,
 }
 
 /// A tail in seconds: infinity for an endless tail, zero for none or unknown.
@@ -234,6 +239,8 @@ impl FfiInstance {
         cursor.pull(&plane, plugin.as_mut());
         let latency = plugin.latency() as u32;
         let tail = tail_seconds_of(plugin.tail(), rate);
+        let expressions = plugin.note_expressions();
+        let mpe = openplugin_core::MpeReceiver::for_plugin(plugin.as_ref());
         Self {
             audio: UnsafeCell::new(Audio {
                 inner: plugin,
@@ -249,6 +256,8 @@ impl FfiInstance {
                 midi_out: Vec::with_capacity(block::MAX_MIDI_OUT),
                 midi_read: 0,
                 layout_index: 0,
+                expressions,
+                mpe,
             }),
             plane,
             meters: Seqlock::new(MeterFrame::SILENT),

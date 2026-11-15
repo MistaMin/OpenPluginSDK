@@ -1,0 +1,19 @@
+[package]
+name = "example-expression-synth"
+description = "A small polyphonic synth that takes per-note expression (CLAP note expressions and polyphonic modulation, VST3 note expressions, MPE over MIDI) in every format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# staticlib: the VST3 expression proof in native/ links it (native/CMakeLists.txt
+# finds libexample_expression_synth.a next to OP_RUST_LIB, or takes
+# -DOP_EXPRESSION_LIB). rlib: the CLAP, LV2 and shell proofs in tests/ call its exports.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+openplugin = { workspace = true }
+
+[dev-dependencies]
+openplugin-testing = { workspace = true }

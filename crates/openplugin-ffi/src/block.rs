@@ -13,7 +13,7 @@
 
 use std::sync::atomic::Ordering;
 
-use openplugin_core::{IoConfig, Transport, MAX_AUDIO_CHANNELS};
+use openplugin_core::{mpe, Expression, IoConfig, NoteRef, Transport, MAX_AUDIO_CHANNELS};
 
 use crate::{Audio, FfiInstance};
 
@@ -27,6 +27,23 @@ pub const EVENT_NOTE_OFF: u32 = 2;
 pub const EVENT_MIDI: u32 = 3;
 pub const EVENT_PARAM_PLAIN: u32 = 4;
 pub const EVENT_PARAM_NORMALIZED: u32 = 5;
+// ---- ABI 7: per-note expression ----
+/// A note-on with the host's note id in `index` (the bits of an `i32`; -1,
+/// `0xFFFF_FFFF`, for none), `channel`, `note` and `velocity` as
+/// [`EVENT_NOTE_ON`]. Delivered to `Plugin::note_on_ref`; a note without an id
+/// goes through MPE for a plugin that asked for it, one with an id never does.
+pub const EVENT_NOTE_ON_ID: u32 = 6;
+/// A note-off with the host's note id in `index`, as [`EVENT_NOTE_ON_ID`];
+/// `velocity` is the release velocity.
+pub const EVENT_NOTE_OFF_ID: u32 = 7;
+/// A per-note expression: `index` the note id (or -1), `midi[0]` the
+/// expression (`OP_EXPRESSION_*`, the CLAP ids), `channel` and `note` the
+/// channel and key ([`NOTE_ANY`] for any), `value` in the expression's units
+/// ([`Expression::range`]). Delivered to `Plugin::note_expression` when the
+/// plugin lists the expression, clamped; NaN is skipped.
+pub const EVENT_NOTE_EXPRESSION: u32 = 8;
+/// `channel` or `note` of an [`EVENT_NOTE_EXPRESSION`]: any.
+pub const NOTE_ANY: u8 = 0xFF;
 
 /// One sample-offset event. Fields not used by `kind` are ignored.
 #[repr(C)]
@@ -170,6 +187,12 @@ unsafe fn read_span(src: *const f32, start: usize, dst: &mut [f32]) {
     }
 }
 
+/// The note id an ABI 7 event carries in `index`; `None` below -1.
+fn event_note_id(event: &OpEvent) -> Option<i32> {
+    let id = event.index as i32;
+    (id >= -1).then_some(id)
+}
+
 fn valid_event(event: &OpEvent, frames: usize) -> bool {
     if event.offset as usize >= frames {
         return false;
@@ -177,6 +200,16 @@ fn valid_event(event: &OpEvent, frames: usize) -> bool {
     match event.kind {
         EVENT_NOTE_ON | EVENT_NOTE_OFF => {
             event.channel < 16 && event.note < 128 && event.velocity < 128
+        }
+        EVENT_NOTE_ON_ID | EVENT_NOTE_OFF_ID => {
+            event.channel < 16 && event.note < 128 && event.velocity < 128 && event_note_id(event).is_some()
+        }
+        EVENT_NOTE_EXPRESSION => {
+            event_note_id(event).is_some()
+                && Expression::from_id(i64::from(event.midi[0])).is_some()
+                && (event.channel < 16 || event.channel == NOTE_ANY)
+                && (event.note < 128 || event.note == NOTE_ANY)
+                && event.value.is_finite()
         }
         EVENT_MIDI => {
             event.midi[0] & 0x80 != 0 && event.midi[1] < 0x80 && event.midi[2] < 0x80
@@ -190,6 +223,24 @@ impl FfiInstance {
     fn apply_events(&self, audio: &mut Audio, start: usize, end: usize) {
         for index in start..end {
             let event = audio.events[index];
+            if let Some(receiver) = audio.mpe.as_mut() {
+                // MPE: notes without a host note id and raw MIDI go through
+                // the receiver. A note with an id (VST3) does not: the host
+                // addresses it with its own per-note expressions.
+                let no_id = event_note_id(&event).is_none_or(|id| id < 0);
+                let bytes = match event.kind {
+                    EVENT_NOTE_ON => Some([0x90 | event.channel, event.note, event.velocity]),
+                    EVENT_NOTE_OFF => Some([0x80 | event.channel, event.note, event.velocity]),
+                    EVENT_NOTE_ON_ID if no_id => Some([0x90 | event.channel, event.note, event.velocity]),
+                    EVENT_NOTE_OFF_ID if no_id => Some([0x80 | event.channel, event.note, event.velocity]),
+                    EVENT_MIDI => Some([event.midi[0], event.midi[1], event.midi[2]]),
+                    _ => None,
+                };
+                if let Some(bytes) = bytes {
+                    mpe::receive_into(receiver, audio.inner.as_mut(), 0, bytes);
+                    continue;
+                }
+            }
             match event.kind {
                 EVENT_NOTE_ON => {
                     audio
@@ -197,6 +248,26 @@ impl FfiInstance {
                         .note_on_channel(0, event.channel, event.note, event.velocity)
                 }
                 EVENT_NOTE_OFF => audio.inner.note_off(0, event.note),
+                EVENT_NOTE_ON_ID | EVENT_NOTE_OFF_ID => {
+                    let id = event_note_id(&event).unwrap_or(-1);
+                    let note = NoteRef::new(id, 0, i16::from(event.channel), i16::from(event.note));
+                    if event.kind == EVENT_NOTE_ON_ID {
+                        audio.inner.note_on_ref(0, note, event.velocity);
+                    } else {
+                        audio.inner.note_off_ref(0, note, event.velocity);
+                    }
+                }
+                EVENT_NOTE_EXPRESSION => {
+                    let Some(expression) = Expression::from_id(i64::from(event.midi[0])) else { continue };
+                    if !audio.expressions.contains(expression) {
+                        continue;
+                    }
+                    let Some(value) = expression.sanitize(f64::from(event.value)) else { continue };
+                    let any = |v: u8| if v == NOTE_ANY { -1 } else { i16::from(v) };
+                    let id = event_note_id(&event).unwrap_or(-1);
+                    let note = NoteRef::new(id, -1, any(event.channel), any(event.note));
+                    audio.inner.note_expression(0, note, expression, value);
+                }
                 EVENT_MIDI => match event.midi[0] & 0xF0 {
                     0x90 => audio.inner.note_on_channel(
                         0,

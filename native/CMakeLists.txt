@@ -21,6 +21,8 @@
 # OP_TAIL=ON is what makes vst3_proof and au_proof exercise the tail report.
 # The channel order proofs (vst3_roles_proof, au_roles_proof, aax_roles_proof) load
 # Role Tags (examples/role_tags) instead; without its library they are not built.
+# The per-note expression proof (vst3_expression_proof) loads Expression Synth
+# (examples/expression_synth): cargo build --release --lib -p example-expression-synth.
 cmake_minimum_required(VERSION 3.20)
 project(OpenPluginShell LANGUAGES C CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 17)
@@ -81,6 +83,26 @@ if(OP_ROLE_LIB AND EXISTS "${OP_ROLE_LIB}")
 else()
   set(OP_ROLE_PROOFS OFF)
   message(STATUS "Role proofs not built: no libexample_role_tags.a (cargo build --release --lib -p example-role-tags)")
+endif()
+
+# The per-note expression proof (0.7 task 4) links Expression Synth
+# (examples/expression_synth): build it with `cargo build --release --lib -p
+# example-expression-synth`. As for the role proofs, libexample_expression_synth.a
+# next to OP_RUST_LIB is used when OP_EXPRESSION_LIB is not given; without it the
+# proof is not built (and says so).
+set(OP_EXPRESSION_LIB "" CACHE FILEPATH "Rust static library of examples/expression_synth, for the expression proof")
+if(NOT OP_EXPRESSION_LIB)
+  get_filename_component(OP_RUST_LIB_DIR "${OP_RUST_LIB}" DIRECTORY)
+  if(EXISTS "${OP_RUST_LIB_DIR}/libexample_expression_synth.a")
+    set(OP_EXPRESSION_LIB "${OP_RUST_LIB_DIR}/libexample_expression_synth.a")
+  endif()
+endif()
+if(OP_EXPRESSION_LIB AND EXISTS "${OP_EXPRESSION_LIB}")
+  set(OP_EXPRESSION_PROOFS ON)
+  message(STATUS "Expression proof over ${OP_EXPRESSION_LIB}")
+else()
+  set(OP_EXPRESSION_PROOFS OFF)
+  message(STATUS "Expression proof not built: no libexample_expression_synth.a (cargo build --release --lib -p example-expression-synth)")
 endif()
 
 # Links the Rust library: OP_RUST_LIB, or the archive given as the second argument.
@@ -322,6 +344,32 @@ if(OP_BUILD_VST3)
       target_link_libraries(VST3RolesProof PRIVATE sdk "-framework CoreFoundation")
       add_dependencies(VST3RolesProof OpenPluginVST3Roles)
       add_test(NAME vst3_roles_proof COMMAND VST3RolesProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Roles>")
+    endif()
+    # Per-note expression proof (ABI 7): the shell over Expression Synth, note ids and
+    # kNoteExpressionValueEvent in, INoteExpressionController read back.
+    if(OP_EXPRESSION_PROOFS)
+      set(OP_PRODUCT_SAVED "${OP_PRODUCT}")
+      set(OP_PRODUCT "Expression Synth")
+      configure_file(vst3/Info.plist.in "${CMAKE_BINARY_DIR}/vst3-expression-Info.plist" @ONLY)
+      set(OP_PRODUCT "${OP_PRODUCT_SAVED}")
+      add_library(OpenPluginVST3Expression MODULE
+        vst3/OpenPluginVST3.cpp
+        "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
+      target_include_directories(OpenPluginVST3Expression PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+      set_target_properties(OpenPluginVST3Expression PROPERTIES
+        OUTPUT_NAME "Expression Synth"
+        BUNDLE TRUE
+        BUNDLE_EXTENSION vst3
+        PREFIX ""
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-expression-Info.plist")
+      target_link_libraries(OpenPluginVST3Expression PRIVATE sdk)
+      op_link_rust(OpenPluginVST3Expression "${OP_EXPRESSION_LIB}")
+      add_executable(VST3ExpressionProof vst3/expression_host.cpp
+        "${OP_VST3_SDK}/public.sdk/source/vst/hosting/eventlist.cpp")
+      target_include_directories(VST3ExpressionProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+      target_link_libraries(VST3ExpressionProof PRIVATE sdk "-framework CoreFoundation")
+      add_dependencies(VST3ExpressionProof OpenPluginVST3Expression)
+      add_test(NAME vst3_expression_proof COMMAND VST3ExpressionProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Expression>")
     endif()
   endif()
   if(OP_EDITOR)

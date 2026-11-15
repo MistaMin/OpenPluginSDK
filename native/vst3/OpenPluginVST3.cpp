@@ -23,6 +23,8 @@
 #include "pluginterfaces/vst/ivstevents.h"
 #include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
+#include "pluginterfaces/vst/ivstnoteexpression.h"
+#include "pluginterfaces/vst/ivstphysicalui.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "pluginterfaces/vst/ivstunits.h"
 #include "pluginterfaces/vst/vstspeaker.h"
@@ -266,6 +268,51 @@ std::string shell_format(uint32_t index, double plain) {
     big.resize(std::min(again, big.size() - 1));
     return big;
 }
+
+// ---- Per-note expression (ABI 7) -> VST3 note expression ---------------------
+// The library lists the expressions the plugin reacts to (op_shell_expressions)
+// with their range in the SDK's units (op_shell_expression_info). Volume to
+// brightness are the VST3 predefined types of the same numbers (kVolumeTypeID 0
+// .. kBrightnessTypeID 5, ivstnoteexpression.h); pressure has no predefined type
+// and is the custom type kCustomStart. Every range is linear, and the predefined
+// VST3 mappings are the same lines: volume plain = 20 log(4 norm) dB is a gain of
+// 4 norm over 0..4, tuning plain = 240 (norm - 0.5) semitones over -120..120, the
+// others norm itself. So normalized = (value - min) / (max - min) for all.
+constexpr NoteExpressionTypeID kPressureTypeID = NoteExpressionTypeIDs::kCustomStart;
+
+struct ShellExpressions {
+    uint32_t mask = 0;
+    uint32_t count = 0;
+    uint32_t order[OP_EXPRESSION_COUNT] = {};  // OP_EXPRESSION_* ids, listed order
+    OpExpressionInfo info[OP_EXPRESSION_COUNT] = {};
+    void load() {
+        mask = 0;
+        count = 0;
+        const uint32_t listed = op_shell_expressions();
+        for (uint32_t id = 0; id < OP_EXPRESSION_COUNT; ++id) {
+            if (!(listed & (1u << id)) || !op_shell_expression_info(id, &info[id]) || !(info[id].max > info[id].min)) continue;
+            mask |= 1u << id;
+            order[count++] = id;
+        }
+    }
+    bool has(uint32_t id) const { return id < OP_EXPRESSION_COUNT && (mask & (1u << id)); }
+    static NoteExpressionTypeID typeOf(uint32_t id) { return id == OP_EXPRESSION_PRESSURE ? kPressureTypeID : static_cast<NoteExpressionTypeID>(id); }
+    // The OP_EXPRESSION_* id of a VST3 type the plugin lists.
+    bool idOf(NoteExpressionTypeID type, uint32_t& id) const {
+        if (type == kPressureTypeID) id = OP_EXPRESSION_PRESSURE;
+        else if (type < OP_EXPRESSION_PRESSURE) id = static_cast<uint32_t>(type);
+        else return false;
+        return has(id);
+    }
+    double plain(uint32_t id, double normalized) const {
+        const OpExpressionInfo& i = info[id];
+        return i.min + std::clamp(normalized, 0.0, 1.0) * (i.max - i.min);
+    }
+    double normalized(uint32_t id, double plain) const {
+        const OpExpressionInfo& i = info[id];
+        return std::clamp((plain - i.min) / (i.max - i.min), 0.0, 1.0);
+    }
+};
 
 // ---- Parameter groups (ABI 5) -> IUnitInfo -----------------------------------
 // The group path of parameter `index` ("Filter/Envelope"; "" is the top level).
@@ -532,6 +579,7 @@ public:
         const uint32_t ports = op_shell_note_ports();
         noteIn_ = (ports & OP_NOTE_PORT_INPUT) != 0;
         noteOut_ = (ports & OP_NOTE_PORT_OUTPUT) != 0;
+        expressions_.load();
     }
     ~Processor() override {
         stopPolling();
@@ -961,6 +1009,8 @@ private:
     static uint8_t to_midi7(double normalized) {
         return static_cast<uint8_t>(std::lround(std::clamp(normalized, 0.0, 1.0) * 127.0));
     }
+    // A VST3 note id as the ABI carries it: int32 bits, -1 for none.
+    static uint32_t noteId(int32 id) { return static_cast<uint32_t>(id < 0 ? -1 : id); }
     static uint8_t velocity7(float velocity) {
         return static_cast<uint8_t>(std::clamp<long>(std::lround(velocity * 127.0f), 0, 127));
     }
@@ -1052,9 +1102,10 @@ private:
             }
         }
     }
-    // Notes, polyphonic pressure and legacy MIDI controller events of the input
-    // event list. Note-on with velocity 0 is a note-off. Tuning and note
-    // expression are not carried (per-note expression is a later task).
+    // Notes (with the host's note id, ABI 7), note expression values for the
+    // types the plugin lists, polyphonic pressure and legacy MIDI controller
+    // events of the input event list. Note-on with velocity 0 is a note-off.
+    // NoteOnEvent::tuning (cents at note-on) is not carried.
     void collectNotes(IEventList* events, int32 numSamples) {
         if (!noteIn_ || !events || numSamples < 1) return;
         const int32 count = events->getEventCount();
@@ -1071,22 +1122,39 @@ private:
                 if (e.noteOn.pitch < 0 || e.noteOn.pitch > 127) break;
                 ev.channel = static_cast<uint8_t>(std::clamp<int>(e.noteOn.channel, 0, 15));
                 ev.note = static_cast<uint8_t>(e.noteOn.pitch);
+                ev.index = noteId(e.noteOn.noteId);
                 if (e.noteOn.velocity > 0.0f) {
-                    ev.kind = OP_EVENT_NOTE_ON;
+                    ev.kind = OP_EVENT_NOTE_ON_ID;
                     ev.velocity = std::max<uint8_t>(velocity7(e.noteOn.velocity), 1);
                 } else {
-                    ev.kind = OP_EVENT_NOTE_OFF;
+                    ev.kind = OP_EVENT_NOTE_OFF_ID;
                 }
                 addEvent(ev);
                 break;
             case Event::kNoteOffEvent:
                 if (e.noteOff.pitch < 0 || e.noteOff.pitch > 127) break;
-                ev.kind = OP_EVENT_NOTE_OFF;
+                ev.kind = OP_EVENT_NOTE_OFF_ID;
                 ev.channel = static_cast<uint8_t>(std::clamp<int>(e.noteOff.channel, 0, 15));
                 ev.note = static_cast<uint8_t>(e.noteOff.pitch);
                 ev.velocity = velocity7(e.noteOff.velocity);
+                ev.index = noteId(e.noteOff.noteId);
                 addEvent(ev);
                 break;
+            case Event::kNoteExpressionValueEvent: {
+                // Addressed by the note id alone; an expression the plugin does
+                // not list, or a value that is not a number, is dropped here.
+                uint32_t id = 0;
+                const NoteExpressionValueEvent& x = e.noteExpressionValue;
+                if (!expressions_.idOf(x.typeId, id) || !std::isfinite(x.value) || x.noteId < 0) break;
+                ev.kind = OP_EVENT_NOTE_EXPRESSION;
+                ev.index = static_cast<uint32_t>(x.noteId);
+                ev.midi[0] = static_cast<uint8_t>(id);
+                ev.channel = OP_NOTE_ANY;
+                ev.note = OP_NOTE_ANY;
+                ev.value = static_cast<float>(expressions_.plain(id, x.value));
+                addEvent(ev);
+                break;
+            }
             case Event::kPolyPressureEvent:
                 if (e.polyPressure.pitch < 0 || e.polyPressure.pitch > 127) break;
                 addMidi(at, static_cast<uint8_t>(0xA0 | std::clamp<int>(e.polyPressure.channel, 0, 15)), static_cast<uint8_t>(e.polyPressure.pitch),
@@ -1355,6 +1423,7 @@ private:
     std::vector<Entry> layouts_;
     bool hasIn_ = false, hasOut_ = false, hasSide_ = false;
     bool noteIn_ = false, noteOut_ = false;
+    ShellExpressions expressions_;
     uint32_t layoutIndex_ = 0;
     uint32_t inCh_ = 0, outCh_ = 0, sideCh_ = 0;
     uint8_t inMap_[OP_MAX_CHANNELS] = {}, outMap_[OP_MAX_CHANNELS] = {}, sideMap_[OP_MAX_CHANNELS] = {};
@@ -1391,14 +1460,82 @@ private:
     float mixStep_ = 1.0f;
 };
 
-class Controller final : public EditController, public IMidiMapping, public ChannelContext::IInfoListener, public IUnitInfo {
+class Controller final : public EditController,
+                         public IMidiMapping,
+                         public ChannelContext::IInfoListener,
+                         public IUnitInfo,
+                         public INoteExpressionController,
+                         public INoteExpressionPhysicalUIMapping {
 public:
     static FUnknown* create(void*) { return static_cast<IEditController*>(new Controller); }
-    // The units come from the library's static parameter description, so a
-    // host may ask for IUnitInfo before initialize.
+    // The units and the note expressions come from the library's static
+    // description, so a host may ask for them before initialize.
     Controller() {
         OpShellInfo info{};
-        if (load_info(info)) units_ = shell_units(info.param_count);
+        if (load_info(info)) {
+            units_ = shell_units(info.param_count);
+            if (op_shell_note_ports() & OP_NOTE_PORT_INPUT) expressions_.load();
+        }
+    }
+    // ---- INoteExpressionController (ABI 7): the expressions the plugin lists,
+    // the same on every channel of the event bus; offered only when it lists
+    // some, so a plugin without them is what it was.
+    bool expressionBus(int32 busIndex, int16 channel) const { return busIndex == 0 && channel >= 0 && channel < 16 && expressions_.count > 0; }
+    int32 PLUGIN_API getNoteExpressionCount(int32 busIndex, int16 channel) SMTG_OVERRIDE {
+        return expressionBus(busIndex, channel) ? static_cast<int32>(expressions_.count) : 0;
+    }
+    tresult PLUGIN_API getNoteExpressionInfo(int32 busIndex, int16 channel, int32 index, NoteExpressionTypeInfo& out) SMTG_OVERRIDE {
+        if (!expressionBus(busIndex, channel) || index < 0 || index >= static_cast<int32>(expressions_.count)) return kInvalidArgument;
+        const uint32_t id = expressions_.order[index];
+        const OpExpressionInfo& info = expressions_.info[id];
+        std::memset(&out, 0, sizeof(out));
+        out.typeId = ShellExpressions::typeOf(id);
+        utf8_to_utf16(info.name, std::strlen(info.name), out.title, 128);
+        utf8_to_utf16(info.short_name, std::strlen(info.short_name), out.shortTitle, 128);
+        utf8_to_utf16(info.unit, std::strlen(info.unit), out.units, 128);
+        out.unitId = kNoParentUnitId;
+        out.valueDesc.minimum = 0.0;
+        out.valueDesc.maximum = 1.0;
+        out.valueDesc.defaultValue = expressions_.normalized(id, info.default_value);
+        out.valueDesc.stepCount = 0;
+        out.associatedParameterId = kNoParamId;
+        out.flags = (info.flags & OP_EXPRESSION_BIPOLAR) ? NoteExpressionTypeInfo::kIsBipolar : 0;
+        return kResultOk;
+    }
+    tresult PLUGIN_API getNoteExpressionStringByValue(int32 busIndex, int16 channel, NoteExpressionTypeID type, NoteExpressionValue normalized,
+                                                      String128 string) SMTG_OVERRIDE {
+        uint32_t id = 0;
+        if (!string || !expressionBus(busIndex, channel) || !expressions_.idOf(type, id) || !std::isfinite(normalized)) return kInvalidArgument;
+        char text[128];
+        const size_t length = op_shell_expression_format(id, expressions_.plain(id, normalized), text, sizeof(text));
+        utf8_to_utf16(text, std::min(length, sizeof(text) - 1), string, 128);
+        return kResultOk;
+    }
+    tresult PLUGIN_API getNoteExpressionValueByString(int32 busIndex, int16 channel, NoteExpressionTypeID type, const TChar* string,
+                                                      NoteExpressionValue& normalized) SMTG_OVERRIDE {
+        uint32_t id = 0;
+        if (!string || !expressionBus(busIndex, channel) || !expressions_.idOf(type, id)) return kInvalidArgument;
+        double value = 0.0;
+        if (!op_shell_expression_parse(id, utf16_to_utf8(string).c_str(), &value)) return kResultFalse;
+        normalized = expressions_.normalized(id, value);
+        return kResultOk;
+    }
+    // ---- INoteExpressionPhysicalUIMapping: an MPE-style controller's X
+    // movement drives tuning, Y movement brightness and pressure pressure,
+    // where the plugin lists them.
+    tresult PLUGIN_API getPhysicalUIMapping(int32 busIndex, int16 channel, PhysicalUIMapList& list) SMTG_OVERRIDE {
+        if (!expressionBus(busIndex, channel) || (list.count > 0 && !list.map)) return kInvalidArgument;
+        for (uint32 i = 0; i < list.count; ++i) {
+            uint32_t id = OP_EXPRESSION_COUNT;
+            switch (list.map[i].physicalUITypeID) {
+            case kPUIXMovement: id = OP_EXPRESSION_TUNING; break;
+            case kPUIYMovement: id = OP_EXPRESSION_BRIGHTNESS; break;
+            case kPUIPressure: id = OP_EXPRESSION_PRESSURE; break;
+            default: break;
+            }
+            list.map[i].noteExpressionTypeID = expressions_.has(id) ? ShellExpressions::typeOf(id) : kInvalidTypeID;
+        }
+        return kResultOk;
     }
     // ---- IUnitInfo: one unit per group (see shell_units); offered only when
     // the plugin has groups, so a plugin without them is what it was. No
@@ -1467,6 +1604,10 @@ public:
         DEF_INTERFACE(ChannelContext::IInfoListener)
         if (!units_.units.empty()) {
             DEF_INTERFACE(IUnitInfo)
+        }
+        if (expressions_.count > 0) {
+            DEF_INTERFACE(INoteExpressionController)
+            DEF_INTERFACE(INoteExpressionPhysicalUIMapping)
         }
     END_DEFINE_INTERFACES(EditController)
     REFCOUNT_METHODS(EditController)
@@ -1652,6 +1793,7 @@ private:
     bool midiIn_ = false;
     ShellUnits units_;
     UnitID selectedUnit_ = kRootUnitId;
+    ShellExpressions expressions_;
 };
 
 #if OP_HAS_EDITOR
