@@ -4,7 +4,7 @@
 
 Each milestone makes the SDK more stable. None of them depends on a product plugin built with it. Where a milestone needs a real plugin to prove something, it uses the SDK's own examples (`examples/editor`, `examples/gain`).
 
-This is the macOS roadmap, from 0.4 to 1.0. Windows and Linux have their own: [ROADMAP_WINDOWS_LINUX.md](ROADMAP_WINDOWS_LINUX.md). Each open item below is one task: what it changes, which files it owns, and what proves it done.
+This is the macOS roadmap, from 0.4 to 1.0 and what comes after. Windows and Linux have their own: [ROADMAP_WINDOWS_LINUX.md](ROADMAP_WINDOWS_LINUX.md). Each open item below is one task: what it changes, which files it owns, and what proves it done.
 
 The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin/GoodLookinDri), which the SDK draws with: 0.3 interaction, 0.4 host polish, 0.5 qualification.
 
@@ -62,7 +62,11 @@ Still open, carried into 0.4:
 - **Validators.** CI runs `auval` (normal and strict), pluginval at strictness 10 on the VST3 and the Audio Unit, `lv2_validate`, and a render through lilv's `lv2apply`, besides `clap-validator`. Avid's AAX Validator runs locally with `scripts/aax_validate.sh` (13 passed, 0 failed, 1 skipped: the cycle-count test needs HDX hardware).
 - **One build script.** `scripts/build_plugin.sh` builds CLAP, LV2, VST3, Audio Unit and AAX for one plugin, keeps build paths out of the binaries, and signs (Developer ID), notarises and PACE-signs when the environment asks for it ([BUILD.md](BUILD.md)).
 
-### Open
+### Status
+
+Tasks 1 to 5 are done: plugin state reaches VST3 (a versioned trailer), the Audio Unit (its own class-info key) and AAX (chunk version 2); parameter-only plugins skip the gate; CLAP state is synchronised with `process`. Task 6 is running.
+
+### Tasks
 
 1. **Plugin state in VST3.** `getState`/`setState` carry the `op_shell_save_state` blob after the parameter values and the bypass flag, versioned; a state written by 0.3.x still loads. Owns `native/vst3/*`. Proof: a plugin with its own chunk round-trips through the VST3 component, old states load, corrupt ones are refused unchanged.
 2. **Plugin state in the Audio Unit.** The class-info dictionary carries the blob under its own key; an old preset without it still loads. Owns `native/au/*`. Same proof through `kAudioUnitProperty_ClassInfo`.
@@ -84,6 +88,33 @@ Then **0.4.0**: version bump, notes, CI green.
 
 Then **0.5.0**.
 
+Status: tasks 1, 2, 3, 4 and 6 are done. Task 5 is running.
+
+## 0.6: every format carries everything
+
+The Rust `Plugin` trait already has notes, MIDI output, transport, sidechain, channel layouts and offline rendering, and CLAP passes them all through. The shell ABI (`native/include/op_shell.h`) carries audio, parameters, state, latency and tail only, so VST3, the Audio Unit and AAX get none of them, and the LV2 entry has no MIDI or time either. 1.0 freezes the shell ABI, so this comes first.
+
+1. **Shell ABI: events, transport, buses and kind.** `op_shell.h` gains a sample-offset event list into `op_shell_process` (note on and off, raw MIDI, parameter changes), MIDI output pulled after the block, a transport struct, a sidechain input, layout queries and selection over `supported_layouts`, an offline flag, and the plugin's kind (effect, instrument, note effect) from `PluginInfo`. Versioned so a shell built for 0.5 refuses a mismatched library. Owns `native/include/op_shell.h`, `crates/openplugin-ffi`, `PluginInfo` in `openplugin-core`. Proof: FFI host tests drive notes, MIDI out, transport, sidechain and offline through the ABI with no allocation.
+2. **VST3 parity.** Event bus in and out (`IEventList`), `ProcessContext` to the transport, an aux input bus for the sidechain, `setBusArrangements` over the plugin's layouts, `kOffline` process mode, the instrument or note-effect category from the kind. Owns `native/vst3/*`. After task 1. Proof: `vst3_proof` plays notes, reads MIDI out, checks the transport and the sidechain; pluginval strictness 10.
+3. **Audio Unit parity.** `aumu` and `aumf` types from the kind, `MusicDeviceMIDIEvent` and `kAudioUnitProperty_MIDIOutputCallback`, transport from `HostCallbackInfo`, a sidechain input element, channel layouts through `SupportedNumChannels` and `AudioChannelLayout`, `kAudioUnitProperty_OfflineRender`. Owns `native/au/*`. After task 1. Proof: `au_proof` and `auval -strict` for an effect, an instrument and a note effect.
+4. **AAX parity.** MIDI input and output nodes, `AAX_ITransport`, a sidechain input, stem formats from the layouts, the plugin category from the kind. Owns `native/aax/*`. After task 1. Proof: the AAX proofs and `scripts/aax_validate.sh`.
+5. **LV2 parity.** Atom MIDI input and output, `time:Position` to the transport, a sidechain port (`lv2:isSideChain`), `lv2:freeWheeling` to the offline flag, `lv2:InstrumentPlugin` from the kind. Owns `crates/openplugin-targets/src/lv2.rs`. Proof: tests through the LV2 entry and `lv2_validate`; a synth renders through `lv2apply`.
+6. **Parameter groups.** `ParamInfo` gains a group path; CLAP module paths, VST3 units, Audio Unit clumps, AAX pages and LV2 port groups show it. After tasks 1 to 5. Proof: each format's proof reads the groups back.
+7. **Telling the host about changes.** A plugin reports a new latency or new parameter info at run time: CLAP `latency.changed` and `params.rescan`, VST3 `restartComponent`, Audio Unit property notifications, AAX `SetSignalLatency`, LV2 latency port. After tasks 1 to 5. Proof: each format's proof changes latency mid-session and sees the host told.
+
+Then **0.6.0**.
+
+## 0.7: host integration and editor polish
+
+1. **The host's parameter menu.** Right-click on a control asks the host for its menu (automation, MIDI learn): CLAP `context-menu`, VST3 `IComponentHandler3`. Formats without one show the SDK's own small menu. Owns a hook in `EditorHost`, the editor parts of each format. Proof: CLAP and VST3 proofs open the host menu for a parameter.
+2. **Track name and colour.** CLAP `track-info` and VST3 `IInfoListener` reach the plugin and the editor. Owns `openplugin-core`, the CLAP and VST3 entries. Proof: tests set the track and read it back.
+3. **Loading files off the audio thread.** A worker in `openplugin-core` runs jobs (impulse responses, samples) on a background thread and hands the result to `process` through a lock-free swap, freeing the old one off the audio thread; LV2 uses its `worker` extension. Owns a new core module, `lv2.rs` worker parts. Proof: a convolution example loads a new IR during playback with no allocation or lock on the audio thread.
+4. **Per-note expression.** MPE, CLAP note expressions and polyphonic modulation, VST3 note expressions, routed to the voices in `openplugin-dsp`. Owns the note parts of each entry, `openplugin-dsp/src/voice.rs`. After 0.6. Proof: tests send per-note pitch, pressure and timbre to one voice and see only that voice change.
+5. **Accessibility.** Controls from the registry appear to VoiceOver with name, value and role, and respond to its increment and decrement. Owns `cocoa.rs` and the registry. Proof: the main-thread test reads the accessibility tree.
+6. **Typing a value, tooltips, files.** Double-click or a key opens a text field that parses through `ParamInfo::parse`; controls show tooltips; the editor can open a file dialog and accept dropped files. Owns `cocoa.rs`, the registry. Proof: the main-thread test types a value and drops a file.
+
+Then **0.7.0**.
+
 ## 1.0: stable and publishable on macOS
 
 1. **Crate metadata.** Every crate inherits the workspace's `authors`, `homepage`, `keywords` and `categories`; unused dependencies (`log` in core, `cpal` in targets) are removed or justified; `cargo publish --dry-run` passes for every crate that does not depend on an unpublished path.
@@ -91,6 +122,15 @@ Then **0.5.0**.
 3. **API documentation.** `missing_docs` on for every public item, examples in the docs that compile, docs.rs metadata.
 4. **API review.** A list of every public item with keep, rename, hide or remove, for the owner to decide the freeze. Nothing is removed without that decision.
 5. **Changelog and breaking-change policy.** `CHANGELOG.md` from 0.1 to the release, and a written policy for breaking changes after 1.0.
+6. **One sound in every format.** A test renders the same input and automation through CLAP, LV2, VST3, the Audio Unit and AAX and checks the outputs match the Rust engine's, sample for sample within float tolerance. Owns `scripts/format_parity/*`. Proof: the test passes for the examples and fails on a deliberately altered shell.
+7. **Installer.** `scripts/build_plugin.sh` can wrap the built bundles in a `.pkg` (`pkgbuild` and `productbuild`), one component per format, signed with a Developer ID Installer identity and notarised when the environment asks. Owns `scripts/*`, `docs/BUILD.md`. Proof: `pkgutil --payload-files` lists every bundle at its install path; the package is never installed by the test.
+
+Status: tasks 1, 2, 4 and 5 are done. Task 3 comes last, after 0.7, because it touches every public item.
 
 The freeze itself and the crates.io publish are the owner's decisions.
+
+## After 1.0
+
+- **AUv3.** An app extension for iPad, iPhone and the Mac, built on the shell ABI. It is a new native shell and an app container, so it is its own milestone.
+- **Windows and Linux.** See [ROADMAP_WINDOWS_LINUX.md](ROADMAP_WINDOWS_LINUX.md).
 
