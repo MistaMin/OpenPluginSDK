@@ -146,7 +146,7 @@ The freeze itself and the crates.io publish are the owner's decisions.
 
 This track runs beside the milestones. `openplugin-dsp` has a starter set: an RBJ biquad, one compressor, saturation curves with ADAA, 2x and linear-phase oversampling, a short convolver (1024 taps), loudness after BS.1770 and R 128, meters, a fixed delay, a naive oscillator, a sample voice, soft bypass and delta listening. It has no dither, no state-variable or crossover filters, no limiter or gate, no long convolution, no modulated delay or reverb, no band-limited oscillator or envelope, and no STFT. Every block below is allocation-free on the audio path, computes for the real sample rate (`effective_rate`), stays free of denormals, cites the paper or standard it follows, and is written from that source, never ported from JUCE or from code under a licence the SDK cannot carry. A cookbook in `docs/DSP_COOKBOOK.md` shows each one inside a small plugin.
 
-Done: tasks 1 to 4 (dither and noise shaping; SVF, matched biquads, Linkwitz-Riley crossovers and Butterworth cascades; envelopes, gain computer, linked dynamics, true peak and a lookahead limiter; long partitioned convolution with a zero-latency head). Open items from them: the matched biquad is not safe under per-sample modulation (use the SVF), full-band white noise can pass the limiter's true-peak ceiling by up to 1.7 dB, and the long convolver's worst block is about 15 times its average.
+Done: tasks 1 to 14, 16 and 17: dither, filters, dynamics, long convolution, modulation and delay, reverb, synthesis, spectral, utility, metering (EBU Tech 3341 and 3342 conformance), virtual analog, multiband and dynamic EQ, FIR design and phase, time and pitch, physical modelling, and neural models. Open: 15 (spectral repair) and 18 (vectorised kernels). Known weak spots, each documented in its module: full-band white noise passes the true-peak limiter and clipper ceiling by up to 1.7 dB; the long convolver's worst block is about 15 times its average; the matched biquad is not safe under per-sample modulation; the plate reverb's topology is written from recollection of Dattorro's paper and its decay is calibrated; PPM short-burst readings are up to 1.4 dB off the standards' table; the diode clipper wants oversampling below 96 kHz.
 
 Blocks that land before 1.0 are frozen with it. Later ones arrive in minor releases, since adding a module breaks nothing.
 
@@ -176,7 +176,7 @@ Blocks that land before 1.0 are frozen with it. Later ones arrive in minor relea
 3. **The performance guide.** `docs/PERFORMANCE.md`: the real-time rules and how the kit checks them; denormals and flush-to-zero; block versus per-sample work; parameter smoothing cost; memory layout (structure of arrays, cache lines); helping the Rust compiler vectorise (chunks, slices without bounds checks, `#[inline]`, LTO, codegen units, target CPU); fast approximations of `tanh`, `exp` and `sin` with stated error; oversampling cost; measuring with Instruments and the harness. Every claim shown with a measured example in the repo.
 4. **The stability guide.** `docs/STABILITY.md`: numerically stable filter topologies and when to use `f64`; guarding state against NaN; panics never crossing the format boundary; thread rules for state, editor and audio; host behaviours to survive (block size changes, rate changes without a reset, process before activate, state loads during playback); soak and fuzz testing with the kit. Each rule linked to the test that enforces it in the SDK.
 
-Status: tasks 1 and 2 are done (`openplugin-testing`: `conformance` with 13 checks and `bench` with commit comparison; it found NaN and denormal bugs in two examples and in `Biquad`, now fixed). Tasks 3 and 4 are next.
+Status: all four tasks are done: `openplugin-testing` (`conformance` with 13 checks, `bench` with commit comparison), `docs/PERFORMANCE.md` and `docs/STABILITY.md` with measured examples in `examples/perf_guide`. The guides' findings are fixed: panics are caught at every CLAP, LV2 and shell entry, and `Biquad` ignores non-finite parameters.
 
 ## Porting toolkit: moving a plugin from another SDK
 
@@ -190,6 +190,8 @@ A team moving a shipped plugin needs three things: the new build must load the o
 6. **DSP from Faust.** A build helper compiles a Faust `.dsp` with Faust's Rust backend and wraps it as a `Plugin`, with parameters from its UI metadata. Faust's compiler is GPL but its generated code is not; the guide states the licence terms. Proof: a Faust filter builds and renders through every format. Needs the Faust compiler installed by the owner.
 7. **C++ DSP bridge.** For teams that ship before rewriting, a documented pattern for calling existing C++ DSP from a Rust plugin through `cxx`, allocation rules included. This one is C++ by nature: its job is to reuse code a team already has, until it is rewritten in Rust.
 8. **Scaffolding.** `openplugin-port new --from manifest.toml` writes a plugin crate with the pinned identity, the parameter table, the state importer stub and the null test ready to run.
+
+Status: tasks 1 (`openplugin-port scan`), 4 (`openplugin-port null`) and 7 (`examples/cpp_bridge`, `docs/CPP_BRIDGE.md`) are done. Task 6 needs the Faust compiler installed.
 
 ## After 1.0
 
