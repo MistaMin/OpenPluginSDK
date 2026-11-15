@@ -19,3 +19,8 @@ openplugin-dsp = { workspace = true }
 openplugin-dri = { workspace = true }
 openplugin-targets = { workspace = true }
 openplugin-ffi = { workspace = true }
+openplugin-testing = { workspace = true, optional = true }
+
+[features]
+# Re-exports the conformance kit and benchmark harness as `openplugin::testing`.
+testing = ["dep:openplugin-testing"]

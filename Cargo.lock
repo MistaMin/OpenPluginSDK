@@ -141,6 +141,7 @@ dependencies = [
  "openplugin-dsp",
  "openplugin-ffi",
  "openplugin-targets",
+ "openplugin-testing",
 ]
 
 [[package]]
@@ -185,6 +186,16 @@ dependencies = [
  "openplugin-dri",
  "openplugin-dsp",
  "openplugin-ffi",
+]
+
+[[package]]
+name = "openplugin-testing"
+version = "0.3.1-beta"
+dependencies = [
+ "example-design-editor",
+ "example-editor",
+ "openplugin",
+ "openplugin-core",
 ]
 
 [[package]]

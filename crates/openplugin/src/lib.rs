@@ -15,6 +15,8 @@ pub use openplugin_dri as dri;
 pub use openplugin_dsp as dsp;
 pub use openplugin_ffi as ffi;
 pub use openplugin_targets as targets;
+#[cfg(feature = "testing")]
+pub use openplugin_testing as testing;
 
 pub mod prelude {
     pub use openplugin_core::{
