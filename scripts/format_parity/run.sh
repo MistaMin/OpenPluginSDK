@@ -17,6 +17,9 @@
 #   --tolerance T     maximum absolute sample difference (default 1e-6)
 #   --skip-build      reuse what --work already holds
 #   --jobs N          parallel jobs for cmake (default 2)
+#   --arch A          arm64 or x86_64 (default: this machine's). x86_64 on an
+#                     Apple Silicon Mac builds every part for Intel and runs
+#                     the whole test under Rosetta (`arch -x86_64`)
 #   -h, --help
 #
 # A format whose SDK variable is unset is skipped and listed as skipped. CLAP
@@ -32,6 +35,7 @@ work="$root/build-format-parity"
 tolerance=1e-6
 build=1
 jobs=2
+arch=
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -39,7 +43,8 @@ while [ $# -gt 0 ]; do
     --tolerance) tolerance=${2:-}; shift 2 ;;
     --skip-build) build=0; shift ;;
     --jobs) jobs=${2:-}; shift 2 ;;
-    -h|--help) sed -n 2,24p "$0"; exit 0 ;;
+    --arch) arch=${2:-}; shift 2 ;;
+    -h|--help) sed -n 2,27p "$0"; exit 0 ;;
     *) echo "format_parity: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -54,6 +59,25 @@ esac
 if [ "$work" = / ]; then
   echo "format_parity: --work must not be /" >&2; exit 2
 fi
+
+case "$(uname -m)" in arm64) host_arch=arm64 ;; *) host_arch=x86_64 ;; esac
+[ -n "$arch" ] || arch=$host_arch
+# Cargo's target folder and the command prefix for a slice that is not this
+# machine's own. Rosetta runs x86_64 on Apple Silicon; the reverse cannot run.
+cargo_target=(); rel=release; runner=()
+case "$arch" in
+  arm64) triple=aarch64-apple-darwin ;;
+  x86_64) triple=x86_64-apple-darwin ;;
+  *) echo "format_parity: --arch must be arm64 or x86_64, got: '$arch'" >&2; exit 2 ;;
+esac
+if [ "$arch" != "$host_arch" ]; then
+  if [ "$arch" != x86_64 ]; then
+    echo "format_parity: cannot run arm64 on an $host_arch machine" >&2; exit 2
+  fi
+  cargo_target=(--target "$triple"); rel="$triple/release"; runner=(arch -x86_64)
+fi
+# Run a command in the chosen architecture.
+run() { "${runner[@]+"${runner[@]}"}" "$@"; }
 
 vst3_sdk=${VST3_SDK:-}
 au_sdk=${AU_SDK:-}
@@ -76,14 +100,14 @@ mkdir -p "$work" "$out" "$bundles" || exit 2
 # ---- build ------------------------------------------------------------------
 if [ "$build" = 1 ]; then
   echo "== building the Rust plugin and the Rust host"
-  (cd "$root" && CARGO_TARGET_DIR="$target" cargo build --release -p example-editor) || exit 2
-  CARGO_TARGET_DIR="$host_target" cargo build --release --manifest-path "$here/host/Cargo.toml" || exit 2
+  (cd "$root" && CARGO_TARGET_DIR="$target" cargo build --release -p example-editor ${cargo_target[@]+"${cargo_target[@]}"}) || exit 2
+  CARGO_TARGET_DIR="$host_target" cargo build --release --manifest-path "$here/host/Cargo.toml" ${cargo_target[@]+"${cargo_target[@]}"} || exit 2
 
   if [ "$have_vst3" = 1 ] || [ "$have_au" = 1 ] || [ "$have_aax" = 1 ]; then
     echo "== configuring and building the native shells and hosts"
     on_off() { if [ "$1" = 1 ]; then echo ON; else echo OFF; fi; }
     cmake -S "$root/native" -B "$cmake_dir" -DCMAKE_BUILD_TYPE=Release \
-      -DOP_RUST_LIB="$target/release/libexample_editor.a" \
+      -DOP_RUST_LIB="$target/$rel/libexample_editor.a" -DCMAKE_OSX_ARCHITECTURES="$arch" \
       -DOP_BUILD_VST3="$(on_off $have_vst3)" -DOP_BUILD_AU="$(on_off $have_au)" -DOP_BUILD_AAX="$(on_off $have_aax)" \
       -DOP_VST3_SDK="$vst3_sdk" -DOP_AU_SDK="$au_sdk" -DOP_AAX_SDK="$aax_sdk" \
       -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
@@ -98,13 +122,13 @@ if [ "$build" = 1 ]; then
   fi
 fi
 
-host="$host_target/release/parity-host"
+host="$host_target/$rel/parity-host"
 [ -x "$host" ] || { echo "format_parity: $host not built" >&2; exit 2; }
 
 # CLAP and LV2 bundles: the cdylib, laid out the way build_plugin.sh lays them out.
 mkdir -p "$bundles/Editor Gain.clap/Contents/MacOS" "$bundles/EditorGain.lv2" || exit 2
-cp "$target/release/libexample_editor.dylib" "$bundles/Editor Gain.clap/Contents/MacOS/Editor Gain" || exit 2
-cp "$target/release/libexample_editor.dylib" "$bundles/EditorGain.lv2/EditorGain.dylib" || exit 2
+cp "$target/$rel/libexample_editor.dylib" "$bundles/Editor Gain.clap/Contents/MacOS/Editor Gain" || exit 2
+cp "$target/$rel/libexample_editor.dylib" "$bundles/EditorGain.lv2/EditorGain.dylib" || exit 2
 
 # ---- run --------------------------------------------------------------------
 # Only files this script wrote, only inside "$out".
@@ -119,17 +143,17 @@ clean_out
 failed=0
 summary=()
 
-"$host" gen "$out/scenario.bin" || exit 2
-"$host" reference "$out/scenario.bin" "$out/reference.f32" || exit 2
+run "$host" gen "$out/scenario.bin" || exit 2
+run "$host" reference "$out/scenario.bin" "$out/reference.f32" || exit 2
 
 # parity LABEL OUTPUT-FILE COMMAND...: run the host, then compare to the reference.
 parity() {
   local label=$1 file=$2; shift 2
-  if ! "$@"; then
+  if ! run "$@"; then
     echo "$label: host failed" >&2; failed=1; summary+=("$label: ERROR"); return
   fi
   local line
-  line=$("$host" compare "$out/reference.f32" "$file" "$tolerance" "$label"); local code=$?
+  line=$(run "$host" compare "$out/reference.f32" "$file" "$tolerance" "$label"); local code=$?
   echo "$line"
   if [ $code -eq 0 ]; then summary+=("$label: ok"); else failed=1; summary+=("$label: FAIL"); fi
 }
@@ -137,11 +161,11 @@ parity() {
 # control LABEL OUTPUT-FILE COMMAND...: the comparison must report a mismatch (exit 1).
 control() {
   local label=$1 file=$2; shift 2
-  if ! "$@"; then
+  if ! run "$@"; then
     echo "$label: host failed" >&2; failed=1; summary+=("$label control: ERROR"); return
   fi
   local line
-  line=$("$host" compare "$out/reference.f32" "$file" "$tolerance" "$label"); local code=$?
+  line=$(run "$host" compare "$out/reference.f32" "$file" "$tolerance" "$label"); local code=$?
   echo "$line"
   if [ $code -eq 1 ]; then
     summary+=("$label control: fails as it must")

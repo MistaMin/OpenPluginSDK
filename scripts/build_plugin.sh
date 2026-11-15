@@ -433,6 +433,21 @@ if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
     case "$b" in *.dylib) echo "install name: $(otool -D "$b" | tail -1)" ;; esac
   done
   if [ "$leaks" = 0 ]; then echo "no build path found in any binary"; fi
+  # Every binary carries exactly the requested slices, so "universal" is two
+  # slices in each bundle and not one slice with a universal name.
+  want="$(echo "$ARCHS" | tr ' ' '\n' | sort | tr '\n' ' ')"
+  for b in ${BUNDLES[@]+"${BUNDLES[@]}"}; do
+    while IFS= read -r f; do
+      have="$(lipo -archs "$f" 2>/dev/null || true)"
+      if [ -z "$have" ]; then continue; fi   # not a Mach-O file
+      sorted="$(echo "$have" | tr ' ' '\n' | sort | tr '\n' ' ')"
+      if [ "$sorted" = "$want" ]; then
+        echo "architectures ($have): $f"
+      else
+        echo "architecture mismatch: $f has ($have), wanted ($ARCHS)"; leaks=1
+      fi
+    done < <(find "$b" -type f \( -perm -u+x -o -name '*.dylib' \))
+  done
 fi
 
 note "done: $OUT"
