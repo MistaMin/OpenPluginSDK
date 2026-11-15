@@ -26,6 +26,7 @@
 //! - [`TruePeakMeter`], [`Ppm`] (EBU, DIN, Nordic, BBC), [`KMeter`], [`VuIec`], [`EbuMeter`], and the lock-free [`scope_feed`] for correlation and goniometer.
 //! - [`FdnReverb`], [`PlateReverb`], [`EarlyReflections`]: Jot-Chaigne feedback delay network, Dattorro plate, and tapped-delay early reflections.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
+//! - [`TimeStretch`], [`PitchShifter`] (phase vocoder with identity phase locking and onset phase reset), [`DelayPitchShifter`] (low-latency modulated-delay taps), [`YinDetector`], [`MpmDetector`] (pitch detection with confidence).
 //! - [`BandlimitedOsc`], [`WavetableOsc`], [`Adsr`], [`PinkNoise`], [`VoiceAllocator`], [`SincKernel`]: synthesis (PolyBLEP/BLAMP oscillators with hard sync, mip-mapped wavetables, envelopes, noise, voice stealing and glide, a windowed-sinc resampler).
 
 pub mod adaa;
@@ -36,6 +37,7 @@ pub mod bypass;
 pub mod chorus;
 pub mod convolve;
 pub mod crossover;
+pub mod delay_pitch;
 pub mod delta;
 pub mod downmix;
 pub mod dither;
@@ -65,6 +67,7 @@ pub mod partitioned;
 pub mod phaser;
 pub mod pcm;
 pub mod pitch;
+pub mod pitch_detect;
 pub mod ppm;
 pub mod true_peak;
 pub mod rate;
@@ -79,6 +82,7 @@ pub mod voice;
 pub mod true_peak_meter;
 pub mod spectrum;
 pub mod stft;
+pub mod vocoder;
 pub mod voice_alloc;
 pub mod wavetable;
 pub mod window;
@@ -92,6 +96,7 @@ pub use bypass::SoftBypass;
 pub use chorus::{Chorus, MAX_CHORUS_MS, MAX_CHORUS_VOICES};
 pub use convolve::BlockConvolver;
 pub use crossover::{Crossover, LinkwitzRiley, LrOrder, MAX_BANDS};
+pub use delay_pitch::{DelayPitchShifter, MAX_DELAY_PITCH_TAPS};
 pub use delta::Delta;
 pub use delay::DelayLine;
 pub use downmix::{
@@ -136,11 +141,13 @@ pub use phaser::{Phaser, MAX_PHASER_FEEDBACK, MAX_PHASER_STAGES};
 pub use partitioned::{ConvolutionIr, ConvolveError, ConvolverConfig, Layout, LongConvolver};
 pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to_f32, lerp};
 pub use pitch::{hz_from_midi, midi_from_hz};
+pub use pitch_detect::{MpmDetector, Pitch, PitchDetector, YinDetector};
 pub use plate::PlateReverb;
 pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
 pub use resample::{playback_ratio, Quality, SincConfig, SincKernel, SincPlayer};
 pub use saturation::{saturate_sample, SaturationMode};
 pub use svf::{Svf, SvfMode};
+pub use vocoder::{PhaseLocking, PitchShifter, TimeStretch, VocoderConfig};
 pub use voice::{Polyphony, SampleVoice};
 pub use voice_alloc::{
     Allocation, GlideMode, NoteOff, StealPolicy, Voice, VoiceAllocator, VoiceMode, VoicePhase,

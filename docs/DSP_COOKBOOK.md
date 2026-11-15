@@ -928,3 +928,161 @@ The kernel is a Kaiser-windowed sinc stored as a table of 256 to 2048 phases per
 | `Best` | 128 | 0.44 | 0.00002 dB | -118.9 dB |
 
 Folding test (a 0.30 cycles/sample tone read at ratio 1.7 would land above Nyquist): the residue is -60.4, -84.4, -101.3 and -132.3 dB for the four qualities, and a tone that stays in band keeps unit gain to within 0.14 % (`Low`) or better. `SincConfig` sets the taps, attenuation and phases by hand.
+
+## Time and pitch
+
+Three families: a phase vocoder (`TimeStretch`, `PitchShifter`), a low-latency delay-line shifter (`DelayPitchShifter`), and pitch detection (`YinDetector`, `MpmDetector`). All allocate in the constructor and nowhere after; all treat non-finite input as zero; all work at the real sample rate. Every number below is measured by a test in `crates/openplugin-dsp/tests/` (named in each subsection).
+
+### Pitch detection
+
+```rust
+use openplugin_dsp::{MpmDetector, PitchDetector, YinDetector};
+
+// prepare (allocates):
+let mut det = MpmDetector::new(sample_rate, 50.0, 2000.0); // or YinDetector
+let mut ring = vec![0.0f32; det.window()];                  // the plugin keeps the last window()
+// every so often, with the newest `window()` samples in order:
+let p = det.detect(&ring);
+if p.is_voiced(0.8) { /* p.frequency in Hz, p.confidence 0..1 */ }
+```
+
+`window()` is about two periods of the lowest frequency asked for (50 Hz at 48 kHz: 1922 samples for YIN, 1922 for MPM; the detector uses the last `window()` samples of whatever slice it is given, and answers `Pitch::NONE` for a shorter one or for silence). `detect` is `O(n log n)`: both compute their autocorrelation with an FFT (`f64`, planned once).
+
+- **YIN** (de Cheveigne and Kawahara, JASA 2002): difference function, cumulative mean normalised difference (CMND), absolute threshold (default 0.15, `set_threshold`), parabolic interpolation. Two choices that differ from a literal reading of the paper, both found by measurement: within the dip under the threshold it takes the lowest point of the whole dip, not the first local minimum (a noisy dip has ripples on its flank; stopping at the first one biased 50 Hz at 96 kHz by 39 cents at 20 dB SNR, now 6), and it interpolates the difference function `d(t)` as the paper's step 5 does, not the CMND (whose running-mean denominator tilts the dip; clean-sine error fell from 1.8 to 0.04 cents). Confidence is `1 - d'(t)`.
+- **MPM** (McLeod and Wyvill, ICMC 2005): the normalised square difference function from an FFT autocorrelation and the recursive `m'(t)`, key maxima, first key maximum over `k` times the highest (`k` = 0.93, `set_cutoff`), parabolic interpolation. Confidence is the interpolated NSDF peak (the paper's clarity).
+
+Measured (`tests/pitch_detect_proof.rs`; 50 Hz to 2 kHz in ten steps, at 44.1, 48 and 96 kHz, two phases each; windows of `window() + 512` samples):
+
+| Signal | YIN worst error | MPM worst error | Confidence |
+| --- | --- | --- | --- |
+| Sine | 0.04 cents | 0.06 cents | at least 0.996 |
+| Harmonic (6 partials, 1/k) | 0.39 cents | 0.40 cents | at least 0.985 |
+| Missing fundamental (partials 2 to 6 only) | 0.64 cents | 0.64 cents | above 0.8 (asserted) |
+| Sine plus white noise at 20 dB SNR | 6.4 cents | 6.2 cents | at least 0.98 |
+| White noise (24 realisations) | | | at most 0.14 (YIN), 0.13 (MPM) |
+
+So a threshold of 0.5 to 0.8 on `confidence` separates tone from noise with a wide gap. Limits: a tone needs about two periods in the window (a longer window for lower fundamentals costs time resolution); an octave error is possible on signals whose second harmonic is much stronger than the fundamental when the period is near the top of the range (the missing-fundamental test passes, but this is not a polyphonic or robust-to-everything tracker); vibrato inside the window blurs the period.
+
+### Time stretch
+
+```rust
+use openplugin_dsp::{PhaseLocking, TimeStretch, VocoderConfig};
+
+let mut cfg = VocoderConfig::for_rate(sample_rate); // frame ~40 ms, identity locking
+cfg.transients = true;                              // reset phases at onsets
+let mut ts = TimeStretch::new(channels, sample_rate, cfg);
+ts.set_ratio(1.5);                                  // output is 1.5x as long; pitch unchanged
+
+// Offline (allocates the result; exact length round(len * ratio)):
+let out = ts.stretch_offline(0, &input);
+
+// Streaming: output length differs from input length, so use push/pop.
+let took = ts.push(0, &input_block);         // may take less than the block if output is full
+while ts.available(0) > 0 {
+    let n = ts.pop(0, &mut out_block);       // finished samples
+}
+```
+
+Method: analysis frames at a fractional-accurate hop `hop_s / ratio`, synthesis at a fixed `frame / 4`, per-bin phase advance from the measured instantaneous frequency (Flanagan and Golden 1966; Dolson 1986), Hann analysis and synthesis windows normalised like `Stft`. Frames are anchored by their centres, so the output is time-aligned (the first `lead()` output samples precede the input). The ratio may change at any time (0.25 to 4).
+
+Measured (`tests/time_pitch_proof.rs`; harmonic tones at 110, 440 and 1500 Hz; 44.1, 48 and 96 kHz): for ratios 0.5, 0.8, 1.25 and 2 the output length is exactly `round(len * ratio)`, the pitch of the steady state is within 0.001 cents (a spectral-line measurement; it is bin-exact because every bin advances at its measured frequency) and the level is within 1 dB of the input's.
+
+#### Phase locking and phasiness
+
+`PhaseLocking::Identity` is Laroche and Dolson's identity phase locking (IEEE TSAP 1999): spectral peaks propagate their phase, every other bin keeps its analysis phase relative to its peak. `PhaseLocking::None` is the plain per-bin vocoder.
+
+Metric (`tests/time_pitch_quality.rs`, `identity_phase_locking_reduces_phasiness`): phasiness shows as partials smeared over neighbouring bins and beating between them, which a magnitude spectrogram sees. The test signal is a six-partial tone with 1 % vibrato at 5 Hz, whose ideal time-stretched version is known in closed form (the same pitch with the vibrato slowed to `5 Hz / ratio`). The metric is the relative L2 distance between the magnitude spectrograms (Hann 2048, hop 512) of the stretched output and the ideal, away from the ends. Zero is a perfect match, and the metric is exactly 0 at ratio 1 for both.
+
+| ratio | plain | identity locking | reduction |
+| --- | --- | --- | --- |
+| 0.8 | 0.058 / 0.042 | 0.0041 / 0.0048 | 14x / 9x |
+| 1.25 | 0.040 / 0.040 | 0.0039 / 0.0049 | 10x / 8x |
+| 1.5 | 0.142 / 0.141 | 0.0025 / 0.0021 | 58x / 68x |
+| 2 | 0.470 / 0.466 | 0.0039 / 0.0028 | 122x / 166x |
+
+(first figure 44.1 kHz, second 48 kHz). The test asserts at least a 3x reduction. This is a tonal, slowly modulated signal on which locking should help most; noisy and dense material shows less.
+
+#### Transients
+
+`VocoderConfig::transients` turns on onset handling. An onset is a frame whose half-wave-rectified spectral flux (Bello et al., IEEE TSAP 2005), normalised by the summed magnitude, exceeds `flux_threshold` (0.5); it stays on while the flux is above 0.4 of that so the frames that carry the transient near the middle of the window are caught too. On an onset frame, phases are reset to the analysis phases (the idea of Roebel, DAFx-03, and Duxbury et al., AES 112, 2002), and the frame's energy centroid is moved by a linear-phase ramp from `c` to `mid + ratio * (c - mid)` (clipped to the frame) so the transient lands at its stretched position.
+
+Measured on a click train (0.5 ms broadband bursts, 350 ms apart; `tests/time_pitch_quality.rs`, `transient_option_reduces_smearing`). Spread is the time between 5 % and 95 % of the energy around each click, in ms (a perfect click is about 0.5 ms); timing error is the distance of the energy peak from the ideal `ratio * t`:
+
+| fs | ratio | spread off | spread on | timing error off | on |
+| --- | --- | --- | --- | --- | --- |
+| 44.1 kHz | 0.5 | 4.66 | 2.29 | 4.32 | 0.17 |
+| 44.1 kHz | 0.8 | 2.08 | 1.09 | 0.77 | 0.40 |
+| 44.1 kHz | 1.25 | 4.01 | 1.66 | 0.67 | 0.50 |
+| 44.1 kHz | 2 | 15.59 | 8.15 | 1.45 | 0.84 |
+| 48 kHz | 0.5 | 2.17 | 1.13 | 2.62 | 0.14 |
+| 48 kHz | 0.8 | 1.71 | 0.80 | 0.79 | 0.11 |
+| 48 kHz | 1.25 | 4.35 | 2.10 | 0.69 | 0.33 |
+| 48 kHz | 2 | 15.22 | 8.45 | 1.62 | 1.34 |
+
+The test asserts the mean spread falls to under 0.7 of its value without the option in every row. It halves the smear but does not remove it: at ratio 2 a click still spreads over 8 ms, because a frame that sees the click at the window edge cannot place it inside the frame at twice the distance. Real drum hits (which have tonal content) are less clean than this test.
+
+### Pitch shift (phase vocoder)
+
+```rust
+use openplugin_dsp::{PitchShifter, VocoderConfig};
+
+let cfg = VocoderConfig::for_rate(sample_rate);
+let mut shifter = PitchShifter::new(channels, sample_rate, cfg);
+shifter.set_semitones(-7.0);                  // -12..=+12; or set_ratio
+// Plugin::latency: shifter.latency()  (1.5 frames + 64; the same at every ratio)
+// per channel, any block size, in place:
+shifter.process(ch, &mut block);
+```
+
+Method: stretch by the pitch ratio `p` (above), then read the stretched stream `p` samples per output sample with a 24-tap Kaiser-windowed sinc (512 phases). For `p > 1` the bins above Nyquist/`p` are removed in the vocoder frame first, so nothing folds. The alternative, direct bin shifting (Laroche and Dolson, WASPAA 1999), was not used: this path reuses the time stretcher and gives the exact ratio. Formants move with the pitch. Channels are independent (no inter-channel phase locking, so a stereo image can wander a little).
+
+Latency is fixed so a plugin can report it once: `frame / 2 + frame / (2 min_ratio) + 64` samples (a stretch-then-resample shifter needs `frame / (2 p)` samples of look-ahead at ratio `p`, so it is sized for the lowest ratio). That is 3136 samples (65 ms) at 44.1 and 48 kHz and 6208 (65 ms) at 96 kHz for the default range of -12 to +12 semitones; `PitchShifter::with_min_ratio` trades range for latency (a minimum ratio of 0.75, about -5 semitones, gives `frame / 2 + frame / 1.5 + 64` = 2453 samples, 51 ms, at 48 kHz). The impulse latency check of `openplugin-testing` passes on a plugin built from it. Measured latency (energy-centroid delay of a Gaussian burst, `tests/pitch_shift_latency.rs`): equal to the reported value to within 0.1 sample at -12, -7, 0, +3, +7 and +12 semitones, 44.1, 48 and 96 kHz.
+
+Measured pitch (`tests/time_pitch_proof.rs`): sines at 220, 440 and 1000 Hz and a four-partial harmonic tone, shifted by -12, -7, +3, +7 and +12 semitones, at 44.1, 48 and 96 kHz, host blocks of 1 to 1024 samples: every partial within 0.001 cents of the target (asserted under 0.5), no underruns.
+
+The cost is one FFT and one inverse FFT of `frame` points per channel per `frame / 4` input samples (at a ratio of 2, per `frame / 8`), in bursts.
+
+### Pitch shift (delay line)
+
+```rust
+use openplugin_dsp::DelayPitchShifter;
+
+let mut ds = DelayPitchShifter::new(channels, sample_rate, 30.0, 2); // 30 ms window, 2 taps
+ds.set_semitones(7.0);
+// Plugin::latency: ds.latency()  (15.0 ms: 722 samples at 48 kHz)
+ds.process(ch, &mut block);
+// Optional, for a monophonic tonal input: feed it the detected pitch.
+ds.set_period_hz(Some(detected_hz));
+```
+
+Method: Dattorro's delay-line modulation (JAES 1997): sawtooth-modulated taps on a `ModDelay` (Hermite reads), crossfaded so a tap is silent when it wraps. Two taps with a short `sin^2` crossfade (`set_crossfade`, default 0.3) are the default; three to six taps use `sin^2` weights over the whole cycle and are rougher on tones, not smoother (more delayed copies are mixed at any moment). Latency is the mean tap delay, 722 samples (15.04 ms) at 48 kHz for 30 ms, and the delay at ratio 1 measured 722.00 samples. The cost is two interpolated reads per sample.
+
+Quality is the price of that latency. The two copies being crossfaded are `W/2` apart, so for a tone of frequency `f` they add as `|w1 + w2 exp(j pi f W)|`: in phase if `f W` is an even integer, out of phase otherwise, and since the weights move that is a level ripple at the wrap rate and a pitch error of up to half a wrap rate. Measured with the perceived pitch (median MPM over a second) on sines (`tests/pitch_shift_latency.rs`, 48 kHz, 30 ms window, two taps, crossfade 0.3):
+
+| shift | 220 Hz | 330 Hz | 1000 Hz |
+| --- | --- | --- | --- |
+| -12 st | +33.6 cents | -28.7 | +6.8 |
+| -7 st | +11.3 | -11.3 | +3.2 |
+| +3 st | -0.7 | +1.0 | -0.2 |
+| +7 st | -10.4 | +13.3 | -2.2 |
+| +12 st | -14.2 | +19.9 | -3.1 |
+
+(level ripple, the 95th over the 5th percentile of 10 ms RMS: 0.1 to 0.9 dB, 1.6 to 6.2 dB at 330 Hz). With full `sin^2` crossfade (`set_crossfade(1.0)`) 220 Hz is worse (+135 cents at -12 st) and 1000 Hz, where `f W = 30`, is exact. Four taps are far worse (up to several hundred cents; some tones cancel almost completely). So do not use more than two taps for tonal input.
+
+`set_period_hz(Some(f0))` is the cure for a monophonic tonal input: the distance between the taps is rounded to a whole number of periods, so the crossfaded copies are in phase. Measured, every one of the 15 cases above is within 0.03 cents with a level ripple of at most 0.7 dB; and with `f0` taken from `MpmDetector` run on the input (`tests/delay_pitch_detected.rs`, 173 Hz harmonic tone, +-7 semitones) the result is within 1 cent (asserted) with no knowledge of the true frequency. The cycle length follows the pitch with a 100 ms time constant. For chords, speech with fast pitch movement or noise, the unsynchronised shifter's roughness is what you get; use the phase vocoder when quality matters more than 15 ms.
+
+Anti-aliasing: shifting up folds content above Nyquist over `r`; the vocoder shifter filters first, this one does not.
+
+### Which one
+
+| | `PitchShifter` | `DelayPitchShifter` |
+| --- | --- | --- |
+| Latency | 65 ms (frame 2048 at 48 kHz, -12..+12) | 15 ms, adjustable by `W` |
+| Tonal quality | exact pitch, no ripple | roughness, exact only with `set_period_hz` |
+| Polyphonic input | yes | rough |
+| Transients | `transients` option | passes through, shifted |
+| CPU | two FFTs per `frame / 4` | two reads per sample |
+
+### Real-time notes
+
+Nothing allocates in `process`, `push`, `pop` or `detect` (`tests/time_pitch_no_alloc.rs`, with NaN and infinity in the input, host blocks of 1 to 1024 samples and shift and stretch changes in the middle). `openplugin-testing`'s conformance kit passes on a plugin built from `PitchShifter` (`tests/pitch_shift_conformance.rs`: all sample rates 22.05 to 384 kHz, block sizes 1 to 8192, hostile input, parameter fuzz, state, layouts, and the latency-by-impulse check against `Plugin::latency`). A sudden change of the pitch ratio changes the stretch of frames already in flight; the reader re-syncs and may glitch once, and `underruns()` counts times it had to hold. Change the ratio smoothly, or from a parameter smoother, to avoid it.
