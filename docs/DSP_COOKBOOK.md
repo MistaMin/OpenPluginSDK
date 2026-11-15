@@ -412,3 +412,102 @@ is what the all-pass compensation equalises.
 - Nothing allocates, including the `configure`/`set` calls
   (`crates/openplugin-dsp/tests/filters_no_alloc.rs` counts allocations with a
   global allocator while every filter runs and is modulated).
+
+## Modulation and delay
+
+Chorus, flanger and phaser are a delay line or a string of allpass filters whose time or break frequency is moved by a low-frequency oscillator. The blocks are `ModDelay` (the fractional delay line), `Lfo`, `Chorus`, `Flanger` and `Phaser`. Each allocates in `new` or `prepare` only, takes the real sample rate, treats a non-finite input sample as `0.0`, flushes values below `1e-30` and clamps every parameter, so a bad value from a host cannot panic or leave NaN in the state.
+
+```rust
+use openplugin_core::Transport;
+use openplugin_dsp::{Chorus, Feel, LfoRate, LfoShape, NoteDivision};
+
+struct MyChorus {
+    chorus: Chorus,
+}
+
+impl MyChorus {
+    fn prepare(&mut self, sample_rate: f32, _max_block: usize, channels: usize) {
+        self.chorus.prepare(channels, sample_rate); // allocates here, nowhere else
+        self.chorus.set_voices(4);
+        self.chorus.set_delay_ms(18.0);
+        self.chorus.set_depth_ms(3.0);
+        self.chorus.set_mix(0.5);
+        self.chorus.set_shape(LfoShape::Sine);
+        // Free-running at 0.8 Hz, or one cycle per dotted quarter note:
+        self.chorus.set_rate(LfoRate::Sync(NoteDivision::new(4, Feel::Dotted)));
+    }
+
+    fn set_transport(&mut self, transport: &Transport) {
+        self.chorus.set_transport(transport); // once per block, before process
+    }
+
+    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        for (channel, buf) in io.iter_mut().enumerate() {
+            self.chorus.process(channel, &mut buf[..frames]);
+        }
+    }
+}
+```
+
+`Flanger::new(channels, fs)` and `Phaser::new(channels, fs)` have the same shape: `prepare`, setters, `set_transport`, `process(channel, block)`. Stereo (or wider) is one object with one state per channel, and the LFOs of later channels are offset by up to half a cycle (`set_stereo_spread`).
+
+### Fractional delay
+
+A delay that is not a whole number of samples needs an interpolator. `ModDelay::new(sample_rate, max_delay_ms, Interpolation::...)` sizes the buffer once; `process(x, delay_samples)` takes a delay that may change on every sample. Delay 0 is the sample just written, and each interpolator has a smallest delay (`min_delay()`): linear 0, Hermite 1, Lagrange order `N` `max(N/2 - 0.5, 0)`, Thiran order `N` `N - 0.5`. A request outside `[min_delay, max_delay]` (or NaN) is clamped.
+
+The kinds follow Laakso, Valimaki, Karjalainen and Laine, "Splitting the Unit Delay", IEEE Signal Processing Magazine 13(1), 1996:
+
+| Kind | Cost | What it does well | Where it falls short |
+| --- | --- | --- | --- |
+| `Linear` | 2 taps | cheapest | low-pass that gets deep at fraction 0.5 (-3 dB at fs/4) |
+| `Hermite` | 4 taps | magnitude much flatter than linear (-1.1 dB at fs/4, fraction 0.5), smooth under a sweep | delay is exactly linear's: accurate at low frequency only |
+| `Lagrange(N)` | `N+1` taps | delay accurate to high order at low frequency, exact at DC | magnitude falls toward Nyquist |
+| `Thiran(N)` | recursive | magnitude exactly 1, delay exact at DC to order `N` | stateful: only for fixed or slowly changing delay |
+
+Measured delay error (phase delay minus the requested delay, in samples, for a delay of 12.25), from the coefficient theory, which the tests also check against the impulse response of a running `ModDelay` to better than 2e-4 samples:
+
+| Kind | 0.05 pi (1.2 kHz at 48 kHz) | 0.1 pi (2.4 kHz) | 0.25 pi (6 kHz) | 0.5 pi (12 kHz) |
+| --- | --- | --- | --- | --- |
+| Linear / Hermite | -0.00039 | -0.00155 | -0.01002 | -0.04517 |
+| Lagrange 3 | -0.00000 | -0.00003 | -0.00123 | -0.01780 |
+| Lagrange 5 | -0.00000 | -0.00000 | -0.00016 | -0.00770 |
+| Thiran 1 | -0.00144 | -0.00571 | -0.03339 | -0.10911 |
+| Thiran 2 | -0.00001 | -0.00013 | -0.00457 | -0.05121 |
+| Thiran 3 | -0.00000 | -0.00000 | -0.00063 | -0.02454 |
+
+`phase_delay`, `group_delay` and `Interpolation::frequency_response` give these numbers for any delay and frequency, so a plugin can show them or pick a kind by its own tolerance (`OPENPLUGIN_TABLE=1 cargo test -p openplugin-dsp --test modulation print_error_table -- --nocapture` prints the full table).
+
+For a swept delay (chorus, flanger, vibrato) use Hermite or Lagrange 3. A sine of 1 kHz through a delay swept 5 ms deep at 2 Hz has a largest sample-to-sample step of 0.1390 against a bound of 0.1433 (the tone's slope times one plus the delay's slope), for linear, Hermite and both Lagrange orders: no click. A Thiran filter keeps state that depends on its coefficients, so it stays clean only while the delay moves inside one integer interval (0.1308 against 0.1440 in the test); across integer crossings it jumps (0.2988) and `Chorus` and `Flanger` replace it with Hermite. Use Thiran for tuning a waveguide or a comb to an exact pitch.
+
+A jump in a delay *parameter* is a different problem from a sweep: `Glide` is a one-pole smoother for a delay in samples. A 100 to 600 sample jump on a 500 Hz tone gives a step of 1.06 without it and 0.066 with a 20 ms glide.
+
+### LFO and the host transport
+
+`Lfo` has sine, triangle, saw, square, sample-and-hold and smoothed random shapes, all bipolar and starting at phase 0. `next()` returns the value then advances; `phase_offset` shifts it without disturbing the lock. The random shapes are a function of the cycle number (`splitmix64` of seed and cycle), so a given cycle always gives the same value.
+
+`LfoRate::Hz(f)` free-runs. `LfoRate::Sync(NoteDivision::new(8, Feel::Dotted))` is one cycle per dotted eighth; `LfoRate::Quarters(8.0)` is one cycle per two 4/4 bars. A synced LFO is locked to `Transport::quarter_notes`: call `set_transport` once per block and, while the host plays, the LFO position becomes `quarter_notes / quarters_per_cycle`. It is a function of musical position, not a counter, so a loop, a locate or a tempo change leaves it exactly where the host says, with no drift to correct. Between blocks it advances at `tempo / 60 / length` per second. While the host is stopped it keeps running at the last good tempo and re-locks on play. Tempo 0 (the `Transport` default), NaN or a non-finite position are ignored.
+
+Measured: 400 blocks of 512 samples at 44.1 kHz with a one-quarter-note sine, including a loop back to 0, a locate to quarter note 1234.37 and tempo changes (120, 97.5, 211 BPM): the largest difference between the LFO and `sin(2 pi * host_position)` is 6e-8. A synced random LFO reaches the same value by two different routes (a jump, versus playing there).
+
+### Flanger and chorus
+
+The flanger is a comb filter: `|1 + g e^{-j w d}|` has notches at odd multiples of `fs / (2 d)`; with `d = 48` samples at 48 kHz the tests find them at 500, 1500, 2500 Hz and so on, with depths below -80 dB, and 1.0000 at the peaks. `mix` runs from -1 to 1 and the deepest comb is at +-0.5; a negative mix inverts the wet path and puts a notch at DC. Feedback adds peaks (the loop delay equals the direct delay exactly). `set_through_zero(true)` delays the dry path by `delay_ms` (the plugin must report `latency_samples()`) so the swept path can cross it; with negative mix the two cancel at the crossing: the test sweeps a 90 Hz tone and the output energy falls to 0.0014 of the input's at the crossing.
+
+The chorus sweeps up to eight voices, spaced evenly in LFO phase, and divides the wet sum by the square root of the count. The pitch shift of a swept delay is the slope of the delay: a 1 ms deep sweep at 1 Hz moves a 2 kHz tone by +-12.6 Hz (the theory is 12.57 Hz).
+
+### Phaser
+
+Each stage is the first-order allpass `(a + z^-1) / (1 + a z^-1)`, `a = (tan(pi f / fs) - 1) / (tan(pi f / fs) + 1)`, with phase `-2 atan(tan(w / 2) / tan(pi f / fs))`. Mixed with the dry signal, `N` stages cancel where the total phase is an odd multiple of -180 degrees, at
+
+```text
+tan(w_k / 2) = tan(pi f / fs) * tan((2k + 1) pi / (2N))      for 2k + 1 < N
+```
+
+`Phaser::notch_frequencies` evaluates this. For 4 to 12 stages, break frequencies 300 Hz, 1 kHz and 2.5 kHz and rates 44.1, 48 and 96 kHz, every notch lands within 2 cents of the prediction and is deeper than -60 dB. Feedback (up to 0.95, either sign) adds a resonance beside each notch; the feedback is one sample late so there is no delay-free loop. The break frequency is swept on a log scale between `set_range`'s limits.
+
+### Limits
+
+- Delay and depth are limited to 100 ms (chorus) and 50 ms (flanger).
+- The LFO runs at no more than half the sample rate.
+- There is one coefficient computation (a `tan`) per phaser sample per channel; if that matters, drive the phaser from a control-rate sweep in your own wrapper.
+- Hermite and Lagrange change the delay of high frequencies, as the table shows; Thiran changes none of the magnitude but is not for sweeps.
