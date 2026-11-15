@@ -4,6 +4,8 @@
 
 Today the toolkit has one tool, the scanner (porting task 1). It answers "what is this plugin?". The tasks that follow build on its manifest.
 
+Shipping before the DSP is rewritten? [CPP_BRIDGE.md](CPP_BRIDGE.md) shows how to call your existing C++ DSP from a Rust plugin through `cxx` (porting task 7), with the real-time rules and how to test them.
+
 | Task | Tool | State |
 |---|---|---|
 | 1 | `scan`: read an existing plugin into a manifest and a Rust snippet | this document |
