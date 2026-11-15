@@ -198,6 +198,74 @@ pub fn fourcc(text: &str) -> Option<u32> {
     Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
 }
 
+// ---------- AudioToolbox: rendering ----------
+
+pub const AU_PROP_MAXIMUM_FRAMES_PER_SLICE: u32 = 14;
+pub const AU_PROP_SET_RENDER_CALLBACK: u32 = 23;
+pub const AU_PARAMETER_EVENT_IMMEDIATE: u32 = 1;
+pub const AU_FORMAT_LINEAR_PCM: u32 = 0x6C70_636D;
+/// Native-endian packed float, non-interleaved.
+pub const AU_FORMAT_FLOAT_PLANAR: u32 = 1 | 8 | 32;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AudioBuffer {
+    pub number_channels: u32,
+    pub data_byte_size: u32,
+    pub data: *mut c_void,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct SMPTETime {
+    pub subframes: i16,
+    pub subframe_divisor: i16,
+    pub counter: u32,
+    pub kind: u32,
+    pub flags: u32,
+    pub hours: i16,
+    pub minutes: i16,
+    pub seconds: i16,
+    pub frames: i16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct AudioTimeStamp {
+    pub sample_time: f64,
+    pub host_time: u64,
+    pub rate_scalar: f64,
+    pub word_clock_time: u64,
+    pub smpte_time: SMPTETime,
+    pub flags: u32,
+    pub reserved: u32,
+}
+
+/// `AudioUnitParameterEvent` with the immediate variant of its union.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AudioUnitParameterEvent {
+    pub scope: u32,
+    pub element: u32,
+    pub parameter: u32,
+    pub event_type: u32,
+    pub buffer_offset: u32,
+    pub value: f32,
+    pub unused: [u32; 2],
+}
+
+#[repr(C)]
+pub struct AURenderCallbackStruct {
+    pub input_proc: unsafe extern "C" fn(*mut c_void, *mut u32, *const AudioTimeStamp, u32, u32, *mut c_void) -> OSStatus,
+    pub input_proc_ref_con: *mut c_void,
+}
+
+#[link(name = "AudioToolbox", kind = "framework")]
+unsafe extern "C" {
+    pub fn AudioUnitRender(unit: AudioComponentInstance, flags: *mut u32, time: *const AudioTimeStamp, bus: u32, frames: u32, data: *mut c_void) -> OSStatus;
+    pub fn AudioUnitScheduleParameters(unit: AudioComponentInstance, events: *const AudioUnitParameterEvent, count: u32) -> OSStatus;
+}
+
 /// A code back to four characters; non-printing bytes become `?`.
 pub fn fourcc_text(code: u32) -> String {
     code.to_be_bytes().iter().map(|b| if (0x20..0x7f).contains(b) { *b as char } else { '?' }).collect()

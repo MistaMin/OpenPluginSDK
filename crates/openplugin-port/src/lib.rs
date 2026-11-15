@@ -12,12 +12,16 @@ pub mod au;
 pub mod bundle;
 pub mod clap;
 pub mod manifest;
+pub mod null;
 pub mod probe;
+pub mod render;
+pub mod signal;
 pub mod snippet;
 #[cfg(test)]
 mod snippet_tests;
 pub mod sys;
 pub mod vst3;
+pub mod wav;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
