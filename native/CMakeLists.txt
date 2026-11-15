@@ -441,3 +441,9 @@ if(OP_BUILD_AAX)
   add_test(NAME aax_alloc_latency_proof COMMAND AAXAllocLatencyProof)
   add_test(NAME aax_bundle_proof COMMAND AAXBundleProof "$<TARGET_BUNDLE_DIR:OpenPluginAAX>")
 endif()
+
+# Format parity hosts and negative-control shells (docs/FORMAT_PARITY.md). Test builds only.
+option(OP_FORMAT_PARITY "Build the format parity hosts from scripts/format_parity" OFF)
+if(OP_FORMAT_PARITY)
+  include("${CMAKE_CURRENT_LIST_DIR}/../scripts/format_parity/parity.cmake")
+endif()
