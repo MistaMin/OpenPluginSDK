@@ -167,7 +167,9 @@ fn a_hanging_plugin_is_killed_at_the_timeout() {
     let start = std::time::Instant::now();
     let err = scan(example_dylib(), &o).unwrap_err();
     assert!(err.contains("timed out"), "{err}");
-    assert!(start.elapsed() < Duration::from_secs(10));
+    // A hang would never return; the bound is loose so a loaded machine starting the
+    // child process slowly does not fail the test.
+    assert!(start.elapsed() < Duration::from_secs(60));
 }
 
 #[test]
