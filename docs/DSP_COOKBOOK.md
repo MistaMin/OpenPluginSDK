@@ -1530,3 +1530,74 @@ Anti-aliasing: shifting up folds content above Nyquist over `r`; the vocoder shi
 ### Real-time notes
 
 Nothing allocates in `process`, `push`, `pop` or `detect` (`tests/time_pitch_no_alloc.rs`, with NaN and infinity in the input, host blocks of 1 to 1024 samples and shift and stretch changes in the middle). `openplugin-testing`'s conformance kit passes on a plugin built from `PitchShifter` (`tests/pitch_shift_conformance.rs`: all sample rates 22.05 to 384 kHz, block sizes 1 to 8192, hostile input, parameter fuzz, state, layouts, and the latency-by-impulse check against `Plugin::latency`). A sudden change of the pitch ratio changes the stretch of frames already in flight; the reader re-syncs and may glitch once, and `underruns()` counts times it had to hold. Change the ratio smoothly, or from a parameter smoother, to avoid it.
+
+## Vectorised kernels
+
+`openplugin_dsp::simd` holds the hot loops of audio code in three versions: a scalar reference, aarch64 NEON, and x86_64 SSE2 or AVX with FMA. `Kernels::detect()` picks the best one once (NEON is part of aarch64; on x86_64 `is_x86_feature_detected!("avx")` and `("fma")` choose AVX, otherwise SSE2) and stores function pointers. Take it in `prepare` and keep the value; each call afterwards is one indirect call. No kernel allocates (`tests/simd_no_alloc.rs`), all take unaligned slices of any length, and the scalar versions are public in `simd::scalar`. No SIMD crate is used: the code is `core::arch` intrinsics behind a small trait, `#[target_feature(enable = "avx,fma")]` entry points that run only after detection, and a SAFETY comment on every `unsafe` block. It builds on Rust 1.85.
+
+```rust
+use openplugin_dsp::simd::{BiquadBank4, Kernels};
+
+let k = Kernels::detect();                       // once, in prepare()
+k.gain(&mut out, &input, 0.5);                   // out = 0.5 * input
+k.mix_add(&mut bus, &voice, 0.25);               // bus += 0.25 * voice
+k.crossfade(&mut out, &dry, &wet, 0.0, 1.0 / n as f32); // linear ramp, g = g0 + step * i
+k.cmac_interleaved(&mut acc, &spectrum, &partition);    // acc += spectrum * partition, [re, im, ..]
+k.cmac_complex(&mut acc_c, &x_c, &h_c);          // the same on rustfft Complex<f32> slices
+k.fir(&mut y, &history_then_block, &taps_reversed);
+let d = k.dot(&a, &b);
+k.matvec(&mut y, &weights_row_major, &x, Some(&bias));
+
+let mut bank = BiquadBank4::new(&[[b0, b1, b2, a1, a2]; 4]); // off the audio thread
+bank.process_interleaved(&mut frames_of_four_channels);
+```
+
+### The kernels and their layouts
+
+| Kernel | Does | Layout |
+| --- | --- | --- |
+| `gain`, `scale`, `mix_add` | `y = a*x`, `x *= a`, `y += a*x` | plain slices |
+| `crossfade` | `y = a*(1-g) + b*g`, `g = g0 + step*i` | `g` is computed from the index, not accumulated, so every path gives the same ramp; blocks up to 2^24 |
+| `cmac_interleaved`, `cmac_complex` | `acc += x*h`, complex | `[re0, im0, re1, im1, ..]`, the memory layout of `Complex<f32>` that `partitioned.rs` uses |
+| `cmac_split` | the same | separate `re` and `im` slices |
+| `fir` | `y[n] = sum_k taps_rev[k] * x[n+k]` | taps **reversed**; `x` is `taps-1` samples of history, then the block, so `x.len() >= y.len() + taps - 1`; any tap count |
+| `dot`, `matvec` | dot product, `y = W x + bias` | row-major `W[row * cols + col]` |
+| `BiquadBank4` | a cascade of any number of sections on four channels at once | audio interleaved by frame `[c0 c1 c2 c3 ..]` (`process_interleaved`) or four planar slices (`process`, which transposes through a stack buffer); coefficients `[b0, b1, b2, a1, a2]` shared by the four channels; state of section `s` is `[z1 of c0..c3, z2 of c0..c3]`; transposed direct form II |
+
+A FIR in direct form needs the history in one buffer. Keep `taps-1` samples of history ahead of the block (copy the block's tail to the front after each call, or use a double-length ring), and store the taps reversed once at design time. The kernel vectorises across outputs: for each tap it multiplies a broadcast tap by several unaligned vectors of the history, so the sum for every output runs in increasing tap order with no horizontal reduction at the end.
+
+`BiquadBank4` is SIMD across channels: one register holds the same state variable of four channels, so one instruction advances four independent filters, the opposite of vectorising along time (which a recursive filter forbids). It suits two stereo pairs (mid/side plus a linked bank), four voices, or four bands. Up to four sections keep their coefficients and state in registers for the whole block; a longer cascade reads and writes the state per sample and is slower. On x86_64 the AVX table runs this kernel on the 128-bit register as well: eight channels would be a different API and the cascade is latency-bound. Unlike `Biquad` it does not guard against NaN or flush denormals; do that around it.
+
+### Equality with the scalar reference
+
+The scalar twin fixes the order of operations and the vector paths follow it.
+
+- **Bit-identical on every path:** `gain`, `scale`, `mix_add`, `crossfade`, `BiquadBank4`. They use separate multiply and add, never a fused multiply-add.
+- **Bit-identical on SSE2 and scalar; within the last bit on NEON and AVX+FMA:** `cmac_*`, `fir`, `dot`, `matvec`. NEON and AVX use a fused multiply-add (one rounding instead of two), so a result can differ from the scalar one by a few units in the last place. The tested bound is `n * f32::EPSILON * sum(|terms|)` for a sum of `n` terms.
+- `dot` and `matvec` sum in the same order on every path (sixteen logical lanes, folded `i + 8`, `i + 4`, then `(s0 + s2) + (s1 + s3)`, then the tail element by element), so vector and scalar differ only by the fusing.
+- NaN and infinity propagate as in the scalar code; the tests put NaN and both infinities into the kernels and compare. The one exception is a product that overflows to infinity in a scalar multiply and cancels in the next subtraction, where a fused path keeps the exact value; it needs magnitudes above 1e19.
+- Lengths are checked with `assert!` and panic on mismatch; that is a programming error, not an input case.
+
+Tests (`simd::tests`, `tests/simd_no_alloc.rs`): random inputs at lengths 0, 1, 3, 7, 8, 9, 15, 16, 17, 33, 255 and 1023, slices starting at odd offsets so they are not 16-byte aligned, FIR with 1 to 255 taps, `matvec` shapes from 1x1 to 7x1023, `BiquadBank4` with 1 to 8 sections in both entry points, and an eight-lane generic run (`simd::tests::emu`) that checks the AVX-width unrolling and tails exactly on any machine.
+
+### Measured
+
+`cargo test -p openplugin-dsp --release --lib simd::tests::bench_report -- --ignored --nocapture` prints the table. Apple Silicon, `--release`, a 1024-sample block, best of five, ns per call; the scalar column is plain Rust that LLVM auto-vectorises where it can. The x86_64 columns are the x86_64 build run under Rosetta 2.
+
+| Kernel | scalar | NEON | speed-up | Rosetta scalar | SSE2 | speed-up |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `gain` 1024 | 55 | 54 | 1.0x | 73 | 79 | 0.9x |
+| `mix_add` 1024 | 69 | 70 | 1.0x | 103 | 105 | 1.0x |
+| `crossfade` 1024 | 443 | 199 | 2.2x | 521 | 264 | 2.0x |
+| `cmac_interleaved` 1024 bins | 430 | 472 | 0.9x | 391 | 428 | 0.9x |
+| `fir` 64 taps x 1024 | 24 400 | 3 650 | 6.7x | 38 800 | 4 530 | 8.6x |
+| `dot` 1024 | 447 | 67 | 6.7x | 589 | 81 | 7.3x |
+| `matvec` 64x64 | 2 010 | 255 | 7.9x | 2 540 | 417 | 6.1x |
+| `BiquadBank4`, 3 sections x 4 channels x 1024 frames | 15 050 | 3 680 | 4.1x | 19 170 | 3 670 | 5.2x |
+
+How to read it:
+
+- **Gain, mix and the complex multiply-accumulate gain nothing.** LLVM already vectorises these elementwise loops, and they are limited by memory, not arithmetic (section 7 of [PERFORMANCE.md](PERFORMANCE.md) found the same for a simple map). The scalar `mac` loop in `partitioned.rs` is already at this speed; switching it to the kernel buys about nothing on its own. The kernels exist so the path is explicit and tested, not because they beat the compiler here.
+- **Reductions and recursions are where hand-written SIMD wins.** The compiler may not reassociate a float sum, so a scalar `dot` is one dependency chain; the kernels keep sixteen independent partial sums. `fir`, `dot` and `matvec` are 6 to 9 times faster, `BiquadBank4` four to five times, `crossfade` twice (the compiler does not vectorise the index-derived ramp).
+- Expected gain when adopted, as an estimate and not a measurement: the `neural.rs` matrix-vector products and any direct FIR about 6 to 8 times on those loops; a `LongConvolver` is dominated by its FFTs and its multiply-accumulate is already vectorised, so little; biquad cascades by running four channels or bands in one bank, about 3 to 4 times. Adopting the kernels inside `partitioned.rs` and `neural.rs` is a separate follow-up and changes nothing there yet.
+- **What was not run.** Rosetta 2 translates x86_64 code to the Apple CPU and reports no AVX or FMA, so the `AvxFma` path compiled (`cargo check --target x86_64-apple-darwin -p openplugin-dsp --tests`) but never executed on real hardware here; only its width-dependent logic was run, through the eight-lane test. Its intrinsics (`_mm256_*` shuffles, unpacks, FMA) are untested on a CPU. The x86 numbers are Rosetta's, not an Intel or AMD chip's; run the benchmark and `cargo test -p openplugin-dsp simd` on real x86_64 hardware to complete the picture.
