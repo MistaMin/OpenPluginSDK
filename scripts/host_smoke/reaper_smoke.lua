@@ -99,9 +99,10 @@ local function body()
   check("track and input item", r.CountTrackMediaItems(tr) == 1, "items=" .. r.CountTrackMediaItems(tr))
 
   local prefix = ({ CLAP = "CLAP: ", VST3 = "VST3: ", AU = "AU: " })[fmt]
-  -- the plug-in's own name is "Editor Gain" (examples/editor); the bundles are called "Example Gain"
-  local fx = r.TrackFX_AddByName(tr, prefix .. "Editor Gain", false, 1)
-  if fx < 0 then fx = r.TrackFX_AddByName(tr, prefix .. "Example Gain", false, 1) end
+  -- the plug-in and its bundles are called "Example Gain" (examples/editor); builds before
+  -- the rename called the plug-in itself "Editor Gain"
+  local fx = r.TrackFX_AddByName(tr, prefix .. "Example Gain", false, 1)
+  if fx < 0 then fx = r.TrackFX_AddByName(tr, prefix .. "Editor Gain", false, 1) end
   local _, fxname = r.TrackFX_GetFXName(tr, fx, "")
   check("insert plug-in", fx >= 0, "fx index " .. tostring(fx) .. ", name '" .. tostring(fxname) .. "'")
   if fx < 0 then return end

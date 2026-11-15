@@ -274,7 +274,7 @@ def audio_checks(d, fmt):
 OG9_TYPES = {"au": 0, "lv2": 2, "vst3": 7}
 # The name each format reports to OpenGrid9. VST3 and LV2 carry the plug-in's own name
 # (examples/editor); the Audio Unit carries the product name given to build_plugin.sh.
-PLUGIN_NAMES = {"vst3": "Editor Gain", "lv2": "Editor Gain", "au": "Example Gain"}
+PLUGIN_NAMES = {"vst3": "Example Gain", "lv2": "Example Gain", "au": "Example Gain"}
 OG9_VST3_SCANNER = OG9_APP + "/Contents/lib/ardour-vst3-scanner"
 OG9_AU_SCANNER = OG9_APP + "/Contents/lib/ardour-au-scanner"
 

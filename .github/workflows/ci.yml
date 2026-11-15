@@ -223,7 +223,7 @@ jobs:
           path: vst3sdk
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      # The proofs load the SDK example (examples/editor, "Editor Gain").
+      # The proofs load the SDK example (examples/editor, "Example Gain").
       - name: Build the example as a static library
         working-directory: OpenPluginSDK
         run: cargo build --release --lib -p example-editor

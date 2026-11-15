@@ -77,6 +77,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 
 ### Changed
 
+- `examples/editor` is called "Example Gain", like its bundles; hosts showed the plug-in as "Editor Gain" while the bundle was "Example Gain". Only the displayed name changes: the CLAP, VST3, Audio Unit and AAX identifiers are the same, so saved sessions still find it.
 - **Breaking (LV2 port indices).** Indices after the parameters are new: every LV2 plugin gains a `freewheel` control port at `first_param + parameter count`, and a plugin whose `note_ports()` has `input` (the default) or `output` gains atom ports after it, then sidechain ports. Ports 0 to 3 and the parameters of an effect keep their indices. An LV2 instrument no longer has audio inputs: its outputs are ports 0 and 1 and its parameters start at port 2 (`lv2::AUDIO_PORTS` stays 4, the effect value; use `lv2::PortMap::first_param`). Hosts that saved state by port symbol or by effect index are unaffected; a plugin with note ports now lists `urid:map` as a required feature.
 - VST3 applies parameter changes and the bypass crossfade at their sample offset instead of at the start of the block.
 - Audio Unit bypass no longer resets the plugin when it ends; the plugin keeps running and the dry signal is delayed by the reported latency (the base class copied the input with no delay).

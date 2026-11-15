@@ -2,7 +2,7 @@
 # Thin VST3, Audio Unit, and AAX shells over a Rust staticlib that exports op_shell_*.
 # Does not sign, install, or copy an SDK into this tree.
 #
-# The proofs load the SDK example (examples/editor, "Editor Gain"). Build and
+# The proofs load the SDK example (examples/editor, "Example Gain"). Build and
 # run them from the repository root; the SDK checkouts stay outside this tree:
 #
 #   CARGO_BUILD_JOBS=2 cargo build --release --lib -p example-editor

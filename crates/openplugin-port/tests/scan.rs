@@ -1,4 +1,4 @@
-//! The scanner against the SDK's own example (`examples/editor`, "Editor Gain").
+//! The scanner against the SDK's own example (`examples/editor`, "Example Gain").
 //!
 //! The CLAP scan always runs: the test builds the example's `cdylib` and scans
 //! it. The VST3, Audio Unit and AAX scans need bundles built by

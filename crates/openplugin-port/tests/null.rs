@@ -45,8 +45,12 @@ fn example_dylib() -> &'static Path {
 }
 
 /// The same code, "built twice": a second copy of the file at another path.
+/// Each call gets its own folder: the tests run in parallel, and copying over a file
+/// another test is loading makes its `dlopen` fail.
 fn clap_pair() -> (PathBuf, PathBuf) {
-    let dir = scratch("clap-pair");
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = scratch(&format!("clap-pair-{n}"));
     let a = dir.join("original.clap");
     let b = dir.join("port.clap");
     std::fs::copy(example_dylib(), &a).unwrap();

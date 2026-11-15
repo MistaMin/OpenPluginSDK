@@ -39,7 +39,7 @@ static PARAMS: [ParamInfo; 2] = [
 
 pub static INFO: PluginInfo = PluginInfo {
     id: "com.opengrid.example.editor-gain",
-    name: "Editor Gain",
+    name: "Example Gain",
     vendor: "OpenGrid",
     url: "https://github.com/MistaMin/OpenPluginSDK",
     email: "",
