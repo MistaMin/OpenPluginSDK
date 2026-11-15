@@ -12,6 +12,7 @@ The working example is [`examples/editor`](../examples/editor): a Navy plate, a 
 |---|---|---|
 | `Editor` | `openplugin_core::editor` | size, size range, `resize`, `bind`, `param_changed`, `tick`, `render`, mouse input, modifiers, keys and focus |
 | `Key`, `Modifiers` | the same | the keys an editor can ask for, and the held modifier keys |
+| `DamageRect`, `DamageTracker`, `Editor::damage` | the same | what changed on screen, so the view repaints only that (below) |
 | `SizeRange` | the same | the sizes an editor takes: minimum, maximum and an optional aspect, with `clamp` |
 | `EditorHost` | the same | where gestures go: `begin`, `perform`, `end`, or `set` for all three; `request_resize` asks the host for a size |
 | `EditorFactory` | the same | `fn(EditorHost) -> Option<Box<dyn Editor>>`, passed to the export macros |
@@ -91,6 +92,22 @@ Cocoa mapping, in `openplugin_dri::cocoa`:
 
 The CLAP, LV2 and shell hosts reach the editor through this same view, so none of them needed a change. How a given host's window routes keys to a plugin view (some forward them to the plugin's view only when it is first responder, and some keep them) differs per host and is not claimed here.
 
+## Repaint
+
+The Cocoa view used to redraw the whole frame 30 times a second. One optional method now lets an editor say what changed:
+
+```rust
+fn damage(&mut self) -> Option<Vec<DamageRect>> { None }   // the default
+```
+
+`None` means everything, which is the default, so an editor written before it is redrawn in full as it always was. `Some(rects)` is what changed since the last call, in points with the origin at the top left; `Some(vec![])` means nothing. The rectangles must cover every pixel that differs from the frame `render` last returned, anti-aliased edges, shadows and glows included.
+
+The view calls `damage` after each tick and after each mouse or key call. It invalidates only those rectangles (`setNeedsDisplayInRect:`, a point larger on each side), and when the list is empty it invalidates nothing, so an idle editor costs the timer tick. A view that does not ask (a test, the snapshot tool, a host that calls `render` itself) still gets correct frames: `render` collects whatever is pending on its own, and the editor clears it once a frame has drawn it. A new size, scale or static layer makes the canvas paint the whole frame whatever the list says. When the window moves to a display of another scale the view invalidates the whole view.
+
+`DamageTracker` keeps the pending list for an editor: `add(rect)`, `add_all()` after a resize, `pending()` for `render` and `damage`, `clear()` after a frame. It starts as "everything", so the first frame is full, and more than 16 rectangles become "everything".
+
+`examples/editor` and `DesignEditor` report the area of a control when its value, hover, pressed or focus state changes (`ControlSet::take_changed`), the focused control when the view gains or loses the keyboard, and the meter only when its picture changes: the 16-segment ladder shows 16 lit-or-not states, so a level change that lights the same segments draws nothing. `SceneCanvas::frame_damaged` does the painting ([DRI_GUIDE.md](DRI_GUIDE.md#repainting-only-what-changed)).
+
 ## Per format
 
 | Format | Gestures | Values back to the editor | Engine binding |
@@ -119,7 +136,7 @@ Everything those shells call is Rust: the audio contract (`op_shell_*`), the tai
 
 ## Tests
 
-- `cargo test -p example-editor`: a test with no harness that runs on the main thread. It opens the editor through the shell ABI, CLAP and LV2. It clicks it, checks the gestures, and reads pixels back from the view. It then resizes the editor through each of the three (`op_editor_resize`, CLAP `adjust_size` and `set_size`, LV2 `ui:resize`), and checks that the view's size, the drawn pixels and the click positions follow: a click at the old position of the Warm switch hits nothing, a click at the scaled one does. It also has the editor ask for a size (a double-click on the bare plate) through `op_editor_set_request_resize`, `clap_host_gui::request_resize` (the host calls `set_size` inside the request) and the host's `ui:resize`. A last case sends real `NSEvent`s to the shell view with a recording responder standing in for the host: modifier flags from mouse events and `flagsChanged:` (a Shift arrow steps a tenth as far), a handled arrow (a whole gesture, nothing for the next responder), unhandled keys and the up of a key the editor did not take (both reach the next responder), Tab, Space and Escape, and the focus ring in the pixels. `flagsChanged:` is exercised with a key event that carries the flags, because `NSEvent` cannot build a flags-changed event directly. No window is used, so first-responder handoff in a real window is not exercised.
+- `cargo test -p example-editor`: a test with no harness that runs on the main thread. It opens the editor through the shell ABI, CLAP and LV2. It clicks it, checks the gestures, and reads pixels back from the view. It then resizes the editor through each of the three (`op_editor_resize`, CLAP `adjust_size` and `set_size`, LV2 `ui:resize`), and checks that the view's size, the drawn pixels and the click positions follow: a click at the old position of the Warm switch hits nothing, a click at the scaled one does. It also has the editor ask for a size (a double-click on the bare plate) through `op_editor_set_request_resize`, `clap_host_gui::request_resize` (the host calls `set_size` inside the request) and the host's `ui:resize`. The editor's own tests (`cargo test -p example-editor --lib`) drive a session through two editors fed the same events, one repainting only its damage and one repainting everything, at scales 1, 1.5 and 2, and compare every frame pixel for pixel; `cargo test -p openplugin-dri` does the same for `SceneCanvas` and `DesignEditor`. A last case sends real `NSEvent`s to the shell view with a recording responder standing in for the host: modifier flags from mouse events and `flagsChanged:` (a Shift arrow steps a tenth as far), a handled arrow (a whole gesture, nothing for the next responder), unhandled keys and the up of a key the editor did not take (both reach the next responder), Tab, Space and Escape, and the focus ring in the pixels. `flagsChanged:` is exercised with a key event that carries the flags, because `NSEvent` cannot build a flags-changed event directly. No window is used, so first-responder handoff in a real window is not exercised.
 - `cargo test -p openplugin-core`: the clamping rules of `SizeRange` (bounds, aspect, a result clamps to itself).
 - `VST3EditorProof` (`native/vst3/editor_host.mm`, built with `-DOP_EDITOR=ON`): loads the VST3 bundle in process and opens the view. It re-creates the engine with the view open. If `OP_EDITOR_PROOF_CLICK` is `x;y;param`, it clicks there and checks the paired edits.
 
@@ -131,7 +148,7 @@ An editor does not have to hand-code hit rectangles. `openplugin_dri::ControlSet
 
 `Editor::modifiers_changed(Modifiers)` is optional and empty by default. The macOS view calls it (see below), so Shift or Command gives the fine adjustment on macOS.
 
-`ControlSet` handles the keys for an editor: it keeps one focused control, moves focus with Tab, and turns the keys into gestures. `examples/editor` forwards `wants_keys`, `key_down`, `key_up` and `focus_changed` to it and draws a ring around the focused control. See [DRI_GUIDE.md](DRI_GUIDE.md#keyboard-and-focus-in-the-registry).
+`ControlSet` handles the keys for an editor: it keeps one focused control, moves focus with Tab, and turns the keys into gestures. `examples/editor` and `DesignEditor` forward `wants_keys`, `key_down`, `key_up` and `focus_changed` to it and draw a ring around the focused control. See [DRI_GUIDE.md](DRI_GUIDE.md#keyboard-and-focus-in-the-registry).
 
 ## Editors from a design file
 
