@@ -132,6 +132,8 @@ Then **0.7.0**.
 6. **One sound in every format.** A test renders the same input and automation through CLAP, LV2, VST3, the Audio Unit and AAX and checks the outputs match the Rust engine's, sample for sample within float tolerance. Owns `scripts/format_parity/*`. Proof: the test passes for the examples and fails on a deliberately altered shell.
 7. **Installer.** `scripts/build_plugin.sh` can wrap the built bundles in a `.pkg` (`pkgbuild` and `productbuild`), one component per format, signed with a Developer ID Installer identity and notarised when the environment asks. Owns `scripts/*`, `docs/BUILD.md`. Proof: `pkgutil --payload-files` lists every bundle at its install path; the package is never installed by the test.
 
+8. **Universal binaries, proven.** `--archs universal` already joins arm64 and x86_64 with `lipo`, but only the CLAP and LV2 were checked. Build every format universal, the AAX SDK library included, run the x86_64 slice of every proof, the format-parity test and `clap-validator` under Rosetta, and add a CI job that does the same. Owns `scripts/build_plugin.sh`, `native/CMakeLists.txt` architecture settings, CI. Proof: `lipo -archs` lists both slices in every bundle, and every proof passes on each slice.
+
 Status: tasks 1, 2, 4, 5, 6 and 7 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
 
 The freeze itself and the crates.io publish are the owner's decisions.
