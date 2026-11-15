@@ -21,7 +21,9 @@
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 
 pub mod adaa;
+pub mod adsr;
 pub mod biquad;
+pub mod blosc;
 pub mod bypass;
 pub mod convolve;
 pub mod crossover;
@@ -40,20 +42,25 @@ pub mod loudness;
 pub mod matched;
 pub mod meter;
 pub mod musical;
+pub mod noise;
 pub mod oscillator;
 pub mod oversampling;
 pub mod partitioned;
 pub mod pcm;
 pub mod pitch;
 pub mod rate;
+pub mod resample;
 pub mod saturation;
 pub mod svf;
 pub mod voice;
 pub mod true_peak;
+pub mod wavetable;
 pub mod window;
 
 pub use adaa::{Adaa2Taylor, ResidualAdaa1};
+pub use adsr::{Adsr, Ahdsr, Curve, Gate, RetriggerMode, Stage};
 pub use biquad::{Biquad, FilterType};
+pub use blosc::{blamp_residual, blep_residual, BandlimitedOsc, BlWave, BlepOrder};
 pub use bypass::SoftBypass;
 pub use convolve::BlockConvolver;
 pub use crossover::{Crossover, LinkwitzRiley, LrOrder, MAX_BANDS};
@@ -79,6 +86,7 @@ pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuMeter};
 pub use musical::{
     ms_from_samples, ms_per_beat, samples_from_ms, samples_from_ticks, samples_per_beat,
 };
+pub use noise::{PinkNoise, WhiteNoise, PINK_LOW_HZ, PINK_RMS};
 pub use oscillator::{Oscillator, Wave};
 pub use oversampling::{OversampleFactor, Oversampler2x};
 pub use dither::{Dither, DitherKind, NoiseShaping};
@@ -86,7 +94,9 @@ pub use partitioned::{ConvolutionIr, ConvolveError, ConvolverConfig, Layout, Lon
 pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to_f32, lerp};
 pub use pitch::{hz_from_midi, midi_from_hz};
 pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
+pub use resample::{playback_ratio, Quality, SincConfig, SincKernel, SincPlayer};
 pub use saturation::{saturate_sample, SaturationMode};
 pub use svf::{Svf, SvfMode};
 pub use voice::{Polyphony, SampleVoice};
+pub use wavetable::{WavetableError, WavetableOsc, WavetableSet};
 pub use window::{hann, WindowRms};
