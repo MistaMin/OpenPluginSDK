@@ -368,9 +368,13 @@ impl Editor for GainEditor {
         // The plate is static: painted once per size and scale, then reused under the moving parts.
         let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, width, height, "Navy");
         let damage = self.damage.pending();
+        // A part that cannot reach into a damaged rectangle is not even built.
+        let touched = |r: &DamageRect| damage.is_none_or(|d| d.iter().any(|x| x.touches(r)));
+        let reach: Vec<DamageRect> = controls.iter().map(|c| self.reach(c)).collect();
+        let meter_reach = DamageRect::from_tuple(lay.meter).expanded(METER_REACH * lay.scale);
         let frame = self.canvas.frame_damaged(scale, 0, plate, |dl| {
             let mut parts = Scene::new();
-            for c in controls.iter() {
+            for (c, _) in controls.iter().zip(&reach).filter(|(_, r)| touched(r)) {
                 let (x, y, w, h) = c.area.bounds();
                 match c.kind {
                     ControlKind::Knob => draw_knob_code(
@@ -397,8 +401,11 @@ impl Editor for GainEditor {
                     _ => {}
                 }
             }
-            meters::draw_led_ladder(&mut parts, rect(lay.meter), false, level_db, level_db, 16);
-            if let Some(c) = controls.focused().and_then(|id| controls.get(id)).filter(|_| keys_active) {
+            if touched(&meter_reach) {
+                meters::draw_led_ladder(&mut parts, rect(lay.meter), false, level_db, level_db, 16);
+            }
+            let ringed = controls.focused().filter(|&id| touched(&reach[id])).and_then(|id| controls.get(id));
+            if let Some(c) = ringed.filter(|_| keys_active) {
                 let (x, y, w, h) = c.area.bounds();
                 let ring = rect((x, y, w, h)).expanded(4.0 * lay.scale);
                 let color = GlColor(0xff5cc8ff);
