@@ -45,6 +45,7 @@ unsafe extern "C" fn map_uri(handle: *mut c_void, uri: *const c_char) -> u32 {
 
 /// The host side of `urid:map`, with the feature array an instance is given.
 pub struct Host {
+    #[allow(clippy::box_collection)] // the Vec header must keep its address for the map handle
     table: Box<Vec<String>>,
     _map: Box<UridMapFeature>,
     _uri: CString,
@@ -54,7 +55,7 @@ pub struct Host {
 
 impl Host {
     pub fn new() -> Self {
-        let mut table: Box<Vec<String>> = Box::new(Vec::new());
+        let mut table: Box<Vec<String>> = Box::default();
         let map = Box::new(UridMapFeature { handle: (&mut *table) as *mut Vec<String> as *mut c_void, map: map_uri });
         let uri = CString::new("http://lv2plug.in/ns/ext/urid#map").unwrap();
         let feature = Box::new(Lv2Feature { uri: uri.as_ptr(), data: (&*map) as *const UridMapFeature as *mut c_void });

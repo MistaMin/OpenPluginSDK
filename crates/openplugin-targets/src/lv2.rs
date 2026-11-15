@@ -14,7 +14,7 @@
 //! an `atom:Sequence` output when it sends MIDI, and one `lv2:isSideChain`
 //! audio input per sidechain channel. An instrument has no main audio input:
 //! its outputs are ports 0 and 1 and its parameters start at port 2. Every
-//! index of an effect that has none of the new ports is unchanged.
+//! port an effect had before keeps its index.
 //! MIDI is delivered at its frame offsets by rendering in segments, the way
 //! the CLAP entry does. The atoms are read from the host's own buffers with
 //! bounds checks and no allocation; truncated, oversized or mistyped atoms

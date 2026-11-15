@@ -12,6 +12,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 
 ### Added
 
+- LV2 parity with CLAP: an `atom:Sequence` input when `note_ports().input` (`midi:MidiEvent` delivered at its frame offset through `note_on_channel`, `note_off` and `midi::deliver`; `time:Position` mapped onto `Transport`), an `atom:Sequence` MIDI output from `pull_midi` when `note_ports().output`, one `lv2:isSideChain` audio input per sidechain channel (`process_buses`), an `lv2:freeWheeling` control port wired to `set_offline`, and `lv2:InstrumentPlugin` with no main audio input for an instrument. `lv2::PortMap` and `lv2::layout_of` describe the layout. Proven through the exported descriptor (`tests/lv2_ports.rs`, `lv2_atoms_hostile.rs`, `lv2_ports_no_alloc.rs`); `lv2_validate` reports 0 errors on the generated files, and `lv2apply` still renders the example.
 - `op_shell_save_state` and `op_shell_load_state` in the shell ABI. They carry the parameters and the plugin's own chunk (`Plugin::save_state` / `load_state`) in one blob, all or nothing. `OP_SHELL_ABI` stays 1; nothing existing changed. The VST3 shell carries the blob in its component state (a trailer after the version 1 fields), the Audio Unit in its class-info dictionary (key `OpenPluginState`), and AAX in state chunk version 2; states written by earlier versions still load.
 - `openplugin_ffi::STATE_WAIT` (two seconds) and `FfiInstance::try_save_bytes`, the bounded form of `save_bytes`.
 - VST3: a `kIsBypass` host bypass parameter. VST3, the Audio Unit and AAX bypass by delaying the dry signal by the reported latency with a 10 ms crossfade, and the plugin keeps running. CLAP's `PARAM_IS_BYPASS` reaches `Plugin::set_host_bypass`.
@@ -28,6 +29,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 
 ### Changed
 
+- **Breaking (LV2 port indices).** Indices after the parameters are new: every LV2 plugin gains a `freewheel` control port at `first_param + parameter count`, and a plugin whose `note_ports()` has `input` (the default) or `output` gains atom ports after it, then sidechain ports. Ports 0 to 3 and the parameters of an effect keep their indices. An LV2 instrument no longer has audio inputs: its outputs are ports 0 and 1 and its parameters start at port 2 (`lv2::AUDIO_PORTS` stays 4, the effect value; use `lv2::PortMap::first_param`). Hosts that saved state by port symbol or by effect index are unaffected; a plugin with note ports now lists `urid:map` as a required feature.
 - VST3 applies parameter changes and the bypass crossfade at their sample offset instead of at the start of the block.
 - Audio Unit bypass no longer resets the plugin when it ends; the plugin keeps running and the dry signal is delayed by the reported latency (the base class copied the input with no delay).
 - CLAP saves and loads beside `process` safely: a gate for plugins with a chunk, the parameter plane for parameter-only plugins.
