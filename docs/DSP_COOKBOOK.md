@@ -1530,3 +1530,165 @@ Anti-aliasing: shifting up folds content above Nyquist over `r`; the vocoder shi
 ### Real-time notes
 
 Nothing allocates in `process`, `push`, `pop` or `detect` (`tests/time_pitch_no_alloc.rs`, with NaN and infinity in the input, host blocks of 1 to 1024 samples and shift and stretch changes in the middle). `openplugin-testing`'s conformance kit passes on a plugin built from `PitchShifter` (`tests/pitch_shift_conformance.rs`: all sample rates 22.05 to 384 kHz, block sizes 1 to 8192, hostile input, parameter fuzz, state, layouts, and the latency-by-impulse check against `Plugin::latency`). A sudden change of the pitch ratio changes the stretch of frames already in flight; the reader re-syncs and may glitch once, and `underruns()` counts times it had to hold. Change the ratio smoothly, or from a parameter smoother, to avoid it.
+
+## Vectorised kernels
+
+`openplugin_dsp::simd` holds the hot loops of audio code in three versions: a scalar reference, aarch64 NEON, and x86_64 SSE2 or AVX with FMA. `Kernels::detect()` picks the best one once (NEON is part of aarch64; on x86_64 `is_x86_feature_detected!("avx")` and `("fma")` choose AVX, otherwise SSE2) and stores function pointers. Take it in `prepare` and keep the value; each call afterwards is one indirect call. No kernel allocates (`tests/simd_no_alloc.rs`), all take unaligned slices of any length, and the scalar versions are public in `simd::scalar`. No SIMD crate is used: the code is `core::arch` intrinsics behind a small trait, `#[target_feature(enable = "avx,fma")]` entry points that run only after detection, and a SAFETY comment on every `unsafe` block. It builds on Rust 1.85.
+
+```rust
+use openplugin_dsp::simd::{BiquadBank4, Kernels};
+
+let k = Kernels::detect();                       // once, in prepare()
+k.gain(&mut out, &input, 0.5);                   // out = 0.5 * input
+k.mix_add(&mut bus, &voice, 0.25);               // bus += 0.25 * voice
+k.crossfade(&mut out, &dry, &wet, 0.0, 1.0 / n as f32); // linear ramp, g = g0 + step * i
+k.cmac_interleaved(&mut acc, &spectrum, &partition);    // acc += spectrum * partition, [re, im, ..]
+k.cmac_complex(&mut acc_c, &x_c, &h_c);          // the same on rustfft Complex<f32> slices
+k.fir(&mut y, &history_then_block, &taps_reversed);
+let d = k.dot(&a, &b);
+k.matvec(&mut y, &weights_row_major, &x, Some(&bias));
+
+let mut bank = BiquadBank4::new(&[[b0, b1, b2, a1, a2]; 4]); // off the audio thread
+bank.process_interleaved(&mut frames_of_four_channels);
+```
+
+### The kernels and their layouts
+
+| Kernel | Does | Layout |
+| --- | --- | --- |
+| `gain`, `scale`, `mix_add` | `y = a*x`, `x *= a`, `y += a*x` | plain slices |
+| `crossfade` | `y = a*(1-g) + b*g`, `g = g0 + step*i` | `g` is computed from the index, not accumulated, so every path gives the same ramp; blocks up to 2^24 |
+| `cmac_interleaved`, `cmac_complex` | `acc += x*h`, complex | `[re0, im0, re1, im1, ..]`, the memory layout of `Complex<f32>` that `partitioned.rs` uses |
+| `cmac_split` | the same | separate `re` and `im` slices |
+| `fir` | `y[n] = sum_k taps_rev[k] * x[n+k]` | taps **reversed**; `x` is `taps-1` samples of history, then the block, so `x.len() >= y.len() + taps - 1`; any tap count |
+| `dot`, `matvec` | dot product, `y = W x + bias` | row-major `W[row * cols + col]` |
+| `BiquadBank4` | a cascade of any number of sections on four channels at once | audio interleaved by frame `[c0 c1 c2 c3 ..]` (`process_interleaved`) or four planar slices (`process`, which transposes through a stack buffer); coefficients `[b0, b1, b2, a1, a2]` shared by the four channels; state of section `s` is `[z1 of c0..c3, z2 of c0..c3]`; transposed direct form II |
+
+A FIR in direct form needs the history in one buffer. Keep `taps-1` samples of history ahead of the block (copy the block's tail to the front after each call, or use a double-length ring), and store the taps reversed once at design time. The kernel vectorises across outputs: for each tap it multiplies a broadcast tap by several unaligned vectors of the history, so the sum for every output runs in increasing tap order with no horizontal reduction at the end.
+
+`BiquadBank4` is SIMD across channels: one register holds the same state variable of four channels, so one instruction advances four independent filters, the opposite of vectorising along time (which a recursive filter forbids). It suits two stereo pairs (mid/side plus a linked bank), four voices, or four bands. Up to four sections keep their coefficients and state in registers for the whole block; a longer cascade reads and writes the state per sample and is slower. On x86_64 the AVX table runs this kernel on the 128-bit register as well: eight channels would be a different API and the cascade is latency-bound. Unlike `Biquad` it does not guard against NaN or flush denormals; do that around it.
+
+### Equality with the scalar reference
+
+The scalar twin fixes the order of operations and the vector paths follow it.
+
+- **Bit-identical on every path:** `gain`, `scale`, `mix_add`, `crossfade`, `BiquadBank4`. They use separate multiply and add, never a fused multiply-add.
+- **Bit-identical on SSE2 and scalar; within the last bit on NEON and AVX+FMA:** `cmac_*`, `fir`, `dot`, `matvec`. NEON and AVX use a fused multiply-add (one rounding instead of two), so a result can differ from the scalar one by a few units in the last place. The tested bound is `n * f32::EPSILON * sum(|terms|)` for a sum of `n` terms.
+- `dot` and `matvec` sum in the same order on every path (sixteen logical lanes, folded `i + 8`, `i + 4`, then `(s0 + s2) + (s1 + s3)`, then the tail element by element), so vector and scalar differ only by the fusing.
+- NaN and infinity propagate as in the scalar code; the tests put NaN and both infinities into the kernels and compare. The one exception is a product that overflows to infinity in a scalar multiply and cancels in the next subtraction, where a fused path keeps the exact value; it needs magnitudes above 1e19.
+- Lengths are checked with `assert!` and panic on mismatch; that is a programming error, not an input case.
+
+Tests (`simd::tests`, `tests/simd_no_alloc.rs`): random inputs at lengths 0, 1, 3, 7, 8, 9, 15, 16, 17, 33, 255 and 1023, slices starting at odd offsets so they are not 16-byte aligned, FIR with 1 to 255 taps, `matvec` shapes from 1x1 to 7x1023, `BiquadBank4` with 1 to 8 sections in both entry points, and an eight-lane generic run (`simd::tests::emu`) that checks the AVX-width unrolling and tails exactly on any machine.
+
+### Measured
+
+`cargo test -p openplugin-dsp --release --lib simd::tests::bench_report -- --ignored --nocapture` prints the table. Apple Silicon, `--release`, a 1024-sample block, best of five, ns per call; the scalar column is plain Rust that LLVM auto-vectorises where it can. The x86_64 columns are the x86_64 build run under Rosetta 2.
+
+| Kernel | scalar | NEON | speed-up | Rosetta scalar | SSE2 | speed-up |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `gain` 1024 | 55 | 54 | 1.0x | 73 | 79 | 0.9x |
+| `mix_add` 1024 | 69 | 70 | 1.0x | 103 | 105 | 1.0x |
+| `crossfade` 1024 | 443 | 199 | 2.2x | 521 | 264 | 2.0x |
+| `cmac_interleaved` 1024 bins | 430 | 472 | 0.9x | 391 | 428 | 0.9x |
+| `fir` 64 taps x 1024 | 24 400 | 3 650 | 6.7x | 38 800 | 4 530 | 8.6x |
+| `dot` 1024 | 447 | 67 | 6.7x | 589 | 81 | 7.3x |
+| `matvec` 64x64 | 2 010 | 255 | 7.9x | 2 540 | 417 | 6.1x |
+| `BiquadBank4`, 3 sections x 4 channels x 1024 frames | 15 050 | 3 680 | 4.1x | 19 170 | 3 670 | 5.2x |
+
+How to read it:
+
+- **Gain, mix and the complex multiply-accumulate gain nothing.** LLVM already vectorises these elementwise loops, and they are limited by memory, not arithmetic (section 7 of [PERFORMANCE.md](PERFORMANCE.md) found the same for a simple map). The scalar `mac` loop in `partitioned.rs` is already at this speed; switching it to the kernel buys about nothing on its own. The kernels exist so the path is explicit and tested, not because they beat the compiler here.
+- **Reductions and recursions are where hand-written SIMD wins.** The compiler may not reassociate a float sum, so a scalar `dot` is one dependency chain; the kernels keep sixteen independent partial sums. `fir`, `dot` and `matvec` are 6 to 9 times faster, `BiquadBank4` four to five times, `crossfade` twice (the compiler does not vectorise the index-derived ramp).
+- Expected gain when adopted, as an estimate and not a measurement: the `neural.rs` matrix-vector products and any direct FIR about 6 to 8 times on those loops; a `LongConvolver` is dominated by its FFTs and its multiply-accumulate is already vectorised, so little; biquad cascades by running four channels or bands in one bank, about 3 to 4 times. Adopting the kernels inside `partitioned.rs` and `neural.rs` is a separate follow-up and changes nothing there yet.
+- **What was not run.** Rosetta 2 translates x86_64 code to the Apple CPU and reports no AVX or FMA, so the `AvxFma` path compiled (`cargo check --target x86_64-apple-darwin -p openplugin-dsp --tests`) but never executed on real hardware here; only its width-dependent logic was run, through the eight-lane test. Its intrinsics (`_mm256_*` shuffles, unpacks, FMA) are untested on a CPU. The x86 numbers are Rosetta's, not an Intel or AMD chip's; run the benchmark and `cargo test -p openplugin-dsp simd` on real x86_64 hardware to complete the picture.
+
+## Spectral repair
+
+`SpectralRepair` is a spectral gate and a noise reducer driven by a learned noise profile, built on the `Stft` of the Spectral section. Every hop it computes a real gain per bin from the frame power `P = |X_k|^2` and the learned noise power `N_k`, smooths it, and multiplies the bin. Phase is untouched. It uses sqrt-Hann analysis and synthesis at `frame / 4` hop (exact COLA), so latency is the STFT's, `frame` samples, from `latency()`.
+
+```rust
+use openplugin_dsp::{GainRule, RepairConfig, RepairParams, SpectralRepair};
+
+let mut r = SpectralRepair::new(RepairConfig::new(48_000.0, 2, 2048))?;   // prepare
+r.set_params(RepairParams {
+    amount_db: 18.0,
+    rule: GainRule::MmseStsa,
+    decision_directed: true,
+    over_subtraction: 1.0,
+    ..RepairParams::default()
+});
+r.start_learning();            // feed a second or two of noise-only audio...
+r.process_in_place(0, noise);
+r.stop_learning();             // ...the profile is the mean power per bin
+r.process_in_place(0, audio);  // audio path: no allocation
+let bytes = r.save_profile();  // versioned bytes for plugin state
+```
+
+### Gains
+
+Sources: S. F. Boll, "Suppression of acoustic noise in speech using spectral subtraction" (IEEE Trans. ASSP 27(2), 1979); M. Berouti, R. Schwartz and J. Makhoul, "Enhancement of speech corrupted by acoustic noise" (ICASSP 1979) for the over-subtraction factor `alpha` and the spectral floor `beta`; Y. Ephraim and D. Malah, "Speech enhancement using a minimum mean-square error short-time spectral amplitude estimator" (IEEE Trans. ASSP 32(6), 1984) for the MMSE-STSA gain and the decision-directed a-priori SNR; Abramowitz and Stegun 9.8.1 to 9.8.4 for the Bessel functions. Written from the papers. For the musical-noise measures below: Y. Uemura, Y. Takahashi, H. Saruwatari, K. Shikano and K. Kondo, "Automatic optimization scheme of spectral subtraction based on musical noise assessment via higher-order statistics" (IWAENC 2008); O. Cappe, "Elimination of the musical noise phenomenon with the Ephraim and Malah noise suppressor" (IEEE Trans. Speech and Audio Processing 2(2), 1994).
+
+| Mode or rule | Gain |
+| --- | --- |
+| `Gate` | `1` where `P >= N 10^(threshold/10)`, else the floor |
+| `SpectralSubtraction` | `sqrt(max(P - alpha N, beta N) / P)` |
+| `Wiener` | `xi / (1 + xi)` |
+| `MmseStsa` | `(sqrt(pi)/2) (sqrt(v)/gamma) e^(-v/2) [(1+v) I0(v/2) + v I1(v/2)]`, `v = xi gamma / (1 + xi)` |
+
+`gamma = P / (alpha N)`. The a-priori SNR `xi` is `max(gamma - 1, 0)`, or with `decision_directed` the estimate `a A_{t-1}^2 / (alpha N) + (1 - a) max(gamma - 1, 0)` with `a = 0.98` and `A_{t-1}^2` the previous frame's clean-power estimate, floored at -25 dB (Ephraim and Malah's values). The exponential is folded into exponentially scaled Bessel functions, so a large `v` cannot overflow; they are checked against the power series, and the MMSE gain against a hand value, in `spectral_repair.rs`.
+
+The spectral floor `beta` applies to every rule. `amount_db` is separate and is the deepest the gain may go: `floor = 10^(-amount_db/20)`, so noise is lowered rather than muted. Measured with the gate (threshold far above the noise, so every bin is closed) the reduction is the amount exactly, 6.00, 12.00, 24.00 and 40.00 dB for those settings. Spectral subtraction on pure noise reaches less than `amount_db` (2.98, 5.75, 10.25 and 15.25 dB for 3, 6, 12 and 24 dB with `alpha = 3`) because the strongest 5 % of noise bins exceed `3 N` and pass.
+
+### Smoothing and musical noise
+
+Raw gains are smoothed by a box average over `2r + 1` bins (`freq_smooth_bins`), then per bin over frames with a one-pole whose time is `attack_ms` when the gain rises (the gate opens) and `release_ms` when it falls. "Listen to removed" outputs `X (1 - g)`, the exact complement, so remains plus removed equals the input (checked to 1e-5).
+
+Musical noise is a residual of isolated time-frequency peaks that come and go. Two measures on the residual of noise-only input, both over the bin power of a Hann 1024 analysis at 75 % overlap: the kurtosis ratio of Uemura et al. (2008) (kurtosis of the residual's bin power over that of the input noise; 1 for a quieter copy of Gaussian noise), and the coefficient of variation of the bin power, the variance of the residual spectrum over time normalised by its mean (1 for Gaussian noise). Measured (`tests/spectral_repair_proof.rs`, white noise, 40 dB of reduction, no spectral floor):
+
+| Rule | smoothing off | time 20/120 ms | freq 4 bins + time 40/200 ms |
+| --- | --- | --- | --- |
+| Spectral subtraction | 6.64, 2.35 | 4.37, 1.69 | 4.16, 1.41 |
+| Wiener | 12.28, 2.84 | 7.75, 1.98 | 5.54, 1.48 |
+| MMSE-STSA, decision-directed | 13.70, 1.47 | 1.83, 1.13 | 1.22, 1.03 |
+| Gate | 4.63, 2.28 | 3.10, 1.64 | 4.29, 1.43 |
+
+(kurtosis ratio, coefficient of variation; the input is 9.18 and 1.00.) Smoothing over frames lowers both for every rule. Smoothing across bins alone does not lower them in this measure: it makes the reduction deeper (a lone surviving bin is averaged down with its closed neighbours), which leaves a sparser residual, and bins of a Hann analysis are correlated over about three neighbours anyway. Use it together with time smoothing. Decision-directed MMSE-STSA with smoothing leaves an essentially Gaussian residual (Cappe, 1994, found the same of the decision-directed estimate). Decision-directed Wiener without time smoothing is the worst case measured (kurtosis ratio above 400 at 37 dB of reduction): it locks bins on and off.
+
+### Results
+
+White noise of standard deviation 0.1 (learned from 2 s of a different noise sequence), 2048-sample frame at 48 kHz, tone of 0.3 amplitude at 1000.37 Hz (6.5 dB SNR), harmonic signal of 8 partials on 220 Hz (6.8 dB). SNR out is the clean component's power over the power of `output - clean` (noise left plus the signal's own damage). Clean SDR is the clean component alone through the same settings: its power over the power of what the repair changed.
+
+| Setting | tone + white | tone + pink | harmonic + white |
+| --- | --- | --- | --- |
+| SS alpha 1, beta .05, 12 dB | +3.8 dB, SDR 39.6 | +3.6, 31.4 | +3.7, 25.1 |
+| SS alpha 2, beta .02, 30 dB | +7.7, 33.6 | +7.1, 25.3 | +6.8, 20.2 |
+| SS alpha 3, beta 0, 40 dB | +15.8, 29.9 | +13.4, 21.2 | +9.8, 15.6 |
+| Wiener alpha 1.5 | +8.0, 30.7 | +7.2, 22.9 | +6.8, 18.8 |
+| Wiener, decision-directed | +10.0, 26.8 | +7.0, 16.3 | +3.8, 11.1 |
+| MMSE-STSA, decision-directed | +8.8, 35.7 | +8.1, 27.4 | +7.8, 21.3 |
+| Gate, 6 dB over noise, 30 dB | +13.9, 45.5 | +13.0, 45.5 | +10.5, 16.7 |
+
+The pink noise (`PinkNoise`) is learned like the white: the profile follows the -3 dB per octave tilt (14.8 dB between 200 Hz and 6.4 kHz against the ideal 15.0). The harmonic signal suffers most because its partials sit in many bins, where noise and signal overlap in the same frames; the gate, which acts on whole bins, hurts it least per dB removed. Spending more reduction costs signal: the more aggressive a setting, the lower its SDR.
+
+### The profile
+
+`start_learning` clears an accumulator, every frame adds `|X_k|^2`, and `stop_learning` replaces the profile with the mean. Power is averaged, not magnitude: it is what the rules need, and the squared mean magnitude of Gaussian noise is `pi/4` of its mean power. The first `frame / hop` frames after a reset still hold the zeros of start-up and are skipped. While learning the audio passes through unchanged. Convergence against the true power `sigma^2 sum(w^2)` of white noise (`tests/spectral_repair_proof.rs`):
+
+| Learn time | frames | rms error over bins | 1/sqrt(frames) | bias |
+| --- | --- | --- | --- | --- |
+| 0.25 s | 19 | 0.350 | 0.229 | +0.001 |
+| 1 s | 89 | 0.159 | 0.106 | -0.002 |
+| 4 s | 371 | 0.079 | 0.052 | +0.0004 |
+| 16 s | 1496 | 0.039 | 0.026 | -0.0002 |
+
+The error falls as `1 / sqrt(frames)` times about 1.5; frames at 75 % overlap are correlated, so there are fewer independent ones than frames. The mean is unbiased. Learn for at least a second; the profile is a mean, so a noise that varies slowly is averaged over the period.
+
+`save_profile` returns bytes: `"OPNP"`, version 1, frame, hop, channels, then per channel a frame count and one f32 power per bin, then an FNV-1a checksum, little-endian; `load_profile` refuses (and changes nothing) for bad magic, another version, another frame size, hop or channel count, truncation, trailing bytes, a checksum mismatch, and NaN, infinite or negative powers (every truncation and every single-bit flip of a saved profile is refused in the test). The profile is in the units of this STFT, so it is only valid at the same frame and hop. A plugin returns the bytes from `save_state` and loads them in `load_state`, as the test plugin does.
+
+### Identity and real-time notes
+
+Disabled, `amount_db = 0`, while learning, and with no profile, the spectra are not touched, so the output equals a plain `Stft` built from `SpectralRepair::stft_config(frame, hop)` with `Identity`, bit for bit (asserted with `to_bits`), and that is the input delayed by `latency()` to within the STFT's tolerance (1e-5). "Listen to removed" has no effect then.
+
+Nothing allocates in `process`, `process_in_place`, `tick`, `start_learning`, `stop_learning`, `set_params`, `load_profile` or `reset` (`tests/spectral_repair_no_alloc.rs`, with NaN and infinity in the input, host blocks of 37 and every mode and rule); `save_profile` allocates. NaN and infinity in the input are zeroed by the STFT, non-finite parameters are ignored, and every gain is checked finite. The conformance kit passes on a tiny denoiser plugin (`tests/spectral_repair_conformance.rs`: all sample rates 22.05 to 384 kHz, block sizes, hostile input, parameter fuzz including the learn toggle, a state round trip that carries the profile, layouts, allocation and latency by impulse).
+
+Limits: the profile is stationary, so it cannot follow changing noise (relearn, or load another profile); there is no per-band reduction control and no noise tracking; the box frequency smoothing blurs gains across narrow tonal peaks, which costs a little of the signal; the transform is a complex FFT of the real frame, twice the work of a real transform.

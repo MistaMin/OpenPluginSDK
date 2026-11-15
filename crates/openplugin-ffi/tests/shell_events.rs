@@ -246,7 +246,7 @@ fn drain(instance: *mut ShellInstance, capacity: usize) -> Vec<OpMidiEvent> {
 #[test]
 fn abi_version_and_kinds() {
     let _g = lock();
-    assert_eq!(ABI, 3);
+    assert_eq!(ABI, 4);
     assert_eq!(kind::<Probe>(), KIND_EFFECT);
     assert_eq!(kind::<Inst>(), KIND_INSTRUMENT);
     assert_eq!(kind::<NoteFx>(), KIND_NOTE_EFFECT);

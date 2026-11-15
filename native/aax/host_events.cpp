@@ -368,6 +368,20 @@ static void stems() {
     stem("5.0", AAX_eStemFormat_5_0, {0, 1, 2, 4, 5}, {0, 2, 1, 3, 4});
     stem("6.1", AAX_eStemFormat_6_1, {0, 1, 2, 3, 4, 5, 8}, {0, 2, 1, 4, 6, 5, 3});
     stem("5.1.4", AAX_eStemFormat_5_1_4, {0, 1, 2, 3, 4, 5, 12, 14, 15, 17}, {0, 2, 1, 4, 5, 3, 6, 7, 8, 9});
+    // The Atmos beds, with the SDK-only roles TSL 18, TSR 19, FLW 20, FRW 21 (layout.rs).
+    // 5.1.2: Pro Tools L C R Ls Rs LFE Ltm Rtm; canonical FL FR FC LFE BL BR TSL TSR.
+    stem("5.1.2", AAX_eStemFormat_5_1_2, {0, 1, 2, 3, 4, 5, 18, 19}, {0, 2, 1, 4, 5, 3, 6, 7});
+    // 7.0.2: Pro Tools L C R Lss Rss Lsr Rsr Lts Rts; canonical FL FR FC SL SR BL BR TSL TSR.
+    stem("7.0.2", AAX_eStemFormat_7_0_2, {0, 1, 2, 9, 10, 4, 5, 18, 19}, {0, 2, 1, 3, 4, 5, 6, 7, 8});
+    // 7.1.2: Pro Tools L C R Lss Rss Lsr Rsr LFE Lts Rts; canonical FL FR FC LFE SL SR BL BR TSL TSR.
+    stem("7.1.2", AAX_eStemFormat_7_1_2, {0, 1, 2, 3, 9, 10, 4, 5, 18, 19}, {0, 2, 1, 4, 5, 6, 7, 3, 8, 9});
+    // 9.1.6: Pro Tools L C R Lw Rw Lss Rss Lsr Rsr LFE Ltf Rtf Ltm Rtm Ltr Rtr;
+    // canonical FL FR FC LFE SL SR BL BR FLW FRW TFL TFR TSL TSR TBL TBR.
+    stem("9.1.6", AAX_eStemFormat_9_1_6, {0, 1, 2, 3, 9, 10, 4, 5, 20, 21, 12, 14, 18, 19, 15, 17}, {0, 2, 1, 8, 9, 4, 5, 6, 7, 3, 10, 11, 12, 13, 14, 15});
+    // A bus with a role no AAX stem can place is not offered: a wide pair on 5.1, or a role past the table.
+    require(stemForBus(bus(OP_BUS_SURROUND, {0, 1, 2, 3, 20, 21})) == nullptr, "5.1 with wides has no stem");
+    require(stemForBus(bus(OP_BUS_SURROUND, {0, 1, 2, 3, 4, 5, 6, 7})) == nullptr, "an unmapped role set has no stem");
+    require(stemForBus(bus(OP_BUS_SURROUND, {0, 1, 2, 3, 4, 200})) == nullptr, "a role id far above the table has no stem");
     // Stereo and mono are not reordered, and the 7.1 layout is not the SDK's 5.1 stem.
     configure(OP_KIND_EFFECT, 0, {layout(bus(OP_BUS_SURROUND, {0, 1, 2, 3, 4, 5}), bus(OP_BUS_SURROUND, {0, 1, 2, 3, 4, 5}))});
     ProcessState wrong;

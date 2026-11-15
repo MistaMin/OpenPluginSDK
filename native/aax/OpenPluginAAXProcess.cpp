@@ -25,14 +25,20 @@
 namespace openplugin_aax {
 namespace {
 // CLAP surround ids, the SDK's canonical roles (openplugin_core::layout).
-constexpr uint8_t FL = 0, FR = 1, FC = 2, LFE = 3, BL = 4, BR = 5, BC = 8, SL = 9, SR = 10, TFL = 12, TFR = 14, TBL = 15, TBR = 17;
+constexpr uint8_t FL = 0, FR = 1, FC = 2, LFE = 3, BL = 4, BR = 5, BC = 8, SL = 9, SR = 10, TFL = 12, TFR = 14, TBL = 15, TBR = 17,
+                  TSL = 18, TSR = 19, FLW = 20, FRW = 21;  // SDK-only roles (layout.rs): top side (Ltm/Lts) and front wides (Lw/Rw)
 constexpr uint8_t NO = OP_ROLE_NONE;
 // The order of each row is the AAX order from the comments on AAX_EStemFormat in
 // AAX_Enums.h of AAX SDK 2.8.1: Pro Tools' film order, L C R Ls Rs LFE for 5.1,
 // L C R Lss Rss Lsr Rsr LFE for 7.1 and L C R Lss Rss Lsr Rsr LFE Ltf Rtf Ltr Rtr
 // for 7.1.4. Ls and Rs are the SDK's back pair (BL, BR) on 5.x; Lss and Rss are
 // the side pair (SL, SR) and Lsr and Rsr the back pair on 7.x. The LFE sits last
-// on 5.1 and eighth on 7.1, not fourth as in the SDK order.
+// on 5.1 and eighth on 7.1, not fourth as in the SDK order. The Atmos stems keep
+// the same rule: the top pairs follow the LFE (Ltf Rtf, then Ltm Rtm or Lts Rts,
+// then Ltr Rtr) and the 9.x stems put the wides (Lw Rw) after R. The top-middle
+// and top-side pairs (Ltm Rtm, Lts Rts) are the SDK's top side roles TSL and TSR,
+// Lw and Rw are FLW and FRW. A stem with a channel that has no role (SDDS Lc and
+// Rc) is not in the table, so a bus that needs it is not offered.
 const Stem kStems[] = {
     {AAX_eStemFormat_Mono, OP_BUS_MONO, 1, {NO}, "mono"},
     {AAX_eStemFormat_Stereo, OP_BUS_STEREO, 2, {FL, FR}, "stereo"},
@@ -44,6 +50,18 @@ const Stem kStems[] = {
     {AAX_eStemFormat_7_1_DTS, OP_BUS_SURROUND, 8, {FL, FC, FR, SL, SR, BL, BR, LFE}, "7.1"},
     {AAX_eStemFormat_5_1_4, OP_BUS_SURROUND, 10, {FL, FC, FR, BL, BR, LFE, TFL, TFR, TBL, TBR}, "5.1.4"},
     {AAX_eStemFormat_7_1_4, OP_BUS_SURROUND, 12, {FL, FC, FR, SL, SR, BL, BR, LFE, TFL, TFR, TBL, TBR}, "7.1.4"},
+    {AAX_eStemFormat_5_0_2, OP_BUS_SURROUND, 7, {FL, FC, FR, BL, BR, TSL, TSR}, "5.0.2"},
+    {AAX_eStemFormat_5_1_2, OP_BUS_SURROUND, 8, {FL, FC, FR, BL, BR, LFE, TSL, TSR}, "5.1.2"},
+    {AAX_eStemFormat_5_0_4, OP_BUS_SURROUND, 9, {FL, FC, FR, BL, BR, TFL, TFR, TBL, TBR}, "5.0.4"},
+    {AAX_eStemFormat_7_0_2, OP_BUS_SURROUND, 9, {FL, FC, FR, SL, SR, BL, BR, TSL, TSR}, "7.0.2"},
+    {AAX_eStemFormat_7_1_2, OP_BUS_SURROUND, 10, {FL, FC, FR, SL, SR, BL, BR, LFE, TSL, TSR}, "7.1.2"},
+    {AAX_eStemFormat_7_0_4, OP_BUS_SURROUND, 11, {FL, FC, FR, SL, SR, BL, BR, TFL, TFR, TBL, TBR}, "7.0.4"},
+    {AAX_eStemFormat_7_0_6, OP_BUS_SURROUND, 13, {FL, FC, FR, SL, SR, BL, BR, TFL, TFR, TSL, TSR, TBL, TBR}, "7.0.6"},
+    {AAX_eStemFormat_7_1_6, OP_BUS_SURROUND, 14, {FL, FC, FR, SL, SR, BL, BR, LFE, TFL, TFR, TSL, TSR, TBL, TBR}, "7.1.6"},
+    {AAX_eStemFormat_9_0_4, OP_BUS_SURROUND, 13, {FL, FC, FR, FLW, FRW, SL, SR, BL, BR, TFL, TFR, TBL, TBR}, "9.0.4"},
+    {AAX_eStemFormat_9_1_4, OP_BUS_SURROUND, 14, {FL, FC, FR, FLW, FRW, SL, SR, BL, BR, LFE, TFL, TFR, TBL, TBR}, "9.1.4"},
+    {AAX_eStemFormat_9_0_6, OP_BUS_SURROUND, 15, {FL, FC, FR, FLW, FRW, SL, SR, BL, BR, TFL, TFR, TSL, TSR, TBL, TBR}, "9.0.6"},
+    {AAX_eStemFormat_9_1_6, OP_BUS_SURROUND, 16, {FL, FC, FR, FLW, FRW, SL, SR, BL, BR, LFE, TFL, TFR, TSL, TSR, TBL, TBR}, "9.1.6"},
     {AAX_eStemFormat_Ambi_1_ACN, OP_BUS_AMBISONIC, 4, {NO}, "HOA1"},
     {AAX_eStemFormat_Ambi_2_ACN, OP_BUS_AMBISONIC, 9, {NO}, "HOA2"},
     {AAX_eStemFormat_Ambi_3_ACN, OP_BUS_AMBISONIC, 16, {NO}, "HOA3"},

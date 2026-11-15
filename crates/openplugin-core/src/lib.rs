@@ -33,7 +33,8 @@ pub use layout::{
     BUS_METER_CHANNELS, MAX_AUDIO_CHANNELS,
 };
 pub use editor::{
-    Editor, EditorFactory, EditorHost, EditorState, Frame, Gesture, GestureQueue, ValueMirror,
+    Editor, EditorFactory, EditorHost, EditorState, Frame, Gesture, GestureQueue, ParamMenu,
+    ParamMenuAction, ValueMirror,
 };
 pub use plane::{ParamCursor, ParamPlane};
 pub use preset::{Preset, PresetBank};
@@ -382,6 +383,49 @@ pub struct Transport {
     pub bar_number: i64,
 }
 
+/// What the host says about the track the plugin sits on. Delivered through
+/// [`Plugin::track_info_changed`] and [`Editor::track_info`] on the main
+/// thread, never on the audio thread. A field the host does not know is
+/// `None` / 0.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrackInfo {
+    /// The track's name, if the host gave one and it is not empty.
+    pub name: Option<String>,
+    /// The track's colour as `0xRRGGBBAA`, if the host gave one.
+    pub colour: Option<u32>,
+    /// A combination of the `TrackInfo::IS_*` bits.
+    pub kind: u32,
+}
+
+impl TrackInfo {
+    /// The plugin is on a return (send) track: start with wet 100%.
+    pub const IS_RETURN: u32 = 1;
+    /// The plugin is on a bus (group) track.
+    pub const IS_BUS: u32 = 2;
+    /// The plugin is on the master track.
+    pub const IS_MASTER: u32 = 4;
+
+    /// The track is a return track.
+    pub fn is_return(&self) -> bool {
+        self.kind & Self::IS_RETURN != 0
+    }
+
+    /// The track is a bus.
+    pub fn is_bus(&self) -> bool {
+        self.kind & Self::IS_BUS != 0
+    }
+
+    /// The track is the master.
+    pub fn is_master(&self) -> bool {
+        self.kind & Self::IS_MASTER != 0
+    }
+
+    /// The colour as `0x00RRGGBB`, the editor's pixel format (alpha dropped).
+    pub fn rgb(&self) -> Option<u32> {
+        self.colour.map(|c| c >> 8)
+    }
+}
+
 /// Lowest sample rate a format bridge accepts, in hertz.
 ///
 /// Every DSP block in `openplugin-dsp` computes its coefficients for the real
@@ -568,6 +612,14 @@ pub trait Plugin: Send + 'static {
     fn preset_values(&self, _index: usize) -> Option<&'static [f32]> {
         None
     }
+
+    /// The host told the plugin about its track: name, colour and kind
+    /// ([`TrackInfo`]). Called on the message thread, never inside `process`
+    /// (the bridges take the plugin between blocks, as for a state call), once
+    /// when the host first knows and again whenever it changes. The default
+    /// ignores it. A plugin typically keeps the value for its editor or
+    /// starts a return track with wet 100%.
+    fn track_info_changed(&mut self, _info: &TrackInfo) {}
 
     /// What this engine shares with its editor ([`editor`]). Called once on
     /// the message thread right after the plugin is made, before any audio.

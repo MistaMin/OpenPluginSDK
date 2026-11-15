@@ -422,6 +422,10 @@ What the table says:
   inlines into your loop). Do not put it on big functions. This guide has no before/after for
   `#[inline]` itself, so it makes no speed claim for it.
 
+### Hand-written SIMD kernels
+
+When the compiler cannot help, `openplugin_dsp::simd` has the loops written by hand with NEON, SSE2 and AVX+FMA paths chosen at run time, each with a scalar reference it is tested against: gain and mix, crossfade, complex multiply-accumulate, FIR, dot product, matrix-vector, and a biquad cascade over four channels at once. What was measured: the loops the compiler already vectorises (gain, mix, complex multiply-accumulate) do not get faster; the ones it cannot (float reductions, a FIR, a biquad recursion) get 4 to 8 times faster on Apple Silicon. Numbers, layouts and the equality guarantees are in [the DSP cookbook](DSP_COOKBOOK.md#vectorised-kernels).
+
 ## 8. Fast approximations of `tanh`, `exp` and `sin`
 
 The standard-library `tanh`, `exp` and `sin` on `f32` are calls into the system math library. They

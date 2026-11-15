@@ -394,6 +394,18 @@ impl FfiInstance {
         true
     }
 
+    /// Tell the plugin about the host's track ([`Plugin::track_info_changed`]).
+    /// Message thread. The plugin object is taken between blocks, as for a
+    /// state call: a block that starts meanwhile is passed through dry, and
+    /// the call waits at most [`STATE_WAIT`] for one already running. Returns
+    /// false when it gave up (nothing was delivered) or the plugin panicked.
+    pub fn set_track_info(&self, info: &openplugin_core::TrackInfo) -> bool {
+        catch_unwind(AssertUnwindSafe(|| {
+            self.with_exclusive(|audio| audio.inner.track_info_changed(info)).is_some()
+        }))
+        .unwrap_or(false)
+    }
+
     pub fn set_offline_flag(&self, offline: bool) {
         self.offline
             .store(if offline { 2 } else { 1 }, Ordering::Release);

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <vector>
 class AAX_CEffectParameters;
 class AAX_IEffectGUI;
@@ -167,6 +168,15 @@ bool proofSetBypass(AAX_CEffectParameters* parameters, bool on);
 bool proofPacket(AAX_CEffectParameters* parameters, PacketBuffer* out);
 // What GenerateCoefficients would post: false when no value or bypass changed since the last take.
 bool proofTakePacket(AAX_CEffectParameters* parameters, PacketBuffer* out);
+// Parameter text. shellText is the plugin's own text for a plain value
+// (op_shell_param_format). fitText shortens it for a host that asks for at most
+// maxChars bytes (see OpenPluginAAXParameters.cpp); false for a negative limit.
+std::string shellText(uint32_t index, double plain);
+bool fitText(const std::string& text, int32_t maxChars, std::string* out);
+// Text through the host entry points of the data model: the text of a normalized value
+// (maxChars as the host passes it) and a typed text read back as a normalized value.
+bool proofText(AAX_CEffectParameters* parameters, uint32_t index, double normalized, int32_t maxChars, std::string* out);
+bool proofValue(AAX_CEffectParameters* parameters, uint32_t index, const char* text, double* normalized);
 // The host's parameter update entry (normalized value), without a controller.
 // kProofBypass as the index addresses the master bypass.
 inline constexpr uint32_t kProofBypass = 0xFFFFFFFFu;

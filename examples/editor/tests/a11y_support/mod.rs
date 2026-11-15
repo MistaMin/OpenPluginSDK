@@ -357,3 +357,35 @@ pub unsafe fn count_of(array: Id) -> usize { unsafe { if array.is_null() { 0 } e
 pub unsafe fn id_of(obj: Id, name: &CStr) -> Id { unsafe { send!(Id, obj, name) }}
 pub unsafe fn bool_of(obj: Id, name: &CStr) -> bool { unsafe { send!(i8, obj, name) != 0 }}
 pub unsafe fn array_item(array: Id, i: usize) -> Id { unsafe { send!(Id, array, c"objectAtIndex:", usize = i) }}
+
+// ---- Menu and event helpers (the menu test) --------------------------------
+
+/// A mouse event of `kind` (NSEventType: 3 is a right mouse down) at a window point.
+pub unsafe fn mouse_event(kind: usize, at: CGPoint, flags: usize, window: Id) -> Id { unsafe {
+    let number = if window.is_null() { 0 } else { send!(isize, window, c"windowNumber") };
+    let event = send!(
+        Id,
+        class(c"NSEvent"),
+        c"mouseEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:clickCount:pressure:",
+        usize = kind,
+        CGPoint = at,
+        usize = flags,
+        f64 = 0.0,
+        isize = number,
+        Id = std::ptr::null_mut(),
+        isize = 0,
+        isize = 1,
+        f32 = 1.0
+    );
+    assert!(!event.is_null());
+    event
+}}
+
+/// `[obj message:arg]` with an object argument and no result.
+pub unsafe fn tell(obj: Id, message: &CStr, arg: Id) { unsafe { send!((), obj, message, Id = arg) }}
+/// `[obj message]` with no result.
+pub unsafe fn tell0(obj: Id, message: &CStr) { unsafe { send!((), obj, message) }}
+/// `[obj message:n]` with an integer argument and no result.
+pub unsafe fn tell_int(obj: Id, message: &CStr, n: isize) { unsafe { send!((), obj, message, isize = n) }}
+/// `[[Class alloc] init]`.
+pub unsafe fn new_object(class_name: &CStr) -> Id { unsafe { send!(Id, send!(Id, class(class_name), c"alloc"), c"init") }}

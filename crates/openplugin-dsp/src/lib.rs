@@ -17,8 +17,10 @@
 //! - [`Loudness`]: BS.1770-4 / EBU R 128 momentary, short-term and gated integrated LUFS ([`KWeighting`]).
 //! - [`LoudnessMatch`]: automatic gain that holds the output at the input's K-weighted loudness.
 //! - [`Downmix`], [`Upmix`]: surround to stereo or mono by channel role (BS.775 / A/52), and the passive stereo upmix.
+//! - [`SurroundAdapter`], [`LinkedDetector`], [`LfeMode`]: a stereo plugin on surround buses, one engine per channel pair, every parameter linked, an optional shared detector, and a fold to stereo.
 //! - [`Dither`]: RPDF/TPDF dither to 8..=24 bits with noise shaping and auto-blank.
 //! - [`neural::Model`]: small Dense/GRU/LSTM/Conv1d inference for amp and pedal models, loaded from JSON.
+//! - [`SpectralRepair`]: spectral gate and noise reduction from a learned noise profile (spectral subtraction, Wiener, MMSE-STSA).
 //! - [`Stft`], [`SpectrumAnalyzer`], [`WindowKind`]: STFT frames with overlap-add, windows with ENBW, and a lock-free spectrum feed to editors.
 //! - [`ModDelay`], [`Interpolation`]: fractional, per-sample modulated delay (Hermite, Lagrange, Thiran allpass).
 //! - [`Lfo`]: sine, triangle, saw, square, sample-and-hold and smoothed random, free-running or locked to the host [`openplugin_core::Transport`].
@@ -95,11 +97,14 @@ pub mod plate;
 mod reverb_common;
 pub mod resample;
 pub mod saturation;
+pub mod surround_adapter;
+pub mod simd;
 pub mod svf;
 pub mod tape;
 pub mod utility;
 pub mod voice;
 pub mod true_peak_meter;
+pub mod spectral_repair;
 pub mod spectrum;
 pub mod stft;
 pub mod vocoder;
@@ -129,6 +134,7 @@ pub use downmix::{
     roles_of, Downmix, DownmixTarget, MixSettings, Normalize, SurroundFill, Upmix, UpmixSettings,
 };
 pub use dynamics::Compressor;
+pub use surround_adapter::{LfeMode, LinkedDetector, StereoOnSurround, SurroundAdapter};
 pub use envelope::{Ballistics, Detection, Domain, EnvelopeFollower, Topology};
 pub use gain_computer::{Dynamics, DynamicsMode, DynamicsParams, GainComputer, Link, Smoothing};
 pub use limiter::Limiter;
@@ -208,6 +214,10 @@ pub use window::{hann, WindowRms};
 pub use spectrum::{
     bin_frequency, log_frequency_bins, spectrum_feed, SpectrumAnalyzer, SpectrumConfig,
     SpectrumReader, SpectrumWriter,
+};
+pub use spectral_repair::{
+    GainRule, ProfileError, RepairConfig, RepairMode, RepairParams, SpectralRepair, MAX_AMOUNT_DB,
+    MAX_SMOOTH_BINS,
 };
 pub use stft::{
     check_ola, check_ola_windows, Complex, Identity, OlaReport, SpectralProcessor, Stft,

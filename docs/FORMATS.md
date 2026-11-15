@@ -17,6 +17,18 @@ OpenPluginSDK's target crates line up with the five formats:
 | **AAX** | macOS | In-process process callback and ACF exports. A Pro Tools load is not claimed | `native/aax` linked to an external AAX SDK. Native mono and stereo. Editor view with `-DOP_EDITOR=ON`; the editor reports its size and asks the host for a new one through `AAX_IViewContainer::SetViewSize`. Not exercised without Pro Tools |
 | **Standalone**| Windows, macOS, Linux | Live performance, test harnesses | CPAL audio driver + window runner |
 
+## Host menu and track
+
+Two host integrations that work from the editor and the host's own services, per format (details in [EDITOR.md](EDITOR.md#the-hosts-parameter-menu-and-the-track)):
+
+| Format | Parameter context menu (right-click on a control) | Track name and colour |
+|---|---|---|
+| CLAP | `clap.context-menu` host `popup` for the parameter; the plugin side offers no items | `clap.track-info`, read at init and on `changed`; name, colour, return, bus and master flags |
+| VST3 | `IComponentHandler3::createContextMenu` then `IContextMenu::popup`, through `op_editor_set_context_menu` | `IInfoListener::setChannelContextInfos`: name and colour (no kind), through `op_shell_set_track_info` (ABI 4) |
+| LV2, AU, AAX | The SDK's own menu: Reset to default, Copy value, Paste value, Type value | Not delivered |
+
+Where the host shows no menu (or declines), the SDK shows its own in every format. The CLAP entry also no longer offers layouts CLAP cannot name: `audio-ports-config` skips any layout whose buses use a role without a `CLAP_SURROUND_*` id (5.1.2, 7.1.2 and 9.1.6, `SpeakerLayout::clap_expressible`), and the `surround` channel map is `SpeakerLayout::clap_map`. Config ids stay the layout's index, so the ids a host sees can skip numbers.
+
 ## Validators in CI
 
 Real host sessions (REAPER and OpenGrid9, scripted) and their results are in [HOST_TESTS.md](HOST_TESTS.md).
