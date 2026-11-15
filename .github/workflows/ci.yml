@@ -94,6 +94,38 @@ jobs:
         working-directory: OpenPluginSDK
         run: cargo test -p openplugin-dsp --release --lib simd -- --include-ignored --nocapture
 
+  # The whole workspace on Windows (MSVC), roadmap W1: everything builds, and
+  # the tests that need no window pass, with clippy. The editor and Audio Unit
+  # tests are macOS-only and compile out here.
+  windows:
+    name: Workspace tests on Windows (stable)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Build the workspace
+        working-directory: OpenPluginSDK
+        run: cargo build --workspace
+      - name: Run the workspace tests
+        working-directory: OpenPluginSDK
+        run: cargo test --workspace --no-fail-fast
+      - name: Clippy, warnings as errors
+        working-directory: OpenPluginSDK
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   msrv:
     name: MSRV check (Rust 1.85.0)
     runs-on: macos-latest

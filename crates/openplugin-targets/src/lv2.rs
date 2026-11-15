@@ -685,6 +685,7 @@ pub fn set_editor(factory: EditorFactory) {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))] // the editor is not on Windows yet
 fn editor_factory() -> Option<EditorFactory> {
     EDITOR.lock().ok().and_then(|slot| *slot)
 }
@@ -739,6 +740,7 @@ struct Instance {
     has_position: bool,
     scratch: [Vec<f32>; 2],
     prepared: usize,
+    #[cfg_attr(windows, allow(dead_code))]
     editor_state: Option<EditorState>,
     bridge: Arc<Bridge>,
     /// The host's `worker:schedule`, if it offered one that works.
@@ -765,6 +767,7 @@ fn uri() -> &'static CStr {
 }
 
 /// Parameters of the installed plugin, read once.
+#[cfg_attr(windows, allow(dead_code))]
 fn param_count() -> usize {
     static COUNT: OnceLock<usize> = OnceLock::new();
     *COUNT.get_or_init(|| creator().map(|create| create().info().params.len()).unwrap_or(0))
@@ -1231,6 +1234,7 @@ pub fn descriptor(index: u32) -> *const Lv2Descriptor {
 /// # Safety
 /// `handle` is null or the handle a host passes as `instance-access`, which
 /// is a plugin instance in the same process.
+#[cfg_attr(windows, allow(dead_code))]
 unsafe fn instance_state(handle: *const c_void) -> Option<EditorState> {
     let instance = unsafe { (handle as *const Instance).as_ref()? };
     if instance.magic != MAGIC {

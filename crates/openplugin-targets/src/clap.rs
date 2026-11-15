@@ -68,6 +68,7 @@ pub fn set_editor(factory: EditorFactory) {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))] // the editor is not on Windows yet
 fn editor_factory() -> Option<EditorFactory> {
     EDITOR.lock().ok().and_then(|slot| *slot)
 }
@@ -539,6 +540,7 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
         }
         let data = unsafe { (*plugin).plugin_data };
         if !data.is_null() {
+            #[cfg_attr(windows, allow(unused_mut))]
             let mut instance = unsafe { Box::from_raw(data as *mut Instance) };
             // The view goes before the engine whose state it shows.
             #[cfg(target_os = "macos")]
