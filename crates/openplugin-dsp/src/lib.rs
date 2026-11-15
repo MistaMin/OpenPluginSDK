@@ -7,6 +7,7 @@
 //! - [`MeterBank`]: stereo peak, RMS, PPM, and VU, plus envelope gain reduction.
 //! - [`LinearPhaseOversampler`]: 1x/2x/4x linear-phase resampling, 64 host samples at 2x and 4x.
 //! - [`BlockConvolver`]: overlap-save playback of a real impulse of at most 1024 taps.
+//! - [`LongConvolver`]: partitioned convolution of impulses of seconds, zero latency, mono, stereo and true stereo ([`ConvolverConfig`], [`ConvolutionIr`]).
 //! - [`GainComp`]: slow stereo RMS loudness match. The default cap is ±12 dB. `with_limit` opens it to ±60 dB.
 //! - [`SoftBypass`]: dry path delayed by the reported latency, with a short crossfade.
 //! - [`Delta`]: what the processing adds or removes (processed minus the aligned dry), with a glide.
@@ -32,6 +33,7 @@ pub mod meter;
 pub mod musical;
 pub mod oscillator;
 pub mod oversampling;
+pub mod partitioned;
 pub mod pcm;
 pub mod pitch;
 pub mod rate;
@@ -59,6 +61,7 @@ pub use musical::{
 pub use oscillator::{Oscillator, Wave};
 pub use oversampling::{OversampleFactor, Oversampler2x};
 pub use dither::{Dither, DitherKind, NoiseShaping};
+pub use partitioned::{ConvolutionIr, ConvolveError, ConvolverConfig, Layout, LongConvolver};
 pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to_f32, lerp};
 pub use pitch::{hz_from_midi, midi_from_hz};
 pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
