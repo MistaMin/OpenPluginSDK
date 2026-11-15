@@ -70,7 +70,8 @@
 use openplugin_core::layout::{
     SURROUND_BC, SURROUND_BL, SURROUND_BR, SURROUND_FC, SURROUND_FL, SURROUND_FLC, SURROUND_FR,
     SURROUND_FRC, SURROUND_LFE, SURROUND_SL, SURROUND_SR, SURROUND_TBC, SURROUND_TBL, SURROUND_TBR,
-    SURROUND_TC, SURROUND_TFC, SURROUND_TFL, SURROUND_TFR, SpeakerLayout,
+    SURROUND_TC, SURROUND_TFC, SURROUND_TFL, SURROUND_TFR, SURROUND_TSL, SURROUND_TSR, SURROUND_FLW,
+    SURROUND_FRW, SpeakerLayout,
 };
 
 /// Role of the single channel of a `Mono` layout. Not a CLAP surround id.
@@ -187,8 +188,12 @@ fn stereo_gains(role: u8, s: &MixSettings) -> (f32, f32) {
         SURROUND_BL | SURROUND_SL => (sur, 0.0),
         SURROUND_BR | SURROUND_SR => (0.0, sur),
         SURROUND_BC => (sur * G, sur * G),
-        SURROUND_TFL | SURROUND_TBL => (h, 0.0),
-        SURROUND_TFR | SURROUND_TBR => (0.0, h),
+        SURROUND_TFL | SURROUND_TBL | SURROUND_TSL => (h, 0.0),
+        SURROUND_TFR | SURROUND_TBR | SURROUND_TSR => (0.0, h),
+        // Front wides sit between the fronts and the sides: half power to their own side.
+        // Not standardised; the SDK's choice.
+        SURROUND_FLW => (G, 0.0),
+        SURROUND_FRW => (0.0, G),
         SURROUND_TC | SURROUND_TFC | SURROUND_TBC => (h * G, h * G),
         _ => (0.0, 0.0),
     }
@@ -198,6 +203,7 @@ fn is_left(role: u8) -> bool {
     matches!(
         role,
         SURROUND_FL | SURROUND_FLC | SURROUND_BL | SURROUND_SL | SURROUND_TFL | SURROUND_TBL
+            | SURROUND_TSL | SURROUND_FLW
     )
 }
 
@@ -720,5 +726,25 @@ mod tests {
         d.process(&[&a, &b, &a, &a, &a, &a], &mut [&mut l, &mut r]);
         assert_eq!(l[3], 9.0); // only the shortest length was written
         d.process(&[], &mut []);
+    }
+
+    #[test]
+    fn atmos_beds_fold_every_channel() {
+        for layout in [
+            SpeakerLayout::Surround512,
+            SpeakerLayout::Surround514,
+            SpeakerLayout::Surround712,
+            SpeakerLayout::Surround916,
+        ] {
+            let d = dm(layout, DownmixTarget::Stereo, MixSettings::default());
+            for (i, role) in layout.roles().iter().enumerate() {
+                if *role == SURROUND_LFE {
+                    continue;
+                }
+                let l = d.coefficient(0, i);
+                let r = d.coefficient(1, i);
+                assert!(l > 0.0 || r > 0.0, "{layout:?} channel {i} (role {role}) is dropped");
+            }
+        }
     }
 }
