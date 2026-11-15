@@ -6,6 +6,9 @@
 //! (drag it up or down, Shift for fine; double-click resets), a bat toggle for Warm (click it),
 //! and an LED ladder. It resizes from 180x120 to 480x320, keeping 3:2, and a
 //! double-click on the bare plate asks the host for a larger or the opening size.
+//! Hit areas, drags and keys live in a [`ControlSet`]: click a control, or press Tab, to focus it
+//! (a ring is drawn), then arrows, Page keys, Home, End, Space and Delete act on it; keys it does
+//! not use go back to the host.
 //! Hit areas and drags live in a [`ControlSet`]. Its changes go through [`EditorHost`] as gestures, and the host's
 //! values come back through [`Editor::param_changed`]. The same editor runs in
 //! CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), and the VST3, Audio Unit and AAX
@@ -15,7 +18,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use openplugin::core::editor::{Modifiers, SizeRange};
+use openplugin::core::editor::{Key, Modifiers, SizeRange};
 use openplugin::core::{Editor, EditorHost, EditorState, Frame, PresetBank};
 use openplugin::dri::goodlookindri::color::Color as GlColor;
 use openplugin::dri::goodlookindri::scene::{Rect, Scene};
@@ -205,6 +208,8 @@ pub struct GainEditor {
     host: EditorHost,
     controls: ControlSet,
     modifiers: Modifiers,
+    /// The view has keyboard focus (the focus ring is drawn only then).
+    keys_active: bool,
     shared: Option<Arc<Shared>>,
     level: f32,
     size: (u32, u32),
@@ -218,6 +223,7 @@ impl GainEditor {
             host,
             controls,
             modifiers: Modifiers::NONE,
+            keys_active: true,
             shared: None,
             level: 0.0,
             size: (WIDTH, HEIGHT),
@@ -258,8 +264,10 @@ impl Editor for GainEditor {
         self.canvas.resize(size.0 as f32, size.1 as f32);
         // New hit areas at the new size; the values carry over without a gesture.
         let values = self.values();
+        let focus = self.controls.focused();
         self.controls = controls_for(self.host.clone(), &layout(size.0, size.1));
         self.controls.set_modifiers(self.modifiers);
+        self.controls.set_focus(focus);
         for (index, value) in values.iter().enumerate() {
             self.controls.param_changed(index, *value);
         }
@@ -283,6 +291,7 @@ impl Editor for GainEditor {
     fn render(&mut self, scale: f32) -> Frame<'_> {
         let level_db = 20.0 * self.level.max(1e-6).log10();
         let controls = &self.controls;
+        let keys_active = self.keys_active;
         let lay = layout(self.size.0, self.size.1);
         let (width, height) = (self.size.0 as f32, self.size.1 as f32);
         // The plate is static: painted once per size and scale, then reused under the moving parts.
@@ -317,6 +326,15 @@ impl Editor for GainEditor {
                 }
             }
             meters::draw_led_ladder(&mut parts, rect(lay.meter), false, level_db, level_db, 16);
+            if let Some(c) = controls.focused().and_then(|id| controls.get(id)).filter(|_| keys_active) {
+                let (x, y, w, h) = c.area.bounds();
+                let ring = rect((x, y, w, h)).expanded(4.0 * lay.scale);
+                let color = GlColor(0xff5cc8ff);
+                match c.kind {
+                    ControlKind::Knob => parts.stroke_ellipse(ring, color, 2.0 * lay.scale),
+                    _ => parts.stroke_round(ring, 6.0 * lay.scale, color, 2.0 * lay.scale),
+                }
+            }
             dl.append(parts);
         })
     }
@@ -324,6 +342,25 @@ impl Editor for GainEditor {
     fn modifiers_changed(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
         self.controls.set_modifiers(modifiers);
+    }
+
+    fn wants_keys(&self) -> bool {
+        self.controls.wants_keys()
+    }
+
+    fn key_down(&mut self, key: Key, modifiers: Modifiers) -> bool {
+        self.controls.key_down(key, modifiers)
+    }
+
+    fn key_up(&mut self, key: Key, modifiers: Modifiers) -> bool {
+        self.controls.key_up(key, modifiers)
+    }
+
+    fn focus_changed(&mut self, focused: bool) {
+        self.keys_active = focused;
+        if !focused {
+            self.controls.release_keys();
+        }
     }
 
     fn mouse_down(&mut self, x: f32, y: f32, clicks: u32) {

@@ -137,7 +137,38 @@ Behaviour, in gestures:
 
 Why 200 points: it is about the height of a small plugin window and one hand movement on a trackpad, and it keeps one point under 0.5% of the range. A 150 point range (the old example) still works through `.drag_range(150.0)`.
 
-The modifier keys reach the editor through `Editor::modifiers_changed`, an optional method with an empty default. The macOS view does not call it yet, so on macOS today the fine adjustment is available only to a host that reports modifiers some other way. Call `ControlSet::set_modifiers` yourself in a standalone window.
+The modifier keys reach the editor through `Editor::modifiers_changed`, which the macOS view calls from the flags of every mouse, wheel and key event and from `flagsChanged:`. Forward it with `ControlSet::set_modifiers`. A view that does not report modifiers leaves them unset (none held).
+
+## Keyboard and focus in the registry
+
+The set keeps at most one focused control, readable for drawing with `ControlSet::focused()` (the id) and `Control::focused()`. The editor forwards four more calls:
+
+```rust
+fn wants_keys(&self) -> bool { self.controls.wants_keys() }        // true if any control takes input
+fn key_down(&mut self, key: Key, m: Modifiers) -> bool { self.controls.key_down(key, m) }
+fn key_up(&mut self, key: Key, m: Modifiers) -> bool { self.controls.key_up(key, m) }
+fn focus_changed(&mut self, focused: bool) { if !focused { self.controls.release_keys(); } }
+
+// render: a ring around the focused control
+if let Some(c) = controls.focused().and_then(|id| controls.get(id)) { /* c.area.bounds() */ }
+```
+
+Both key calls return whether the set used the key. Everything it does not use returns false, which the view hands to the host, so with nothing focused no key is taken.
+
+| Key | Effect on the focused control |
+|---|---|
+| Tab, Shift-Tab | next or previous interactive control, in the order they were added (read-only ones are skipped). From nothing, the first or the last. Past either end focus is cleared and the key is not handled, so the host can move on |
+| click | focuses the clicked control; a click on bare plate or a read-only control clears focus |
+| Up or Right, Down or Left | raise or lower a continuous control by 1% of its range; a stepped, toggle or choice control by one position. A vertical key bank counts from the top, so there Up and Left go to the previous key |
+| Page Up, Page Down | 10% of the range; a tenth of the positions (at least one) for a stepped control |
+| Shift or Command with the above | a tenth of the step (Shift or Command, as for the mouse) |
+| Home, End | the minimum, the maximum (a toggle: off, on) |
+| Return, Space | flips a toggle; presses a button (begin and the maximum) until the key is up (the minimum and end). Auto-repeat of the held key does nothing. Not handled on a knob, fader or key bank |
+| Delete, Backspace | the default value. Not handled on a button |
+| Escape | clears focus. Not handled when nothing is focused |
+| any other key | not handled |
+
+Every step is a whole `Begin`, `Perform`, `End` through the `EditorHost`, as for the wheel, and the value is `ParamInfo::clamp`ed. At an end of the range the key is handled and nothing is sent; a value equal to the current one is never sent. Home, End, Return, Space, Delete, Backspace, Escape and Tab with Command, Control or Alt held are not handled, so the host's shortcuts win; the arrows and Page keys step with any modifier. Keys are ignored while the mouse holds a control. `key_up` returns true for a key whose down was handled and false otherwise, so the host sees the up of exactly the keys it saw go down. `release_keys()` lets go of a held button and forgets held keys; call it when the view loses keyboard focus (focus itself stays). `set_focus(Option<ControlId>)` moves focus in code, for an editor that rebuilds its set (as `examples/editor` does on resize). `DesignEditor` does not forward keys yet.
 
 ## Editors from a design file
 

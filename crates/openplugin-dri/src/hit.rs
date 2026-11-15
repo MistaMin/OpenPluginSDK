@@ -32,13 +32,29 @@
 //!   it, so a late echo cannot make the control flicker; the host's value
 //!   arrives again after the release.
 //! * Read-only parameters never react to input.
+//! * Keyboard focus is on one control at most. A click focuses the control it
+//!   hits (a click on bare plate clears focus). Tab and Shift-Tab walk the
+//!   interactive controls in the order they were added; a Tab past either end
+//!   clears focus and is left unhandled so the host can move on. Arrows and
+//!   Page Up or Down step the focused control through the same gestures as the
+//!   wheel (a whole begin, perform, end per step; Shift or Command makes the
+//!   step a tenth). Home and End go to the minimum and maximum, Return or
+//!   Space flip a toggle or press a button (held while the key is down), and
+//!   Delete or Backspace reset to the default. Escape clears focus.
+//!   [`ControlSet::key_down`] returns false for every key it did not use,
+//!   which is every key while nothing is focused, so the view can pass those
+//!   to the host (transport, shortcuts).
 
 use openplugin_core::{EditorHost, ParamFlags, ParamInfo, Unit};
 
-pub use openplugin_core::editor::Modifiers;
+pub use openplugin_core::editor::{Key, Modifiers};
 
 /// Points of vertical drag for the full range of a knob.
 pub const DEFAULT_DRAG_RANGE: f32 = 200.0;
+/// Fraction of the range a continuous control moves per arrow key.
+pub const KEY_STEP: f32 = 0.01;
+/// Fraction of the range a continuous control moves per Page Up or Down.
+pub const PAGE_STEP: f32 = 0.1;
 /// Fraction of the range a continuous control moves per unit of wheel.
 pub const WHEEL_STEP: f32 = 0.02;
 /// Drag and wheel factor while the fine modifier is held.
@@ -129,12 +145,13 @@ pub struct Control {
     value: f32,
     hover: bool,
     pressed: bool,
+    focused: bool,
     drag_range: f32,
 }
 
 impl Control {
     fn new(kind: ControlKind, area: Area, param: usize, info: &'static ParamInfo) -> Self {
-        Self { area, kind, param, info, value: info.clamp(info.default), hover: false, pressed: false, drag_range: 0.0 }
+        Self { area, kind, param, info, value: info.clamp(info.default), hover: false, pressed: false, focused: false, drag_range: 0.0 }
     }
 
     pub fn knob(area: Area, param: usize, info: &'static ParamInfo) -> Self {
@@ -183,6 +200,11 @@ impl Control {
     /// The control is held by the mouse.
     pub fn pressed(&self) -> bool {
         self.pressed
+    }
+
+    /// The control has keyboard focus (draw a focus ring).
+    pub fn focused(&self) -> bool {
+        self.focused
     }
 
     /// Toggle on, button down, or a value above the middle of the range.
@@ -248,6 +270,11 @@ pub struct ControlSet {
     controls: Vec<Control>,
     grab: Option<Grab>,
     hovered: Option<ControlId>,
+    focus: Option<ControlId>,
+    /// Return or Space held down on a toggle or button, until released.
+    hold: Option<(Key, ControlId)>,
+    /// Keys whose down was handled, so their up is too.
+    handled_down: Vec<Key>,
     modifiers: Modifiers,
     wheel_acc: f32,
     wheel_id: Option<ControlId>,
@@ -260,6 +287,9 @@ impl ControlSet {
             controls: Vec::new(),
             grab: None,
             hovered: None,
+            focus: None,
+            hold: None,
+            handled_down: Vec::new(),
             modifiers: Modifiers::NONE,
             wheel_acc: 0.0,
             wheel_id: None,
@@ -323,8 +353,8 @@ impl ControlSet {
         if !plain.is_finite() {
             return;
         }
-        let held = self.grab.as_ref().map(|g| self.controls[g.id].param);
-        if held == Some(param) {
+        let held = self.grab.as_ref().map(|g| g.id).or(self.hold.map(|h| h.1));
+        if held.map(|id| self.controls[id].param) == Some(param) {
             return;
         }
         for c in self.controls.iter_mut().filter(|c| c.param == param) {
@@ -344,7 +374,10 @@ impl ControlSet {
             // A release was lost; close the gesture it owed.
             self.release();
         }
-        let Some(id) = self.hit(x, y) else { return };
+        self.release_keys();
+        let hit = self.hit(x, y);
+        self.set_focus(hit);
+        let Some(id) = hit else { return };
         let (param, info, kind) = {
             let c = &self.controls[id];
             (c.param, c.info, c.kind)
@@ -469,6 +502,204 @@ impl ControlSet {
             let norm = c.info.to_normalized(c.value) + dy * WHEEL_STEP * fine;
             c.info.from_normalized(norm)
         };
+        if new != c.value {
+            c.value = new;
+            self.host.set(c.param, new);
+        }
+    }
+
+    /// The control with keyboard focus.
+    pub fn focused(&self) -> Option<ControlId> {
+        self.focus
+    }
+
+    /// Focus a control, or clear focus with `None`. A control that does not
+    /// exist or is read-only cannot take focus (focus is cleared). Keys held
+    /// on the control that loses focus are let go.
+    pub fn set_focus(&mut self, id: Option<ControlId>) {
+        let id = id.filter(|&i| self.controls.get(i).is_some_and(Control::interactive));
+        if self.focus != id {
+            self.release_keys();
+            if let Some(old) = self.focus {
+                self.controls[old].focused = false;
+            }
+            if let Some(new) = id {
+                self.controls[new].focused = true;
+            }
+            self.focus = id;
+        }
+    }
+
+    /// The set has a control that takes keys: the view should take keyboard
+    /// focus. An editor forwards [`openplugin_core::Editor::wants_keys`] here.
+    pub fn wants_keys(&self) -> bool {
+        self.controls.iter().any(Control::interactive)
+    }
+
+    /// Let go of keys held: a pressed button is released and the keys whose
+    /// down was handled are forgotten. Call when the view loses keyboard
+    /// focus ([`openplugin_core::Editor::focus_changed`]); focus stays.
+    pub fn release_keys(&mut self) {
+        self.handled_down.clear();
+        self.release_hold();
+    }
+
+    fn release_hold(&mut self) {
+        if let Some((_, id)) = self.hold.take() {
+            let c = &mut self.controls[id];
+            c.pressed = false;
+            if c.kind == ControlKind::Button {
+                let off = c.info.clamp(c.info.min);
+                c.value = off;
+                self.host.perform(c.param, off);
+                self.host.end(c.param);
+            }
+        }
+    }
+
+    /// Move focus to the next (or, `back`, the previous) interactive control.
+    /// False, with focus cleared, when there is none past the end.
+    fn move_focus(&mut self, back: bool) -> bool {
+        let order: Vec<ControlId> = (0..self.controls.len()).filter(|&i| self.controls[i].interactive()).collect();
+        let at = self.focus.and_then(|f| order.iter().position(|&i| i == f));
+        let next = match (at, back) {
+            (None, false) => order.first().copied(),
+            (None, true) => order.last().copied(),
+            (Some(p), false) => order.get(p + 1).copied(),
+            (Some(p), true) => p.checked_sub(1).map(|q| order[q]),
+        };
+        self.set_focus(next);
+        next.is_some()
+    }
+
+    /// A key went down. True when the set used it; false for every other key,
+    /// so the view hands it to the host. Nothing is handled while the mouse
+    /// holds a control. See the module notes for the keys.
+    pub fn key_down(&mut self, key: Key, modifiers: Modifiers) -> bool {
+        if self.grab.is_some() {
+            return false;
+        }
+        // Command, Control and Alt keep the host's shortcuts, except on the
+        // arrows and Page keys, where Command asks for a fine step.
+        let plain = !(modifiers.command || modifiers.ctrl || modifiers.alt);
+        let handled = match key {
+            Key::Tab => plain && self.move_focus(modifiers.shift),
+            Key::Escape => {
+                let had = plain && self.focus.is_some();
+                if had {
+                    self.set_focus(None);
+                }
+                had
+            }
+            Key::Left | Key::Right | Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
+                self.focus.is_some_and(|id| self.step_key(id, key, modifiers.fine()))
+            }
+            Key::Home | Key::End => plain && self.focus.is_some_and(|id| self.jump_key(id, key == Key::End)),
+            Key::Return | Key::Space => plain && self.focus.is_some_and(|id| self.press_key(id, key)),
+            Key::Delete | Key::Backspace => plain && self.focus.is_some_and(|id| self.reset_key(id)),
+            Key::Char(_) => false,
+        };
+        if handled && !self.handled_down.contains(&key) {
+            self.handled_down.push(key);
+        }
+        handled
+    }
+
+    /// A key went up. True when its down was handled here.
+    pub fn key_up(&mut self, key: Key, _modifiers: Modifiers) -> bool {
+        if self.hold.is_some_and(|(k, _)| k == key) {
+            self.release_hold();
+        }
+        match self.handled_down.iter().position(|&k| k == key) {
+            Some(i) => {
+                self.handled_down.swap_remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Arrow or Page key on a control. False when the key means nothing to it.
+    fn step_key(&mut self, id: ControlId, key: Key, fine: bool) -> bool {
+        let c = &self.controls[id];
+        let page = matches!(key, Key::PageUp | Key::PageDown);
+        // Up and Right raise a value. A vertical key bank counts its keys from
+        // the top, so there Up and Left go to the previous key.
+        let up = matches!(key, Key::Up | Key::Right | Key::PageUp);
+        let dir = match c.kind {
+            ControlKind::Button => return false,
+            ControlKind::KeyBank { vertical: true } => {
+                if matches!(key, Key::Up | Key::Left | Key::PageUp) { -1.0 } else { 1.0 }
+            }
+            _ if up => 1.0,
+            _ => -1.0,
+        };
+        let new = if c.is_stepped() {
+            let n = match c.info.unit {
+                Unit::Toggle | Unit::Choice => ((c.info.max - c.info.min).round().max(0.0) as u32) + 1,
+                _ => c.info.steps,
+            };
+            let positions = if page { (n as f32 * PAGE_STEP).ceil().max(1.0) } else { 1.0 };
+            c.info.clamp(c.value + dir * positions * c.plain_step())
+        } else {
+            let amount = if page { PAGE_STEP } else { KEY_STEP } * if fine { FINE_FACTOR } else { 1.0 };
+            c.info.from_normalized(c.info.to_normalized(c.value) + dir * amount)
+        };
+        self.send_value(id, new);
+        true
+    }
+
+    /// Home or End: the minimum or the maximum.
+    fn jump_key(&mut self, id: ControlId, end: bool) -> bool {
+        let c = &self.controls[id];
+        if c.kind == ControlKind::Button {
+            return false;
+        }
+        let new = c.info.clamp(if end { c.info.max } else { c.info.min });
+        self.send_value(id, new);
+        true
+    }
+
+    /// Delete or Backspace: the default.
+    fn reset_key(&mut self, id: ControlId) -> bool {
+        let c = &self.controls[id];
+        if c.kind == ControlKind::Button {
+            return false;
+        }
+        let new = c.info.clamp(c.info.default);
+        self.send_value(id, new);
+        true
+    }
+
+    /// Return or Space: flip a toggle, press a button until the key is up.
+    /// While one of the two is held, the repeat of the key is swallowed.
+    fn press_key(&mut self, id: ControlId, key: Key) -> bool {
+        let c = &self.controls[id];
+        match c.kind {
+            ControlKind::Toggle | ControlKind::Button => {}
+            _ => return false,
+        }
+        if self.hold.is_some() {
+            return true;
+        }
+        let (param, info, kind) = (c.param, c.info, c.kind);
+        if kind == ControlKind::Toggle {
+            let v = info.clamp(if c.is_on() { info.min } else { info.max });
+            self.send_value(id, v);
+        } else {
+            let v = info.clamp(info.max);
+            self.controls[id].value = v;
+            self.host.begin(param);
+            self.host.perform(param, v);
+        }
+        self.controls[id].pressed = true;
+        self.hold = Some((key, id));
+        true
+    }
+
+    /// A whole gesture for one new value, when it differs from the current one.
+    fn send_value(&mut self, id: ControlId, new: f32) {
+        let c = &mut self.controls[id];
         if new != c.value {
             c.value = new;
             self.host.set(c.param, new);
@@ -793,5 +1024,401 @@ mod tests {
         set.mouse_down(10.0, 10.0, 1);
         set.mouse_down(10.0, 10.0, 1);
         assert_eq!(take(&log), vec![Begin(0), End(0), Begin(0)]);
+    }
+
+    // ---- keyboard focus and keys ----
+
+    const NO: Modifiers = Modifiers::NONE;
+    const SHIFT: Modifiers = Modifiers { shift: true, ..Modifiers::NONE };
+    const CMD: Modifiers = Modifiers { command: true, ..Modifiers::NONE };
+    const CTRL: Modifiers = Modifiers { ctrl: true, ..Modifiers::NONE };
+    const ALT: Modifiers = Modifiers { alt: true, ..Modifiers::NONE };
+
+    /// Knob 0 (gain), toggle 1, read-only knob 2, key bank 3 (horizontal),
+    /// stepped knob 4, button 5, vertical key bank 6; the control ids are the
+    /// positions in that order.
+    fn key_rig() -> (ControlSet, Log) {
+        let (mut set, log) = rig();
+        set.add(Control::knob(Area::rect(0.0, 0.0, 60.0, 60.0), 0, &GAIN));
+        set.add(Control::toggle(Area::rect(100.0, 0.0, 30.0, 30.0), 1, &WARM));
+        set.add(Control::knob(Area::rect(200.0, 0.0, 60.0, 60.0), 9, &LOCKED));
+        set.add(Control::key_bank(Area::rect(0.0, 100.0, 100.0, 20.0), 3, &MODE, false));
+        set.add(Control::knob(Area::rect(300.0, 0.0, 60.0, 60.0), 2, &STEPS));
+        set.add(Control::button(Area::circle(450.0, 50.0, 10.0), 7, &WARM));
+        set.add(Control::key_bank(Area::rect(500.0, 0.0, 20.0, 100.0), 8, &MODE, true));
+        (set, log)
+    }
+
+    fn focus(set: &mut ControlSet, id: ControlId) {
+        set.set_focus(Some(id));
+        assert_eq!(set.focused(), Some(id));
+    }
+
+    fn near(g: Gesture, param: u32, want: f32) {
+        let Perform(p, v) = g else { panic!("{g:?}") };
+        assert_eq!(p, param);
+        assert!((v - want).abs() < 1e-3, "{v} != {want}");
+    }
+
+    #[test]
+    fn tab_walks_the_interactive_controls_and_leaves_at_the_ends() {
+        let (mut set, log) = key_rig();
+        assert!(set.wants_keys());
+        assert_eq!(set.focused(), None);
+        let mut order = Vec::new();
+        for _ in 0..6 {
+            assert!(set.key_down(Key::Tab, NO));
+            order.push(set.focused().unwrap());
+            assert!(set.get(*order.last().unwrap()).unwrap().focused());
+        }
+        // The read-only knob (2) is skipped.
+        assert_eq!(order, vec![0, 1, 3, 4, 5, 6]);
+        // Past the last control: not handled, focus cleared.
+        assert!(!set.key_down(Key::Tab, NO));
+        assert_eq!(set.focused(), None);
+        assert!(set.iter().all(|c| !c.focused()));
+        // Shift-Tab from nothing goes to the last control, then back.
+        assert!(set.key_down(Key::Tab, SHIFT));
+        assert_eq!(set.focused(), Some(6));
+        assert!(set.key_down(Key::Tab, SHIFT));
+        assert_eq!(set.focused(), Some(5));
+        focus(&mut set, 0);
+        assert!(!set.key_down(Key::Tab, SHIFT), "before the first control");
+        assert_eq!(set.focused(), None);
+        // Control-Tab belongs to the host.
+        focus(&mut set, 1);
+        assert!(!set.key_down(Key::Tab, CTRL));
+        assert_eq!(set.focused(), Some(1));
+        assert!(take(&log).is_empty(), "moving focus sends no gesture");
+    }
+
+    #[test]
+    fn a_set_with_nothing_to_key_does_not_want_keys() {
+        let (mut set, _log) = rig();
+        assert!(!set.wants_keys());
+        assert!(!set.key_down(Key::Tab, NO));
+        set.add(Control::knob(Area::rect(0.0, 0.0, 10.0, 10.0), 0, &LOCKED));
+        assert!(!set.wants_keys());
+        assert!(!set.key_down(Key::Tab, NO));
+        set.set_focus(Some(0));
+        assert_eq!(set.focused(), None, "a read-only control takes no focus");
+        set.set_focus(Some(99));
+        assert_eq!(set.focused(), None);
+    }
+
+    #[test]
+    fn a_click_focuses_the_control_and_a_click_on_the_plate_clears_it() {
+        let (mut set, _log) = key_rig();
+        set.mouse_down(310.0, 10.0, 1);
+        set.mouse_up(310.0, 10.0);
+        assert_eq!(set.focused(), Some(4));
+        assert!(set.get(4).unwrap().focused());
+        set.mouse_down(110.0, 10.0, 1);
+        set.mouse_up(110.0, 10.0);
+        assert_eq!(set.focused(), Some(1));
+        assert!(!set.get(4).unwrap().focused());
+        // A double-click reset focuses too.
+        set.mouse_down(30.0, 30.0, 2);
+        set.mouse_up(30.0, 30.0);
+        assert_eq!(set.focused(), Some(0));
+        // Read-only: no focus, and the old focus goes.
+        set.mouse_down(210.0, 10.0, 1);
+        assert_eq!(set.focused(), None);
+        set.mouse_up(210.0, 10.0);
+        set.mouse_down(30.0, 30.0, 1);
+        set.mouse_up(30.0, 30.0);
+        set.mouse_down(700.0, 700.0, 1);
+        assert_eq!(set.focused(), None);
+    }
+
+    #[test]
+    fn arrows_step_a_continuous_control_by_gestures() {
+        let (mut set, log) = key_rig();
+        focus(&mut set, 0);
+        assert!(set.key_down(Key::Up, NO));
+        let g = take(&log);
+        assert_eq!((g[0], g[2]), (Begin(0), End(0)));
+        near(g[1], 0, 0.48);
+        assert!(set.key_down(Key::Right, NO));
+        near(take(&log)[1], 0, 0.96);
+        assert!(set.key_down(Key::Down, NO));
+        assert!(set.key_down(Key::Left, NO));
+        let g = take(&log);
+        near(g[1], 0, 0.48);
+        near(g[4], 0, 0.0);
+        // Page keys move a tenth of the range.
+        assert!(set.key_down(Key::PageUp, NO));
+        near(take(&log)[1], 0, 4.8);
+        assert!(set.key_down(Key::PageDown, NO));
+        near(take(&log)[1], 0, 0.0);
+        // Shift and Command make it a tenth of that.
+        assert!(set.key_down(Key::Up, SHIFT));
+        near(take(&log)[1], 0, 0.048);
+        assert!(set.key_down(Key::PageUp, CMD));
+        near(take(&log)[1], 0, 0.048 + 0.48);
+    }
+
+    #[test]
+    fn keys_clamp_at_the_ends_and_send_nothing_there() {
+        let (mut set, log) = key_rig();
+        focus(&mut set, 0);
+        set.param_changed(0, 23.9);
+        assert!(set.key_down(Key::PageUp, NO));
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, 24.0), End(0)]);
+        // Handled, but already at the maximum: no gesture.
+        assert!(set.key_down(Key::Up, NO));
+        assert!(set.key_down(Key::PageUp, NO));
+        assert!(take(&log).is_empty());
+        set.param_changed(0, -24.0);
+        assert!(set.key_down(Key::PageDown, NO));
+        assert!(take(&log).is_empty());
+        assert_eq!(set.get(0).unwrap().value(), -24.0);
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_ends() {
+        let (mut set, log) = key_rig();
+        focus(&mut set, 0);
+        assert!(set.key_down(Key::End, NO));
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, 24.0), End(0)]);
+        assert!(set.key_down(Key::Home, SHIFT));
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, -24.0), End(0)]);
+        // Stepped and choice parameters land on a position.
+        focus(&mut set, 4);
+        assert!(set.key_down(Key::End, NO));
+        assert_eq!(take(&log), vec![Begin(2), Perform(2, 10.0), End(2)]);
+        focus(&mut set, 3);
+        assert!(set.key_down(Key::End, NO));
+        assert_eq!(take(&log), vec![Begin(3), Perform(3, 3.0), End(3)]);
+        assert!(set.key_down(Key::Home, NO));
+        assert_eq!(take(&log), vec![Begin(3), Perform(3, 0.0), End(3)]);
+        // Toggle: Home is off, End is on. A button has no ends.
+        focus(&mut set, 1);
+        assert!(set.key_down(Key::End, NO));
+        assert!(set.key_down(Key::Home, NO));
+        assert_eq!(take(&log), vec![Begin(1), Perform(1, 1.0), End(1), Begin(1), Perform(1, 0.0), End(1)]);
+        focus(&mut set, 5);
+        assert!(!set.key_down(Key::End, NO));
+        assert!(!set.key_down(Key::Up, NO));
+        assert!(take(&log).is_empty());
+    }
+
+    #[test]
+    fn stepped_controls_move_by_positions() {
+        let (mut set, log) = key_rig();
+        // Positions 0,2,4,6,8,10: an arrow is one position, a page is a tenth of six, rounded up, so one.
+        focus(&mut set, 4);
+        assert!(set.key_down(Key::Up, NO));
+        assert!(set.key_down(Key::PageUp, SHIFT));
+        assert!(set.key_down(Key::Right, CMD));
+        assert_eq!(
+            take(&log),
+            vec![Begin(2), Perform(2, 2.0), End(2), Begin(2), Perform(2, 4.0), End(2), Begin(2), Perform(2, 6.0), End(2)]
+        );
+        assert!(set.key_down(Key::Down, NO));
+        assert_eq!(take(&log), vec![Begin(2), Perform(2, 4.0), End(2)]);
+        // Choice: a horizontal bank raises with Right.
+        focus(&mut set, 3);
+        assert_eq!(set.get(3).unwrap().selected_key(), 1);
+        assert!(set.key_down(Key::Right, NO));
+        assert!(set.key_down(Key::PageUp, NO));
+        assert!(set.key_down(Key::Right, NO), "already on the last key");
+        assert!(set.key_down(Key::Left, NO));
+        assert_eq!(
+            take(&log),
+            vec![Begin(3), Perform(3, 2.0), End(3), Begin(3), Perform(3, 3.0), End(3), Begin(3), Perform(3, 2.0), End(3)]
+        );
+        // A vertical bank counts from the top: Up goes to the previous key.
+        focus(&mut set, 6);
+        assert!(set.key_down(Key::Up, NO));
+        assert!(set.key_down(Key::Up, NO));
+        assert!(set.key_down(Key::Down, NO));
+        assert_eq!(take(&log), vec![Begin(8), Perform(8, 0.0), End(8), Begin(8), Perform(8, 1.0), End(8)]);
+        // A toggle: up is on, down is off, a repeat sends nothing.
+        focus(&mut set, 1);
+        assert!(set.key_down(Key::Up, NO));
+        assert!(set.key_down(Key::Up, NO));
+        assert!(set.key_down(Key::Left, NO));
+        assert_eq!(take(&log), vec![Begin(1), Perform(1, 1.0), End(1), Begin(1), Perform(1, 0.0), End(1)]);
+    }
+
+    #[test]
+    fn return_and_space_flip_a_toggle_once_per_press() {
+        let (mut set, log) = key_rig();
+        focus(&mut set, 1);
+        assert!(set.key_down(Key::Space, NO));
+        assert_eq!(take(&log), vec![Begin(1), Perform(1, 1.0), End(1)]);
+        assert!(set.get(1).unwrap().pressed());
+        // Auto-repeat of the held key, and another key meanwhile, change nothing.
+        assert!(set.key_down(Key::Space, NO));
+        assert!(set.key_down(Key::Space, NO));
+        assert!(set.key_down(Key::Return, NO));
+        assert!(take(&log).is_empty());
+        assert!(set.key_up(Key::Space, NO));
+        assert!(!set.get(1).unwrap().pressed());
+        assert!(take(&log).is_empty());
+        assert!(set.key_down(Key::Return, NO));
+        assert!(set.key_up(Key::Return, NO));
+        assert_eq!(take(&log), vec![Begin(1), Perform(1, 0.0), End(1)]);
+        assert!(!set.get(1).unwrap().is_on());
+    }
+
+    #[test]
+    fn return_and_space_hold_a_button_until_the_key_is_up() {
+        let (mut set, log) = key_rig();
+        focus(&mut set, 5);
+        assert!(set.key_down(Key::Return, NO));
+        assert_eq!(take(&log), vec![Begin(7), Perform(7, 1.0)]);
+        assert!(set.get(5).unwrap().is_on() && set.get(5).unwrap().pressed());
+        assert!(set.key_down(Key::Return, NO), "repeat");
+        assert!(take(&log).is_empty());
+        // The host's echo of the held parameter is ignored.
+        set.param_changed(7, 0.0);
+        assert!(set.get(5).unwrap().is_on());
+        assert!(set.key_up(Key::Return, NO));
+        assert_eq!(take(&log), vec![Perform(7, 0.0), End(7)]);
+        assert!(!set.get(5).unwrap().is_on() && !set.get(5).unwrap().pressed());
+        // Losing keyboard focus while held lets the button go.
+        assert!(set.key_down(Key::Space, NO));
+        take(&log);
+        set.release_keys();
+        assert_eq!(take(&log), vec![Perform(7, 0.0), End(7)]);
+        assert!(!set.key_up(Key::Space, NO));
+        // Moving focus away does the same.
+        assert!(set.key_down(Key::Space, NO));
+        take(&log);
+        assert!(set.key_down(Key::Tab, NO));
+        assert_eq!(take(&log), vec![Perform(7, 0.0), End(7)]);
+        // Return and Space mean nothing to a knob or a key bank.
+        focus(&mut set, 0);
+        assert!(!set.key_down(Key::Return, NO));
+        focus(&mut set, 3);
+        assert!(!set.key_down(Key::Space, NO));
+        assert!(take(&log).is_empty());
+    }
+
+    #[test]
+    fn delete_and_backspace_reset_to_the_default() {
+        let (mut set, log) = key_rig();
+        focus(&mut set, 0);
+        set.param_changed(0, 10.0);
+        assert!(set.key_down(Key::Delete, NO));
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, 0.0), End(0)]);
+        assert!(set.key_down(Key::Backspace, NO), "handled even at the default");
+        assert!(take(&log).is_empty());
+        focus(&mut set, 3);
+        set.param_changed(3, 3.0);
+        assert!(set.key_down(Key::Backspace, NO));
+        assert_eq!(take(&log), vec![Begin(3), Perform(3, 1.0), End(3)]);
+        focus(&mut set, 4);
+        set.param_changed(2, 8.0);
+        assert!(set.key_down(Key::Delete, NO));
+        assert_eq!(take(&log), vec![Begin(2), Perform(2, 0.0), End(2)]);
+        focus(&mut set, 5);
+        assert!(!set.key_down(Key::Delete, NO), "a button has no value to reset");
+        // Command-Delete is the host's.
+        focus(&mut set, 0);
+        set.param_changed(0, 5.0);
+        assert!(!set.key_down(Key::Delete, CMD));
+        assert!(take(&log).is_empty());
+    }
+
+    #[test]
+    fn escape_clears_focus_and_otherwise_goes_to_the_host() {
+        let (mut set, _log) = key_rig();
+        assert!(!set.key_down(Key::Escape, NO));
+        focus(&mut set, 0);
+        assert!(!set.key_down(Key::Escape, CMD));
+        assert_eq!(set.focused(), Some(0));
+        assert!(set.key_down(Key::Escape, NO));
+        assert_eq!(set.focused(), None);
+        assert!(!set.get(0).unwrap().focused());
+        assert!(!set.key_down(Key::Escape, NO));
+    }
+
+    #[test]
+    fn keys_the_set_does_not_use_reach_the_host() {
+        let (mut set, log) = key_rig();
+        // Nothing focused: no key is handled, and none sends a gesture.
+        let all = [
+            Key::Left,
+            Key::Up,
+            Key::Down,
+            Key::PageUp,
+            Key::PageDown,
+            Key::Home,
+            Key::End,
+            Key::Return,
+            Key::Space,
+            Key::Delete,
+            Key::Backspace,
+            Key::Escape,
+            Key::Char('a'),
+        ];
+        for key in all {
+            assert!(!set.key_down(key, NO), "{key:?}");
+            assert!(!set.key_up(key, NO), "{key:?}");
+        }
+        focus(&mut set, 0);
+        assert!(!set.key_down(Key::Char('a'), NO));
+        assert!(!set.key_down(Key::Char(' '), NO));
+        // Command, Control or Alt on a key that is not an arrow or Page key keeps it for the host.
+        for m in [CMD, CTRL, ALT] {
+            for key in [Key::Home, Key::End, Key::Return, Key::Space, Key::Delete, Key::Backspace, Key::Tab, Key::Escape] {
+                assert!(!set.key_down(key, m), "{key:?} {m:?}");
+            }
+        }
+        assert_eq!(set.focused(), Some(0));
+        assert!(take(&log).is_empty());
+    }
+
+    #[test]
+    fn key_up_follows_key_down() {
+        let (mut set, _log) = key_rig();
+        focus(&mut set, 0);
+        assert!(set.key_down(Key::Up, NO));
+        assert!(set.key_down(Key::Up, NO), "auto-repeat");
+        assert!(set.key_up(Key::Up, NO));
+        assert!(!set.key_up(Key::Up, NO), "one up per run of downs");
+        assert!(!set.key_down(Key::Char('x'), NO));
+        assert!(!set.key_up(Key::Char('x'), NO));
+        assert!(set.key_down(Key::Tab, NO));
+        assert!(set.key_up(Key::Tab, NO));
+        // A Tab that left the set is the host's, down and up.
+        focus(&mut set, 6);
+        assert!(!set.key_down(Key::Tab, NO));
+        assert!(!set.key_up(Key::Tab, NO));
+    }
+
+    #[test]
+    fn keys_wait_while_the_mouse_holds_a_control() {
+        let (mut set, log) = key_rig();
+        set.mouse_down(30.0, 30.0, 1);
+        take(&log);
+        assert!(!set.key_down(Key::Up, NO));
+        assert!(!set.key_down(Key::Tab, NO));
+        set.mouse_up(30.0, 30.0);
+        assert_eq!(take(&log), vec![End(0)]);
+        assert!(set.key_down(Key::Up, NO), "the clicked control is focused");
+        assert_eq!(take(&log).len(), 3);
+    }
+
+    #[test]
+    fn keys_send_only_finite_values_in_range() {
+        let (mut set, log) = key_rig();
+        focus(&mut set, 0);
+        set.param_changed(0, 1e30);
+        for key in [Key::Up, Key::PageUp, Key::Home, Key::End, Key::Down, Key::PageDown, Key::Delete] {
+            for m in [NO, SHIFT, CMD] {
+                set.key_down(key, m);
+            }
+        }
+        let g = take(&log);
+        assert!(!g.is_empty());
+        for g in g {
+            if let Perform(_, v) = g {
+                assert!((-24.0..=24.0).contains(&v), "{v}");
+            }
+        }
     }
 }

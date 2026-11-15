@@ -14,6 +14,10 @@
 //!   The editor also asks its host for a size (a double-click on the plate),
 //!   through `op_editor_set_request_resize`, `clap_host_gui::request_resize`
 //!   (the host answers inside the call) and the host's `ui:resize` feature.
+//! - Keys: modifier flags from mouse events and `flagsChanged:` reach the
+//!   editor; a handled arrow is a gesture; a key the editor does not use, and
+//!   the up of a key it did not take, go to the next responder; Tab, Space and
+//!   Escape move, use and clear focus, and the focus ring is drawn.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
@@ -26,7 +30,8 @@ fn main() {
     mac::shell_editor_resizes();
     mac::clap_gui_resizes();
     mac::lv2_ui_resizes();
-    println!("cocoa: 6 passed");
+    mac::shell_editor_keys();
+    println!("cocoa: 7 passed");
 }
 
 #[cfg(target_os = "macos")]
@@ -65,6 +70,9 @@ mod mac {
         fn objc_getClass(name: *const c_char) -> Id;
         fn sel_registerName(name: *const c_char) -> Sel;
         fn objc_msgSend();
+        fn objc_allocateClassPair(superclass: Id, name: *const c_char, extra: usize) -> Id;
+        fn class_addMethod(cls: Id, sel: Sel, imp: *const c_void, types: *const c_char) -> i8;
+        fn objc_registerClassPair(cls: Id);
         #[cfg(target_arch = "x86_64")]
         fn objc_msgSend_stret();
     }
@@ -774,5 +782,196 @@ mod mac {
             send!((), parent, c"release");
         }
         println!("lv2 resize: ok");
+    }
+
+    // ---- keyboard and modifiers ----
+
+    thread_local! {
+        /// What the next responder saw: key downs, key ups, flags changes.
+        static NEXT: RefCell<[u32; 3]> = const { RefCell::new([0; 3]) };
+    }
+
+    extern "C" fn next_key_down(_this: Id, _cmd: Sel, _event: Id) {
+        NEXT.with(|n| n.borrow_mut()[0] += 1);
+    }
+    extern "C" fn next_key_up(_this: Id, _cmd: Sel, _event: Id) {
+        NEXT.with(|n| n.borrow_mut()[1] += 1);
+    }
+    extern "C" fn next_flags(_this: Id, _cmd: Sel, _event: Id) {
+        NEXT.with(|n| n.borrow_mut()[2] += 1);
+    }
+
+    fn next_seen() -> [u32; 3] {
+        NEXT.with(|n| *n.borrow())
+    }
+
+    /// A responder that counts the key events it is handed, standing in for the host.
+    unsafe fn make_recorder() -> Id { unsafe {
+        let cls = objc_allocateClassPair(class(c"NSResponder"), c"OpKeyRecorder".as_ptr(), 0);
+        assert!(!cls.is_null());
+        class_addMethod(cls, sel(c"keyDown:"), next_key_down as *const c_void, c"v@:@".as_ptr());
+        class_addMethod(cls, sel(c"keyUp:"), next_key_up as *const c_void, c"v@:@".as_ptr());
+        class_addMethod(cls, sel(c"flagsChanged:"), next_flags as *const c_void, c"v@:@".as_ptr());
+        objc_registerClassPair(cls);
+        send!(Id, send!(Id, cls, c"alloc"), c"init")
+    }}
+
+    const SHIFT_FLAG: usize = 1 << 17;
+    const CMD_FLAG: usize = 1 << 20;
+
+    /// A key event: `down` or up, the virtual key code, what it types, and modifier flags.
+    unsafe fn key(down: bool, code: u16, typed: &CStr, flags: usize) -> Id { unsafe {
+        let text = send!(Id, class(c"NSString"), c"stringWithUTF8String:", *const c_char = typed.as_ptr());
+        send!(
+            Id,
+            class(c"NSEvent"),
+            c"keyEventWithType:location:modifierFlags:timestamp:windowNumber:context:characters:charactersIgnoringModifiers:isARepeat:keyCode:",
+            usize = if down { 10 } else { 11 },
+            CGPoint = CGPoint { x: 0.0, y: 0.0 },
+            usize = flags,
+            f64 = 0.0,
+            isize = 0,
+            Id = std::ptr::null_mut(),
+            Id = text,
+            Id = text,
+            i8 = 0,
+            u16 = code
+        )
+    }}
+
+    unsafe fn mouse_flags(kind: usize, x: f64, y: f64, flags: usize) -> Id { unsafe {
+        send!(
+            Id,
+            class(c"NSEvent"),
+            c"mouseEventWithType:location:modifierFlags:timestamp:windowNumber:context:eventNumber:clickCount:pressure:",
+            usize = kind,
+            CGPoint = CGPoint { x, y },
+            usize = flags,
+            f64 = 0.0,
+            isize = 0,
+            Id = std::ptr::null_mut(),
+            isize = 0,
+            isize = 1,
+            f32 = 1.0
+        )
+    }}
+
+    /// The plain values of the `perform` calls logged so far, for one parameter.
+    fn performed(param: u32) -> Vec<f64> {
+        LOG.with(|l| {
+            l.borrow()
+                .iter()
+                .filter_map(|e| {
+                    let mut it = e.split(' ');
+                    (it.next() == Some("perform") && it.next().and_then(|p| p.parse::<u32>().ok()) == Some(param))
+                        .then(|| it.next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(f64::NAN))
+                })
+                .collect()
+        })
+    }
+
+    fn logged() -> Vec<String> {
+        LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    fn blue(p: u32) -> bool {
+        let (r, g, b) = ((p >> 16) & 255, (p >> 8) & 255, p & 255);
+        b > r + 60 && b > g + 20
+    }
+
+    pub fn shell_editor_keys() {
+        unsafe {
+            let host = OpEditorHost { context: std::ptr::null_mut(), begin_edit: Some(begin), perform_edit: Some(perform), end_edit: Some(end) };
+            let editor = op_editor_create(&host);
+            assert!(!editor.is_null());
+            let view = op_editor_view(editor);
+            let parent = new_view(WIDTH as f64, HEIGHT as f64);
+            assert_eq!(op_editor_attach(editor, parent), 1);
+            let recorder = make_recorder();
+            send!((), view, c"setNextResponder:", Id = recorder);
+            logged();
+
+            // The editor has controls that take keys, so the view takes the keyboard.
+            assert_eq!(send!(i8, view, c"acceptsFirstResponder"), 1);
+
+            // A click on the knob focuses it. Shift is held for the press and
+            // let go for the release: both reach the editor (no gesture moves).
+            let size = (WIDTH, HEIGHT);
+            let (kx, ky) = point_at(size, (KNOB.0 + KNOB.2 * 0.5, KNOB.1 + KNOB.3 * 0.5));
+            send!((), view, c"mouseDown:", Id = mouse_flags(1, kx, ky, SHIFT_FLAG));
+            send!((), view, c"mouseUp:", Id = mouse_flags(2, kx, ky, 0));
+            assert_eq!(logged(), vec!["begin 0", "end 0"]);
+
+            // Up arrow (key code 126): a handled key is a whole gesture and
+            // does not reach the next responder. One percent of 48 dB.
+            send!((), view, c"keyDown:", Id = key(true, 126, c"\u{f700}", 0));
+            let log = logged();
+            assert_eq!(log.len(), 3, "{log:?}");
+            LOG.with(|l| l.borrow_mut().extend(log));
+            let v = performed(0);
+            assert!((v[0] - 0.48).abs() < 1e-3, "{v:?}");
+            logged();
+            assert_eq!(next_seen(), [0, 0, 0]);
+
+            // flagsChanged: Shift down makes the same arrow a tenth as far, and
+            // the next responder hears about the modifier too.
+            send!((), view, c"flagsChanged:", Id = key(true, 56, c"", SHIFT_FLAG));
+            assert_eq!(next_seen(), [0, 0, 1]);
+            send!((), view, c"keyDown:", Id = key(true, 126, c"\u{f700}", SHIFT_FLAG));
+            let v = performed(0);
+            assert!((v[0] - 0.528).abs() < 1e-3, "{v:?}");
+            logged();
+            // Shift up again, through a mouse event's flags.
+            send!((), view, c"mouseMoved:", Id = mouse_flags(5, kx, ky, 0));
+            send!((), view, c"keyDown:", Id = key(true, 126, c"\u{f700}", 0));
+            let v = performed(0);
+            assert!((v[0] - 1.008).abs() < 1e-3, "{v:?}");
+            logged();
+
+            // Keys the editor has no use for go to the host: Space on a knob,
+            // a letter, and Command with a letter.
+            send!((), view, c"keyDown:", Id = key(true, 49, c" ", 0));
+            send!((), view, c"keyDown:", Id = key(true, 0, c"a", 0));
+            send!((), view, c"keyDown:", Id = key(true, 0, c"a", CMD_FLAG));
+            assert_eq!(next_seen(), [3, 0, 1]);
+            assert!(logged().is_empty());
+            // A key up whose down the editor never took goes there too.
+            send!((), view, c"keyUp:", Id = key(false, 0, c"a", 0));
+            assert_eq!(next_seen(), [3, 1, 1]);
+
+            // Tab moves focus to the toggle and Space flips it; the up of a
+            // handled key stays with the editor.
+            send!((), view, c"keyDown:", Id = key(true, 48, c"\t", 0));
+            send!((), view, c"keyDown:", Id = key(true, 49, c" ", 0));
+            send!((), view, c"keyUp:", Id = key(false, 49, c" ", 0));
+            assert_eq!(logged(), vec!["begin 1", "perform 1 1", "end 1"]);
+            assert_eq!(next_seen(), [3, 1, 1]);
+
+            // Escape clears focus, then arrows and Escape belong to the host.
+            let (rx, ry) = (KNOB.0 + KNOB.2 * 0.5, KNOB.1 - 4.0);
+            send!((), view, c"keyDown:", Id = key(true, 53, c"\u{1b}", 0));
+            assert_eq!(next_seen(), [3, 1, 1]);
+            let ring_off = pixel(view, rx as f64, ry as f64 + 0.0);
+            send!((), view, c"keyDown:", Id = key(true, 126, c"\u{f700}", 0));
+            send!((), view, c"keyDown:", Id = key(true, 53, c"\u{1b}", 0));
+            assert_eq!(next_seen(), [5, 1, 1]);
+            assert!(logged().is_empty());
+
+            // The focus ring: a click on the knob draws one around it.
+                        send!((), view, c"mouseDown:", Id = mouse(1, kx, ky));
+            send!((), view, c"mouseUp:", Id = mouse(2, kx, ky));
+            logged();
+            let ring_on = pixel(view, rx as f64, ry as f64);
+            assert_ne!(ring_on, ring_off, "a ring is drawn on focus");
+            assert!(blue(ring_on), "ring colour {ring_on:06x} (plate {ring_off:06x})");
+            send!((), view, c"keyDown:", Id = key(true, 53, c"\u{1b}", 0));
+            assert_eq!(pixel(view, rx as f64, ry as f64), ring_off, "ring gone after Escape");
+
+            send!((), view, c"setNextResponder:", Id = std::ptr::null_mut::<c_void>());
+            op_editor_destroy(editor);
+            send!((), parent, c"release");
+            send!((), recorder, c"release");
+        }
+        println!("keys and modifiers: ok");
     }
 }

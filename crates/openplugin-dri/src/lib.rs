@@ -33,6 +33,6 @@ pub use controls::{
 };
 pub use goodlookindri;
 pub use design_editor::{DesignEditor, DesignEditorError, DesignOptions};
-pub use hit::{Area, Control, ControlId, ControlKind, ControlSet, Modifiers};
+pub use hit::{Area, Control, ControlId, ControlKind, ControlSet, Key, Modifiers};
 pub use styles::{Color, FaceplateStyle, KnobStyle, MeterStyle};
 pub use window::{DriHostWindow, DriView};
