@@ -76,7 +76,8 @@ pub struct OpParamDesc {
 }
 
 /// One bus of a layout. Channels are always in the SDK's canonical order:
-/// `roles[i]` is the CLAP surround id (`SURROUND_*` in `openplugin-core`) of
+/// `roles[i]` is the SDK role id (`SURROUND_*` in `openplugin-core`: the CLAP
+/// surround ids 0..=17, then 18..=21 for top side and wide channels) of
 /// channel `i`, or [`ROLE_NONE`] for mono, ambisonic, discrete buses and
 /// channels past [`ROLE_SLOTS`].
 #[repr(C)]
