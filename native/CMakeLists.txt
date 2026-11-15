@@ -399,10 +399,38 @@ if(OP_BUILD_AU)
     target_link_libraries(AUStateProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
     add_dependencies(AUStateProof OpenPluginAUState)
     add_test(NAME au_state_proof COMMAND AUStateProof "$<TARGET_BUNDLE_DIR:OpenPluginAUState>")
+    # Parameter text over a stand-in with a choice parameter, which the SDK example lacks.
+    function(op_au_text_plist)
+      set(OP_PRODUCT "TextTest")
+      set(OP_BUNDLE_ID "com.opengrid.test.text")
+      set(OP_VERSION "1")
+      set(OP_MANUFACTURER "OpenPlugin")
+      set(OP_AU_SUBTYPE "TxTs")
+      set(OP_AU_MANUFACTURER "OpTs")
+      set(OP_AU_TYPE "aufx")
+      configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-text-Info.plist" @ONLY)
+    endfunction()
+    op_au_text_plist()
+    add_library(OpenPluginAUText MODULE au/OpenPluginAU.cpp au/text_shell.cpp)
+    op_au_set_type(OpenPluginAUText aufx)
+    target_compile_features(OpenPluginAUText PRIVATE cxx_std_23)
+    target_include_directories(OpenPluginAUText PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+    set_target_properties(OpenPluginAUText PROPERTIES
+      OUTPUT_NAME "TextTest"
+      BUNDLE TRUE
+      BUNDLE_EXTENSION component
+      PREFIX ""
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-text-Info.plist")
+    target_link_libraries(OpenPluginAUText PRIVATE openplugin_au_sdk)
+    add_executable(AUTextProof au/text_host.cpp)
+    target_include_directories(AUTextProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(AUTextProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+    add_dependencies(AUTextProof OpenPluginAUText)
+    add_test(NAME au_text_proof COMMAND AUTextProof "$<TARGET_BUNDLE_DIR:OpenPluginAUText>")
     # Shell ABI 2 parity (events, MIDI in and out, transport, sidechain, layouts, offline, the ABI
     # check) over au/probe_shell.cpp, a stand-in that implements all of ABI 2 and reports what it
     # received. Five components of the same shell source: an effect (aufx), an instrument (aumu), a
-    # music effect (aumf), and two effects whose library reports ABI 3 and ABI 1.
+    # music effect (aumf), and two effects whose library reports ABI 4 (newer than the shell, accepted) and ABI 2 (older than OP_SHELL_ABI 3, refused).
     function(op_au_probe_bundle target product subtype type kind abi)
       set(OP_PRODUCT "${product}")
       set(OP_BUNDLE_ID "com.opengrid.test.${subtype}")
@@ -425,11 +453,11 @@ if(OP_BUILD_AU)
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/${target}-Info.plist")
       target_link_libraries(${target} PRIVATE openplugin_au_sdk)
     endfunction()
-    op_au_probe_bundle(OpenPluginAUProbeFx "ProbeFx" "PrFx" aufx 0 2)
-    op_au_probe_bundle(OpenPluginAUProbeInst "ProbeInst" "PrIn" aumu 1 2)
-    op_au_probe_bundle(OpenPluginAUProbeMidiFx "ProbeMidiFx" "PrMf" aumf 2 2)
-    op_au_probe_bundle(OpenPluginAUProbeNewer "ProbeNewer" "PrNw" aufx 0 3)
-    op_au_probe_bundle(OpenPluginAUProbeOlder "ProbeOlder" "PrOl" aufx 0 1)
+    op_au_probe_bundle(OpenPluginAUProbeFx "ProbeFx" "PrFx" aufx 0 3)
+    op_au_probe_bundle(OpenPluginAUProbeInst "ProbeInst" "PrIn" aumu 1 3)
+    op_au_probe_bundle(OpenPluginAUProbeMidiFx "ProbeMidiFx" "PrMf" aumf 2 3)
+    op_au_probe_bundle(OpenPluginAUProbeNewer "ProbeNewer" "PrNw" aufx 0 4)
+    op_au_probe_bundle(OpenPluginAUProbeOlder "ProbeOlder" "PrOl" aufx 0 2)
     add_executable(AUEventsProof au/events_host.cpp)
     target_compile_features(AUEventsProof PRIVATE cxx_std_23)
     target_include_directories(AUEventsProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/au")

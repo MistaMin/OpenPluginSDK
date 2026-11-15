@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #ifndef CHECK
@@ -209,4 +210,52 @@ inline void proof_check_bypass(AudioUnit unit, UInt32 channels, const char* labe
     std::printf("AU %s bypass off: processed signal restored, max difference %.3g, distance from dry %.3g\n", label, worstWet, worstBackDry);
     CHECK(worstWet < 1e-5);
     CHECK(worstBackDry > 0.01);
+}
+
+// ---- parameter text (kAudioUnitProperty_ParameterStringFromValue / ValueFromString) ----------
+/// The unit's text for a parameter value; `value` null asks for the current value. Empty and
+/// `ok` false when the unit refused.
+inline std::string proof_text_of(AudioUnit unit, AudioUnitParameterID id, const AudioUnitParameterValue* value, bool* ok = nullptr) {
+    AudioUnitParameterStringFromValue request{};
+    request.inParamID = id;
+    request.inValue = value;
+    UInt32 size = sizeof(request);
+    const OSStatus status = AudioUnitGetProperty(unit, kAudioUnitProperty_ParameterStringFromValue, kAudioUnitScope_Global, 0, &request, &size);
+    if (ok) *ok = status == noErr && request.outString;
+    if (status != noErr || !request.outString) return {};
+    char text[512] = {};
+    CHECK(CFStringGetCString(request.outString, text, sizeof(text), kCFStringEncodingUTF8));
+    CFRelease(request.outString);
+    return text;
+}
+/// The value the unit reads from `text`; false when it refused.
+inline bool proof_value_of(AudioUnit unit, AudioUnitParameterID id, const char* text, double* out) {
+    AudioUnitParameterValueFromString request{};
+    request.inParamID = id;
+    request.inString = CFStringCreateWithCString(nullptr, text, kCFStringEncodingUTF8);
+    CHECK(request.inString);
+    UInt32 size = sizeof(request);
+    request.outValue = -777.0f;
+    const OSStatus status = AudioUnitGetProperty(unit, kAudioUnitProperty_ParameterValueFromString, kAudioUnitScope_Global, 0, &request, &size);
+    CFRelease(request.inString);
+    if (status != noErr) return false;
+    *out = request.outValue;
+    return true;
+}
+/// The labels of an indexed parameter; false when the unit has none.
+inline bool proof_value_strings(AudioUnit unit, AudioUnitParameterID id, std::vector<std::string>* out) {
+    UInt32 size = 0;
+    Boolean writable = false;
+    if (AudioUnitGetPropertyInfo(unit, kAudioUnitProperty_ParameterValueStrings, kAudioUnitScope_Global, id, &size, &writable) != noErr) return false;
+    CFArrayRef array = nullptr;
+    size = sizeof(array);
+    if (AudioUnitGetProperty(unit, kAudioUnitProperty_ParameterValueStrings, kAudioUnitScope_Global, id, &array, &size) != noErr || !array) return false;
+    out->clear();
+    for (CFIndex i = 0; i < CFArrayGetCount(array); ++i) {
+        char text[512] = {};
+        CHECK(CFStringGetCString(static_cast<CFStringRef>(CFArrayGetValueAtIndex(array, i)), text, sizeof(text), kCFStringEncodingUTF8));
+        out->push_back(text);
+    }
+    CFRelease(array);
+    return true;
 }
