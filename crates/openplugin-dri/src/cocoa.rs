@@ -25,6 +25,7 @@
 #![allow(unsafe_code, clippy::missing_safety_doc)]
 
 use openplugin_core::editor::SizeRange;
+use openplugin_core::editor::{Key, Modifiers};
 use openplugin_core::Editor;
 use std::ffi::{c_char, c_void, CString};
 use std::ptr::null_mut;
@@ -157,6 +158,8 @@ struct State {
     /// The editor's size, which mouse positions are mapped to.
     size: (u32, u32),
     last: Instant,
+    /// The modifier keys the editor was last told about.
+    modifiers: Modifiers,
     /// The editor is inside one of its calls.
     busy: bool,
     /// A resize that came in while `busy`: width, height, and whether the
@@ -298,13 +301,147 @@ unsafe fn local(this: Id, size: (u32, u32), event: Id) -> (f32, f32) { unsafe {
     ((q.x * sx) as f32, (q.y * sy) as f32)
 }}
 
+/// The modifier keys of an event (`NSEventModifierFlags`).
+fn modifiers_from_flags(flags: usize) -> Modifiers {
+    Modifiers {
+        shift: flags & (1 << 17) != 0,
+        ctrl: flags & (1 << 18) != 0,
+        alt: flags & (1 << 19) != 0,
+        command: flags & (1 << 20) != 0,
+    }
+}
+
+/// Tell the editor about the event's modifier keys when they differ from the
+/// last ones it heard. Returns the current modifiers.
+unsafe fn sync_modifiers(st: &mut State, event: Id) -> Modifiers { unsafe {
+    let now = modifiers_from_flags(send!(usize, event, b"modifierFlags\0"));
+    if now != st.modifiers {
+        st.modifiers = now;
+        st.editor.modifiers_changed(now);
+    }
+    now
+}}
+
+/// A key from a macOS virtual key code (the `kVK_` values of the keys that do
+/// not type a character) or, failing that, the first character the key types
+/// without modifiers, lower case.
+fn key_from_code(code: u16, typed: Option<char>) -> Option<Key> {
+    Some(match code {
+        123 => Key::Left,
+        124 => Key::Right,
+        125 => Key::Down,
+        126 => Key::Up,
+        116 => Key::PageUp,
+        121 => Key::PageDown,
+        115 => Key::Home,
+        119 => Key::End,
+        48 => Key::Tab,
+        36 | 76 => Key::Return,
+        53 => Key::Escape,
+        117 => Key::Delete,
+        51 => Key::Backspace,
+        49 => Key::Space,
+        _ => {
+            let c = typed?;
+            // Function keys type private-use characters.
+            if c.is_control() || ('\u{f700}'..='\u{f8ff}').contains(&c) {
+                return None;
+            }
+            Key::Char(c.to_lowercase().next().unwrap_or(c))
+        }
+    })
+}
+
+/// The event's key, or `None` for a key the contract has no name for.
+unsafe fn event_key(event: Id) -> Option<Key> { unsafe {
+    let code = send!(u16, event, b"keyCode\0");
+    let chars = send!(Id, event, b"charactersIgnoringModifiers\0");
+    let typed = if chars.is_null() {
+        None
+    } else {
+        let utf8 = send!(*const c_char, chars, b"UTF8String\0");
+        if utf8.is_null() { None } else { std::ffi::CStr::from_ptr(utf8).to_str().ok().and_then(|t| t.chars().next()) }
+    };
+    key_from_code(code, typed)
+}}
+
+/// Hand an event the editor did not use to the next responder, so the host
+/// keeps its transport keys and shortcuts.
+unsafe fn pass_on(this: Id, name: &[u8], event: Id) { unsafe {
+    let next = send!(Id, this, b"nextResponder\0");
+    if !next.is_null() {
+        send!((), next, name, Id = event);
+    }
+}}
+
+unsafe fn key_event(this: Id, event: Id, down: bool) { unsafe {
+    let mut handled = false;
+    guarded(this, |st| {
+        let mods = sync_modifiers(st, event);
+        if let Some(key) = event_key(event).filter(|_| st.editor.wants_keys()) {
+            handled = if down { st.editor.key_down(key, mods) } else { st.editor.key_up(key, mods) };
+        }
+    });
+    if handled {
+        redraw(this);
+    } else {
+        pass_on(this, if down { b"keyDown:\0" } else { b"keyUp:\0" }, event);
+    }
+}}
+
+extern "C" fn key_down(this: Id, _cmd: Sel, event: Id) {
+    unsafe { key_event(this, event, true) }
+}
+
+extern "C" fn key_up(this: Id, _cmd: Sel, event: Id) {
+    unsafe { key_event(this, event, false) }
+}
+
+extern "C" fn flags_changed(this: Id, _cmd: Sel, event: Id) {
+    unsafe {
+        guarded(this, |st| {
+            sync_modifiers(st, event);
+        });
+        pass_on(this, b"flagsChanged:\0", event);
+    }
+}
+
+extern "C" fn accepts_first_responder(this: Id, _cmd: Sel) -> i8 {
+    unsafe { state(this).is_some_and(|st| st.editor.wants_keys()) as i8 }
+}
+
+extern "C" fn become_first_responder(this: Id, _cmd: Sel) -> i8 {
+    unsafe {
+        guarded(this, |st| st.editor.focus_changed(true));
+        redraw(this);
+    }
+    1
+}
+
+extern "C" fn resign_first_responder(this: Id, _cmd: Sel) -> i8 {
+    unsafe {
+        guarded(this, |st| st.editor.focus_changed(false));
+        redraw(this);
+    }
+    1
+}
+
 unsafe fn redraw(this: Id) { unsafe {
     send!((), this, b"setNeedsDisplay:\0", i8 = 1);
 }}
 
 extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
     unsafe {
+        // A click gives the editor the keyboard, when it wants keys. Outside the
+        // editor call: taking focus calls the editor again.
+        if state(this).is_some_and(|st| st.editor.wants_keys()) {
+            let window = send!(Id, this, b"window\0");
+            if !window.is_null() {
+                send!(i8, window, b"makeFirstResponder:\0", Id = this);
+            }
+        }
         guarded(this, |st| {
+            sync_modifiers(st, event);
             let (x, y) = local(this, st.size, event);
             let clicks = send!(isize, event, b"clickCount\0").max(1) as u32;
             st.editor.mouse_down(x, y, clicks);
@@ -316,6 +453,7 @@ extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
 extern "C" fn mouse_moved(this: Id, _cmd: Sel, event: Id) {
     unsafe {
         guarded(this, |st| {
+            sync_modifiers(st, event);
             let (x, y) = local(this, st.size, event);
             st.editor.mouse_move(x, y);
         });
@@ -325,6 +463,7 @@ extern "C" fn mouse_moved(this: Id, _cmd: Sel, event: Id) {
 extern "C" fn mouse_up(this: Id, _cmd: Sel, event: Id) {
     unsafe {
         guarded(this, |st| {
+            sync_modifiers(st, event);
             let (x, y) = local(this, st.size, event);
             st.editor.mouse_up(x, y);
         });
@@ -335,6 +474,7 @@ extern "C" fn mouse_up(this: Id, _cmd: Sel, event: Id) {
 extern "C" fn scroll_wheel(this: Id, _cmd: Sel, event: Id) {
     unsafe {
         guarded(this, |st| {
+            sync_modifiers(st, event);
             let (x, y) = local(this, st.size, event);
             let dy = send!(f64, event, b"scrollingDeltaY\0");
             let precise = send!(i8, event, b"hasPreciseScrollingDeltas\0") != 0;
@@ -393,7 +533,12 @@ unsafe fn view_class() -> Class { unsafe {
     add(b"setFrameSize:\0", set_frame_size as *const c_void, b"v@:{CGSize=dd}\0");
     add(b"isFlipped\0", yes as *const c_void, b"c@:\0");
     add(b"isOpaque\0", yes as *const c_void, b"c@:\0");
-    add(b"acceptsFirstResponder\0", yes as *const c_void, b"c@:\0");
+    add(b"acceptsFirstResponder\0", accepts_first_responder as *const c_void, b"c@:\0");
+    add(b"becomeFirstResponder\0", become_first_responder as *const c_void, b"c@:\0");
+    add(b"resignFirstResponder\0", resign_first_responder as *const c_void, b"c@:\0");
+    add(b"keyDown:\0", key_down as *const c_void, b"v@:@\0");
+    add(b"keyUp:\0", key_up as *const c_void, b"v@:@\0");
+    add(b"flagsChanged:\0", flags_changed as *const c_void, b"v@:@\0");
     add(b"acceptsFirstMouse:\0", yes_event as *const c_void, b"c@:@\0");
     add(b"mouseDown:\0", mouse_down as *const c_void, b"v@:@\0");
     add(b"mouseDragged:\0", mouse_moved as *const c_void, b"v@:@\0");
@@ -428,7 +573,7 @@ impl EditorView {
             if view.is_null() {
                 return None;
             }
-            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), busy: false, pending: None, in_frame: false }));
+            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false }));
             object_setInstanceVariable(view, IVAR.as_ptr() as *const c_char, state as *mut c_void);
 
             // Mouse-moved events need a tracking area: moved | active always | in visible rect.
@@ -609,5 +754,34 @@ pub fn run_window(title: &str, editor: Box<dyn Editor>, poll: Option<Poll>) -> i
         drop(view);
         send!((), pool, b"drain\0");
         0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_map_to_modifiers() {
+        assert_eq!(modifiers_from_flags(0), Modifiers::NONE);
+        let all = modifiers_from_flags((1 << 17) | (1 << 18) | (1 << 19) | (1 << 20));
+        assert!(all.shift && all.ctrl && all.alt && all.command);
+        // Caps lock (1 << 16) and device bits are not modifiers here.
+        assert_eq!(modifiers_from_flags((1 << 16) | 0x100), Modifiers::NONE);
+        assert_eq!(modifiers_from_flags(1 << 20), Modifiers { command: true, ..Modifiers::NONE });
+    }
+
+    #[test]
+    fn key_codes_map_to_keys() {
+        assert_eq!(key_from_code(123, None), Some(Key::Left));
+        assert_eq!(key_from_code(126, Some('\u{f700}')), Some(Key::Up));
+        assert_eq!(key_from_code(36, Some('\r')), Some(Key::Return));
+        assert_eq!(key_from_code(76, None), Some(Key::Return));
+        assert_eq!(key_from_code(51, Some('\u{7f}')), Some(Key::Backspace));
+        assert_eq!(key_from_code(117, None), Some(Key::Delete));
+        assert_eq!(key_from_code(49, Some(' ')), Some(Key::Space));
+        assert_eq!(key_from_code(0, Some('A')), Some(Key::Char('a')));
+        assert_eq!(key_from_code(122, Some('\u{f704}')), None, "F1 types a private-use character");
+        assert_eq!(key_from_code(0, None), None);
     }
 }
