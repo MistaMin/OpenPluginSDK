@@ -139,11 +139,21 @@ impl Biquad {
         self.a2 = a2 * inv_a0;
     }
 
+    /// Filters one sample.
+    ///
+    /// A NaN or infinite input sample is treated as silence, so it never reaches the state.
+    /// If the output still leaves the finite range, the state is cleared and 0.0 is returned,
+    /// so one bad sample cannot silence the filter until the host resets it.
     #[inline]
     pub fn process_sample(&mut self, x: f32) -> f32 {
+        let x = if x.is_finite() { x } else { 0.0 };
         let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
             - self.a2 * self.y2;
+        if !y.is_finite() {
+            self.reset();
+            return 0.0;
+        }
         self.x2 = self.x1;
         self.x1 = x;
         self.y2 = self.y1;

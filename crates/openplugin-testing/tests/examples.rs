@@ -37,12 +37,11 @@ fn example_design_editor_conforms() {
     report.assert_pass();
 }
 
-/// A real finding: `openplugin_dsp::Biquad` keeps a NaN in its state for good, so one NaN at
-/// the input silences the EQ until the host resets it. Everything else passes. When the filter
-/// is fixed this test fails; change it to `assert_pass`.
+/// `openplugin_dsp::Biquad` used to keep a NaN in its state for good, which this kit found;
+/// the filter now drops non-finite input, so the EQ passes everything.
 #[test]
-fn example_console_eq_conforms_except_nan_recovery() {
+fn example_console_eq_conforms() {
     let report = conformance(console_eq::ConsoleEqPlugin::default, options());
     println!("{report}");
-    assert_eq!(report.failed_checks(), vec![openplugin_testing::Check::HostileInput], "{report}");
+    report.assert_pass();
 }
