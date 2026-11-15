@@ -3,10 +3,10 @@
 // .component, registered in this process only (nothing is installed), with
 // AudioToolbox only (no op_shell_* calls).
 //
-// Contract: the Audio Unit shell reads its parameters once at the start of a
-// render call (AUEffectBase scheduled parameter ramps are not used), so a
-// change takes effect on a render-call boundary. The host therefore cuts a
-// render call at every event frame and sets the parameters before it.
+// Contract: the Audio Unit shell takes a parameter change at its sample offset. The host renders
+// each host block in one render call and schedules every change of the block with
+// AudioUnitScheduleParameters (an immediate event at the change's offset), so the change lands on
+// its frame like the reference's.
 //
 //   ParityAU <bundle> <scenario> <output>
 #include "scenario.h"
@@ -65,12 +65,19 @@ int main(int argc, char** argv) {
     PARITY_CHECK(AudioUnitInitialize(unit) == noErr);
 
     std::vector<float> out[2] = {std::vector<float>(s.frames), std::vector<float>(s.frames)};
-    const auto cuts = parity_cuts(s);
     ProofBuffers buffers(2, s.block);
-    for (size_t k = 0; k + 1 < cuts.size(); ++k) {
-        const uint32_t a = cuts[k], b = cuts[k + 1];
+    for (uint32_t a = 0; a < s.frames; a += s.block) {
+        const uint32_t b = std::min(a + s.block, s.frames);
         for (const auto& e : s.events) {
-            if (e.frame == a) PARITY_CHECK(AudioUnitSetParameter(unit, ids[e.param], kAudioUnitScope_Global, 0, e.value, 0) == noErr);
+            if (e.frame < a || e.frame >= b) continue;
+            AudioUnitParameterEvent event{};
+            event.scope = kAudioUnitScope_Global;
+            event.element = 0;
+            event.parameter = ids[e.param];
+            event.eventType = kParameterEvent_Immediate;
+            event.eventValues.immediate.bufferOffset = e.frame - a;
+            event.eventValues.immediate.value = e.value;
+            PARITY_CHECK(AudioUnitScheduleParameters(unit, &event, 1) == noErr);
         }
         PARITY_CHECK(proof_render(unit, buffers, b - a, static_cast<double>(a)) == noErr);
         for (int ch = 0; ch < 2; ++ch) std::copy(buffers.data[ch].begin(), buffers.data[ch].begin() + (b - a), out[ch].begin() + a);

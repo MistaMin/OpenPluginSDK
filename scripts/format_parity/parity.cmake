@@ -61,10 +61,14 @@ if(OP_BUILD_AU)
   set(OP_BUNDLE_ID "${OP_PARITY_SAVED_ID}")
   set(OP_AU_SUBTYPE "${OP_PARITY_SAVED_SUB}")
   set(OP_AU_MANUFACTURER "${OP_PARITY_SAVED_MAN}")
-  add_library(OpenPluginAUFault MODULE au/OpenPluginAU.cpp "${OP_PARITY_DIR}/native/parity_fault.cpp")
+  # The Audio Unit shell renders through op_shell_process_events, so its fault is that call
+  # (native/au/parity_fault_events.cpp); the other file is kept for the op_shell_process rename.
+  add_library(OpenPluginAUFault MODULE au/OpenPluginAU.cpp "${OP_PARITY_DIR}/native/parity_fault.cpp" au/parity_fault_events.cpp)
+  op_au_set_type(OpenPluginAUFault "${OP_AU_TYPE}")
+  set_source_files_properties(au/parity_fault_events.cpp PROPERTIES COMPILE_DEFINITIONS "PARITY_FAULT_SCALE=${OP_PARITY_FAULT_SCALE}f")
   target_compile_features(OpenPluginAUFault PRIVATE cxx_std_23)
   target_include_directories(OpenPluginAUFault PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
-  target_compile_definitions(OpenPluginAUFault PRIVATE ${OP_PARITY_FAULT_DEFS})
+  target_compile_definitions(OpenPluginAUFault PRIVATE ${OP_PARITY_FAULT_DEFS} "op_shell_process_events=parity_faulty_process_events")
   set_target_properties(OpenPluginAUFault PROPERTIES
     OUTPUT_NAME "ParityFault"
     BUNDLE TRUE

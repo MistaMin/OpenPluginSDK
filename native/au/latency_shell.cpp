@@ -85,3 +85,6 @@ uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t lengt
 double op_shell_tail_seconds(void*) { return 0.0; }
 #endif
 }
+
+// The ABI 2 calls, mapped onto the op_shell_process above.
+#include "stub_abi2.h"
