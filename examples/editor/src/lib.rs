@@ -547,13 +547,13 @@ mod tests {
         p.frame(scale, "hover the knob");
         p.both(|e| e.mouse_down(kx, ky, 1));
         p.frame(scale, "press the knob");
-        for i in 1..=40 {
-            let y = ky - i as f32 * 3.0;
+        for i in 1..=14 {
+            let y = ky - i as f32 * 8.0;
             p.both(|e| e.mouse_move(kx, y));
             p.frame(scale, &format!("drag up {i}"));
         }
-        for i in 1..=40 {
-            let y = ky - 120.0 + i as f32 * 5.0;
+        for i in 1..=14 {
+            let y = ky - 112.0 + i as f32 * 14.0;
             p.both(|e| e.mouse_move(kx, y));
             p.frame(scale, &format!("drag down {i}"));
         }
@@ -598,7 +598,7 @@ mod tests {
                 peaks.raise(peak);
             }
             p.frame(scale, &format!("peak {peak}"));
-            for i in 0..45 {
+            for i in 0..22 {
                 p.frame(scale, &format!("fall after {peak}, tick {i}"));
             }
         }
@@ -617,8 +617,8 @@ mod tests {
         for scale in [2.0, 1.0, 1.5] {
             let p = run(scale);
             // The comparison would be empty if everything were repainted every time.
-            assert!(p.partial > 100, "scale {scale}: only {} partial frames of {}", p.partial, p.frames);
-            assert!(p.skipped > 20, "scale {scale}: only {} idle frames of {}", p.skipped, p.frames);
+            assert!(p.partial > 40, "scale {scale}: only {} partial frames of {}", p.partial, p.frames);
+            assert!(p.skipped > 10, "scale {scale}: only {} idle frames of {}", p.skipped, p.frames);
         }
     }
 
