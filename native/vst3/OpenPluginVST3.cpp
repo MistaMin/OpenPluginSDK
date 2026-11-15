@@ -568,15 +568,27 @@ public:
         }
         op_editor_bind(editor_, engine_);
         op_editor_set_request_resize(editor_, frameContext, request);
-        if (!op_editor_attach(editor_, parent)) closeEditor();
+        if (!op_editor_attach(editor_, parent)) {
+            closeEditor();
+            return nullptr;
+        }
+        owner_ = frameContext;
         return editor_;
     }
     void* editor() const { return editor_; }
+    // The editor belongs to the view that opened it last. A host that opens a
+    // second view replaces the first view's editor, so the first view must not
+    // close, resize or read the second view's editor.
+    void* editorOf(const void* view) const { return editor_ && owner_ == view ? editor_ : nullptr; }
+    void closeEditorOf(const void* view) {
+        if (editor_ && owner_ == view) closeEditor();
+    }
     void closeEditor() {
         if (editor_) {
             op_editor_destroy(editor_);
             editor_ = nullptr;
         }
+        owner_ = nullptr;
     }
 
 private:
@@ -589,6 +601,7 @@ private:
     }
     static void hostEnd(void* context, uint32_t index) { static_cast<Controller*>(context)->EditController::endEdit(index); }
     void* editor_ = nullptr;
+    const void* owner_ = nullptr;
     void* engine_ = nullptr;
 #else
     IPlugView* PLUGIN_API createView(FIDString) SMTG_OVERRIDE { return nullptr; }
@@ -614,7 +627,7 @@ public:
         }
     }
     ~EditorView() override {
-        if (open_ && controller_) controller_->closeEditor();
+        if (open_ && controller_) controller_->closeEditorOf(this);
     }
     tresult PLUGIN_API isPlatformTypeSupported(FIDString type) SMTG_OVERRIDE {
         return type && std::strcmp(type, kPlatformTypeNSView) == 0 ? kResultTrue : kResultFalse;
@@ -628,7 +641,7 @@ public:
         return CPluginView::attached(parent, type);
     }
     tresult PLUGIN_API removed() SMTG_OVERRIDE {
-        if (open_ && controller_) controller_->closeEditor();
+        if (open_ && controller_) controller_->closeEditorOf(this);
         open_ = false;
         return CPluginView::removed();
     }
@@ -637,7 +650,7 @@ public:
         if (!size) return kInvalidArgument;
         uint32_t width = 0;
         uint32_t height = 0;
-        if (open_ && controller_ && controller_->editor() && op_editor_get_size(controller_->editor(), &width, &height)) {
+        if (void* editor = ownEditor(); editor && op_editor_get_size(editor, &width, &height)) {
             rect = ViewRect(rect.left, rect.top, rect.left + static_cast<int32>(width), rect.top + static_cast<int32>(height));
         }
         *size = rect;
@@ -664,15 +677,17 @@ public:
     }
 
 private:
+    // This view's editor, or null when it is closed or another view replaced it.
+    void* ownEditor() const { return open_ && controller_ ? controller_->editorOf(this) : nullptr; }
     // The editor's own adjustment when it is open. Before that only the
     // bounds are known, so the aspect is not applied until the editor opens.
     void adjust(uint32_t& width, uint32_t& height) const {
-        if (open_ && controller_ && controller_->editor() && op_editor_adjust_size(controller_->editor(), &width, &height)) return;
+        if (void* editor = ownEditor(); editor && op_editor_adjust_size(editor, &width, &height)) return;
         width = width < minW_ ? minW_ : (width > maxW_ ? maxW_ : width);
         height = height < minH_ ? minH_ : (height > maxH_ ? maxH_ : height);
     }
     void resizeEditor(uint32_t width, uint32_t height) {
-        if (open_ && controller_ && controller_->editor()) op_editor_resize(controller_->editor(), width, height);
+        if (void* editor = ownEditor()) op_editor_resize(editor, width, height);
     }
     // The editor asks for a size: the frame decides, then the editor takes it.
     static uint32_t requestResize(void* context, uint32_t width, uint32_t height) {

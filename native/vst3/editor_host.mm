@@ -255,6 +255,33 @@ int main(int argc, char** argv) {
         CHECK(view->removed() == kResultOk);
         CHECK(parent.subviews.count == 0);
         view->release();
+
+        // Two views on one controller: the second replaces the first's editor.
+        // Removing and releasing the first must leave the second's editor alone.
+        {
+            NSWindow* secondWindow = [[NSWindow alloc] initWithContentRect:frame styleMask:NSWindowStyleMaskBorderless backing:NSBackingStoreBuffered defer:NO];
+            NSView* secondParent = [secondWindow contentView];
+            IPlugView* first = controller->createView(ViewType::kEditor);
+            CHECK(first && first->attached(parent, kPlatformTypeNSView) == kResultOk);
+            IPlugView* second = controller->createView(ViewType::kEditor);
+            CHECK(second && second->attached(secondParent, kPlatformTypeNSView) == kResultOk);
+            CHECK(secondParent.subviews.count == 1);
+            CHECK(first->removed() == kResultOk);
+            first->release();
+            spin(0.05);
+            CHECK(secondParent.subviews.count == 1);
+            ViewRect size{};
+            CHECK(second->getSize(&size) == kResultOk && size.getWidth() > 0);
+            const int before = handler.begins;
+            click(secondParent.subviews[0], secondWindow, size.getHeight(), cx * size.getWidth() / rect.getWidth(), cy * size.getHeight() / rect.getHeight(), 1);
+            spin(0.05);
+            std::printf("second view after the first closed: %d begin\n", handler.begins - before);
+            CHECK(handler.begins == before + 1);
+            CHECK(second->removed() == kResultOk);
+            CHECK(secondParent.subviews.count == 0);
+            second->release();
+            [secondWindow release];
+        }
         // Open once more, then tear down with the processor going first.
         view = controller->createView(ViewType::kEditor);
         CHECK(view && view->attached(parent, kPlatformTypeNSView) == kResultOk);
