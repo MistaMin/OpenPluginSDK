@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <type_traits>
@@ -41,7 +42,38 @@ std::vector<void*> gLive;
 #endif
 struct CachedParam {
     OpParamDesc desc;
+    // The plugin's labels at each step, for a choice parameter (empty for every other one).
+    std::vector<std::string> labels;
 };
+// The plugin's text for a plain value (op_shell_param_format). Main thread only; it allocates.
+std::string shellText(uint32_t index, double plain) {
+    char small[128];
+    const size_t length = op_shell_param_format(index, plain, small, sizeof(small));
+    if (length < sizeof(small)) return std::string(small, length);
+    std::string text(length + 1, '\0');
+    const size_t again = op_shell_param_format(index, plain, text.data(), text.size());
+    text.resize(std::min(again, length));
+    return text;
+}
+bool isNumberText(const std::string& text) {
+    char* end = nullptr;
+    std::strtod(text.c_str(), &end);
+    return end != text.c_str() && *end == '\0';
+}
+// A choice parameter has whole steps from min to max, no unit, and labels that are words. The ABI
+// has no "choice" flag, so a stepped number (labels like "3") stays an ordinary stepped parameter.
+std::vector<std::string> choiceLabels(uint32_t index, const OpParamDesc& desc) {
+    std::vector<std::string> labels;
+    if (!(desc.flags & OP_PARAM_DISCRETE) || desc.unit[0] != '\0' || desc.steps < 3 || desc.steps > 256) return labels;
+    if (desc.max - desc.min != static_cast<double>(desc.steps - 1) || desc.min != std::floor(desc.min)) return labels;
+    bool allNumbers = true;
+    for (uint32_t step = 0; step < desc.steps; ++step) {
+        labels.push_back(shellText(index, desc.min + step));
+        if (!isNumberText(labels.back())) allNumbers = false;
+    }
+    if (allNumbers) labels.clear();
+    return labels;
+}
 // The shell's own key in the kAudioUnitProperty_ClassInfo dictionary. The value is the
 // opaque blob of op_shell_save_state, as CFData. The base class's keys stay as they are.
 #define OP_AU_STATE_KEY CFSTR("OpenPluginState")
@@ -130,6 +162,7 @@ public:
             for (uint32_t i = 0; i < info.param_count; ++i) {
                 if (!op_shell_param(i, &params_[i].desc)) continue;
                 this->Globals()->SetParameter(i, static_cast<float>(params_[i].desc.default_plain));
+                params_[i].labels = choiceLabels(i, params_[i].desc);
             }
             const uint32_t kind = op_shell_kind();
             // aumu is the instrument; aufx and aumf are both audio effects (an aumf also takes MIDI).
@@ -192,6 +225,17 @@ public:
             return noErr;
         }
 #endif
+        // The plugin's own parameter text; the parameter id travels in the struct.
+        if (id == kAudioUnitProperty_ParameterStringFromValue) {
+            size = sizeof(AudioUnitParameterStringFromValue);
+            writable = false;
+            return noErr;
+        }
+        if (id == kAudioUnitProperty_ParameterValueFromString) {
+            size = sizeof(AudioUnitParameterValueFromString);
+            writable = false;
+            return noErr;
+        }
         if (scope == kAudioUnitScope_Global) {
             if (id == kAudioUnitProperty_OfflineRender) {
                 size = sizeof(UInt32);
@@ -227,6 +271,28 @@ public:
             return noErr;
         }
 #endif
+        if (id == kAudioUnitProperty_ParameterStringFromValue) {
+            auto* request = static_cast<AudioUnitParameterStringFromValue*>(data);
+            if (request->inParamID >= params_.size()) return kAudioUnitErr_InvalidParameter;
+            const double plain = request->inValue ? static_cast<double>(*request->inValue) : static_cast<double>(this->Globals()->GetParameter(request->inParamID));
+            if (!std::isfinite(plain)) return kAudioUnitErr_InvalidParameterValue;
+            const std::string text = shellText(request->inParamID, plain);
+            // The host releases the string.
+            request->outString = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8*>(text.data()), static_cast<CFIndex>(text.size()), kCFStringEncodingUTF8, false);
+            return request->outString ? OSStatus(noErr) : OSStatus(kAudioUnitErr_InvalidPropertyValue);
+        }
+        if (id == kAudioUnitProperty_ParameterValueFromString) {
+            auto* request = static_cast<AudioUnitParameterValueFromString*>(data);
+            if (request->inParamID >= params_.size() || !request->inString) return kAudioUnitErr_InvalidParameter;
+            const CFIndex room = CFStringGetMaximumSizeForEncoding(CFStringGetLength(request->inString), kCFStringEncodingUTF8) + 1;
+            if (room > 4096) return kAudioUnitErr_InvalidPropertyValue;
+            std::string text(static_cast<size_t>(room), '\0');
+            if (!CFStringGetCString(request->inString, text.data(), room, kCFStringEncodingUTF8)) return kAudioUnitErr_InvalidPropertyValue;
+            double plain = 0.0;
+            if (!op_shell_param_parse(request->inParamID, text.c_str(), &plain) || !std::isfinite(plain)) return kAudioUnitErr_InvalidPropertyValue;
+            request->outValue = static_cast<AudioUnitParameterValue>(plain);
+            return noErr;
+        }
         if (scope == kAudioUnitScope_Global) {
             if (id == kAudioUnitProperty_OfflineRender) {
                 *static_cast<UInt32*>(data) = offline_.load(std::memory_order_relaxed) ? 1 : 0;
@@ -526,6 +592,25 @@ public:
         else if (std::strcmp(desc.unit, ":1") == 0) info.unit = kAudioUnitParameterUnit_Ratio;
         else if ((desc.flags & OP_PARAM_DISCRETE) && desc.max == 1.0 && desc.steps == 2) info.unit = kAudioUnitParameterUnit_Boolean;
         else info.unit = kAudioUnitParameterUnit_Generic;
+        // Hosts ask the plugin for the text of every value (kAudioUnitProperty_ParameterStringFromValue).
+        info.flags |= kAudioUnitParameterFlag_ValuesHaveStrings;
+        if (!params_[id].labels.empty()) info.unit = kAudioUnitParameterUnit_Indexed;
+        return noErr;
+    }
+    // The labels of a choice parameter, one per step from min (kAudioUnitParameterUnit_Indexed).
+    OSStatus GetParameterValueStrings(AudioUnitScope scope, AudioUnitParameterID id, CFArrayRef* strings) override {
+        if (scope != kAudioUnitScope_Global || id >= params_.size() || params_[id].labels.empty()) return kAudioUnitErr_InvalidProperty;
+        if (!strings) return noErr;
+        const auto& labels = params_[id].labels;
+        CFMutableArrayRef array = CFArrayCreateMutable(nullptr, static_cast<CFIndex>(labels.size()), &kCFTypeArrayCallBacks);
+        if (!array) return kAudio_ParamError;
+        for (const std::string& label : labels) {
+            CFStringRef text = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8*>(label.data()), static_cast<CFIndex>(label.size()), kCFStringEncodingUTF8, false);
+            if (!text) { CFRelease(array); return kAudio_ParamError; }
+            CFArrayAppendValue(array, text);
+            CFRelease(text);
+        }
+        *strings = array;  // the host releases it
         return noErr;
     }
     bool validValue(AudioUnitParameterID id, AudioUnitParameterValue value) const {

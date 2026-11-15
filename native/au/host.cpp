@@ -8,6 +8,7 @@
 #include "op_shell.h"
 #include "proof_au.h"
 #include <limits>
+#include <string>
 static std::vector<AudioUnitParameterID> parameter_ids(AudioUnit unit) {
     UInt32 size = 0;
     CHECK(AudioUnitGetPropertyInfo(unit, kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0, &size, nullptr) == noErr);
@@ -64,6 +65,78 @@ static void check_parameters(AudioUnit unit) {
         CHECK(std::fabs(value - desc.default_plain) < 1e-5);
     }
 }
+// The Audio Unit shows the plug-in's own parameter text (op_shell_param_format / op_shell_param_parse),
+// not the number: the example's Gain at +6 dB reads what ParamInfo::format gives, a typed "6 dB"
+// reads 6.0, and the toggle reads its labels.
+static std::string abi_text(uint32_t id, double plain) {
+    char buf[256] = {};
+    const size_t length = op_shell_param_format(id, plain, buf, sizeof(buf));
+    CHECK(length > 0 && length < sizeof(buf));
+    return buf;
+}
+static void check_text(AudioUnit unit, int gainId, int warmId) {
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        OpParamDesc desc{};
+        CHECK(op_shell_param(i, &desc) != 0);
+        AudioUnitParameterInfo host{};
+        UInt32 hostSize = sizeof(host);
+        CHECK(AudioUnitGetProperty(unit, kAudioUnitProperty_ParameterInfo, kAudioUnitScope_Global, i, &host, &hostSize) == noErr);
+        // The flag that tells a host to ask the plug-in for the text.
+        CHECK((host.flags & kAudioUnitParameterFlag_ValuesHaveStrings) != 0);
+        const double middle = 0.5 * (desc.min + desc.max);
+        for (double plain : {desc.min, desc.default_plain, middle, desc.max}) {
+            const auto value = static_cast<AudioUnitParameterValue>(plain);
+            const std::string text = proof_text_of(unit, i, &value);
+            CHECK(text == abi_text(i, value));
+            double back = -777.0;
+            CHECK(proof_value_of(unit, i, text.c_str(), &back));
+            CHECK(op_shell_param_format(i, back, nullptr, 0) == text.size() && abi_text(i, back) == text);
+        }
+        std::vector<std::string> labels;
+        const bool indexed = host.unit == kAudioUnitParameterUnit_Indexed;
+        CHECK(proof_value_strings(unit, i, &labels) == indexed);
+    }
+    // Gain +6 dB is the plug-in's text (the example's -24..24 dB), not "6.0000".
+    OpParamDesc gain{};
+    CHECK(op_shell_param(static_cast<uint32_t>(gainId), &gain) != 0);
+    CHECK(gain.min <= 6.0 && gain.max >= 6.0);
+    const AudioUnitParameterValue six = 6.0f;
+    const std::string sixText = proof_text_of(unit, gainId, &six);
+    std::printf("AU Gain +6 dB reads '%s'\n", sixText.c_str());
+    CHECK(sixText == abi_text(static_cast<uint32_t>(gainId), 6.0));
+    CHECK(sixText.find("dB") != std::string::npos && sixText.find("6") != std::string::npos);
+    // A null value asks for the current one.
+    CHECK(AudioUnitSetParameter(unit, gainId, kAudioUnitScope_Global, 0, six, 0) == noErr);
+    CHECK(proof_text_of(unit, gainId, nullptr) == sixText);
+    double plain = -777.0;
+    CHECK(proof_value_of(unit, gainId, "6 dB", &plain) && plain == 6.0);
+    CHECK(proof_value_of(unit, gainId, "-3", &plain) && plain == -3.0);
+    CHECK(proof_value_of(unit, gainId, sixText.c_str(), &plain) && plain == 6.0);
+    CHECK(proof_value_of(unit, gainId, "99 dB", &plain) && plain == gain.max);  // clamped by the plug-in
+    plain = -777.0;
+    CHECK(!proof_value_of(unit, gainId, "loud", &plain) && plain == -777.0);
+    CHECK(!proof_value_of(unit, gainId, "3 parsecs", &plain));
+    CHECK(!proof_value_of(unit, gainId, "", &plain));
+    // Unknown parameters and bad values are refused.
+    bool ok = true;
+    CHECK(proof_text_of(unit, 9999, &six, &ok).empty() && !ok);
+    const AudioUnitParameterValue nan = std::numeric_limits<float>::quiet_NaN();
+    proof_text_of(unit, gainId, &nan, &ok);
+    CHECK(!ok);
+    CHECK(!proof_value_of(unit, 9999, "6 dB", &plain));
+    // The toggle reads its labels.
+    const AudioUnitParameterValue off = 0.0f, on = 1.0f;
+    const std::string offText = proof_text_of(unit, warmId, &off), onText = proof_text_of(unit, warmId, &on);
+    std::printf("AU Warm reads '%s' and '%s'\n", offText.c_str(), onText.c_str());
+    CHECK(offText == abi_text(static_cast<uint32_t>(warmId), 0.0) && onText == abi_text(static_cast<uint32_t>(warmId), 1.0));
+    CHECK(offText != onText && !offText.empty() && !onText.empty());
+    CHECK(offText != "0" && onText != "1" && offText.find("0.") == std::string::npos);
+    CHECK(proof_value_of(unit, warmId, onText.c_str(), &plain) && plain == 1.0);
+    CHECK(proof_value_of(unit, warmId, offText.c_str(), &plain) && plain == 0.0);
+    CHECK(AudioUnitSetParameter(unit, gainId, kAudioUnitScope_Global, 0, static_cast<AudioUnitParameterValue>(gain.default_plain), 0) == noErr);
+}
 static std::vector<float> render_au(AudioUnit unit, UInt32 channels, int blocks) {
     constexpr UInt32 kFrames = 512;
     std::vector<std::vector<float>> output(channels, std::vector<float>(kFrames));
@@ -98,6 +171,7 @@ int main(int argc, char** argv) {
         OpParamDesc warmDesc{};
         CHECK(op_shell_param(static_cast<uint32_t>(gainId), &gainDesc) != 0);
         CHECK(op_shell_param(static_cast<uint32_t>(warmId), &warmDesc) != 0);
+        check_text(unit, gainId, warmId);
         CHECK(AudioUnitSetParameter(unit, gainId, kAudioUnitScope_Global, 0, std::numeric_limits<float>::quiet_NaN(), 0) != noErr);
         CHECK(AudioUnitSetParameter(unit, gainId, kAudioUnitScope_Global, 0, static_cast<AudioUnitParameterValue>(gainDesc.max + 10.0), 0) != noErr);
         CHECK(AudioUnitInitialize(unit) == noErr);

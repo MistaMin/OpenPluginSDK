@@ -4,9 +4,29 @@
 // notes, no layouts and no sidechain; process_events maps onto their op_shell_process.
 // Include after the stand-in's own op_shell_process. Test code, never linked into a product.
 #pragma once
+// Define OP_STUB_HAS_PARAM_TEXT before including to bring your own op_shell_param_format/parse.
 #include "op_shell.h"
+#include <cstdio>
+#include <cstdlib>
 
 extern "C" {
+#ifndef OP_STUB_HAS_PARAM_TEXT
+// ABI 3 parameter text: the plain number with "%g", read back with strtod.
+size_t op_shell_param_format(uint32_t, double plain, char* buf, size_t cap) {
+    char text[64];
+    const int length = std::snprintf(text, sizeof(text), "%g", plain);
+    if (buf && cap > 0) { std::snprintf(buf, cap, "%s", text); }
+    return length < 0 ? 0 : static_cast<size_t>(length);
+}
+int op_shell_param_parse(uint32_t, const char* text, double* out) {
+    if (!text || !out) return 0;
+    char* end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || *end) return 0;
+    *out = value;
+    return 1;
+}
+#endif
 uint32_t op_shell_abi_version(void) { return OP_SHELL_ABI; }
 uint32_t op_shell_kind(void) { return OP_KIND_EFFECT; }
 uint32_t op_shell_note_ports(void) { return 0; }
