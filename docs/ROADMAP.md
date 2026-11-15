@@ -105,6 +105,8 @@ The Rust `Plugin` trait already has notes, MIDI output, transport, sidechain, ch
 9. **Downmix and upmix matrices.** A module in `openplugin-dsp` folds any SDK layout to stereo or mono (ITU-R BS.775 for 5.x; documented, matching folds for 6.1, 7.1 and the Atmos beds), with the centre, surround and LFE levels as parameters, and the matching passive upmix. Owns a new `openplugin-dsp` module. Proof: unit tests against the published coefficients, energy checks, no allocation.
 10. **Stereo plugins on surround buses.** A plugin written for stereo opts in to an adapter that runs it on a surround bus: one engine per channel pair (L/R, sides, backs, height pairs), the centre as mono, the LFE processed, passed or muted by the plugin's choice, every parameter linked, and an optional shared detector so dynamics move every channel together. A `fold to stereo` mode uses task 9 for surround in, stereo out. Opt-in only: wideners and reverbs that need the speaker positions keep their own surround code. Owns a new `openplugin-core` adapter module and the layout lists the entries publish. After tasks 8 and 9. Proof: a stereo test plugin on 5.1 and 7.1.4 matches running the engines by hand, with linked gain reduction, in every format.
 
+Status: tasks 1 (shell ABI 2), 5 (LV2) and 9 (downmix and upmix) are done. Tasks 2 to 4 (VST3, Audio Unit, AAX) start now on ABI 2.
+
 Then **0.6.0**.
 
 ## 0.7: host integration and editor polish
@@ -130,13 +132,15 @@ Then **0.7.0**.
 6. **One sound in every format.** A test renders the same input and automation through CLAP, LV2, VST3, the Audio Unit and AAX and checks the outputs match the Rust engine's, sample for sample within float tolerance. Owns `scripts/format_parity/*`. Proof: the test passes for the examples and fails on a deliberately altered shell.
 7. **Installer.** `scripts/build_plugin.sh` can wrap the built bundles in a `.pkg` (`pkgbuild` and `productbuild`), one component per format, signed with a Developer ID Installer identity and notarised when the environment asks. Owns `scripts/*`, `docs/BUILD.md`. Proof: `pkgutil --payload-files` lists every bundle at its install path; the package is never installed by the test.
 
-Status: tasks 1, 2, 4, 5 and 7 are done (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
+Status: tasks 1, 2, 4, 5, 6 and 7 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
 
 The freeze itself and the crates.io publish are the owner's decisions.
 
 ## DSP library: building blocks for good products
 
 This track runs beside the milestones. `openplugin-dsp` has a starter set: an RBJ biquad, one compressor, saturation curves with ADAA, 2x and linear-phase oversampling, a short convolver (1024 taps), loudness after BS.1770 and R 128, meters, a fixed delay, a naive oscillator, a sample voice, soft bypass and delta listening. It has no dither, no state-variable or crossover filters, no limiter or gate, no long convolution, no modulated delay or reverb, no band-limited oscillator or envelope, and no STFT. Every block below is allocation-free on the audio path, computes for the real sample rate (`effective_rate`), stays free of denormals, cites the paper or standard it follows, and is written from that source, never ported from JUCE or from code under a licence the SDK cannot carry. A cookbook in `docs/DSP_COOKBOOK.md` shows each one inside a small plugin.
+
+Done: task 1 (dither and noise shaping). Running: tasks 2, 3 and 4.
 
 Blocks that land before 1.0 are frozen with it. Later ones arrive in minor releases, since adding a module breaks nothing.
 
