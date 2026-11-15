@@ -66,7 +66,7 @@
 //!   [`ControlSet::take_changed`] lists the controls whose look changed since
 //!   the last call, so an editor repaints only those ([`openplugin_core::Editor::damage`]).
 
-use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, DamageRect, TextEdit, Tooltip};
+use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, DamageRect, ParamMenu, ParamMenuAction, TextEdit, Tooltip};
 use openplugin_core::{EditorHost, ParamFlags, ParamInfo, Unit};
 
 pub use openplugin_core::editor::{Key, Modifiers};
@@ -341,6 +341,8 @@ pub struct ControlSet {
     editing: Option<ControlId>,
     /// A request for a field the view has not taken yet.
     pending_edit: Option<TextEdit>,
+    /// A request for the SDK's own parameter menu the view has not taken yet.
+    pending_menu: Option<ParamMenu>,
 }
 
 impl ControlSet {
@@ -359,6 +361,7 @@ impl ControlSet {
             double_click: DoubleClick::default(),
             editing: None,
             pending_edit: None,
+            pending_menu: None,
         }
     }
 
@@ -420,6 +423,63 @@ impl ControlSet {
     pub fn text_edit_cancel(&mut self) {
         self.editing = None;
         self.pending_edit = None;
+    }
+
+    /// The right button (or Control-click) went down at (`x`, `y`). On a
+    /// control it asks the host for the parameter's context menu
+    /// ([`EditorHost::context_menu`]); when the host shows none, the SDK's own
+    /// menu is queued for [`Self::take_param_menu`]. Returns true when the
+    /// click was on a control (and so is not for the host), false otherwise
+    /// and while the pointer holds a control.
+    pub fn context_click(&mut self, x: f32, y: f32) -> bool {
+        if self.grab.is_some() {
+            return false;
+        }
+        let Some(id) = self.hit(x, y) else { return false };
+        self.release_keys();
+        self.set_focus(Some(id));
+        let (param, name) = (self.controls[id].param, self.controls[id].info.name);
+        if !self.host.context_menu(param, x, y) {
+            self.pending_menu = Some(ParamMenu { param: param as u32, x, y, label: name.to_string() });
+        }
+        true
+    }
+
+    /// The request queued by [`Self::context_click`], once.
+    /// [`openplugin_core::Editor::take_param_menu`] forwards here.
+    pub fn take_param_menu(&mut self) -> Option<ParamMenu> {
+        self.pending_menu.take()
+    }
+
+    /// An item of the SDK's parameter menu was chosen for parameter `param`:
+    /// reset sends the default as one gesture, paste reads the text with
+    /// `ParamInfo::parse` (clamped; text that is not a value changes nothing),
+    /// type opens the text field, and copy returns the formatted value.
+    /// [`openplugin_core::Editor::param_menu_action`] forwards here.
+    pub fn param_menu_action(&mut self, param: u32, action: ParamMenuAction) -> Option<String> {
+        let id = self.controls.iter().rposition(|c| c.param == param as usize)?;
+        let info = self.controls[id].info;
+        match action {
+            ParamMenuAction::Reset => {
+                if self.controls[id].interactive() {
+                    self.send_value(id, info.clamp(info.default));
+                }
+                None
+            }
+            ParamMenuAction::Copy => Some(info.format(self.controls[id].value)),
+            ParamMenuAction::Paste(text) => {
+                if self.controls[id].interactive() {
+                    if let Some(v) = info.parse(&text).filter(|v| v.is_finite()) {
+                        self.send_value(id, info.clamp(v));
+                    }
+                }
+                None
+            }
+            ParamMenuAction::Type => {
+                self.begin_text_edit(id);
+                None
+            }
+        }
     }
 
     /// One tooltip per control, in the order they were added (a tooltip's
@@ -1807,6 +1867,58 @@ mod tests {
         set.mouse_down(30.0, 30.0, 2);
         set.mouse_up(30.0, 30.0);
         assert!(set.take_text_edit().is_some() && take(&log).is_empty());
+    }
+
+    #[test]
+    fn right_click_asks_the_host_and_falls_back_to_the_sdk_menu() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        // A host with a menu: it is asked for the right parameter, no fallback.
+        let log: Log = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let asked = Rc::new(Cell::new(None));
+        let (sink, seen) = (log.clone(), asked.clone());
+        let host = EditorHost::new(move |g| sink.borrow_mut().push(g)).with_context_menu(move |p, x, y| {
+            seen.set(Some((p, x, y)));
+            true
+        });
+        let mut set = ControlSet::new(host).with(Control::knob(Area::rect(0.0, 0.0, 60.0, 60.0), 0, &GAIN));
+        assert!(!set.context_click(100.0, 100.0), "empty space is the host's");
+        assert!(asked.get().is_none());
+        assert!(set.context_click(30.0, 20.0));
+        assert_eq!(asked.get(), Some((0, 30, 20)));
+        assert!(set.take_param_menu().is_none() && take(&log).is_empty());
+        // No host menu: the SDK queues its own, once.
+        let (mut set, log) = knob_rig();
+        assert!(set.context_click(30.0, 20.0));
+        let menu = set.take_param_menu().expect("fallback menu");
+        assert_eq!((menu.param, menu.label.as_str()), (0, "Gain"));
+        assert!(set.take_param_menu().is_none() && take(&log).is_empty());
+        // A held control keeps the click.
+        set.mouse_down(30.0, 30.0, 1);
+        assert!(!set.context_click(30.0, 30.0));
+    }
+
+    #[test]
+    fn sdk_menu_items_reset_copy_paste_and_type() {
+        let (mut set, log) = knob_rig();
+        set.param_changed(0, 10.0);
+        assert_eq!(set.param_menu_action(0, ParamMenuAction::Copy), Some("10.0 dB".to_string()));
+        assert!(take(&log).is_empty(), "copy changes nothing");
+        assert_eq!(set.param_menu_action(0, ParamMenuAction::Reset), None);
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, 0.0), End(0)]);
+        // Paste reads units and clamps; junk and unknown parameters do nothing.
+        set.param_menu_action(0, ParamMenuAction::Paste("-6 dB".into()));
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, -6.0), End(0)]);
+        set.param_menu_action(0, ParamMenuAction::Paste("99".into()));
+        assert_eq!(take(&log), vec![Begin(0), Perform(0, GAIN.max), End(0)]);
+        set.param_menu_action(0, ParamMenuAction::Paste("banana".into()));
+        set.param_menu_action(7, ParamMenuAction::Paste("1".into()));
+        assert!(take(&log).is_empty());
+        assert_eq!(set.param_menu_action(7, ParamMenuAction::Copy), None);
+        // Type opens the text field over the control.
+        set.param_menu_action(0, ParamMenuAction::Type);
+        assert_eq!(set.take_text_edit().map(|e| e.label), Some("Gain".to_string()));
+        assert_eq!(set.editing(), Some(0));
     }
 
     #[test]

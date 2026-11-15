@@ -450,3 +450,80 @@ pub struct clap_host_gui {
     pub request_hide: Option<unsafe extern "C" fn(host: *const clap_host) -> bool>,
     pub closed: Option<unsafe extern "C" fn(host: *const clap_host, was_destroyed: bool)>,
 }
+
+pub const EXT_CONTEXT_MENU: &[u8] = b"clap.context-menu/1\0";
+pub const EXT_CONTEXT_MENU_COMPAT: &[u8] = b"clap.context-menu.draft/0\0";
+pub const CONTEXT_MENU_TARGET_KIND_GLOBAL: u32 = 0;
+pub const CONTEXT_MENU_TARGET_KIND_PARAM: u32 = 1;
+
+/// What a context menu is for: the whole plugin or one parameter (`id` is the CLAP param id).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct clap_context_menu_target {
+    pub kind: u32,
+    pub id: u32,
+}
+
+/// The host's menu builder, given to the plugin's `populate`.
+#[repr(C)]
+pub struct clap_context_menu_builder {
+    pub ctx: *mut c_void,
+    pub add_item: Option<unsafe extern "C" fn(builder: *const clap_context_menu_builder, item_kind: u32, item_data: *const c_void) -> bool>,
+    pub supports: Option<unsafe extern "C" fn(builder: *const clap_context_menu_builder, item_kind: u32) -> bool>,
+}
+
+/// `clap_plugin_context_menu`: the plugin's items for a host menu.
+#[repr(C)]
+pub struct clap_plugin_context_menu {
+    pub populate: Option<unsafe extern "C" fn(plugin: *const clap_plugin, target: *const clap_context_menu_target, builder: *const clap_context_menu_builder) -> bool>,
+    pub perform: Option<unsafe extern "C" fn(plugin: *const clap_plugin, target: *const clap_context_menu_target, action_id: u32) -> bool>,
+}
+
+/// `clap_host_context_menu`: the host's menu for a target.
+#[repr(C)]
+pub struct clap_host_context_menu {
+    pub populate: Option<unsafe extern "C" fn(host: *const clap_host, target: *const clap_context_menu_target, builder: *const clap_context_menu_builder) -> bool>,
+    pub perform: Option<unsafe extern "C" fn(host: *const clap_host, target: *const clap_context_menu_target, action_id: u32) -> bool>,
+    pub can_popup: Option<unsafe extern "C" fn(host: *const clap_host) -> bool>,
+    pub popup: Option<unsafe extern "C" fn(host: *const clap_host, target: *const clap_context_menu_target, screen_index: i32, x: i32, y: i32) -> bool>,
+}
+
+pub const EXT_TRACK_INFO: &[u8] = b"clap.track-info/1\0";
+pub const EXT_TRACK_INFO_COMPAT: &[u8] = b"clap.track-info.draft/1\0";
+pub const TRACK_INFO_HAS_TRACK_NAME: u64 = 1 << 0;
+pub const TRACK_INFO_HAS_TRACK_COLOR: u64 = 1 << 1;
+pub const TRACK_INFO_HAS_AUDIO_CHANNEL: u64 = 1 << 2;
+pub const TRACK_INFO_IS_FOR_RETURN_TRACK: u64 = 1 << 3;
+pub const TRACK_INFO_IS_FOR_BUS: u64 = 1 << 4;
+pub const TRACK_INFO_IS_FOR_MASTER: u64 = 1 << 5;
+
+/// `clap_color`: one byte per channel.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct clap_color {
+    pub alpha: u8,
+    pub red: u8,
+    pub green: u8,
+    pub blue: u8,
+}
+
+#[repr(C)]
+pub struct clap_track_info {
+    pub flags: u64,
+    pub name: [c_char; NAME_SIZE],
+    pub color: clap_color,
+    pub audio_channel_count: i32,
+    pub audio_port_type: *const c_char,
+}
+
+/// `clap_plugin_track_info`: the host says the track changed.
+#[repr(C)]
+pub struct clap_plugin_track_info {
+    pub changed: Option<unsafe extern "C" fn(plugin: *const clap_plugin)>,
+}
+
+/// `clap_host_track_info`: what the host knows about the plugin's track.
+#[repr(C)]
+pub struct clap_host_track_info {
+    pub get: Option<unsafe extern "C" fn(host: *const clap_host, info: *mut clap_track_info) -> bool>,
+}

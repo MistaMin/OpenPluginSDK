@@ -636,6 +636,18 @@ impl Editor for DesignEditor {
         self.controls.take_text_edit()
     }
 
+    fn right_mouse_down(&mut self, x: f32, y: f32) -> bool {
+        self.controls.context_click(x, y)
+    }
+
+    fn take_param_menu(&mut self) -> Option<openplugin_core::editor::ParamMenu> {
+        self.controls.take_param_menu()
+    }
+
+    fn param_menu_action(&mut self, param: u32, action: openplugin_core::editor::ParamMenuAction) -> Option<String> {
+        self.controls.param_menu_action(param, action)
+    }
+
     fn text_edit_commit(&mut self, text: &str) -> bool {
         self.controls.text_edit_commit(text)
     }

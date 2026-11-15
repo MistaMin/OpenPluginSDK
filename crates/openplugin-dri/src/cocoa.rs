@@ -53,7 +53,7 @@
 
 #![allow(unsafe_code, clippy::missing_safety_doc)]
 
-use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, FileDialog, SizeRange, TextEdit};
+use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, FileDialog, ParamMenu, ParamMenuAction, SizeRange, TextEdit};
 use openplugin_core::editor::{Key, Modifiers};
 use openplugin_core::Editor;
 use std::ffi::{c_char, c_void, CStr, CString};
@@ -234,7 +234,18 @@ struct State {
     /// Answers to file dialogs, delivered on the next tick.
     file_results: Vec<(u32, Option<Vec<PathBuf>>)>,
     file_hook: Option<FileHook>,
+    /// The parameter the SDK's menu was last shown for (the items act on it).
+    menu_param: u32,
+    menu_hook: Option<MenuHook>,
 }
+
+/// The items of the SDK's own parameter menu, in order: the item chosen is an
+/// index into this list.
+pub const PARAM_MENU_ITEMS: [&str; 4] = ["Reset to default", "Copy value", "Paste value", "Type value"];
+
+/// Stands in for the system menu (tests): returning true means the menu was
+/// handled (nothing is shown); false lets the real `NSMenu` pop up.
+pub type MenuHook = Box<dyn FnMut(&ParamMenu) -> bool>;
 
 /// Stands in for the system file panel (tests): `Some(answer)` resolves the
 /// request, `None` lets the real panel open.
@@ -583,8 +594,40 @@ unsafe fn invalidate(this: Id) { unsafe {
     }
 }}
 
+/// The right button, or Control-click: the editor may take it for a parameter
+/// menu (the host's or the SDK's); otherwise it goes on to the host.
+extern "C" fn right_mouse_down(this: Id, _cmd: Sel, event: Id) {
+    unsafe {
+        close_text_field(this, true);
+        let mut used = false;
+        guarded(this, |st| {
+            sync_modifiers(st, event);
+            let (x, y) = local(this, st.size, event);
+            used = st.editor.right_mouse_down(x, y);
+        });
+        if used {
+            invalidate(this);
+        } else {
+            pass_on(this, b"rightMouseDown:\0", event);
+        }
+    }
+}
+
 extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
     unsafe {
+        // Control-click is a right click on a Mac.
+        if modifiers_from_flags(send!(usize, event, b"modifierFlags\0")).ctrl {
+            let mut used = false;
+            guarded(this, |st| {
+                sync_modifiers(st, event);
+                let (x, y) = local(this, st.size, event);
+                used = st.editor.right_mouse_down(x, y);
+            });
+            if used {
+                invalidate(this);
+                return;
+            }
+        }
         // A click on the view (the field takes its own) abandons the field.
         close_text_field(this, true);
         // A click gives the editor the keyboard, when it wants keys. Outside the
@@ -686,10 +729,15 @@ unsafe fn poll_requests(this: Id) { unsafe {
     }
     let mut edit = None;
     let mut dialog = None;
+    let mut menu = None;
     guarded(this, |st| {
         edit = st.editor.take_text_edit();
         dialog = st.editor.take_file_dialog();
+        menu = st.editor.take_param_menu();
     });
+    if let Some(menu) = menu {
+        show_param_menu(this, menu);
+    }
     if let Some(edit) = edit {
         open_text_field(this, edit);
     }
@@ -697,6 +745,106 @@ unsafe fn poll_requests(this: Id) { unsafe {
         open_file_dialog(this, dialog);
     }
 }}
+
+/// Show the SDK's own parameter menu at the click, or hand it to the test hook.
+/// The items act on the parameter through [`menu_item`].
+unsafe fn show_param_menu(this: Id, menu: ParamMenu) { unsafe {
+    let Some(st) = state(this) else { return };
+    st.menu_param = menu.param;
+    if let Some(hook) = st.menu_hook.as_mut() {
+        if hook(&menu) {
+            return;
+        }
+    }
+    let size = st.size;
+    let ns = send!(Id, send!(Id, class(b"NSMenu\0") as Id, b"alloc\0"), b"initWithTitle:\0", Id = ns_string(&menu.label));
+    if ns.is_null() {
+        return;
+    }
+    send!((), ns, b"setAutoenablesItems:\0", i8 = 0);
+    for (i, title) in PARAM_MENU_ITEMS.iter().enumerate() {
+        let item = send!(
+            Id,
+            send!(Id, class(b"NSMenuItem\0") as Id, b"alloc\0"),
+            b"initWithTitle:action:keyEquivalent:\0",
+            Id = ns_string(title),
+            Sel = sel(b"openpluginMenuItem:\0"),
+            Id = ns_string("")
+        );
+        send!((), item, b"setTag:\0", isize = i as isize);
+        send!((), item, b"setTarget:\0", Id = this);
+        send!((), ns, b"addItem:\0", Id = item);
+        send!((), item, b"release\0");
+    }
+    let bounds = send_rect(this, b"bounds\0");
+    let sx = if size.0 > 0 { bounds.size.w / f64::from(size.0) } else { 1.0 };
+    let sy = if size.1 > 0 { bounds.size.h / f64::from(size.1) } else { 1.0 };
+    let at = CGPoint { x: f64::from(menu.x) * sx, y: f64::from(menu.y) * sy };
+    // Blocks in the menu's own tracking loop; the chosen item runs `menu_item` inside it.
+    send!(i8, ns, b"popUpMenuPositioningItem:atLocation:inView:\0", Id = null_mut(), CGPoint = at, Id = this);
+    send!((), ns, b"release\0");
+}}
+
+const PASTEBOARD_TEXT: &str = "public.utf8-plain-text";
+
+unsafe fn pasteboard_text() -> Option<String> { unsafe {
+    let board = send!(Id, class(b"NSPasteboard\0") as Id, b"generalPasteboard\0");
+    if board.is_null() {
+        return None;
+    }
+    let s = send!(Id, board, b"stringForType:\0", Id = ns_string(PASTEBOARD_TEXT));
+    if s.is_null() {
+        return None;
+    }
+    let utf8 = send!(*const c_char, s, b"UTF8String\0");
+    (!utf8.is_null()).then(|| CStr::from_ptr(utf8).to_string_lossy().into_owned())
+}}
+
+unsafe fn set_pasteboard_text(text: &str) { unsafe {
+    let board = send!(Id, class(b"NSPasteboard\0") as Id, b"generalPasteboard\0");
+    if board.is_null() {
+        return;
+    }
+    send!(isize, board, b"clearContents\0");
+    send!(i8, board, b"setString:forType:\0", Id = ns_string(text), Id = ns_string(PASTEBOARD_TEXT));
+}}
+
+/// Run item `index` of [`PARAM_MENU_ITEMS`] for the parameter the menu was
+/// shown for. Paste reads the clipboard and copy writes it, unless `text` is
+/// given (tests), which stands in for the clipboard both ways.
+unsafe fn run_menu_item(this: Id, index: usize, text: Option<&str>) -> Option<String> { unsafe {
+    let param = state(this)?.menu_param;
+    let action = match index {
+        0 => ParamMenuAction::Reset,
+        1 => ParamMenuAction::Copy,
+        2 => ParamMenuAction::Paste(match text {
+            Some(t) => t.to_string(),
+            None => pasteboard_text().unwrap_or_default(),
+        }),
+        3 => ParamMenuAction::Type,
+        _ => return None,
+    };
+    let mut copied = None;
+    guarded(this, |st| copied = st.editor.param_menu_action(param, action));
+    if let (Some(t), None) = (copied.as_deref(), text) {
+        set_pasteboard_text(t);
+    }
+    invalidate(this);
+    copied
+}}
+
+/// The action of every item of the SDK's parameter menu; the tag is the index.
+extern "C" fn menu_item(this: Id, _cmd: Sel, sender: Id) {
+    unsafe {
+        if sender.is_null() {
+            return;
+        }
+        let tag = send!(isize, sender, b"tag\0");
+        if tag >= 0 {
+            run_menu_item(this, tag as usize, None);
+        }
+    }
+}
 
 /// Open the small native field over the control, with its text selected.
 unsafe fn open_text_field(this: Id, edit: TextEdit) { unsafe {
@@ -1348,6 +1496,8 @@ unsafe fn view_class() -> Class { unsafe {
     add(b"flagsChanged:\0", flags_changed as *const c_void, b"v@:@\0");
     add(b"acceptsFirstMouse:\0", yes_event as *const c_void, b"c@:@\0");
     add(b"mouseDown:\0", mouse_down as *const c_void, b"v@:@\0");
+    add(b"rightMouseDown:\0", right_mouse_down as *const c_void, b"v@:@\0");
+    add(b"openpluginMenuItem:\0", menu_item as *const c_void, b"v@:@\0");
     add(b"mouseDragged:\0", mouse_moved as *const c_void, b"v@:@\0");
     add(b"mouseMoved:\0", mouse_moved as *const c_void, b"v@:@\0");
     add(b"mouseUp:\0", mouse_up as *const c_void, b"v@:@\0");
@@ -1393,7 +1543,7 @@ impl EditorView {
             if view.is_null() {
                 return None;
             }
-            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false, scale: 0.0, ax_elements: Vec::new(), ax_seen: Vec::new(), text_field: None, field_cancel: false, opening: false, tip_key: Vec::new(), drags: false, file_results: Vec::new(), file_hook: None }));
+            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false, scale: 0.0, ax_elements: Vec::new(), ax_seen: Vec::new(), text_field: None, field_cancel: false, opening: false, tip_key: Vec::new(), drags: false, file_results: Vec::new(), file_hook: None, menu_param: 0, menu_hook: None }));
             object_setInstanceVariable(view, IVAR.as_ptr() as *const c_char, state as *mut c_void);
 
             // Mouse-moved events need a tracking area: moved | active always | in visible rect.
@@ -1527,6 +1677,22 @@ impl EditorView {
             let block = make_panel_block(self.view, panel, request.tag);
             ((*block).invoke)(block, response);
         }
+    }
+
+    /// Answer the SDK's parameter menu with `hook` instead of popping up an
+    /// `NSMenu`, for tests. See [`MenuHook`].
+    pub fn set_menu_hook(&self, hook: Option<MenuHook>) {
+        if let Some(s) = unsafe { self.state.as_mut() } {
+            s.menu_hook = hook;
+        }
+    }
+
+    /// Choose item `index` of [`PARAM_MENU_ITEMS`] as if from the menu last
+    /// shown, with `text` standing in for the clipboard (what paste reads;
+    /// copy returns what it would put there). For tests; the menu's own
+    /// action, `openpluginMenuItem:`, does the same with the real clipboard.
+    pub fn choose_menu_item(&self, index: usize, text: Option<&str>) -> Option<String> {
+        unsafe { run_menu_item(self.view, index, text) }
     }
 
     /// Replace the poll hook.
