@@ -63,7 +63,7 @@ use openplugin_core::worker::{self, Executor, Step, Task, Waker};
 
 use openplugin_core::midi::{self, Message, Parser};
 use openplugin_core::{
-    sample_rate_supported, Category, EditorFactory, EditorState, IoConfig, MeterFrame, ParamCursor, ParamPlane,
+    sample_rate_supported, Category, EditorFactory, EditorState, IoConfig, MeterFrame, ParamCursor, ParamInfo, ParamPlane,
     Plugin, Seqlock, Taper, Transport, Unit,
 };
 
@@ -1492,6 +1492,39 @@ pub fn symbol(id: &str) -> String {
     s
 }
 
+/// The parameter groups as LV2 port groups: every path (parents first, see
+/// [`openplugin_core::group_paths`]) and its `lv2:symbol`, which is the path
+/// as a [`symbol`] made unique with a number (`Filter/Env` is `Filter_Env`).
+struct PortGroups {
+    paths: Vec<&'static str>,
+    symbols: Vec<String>,
+}
+
+impl PortGroups {
+    fn of(params: &[ParamInfo]) -> Self {
+        let paths = openplugin_core::group_paths(params);
+        let mut symbols: Vec<String> = Vec::with_capacity(paths.len());
+        for path in &paths {
+            let base = symbol(path);
+            let mut candidate = base.clone();
+            let mut n = 2;
+            while symbols.contains(&candidate) {
+                candidate = format!("{base}_{n}");
+                n += 1;
+            }
+            symbols.push(candidate);
+        }
+        Self { paths, symbols }
+    }
+
+    fn symbol_of(&self, path: &str) -> Option<&str> {
+        if path.is_empty() {
+            return None;
+        }
+        self.paths.iter().position(|p| *p == path).map(|at| self.symbols[at].as_str())
+    }
+}
+
 fn class_of(category: Category, instrument: bool) -> &'static str {
     if instrument {
         return "lv2:InstrumentPlugin";
@@ -1550,6 +1583,7 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
     let resizable = ui == Some(true);
     let info = plugin.info();
     let uri = plugin_uri(plugin);
+    let groups = PortGroups::of(info.params);
     let mut out = String::new();
     for (prefix, iri) in [
         ("atom", "http://lv2plug.in/ns/ext/atom#"),
@@ -1557,6 +1591,7 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
         ("foaf", "http://xmlns.com/foaf/0.1/"),
         ("lv2", "http://lv2plug.in/ns/lv2core#"),
         ("midi", "http://lv2plug.in/ns/ext/midi#"),
+        ("pg", "http://lv2plug.in/ns/ext/port-groups#"),
         ("pprop", "http://lv2plug.in/ns/ext/port-props#"),
         ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
         ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
@@ -1566,6 +1601,11 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
         ("urid", "http://lv2plug.in/ns/ext/urid#"),
         ("work", "http://lv2plug.in/ns/ext/worker#"),
     ] {
+        // The port-groups prefix only when there is a group, so a plugin
+        // without groups is described exactly as before.
+        if prefix == "pg" && groups.paths.is_empty() {
+            continue;
+        }
         let _ = writeln!(out, "@prefix {prefix}: <{iri}> .");
     }
     out.push('\n');
@@ -1637,6 +1677,9 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
         if let Some(unit) = unit {
             lines.push(format!("      units:unit {unit}"));
         }
+        if let Some(group) = groups.symbol_of(p.host_group()) {
+            lines.push(format!("      pg:group <{uri}#group_{group}>"));
+        }
         ports.push(format!("{} ]", lines.join(" ;\n")));
     }
     ports.push(format!(
@@ -1663,6 +1706,17 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
     }
     out.push_str(&ports.join(" ,\n"));
     out.push_str(" .\n");
+    // One pg:Group per group path, parents included: the last name is its
+    // label, and a nested group is pg:subGroupOf its parent.
+    for (path, sym) in groups.paths.iter().zip(&groups.symbols) {
+        let _ = writeln!(out, "\n<{uri}#group_{sym}>");
+        out.push_str("    a pg:Group , pg:InputGroup ;\n");
+        let _ = write!(out, "    lv2:symbol \"{sym}\" ;\n    lv2:name {}", quoted(openplugin_core::group_name(path)));
+        if let Some(parent) = groups.symbol_of(openplugin_core::group_parent(path)) {
+            let _ = write!(out, " ;\n    pg:subGroupOf <{uri}#group_{parent}>");
+        }
+        out.push_str(" .\n");
+    }
     if with_ui {
         let _ = writeln!(out, "\n<{uri}#ui>");
         out.push_str("    a ui:CocoaUI ;\n");

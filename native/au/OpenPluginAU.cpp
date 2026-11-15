@@ -44,7 +44,20 @@ struct CachedParam {
     OpParamDesc desc;
     // The plugin's labels at each step, for a choice parameter (empty for every other one).
     std::vector<std::string> labels;
+    // The clump of the parameter's group (1, 2, ... in the order groups first appear), 0 for none.
+    UInt32 clump = 0;
 };
+// The group path of parameter `index` (op_shell_param_group, ABI 5): "Filter/Envelope", or "" for
+// the top level.
+std::string shellGroup(uint32_t index) {
+    char small[128];
+    const size_t length = op_shell_param_group(index, small, sizeof(small));
+    if (length < sizeof(small)) return std::string(small, length);
+    std::string text(length + 1, '\0');
+    const size_t again = op_shell_param_group(index, text.data(), text.size());
+    text.resize(std::min(again, length));
+    return text;
+}
 // The plugin's text for a plain value (op_shell_param_format). Main thread only; it allocates.
 std::string shellText(uint32_t index, double plain) {
     char small[128];
@@ -166,6 +179,12 @@ public:
                 if (!op_shell_param(i, &params_[i].desc)) continue;
                 this->Globals()->SetParameter(i, static_cast<float>(params_[i].desc.default_plain));
                 params_[i].labels = choiceLabels(i, params_[i].desc);
+                // Clumps are flat: one per distinct group path, named by the whole path.
+                const std::string group = shellGroup(i);
+                if (group.empty()) continue;
+                auto known = std::find(clumps_.begin(), clumps_.end(), group);
+                if (known == clumps_.end()) known = clumps_.insert(clumps_.end(), group);
+                params_[i].clump = static_cast<UInt32>(known - clumps_.begin()) + 1;
             }
             const uint32_t kind = op_shell_kind();
             // aumu is the instrument; aufx and aumf are both audio effects (an aumf also takes MIDI).
@@ -600,6 +619,33 @@ public:
         // Hosts ask the plugin for the text of every value (kAudioUnitProperty_ParameterStringFromValue).
         info.flags |= kAudioUnitParameterFlag_ValuesHaveStrings;
         if (!params_[id].labels.empty()) info.unit = kAudioUnitParameterUnit_Indexed;
+        if (params_[id].clump) this->HasClump(info, params_[id].clump);
+        return noErr;
+    }
+    // The name of a group's clump (kAudioUnitProperty_ParameterClumpName). AU clumps are flat, so
+    // the name is the whole path ("Filter/Envelope"), which keeps "Osc 1/Env" and "Osc 2/Env"
+    // apart. A host that asks for a shorter name gets the last name of the path, cut to fit. A
+    // plugin without groups has no clumps and answers as before (the base class's error).
+    OSStatus CopyClumpName(AudioUnitScope scope, UInt32 clumpID, UInt32 desiredLength, CFStringRef* outName) override {
+        if (scope != kAudioUnitScope_Global || clumpID == 0 || clumpID > clumps_.size() || !outName)
+            return Base::CopyClumpName(scope, clumpID, desiredLength, outName);
+        const std::string& path = clumps_[clumpID - 1];
+        CFStringRef name = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8*>(path.data()), static_cast<CFIndex>(path.size()), kCFStringEncodingUTF8, false);
+        if (!name) return kAudio_ParamError;
+        if (desiredLength > 0 && CFStringGetLength(name) > static_cast<CFIndex>(desiredLength)) {
+            const size_t slash = path.rfind('/');
+            const std::string last = slash == std::string::npos ? path : path.substr(slash + 1);
+            CFRelease(name);
+            CFStringRef shortName = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8*>(last.data()), static_cast<CFIndex>(last.size()), kCFStringEncodingUTF8, false);
+            if (!shortName) return kAudio_ParamError;
+            CFIndex keep = std::min(CFStringGetLength(shortName), static_cast<CFIndex>(desiredLength));
+            // Do not cut a surrogate pair in two.
+            if (keep < CFStringGetLength(shortName) && keep > 0 && CFStringIsSurrogateHighCharacter(CFStringGetCharacterAtIndex(shortName, keep - 1))) --keep;
+            name = CFStringCreateWithSubstring(nullptr, shortName, CFRangeMake(0, keep));
+            CFRelease(shortName);
+            if (!name) return kAudio_ParamError;
+        }
+        *outName = name;  // the host releases it
         return noErr;
     }
     // The labels of a choice parameter, one per step from min (kAudioUnitParameterUnit_Indexed).
@@ -1120,6 +1166,8 @@ private:
     std::vector<float> delay_;
     std::vector<float> dry_;
     std::vector<CachedParam> params_;
+    // Group path of each clump; clump ID n is clumps_[n - 1].
+    std::vector<std::string> clumps_;
     // A blob accepted while there was no engine, loaded at the next Initialize.
     std::vector<uint8_t> pending_;
 };

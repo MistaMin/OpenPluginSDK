@@ -14,6 +14,7 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/vst/ivstunits.h"
 #include "public.sdk/source/common/memorystream.h"
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
 #include <algorithm>
@@ -89,6 +90,118 @@ static void check_parameters(IEditController* controller) {
 // The bypass parameter: found by its flag, not by an assumed id. It must be
 // automatable, a two-state switch off by default, and outside 0..n-1 so the
 // plugin's own ids stay the ABI indices.
+// Parameter groups (ABI 5) as units: the root unit, one unit per group path
+// and per parent of a path, nested by path and named by the last name; every
+// parameter's unitId is the unit of its group, the bypass is in the root. A
+// plugin without groups offers no IUnitInfo and keeps every parameter in the
+// root unit, as before groups existed. The expected tree comes from the ABI.
+static std::string abi_group(uint32_t index) {
+    char buf[512];
+    const size_t length = op_shell_param_group(index, buf, sizeof(buf));
+    CHECK(length < sizeof(buf));
+    return std::string(buf, length);
+}
+static void check_units(IEditController* controller) {
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
+    IUnitInfo* units = nullptr;
+    const bool offered = controller->queryInterface(IUnitInfo::iid, reinterpret_cast<void**>(&units)) == kResultOk && units;
+    bool grouped = false;
+    for (uint32_t i = 0; i < info.param_count; ++i) grouped = grouped || !abi_group(i).empty();
+    if (!grouped) {
+        CHECK(!offered);
+        for (int32 i = 0; i < controller->getParameterCount(); ++i) {
+            ParameterInfo host{};
+            CHECK(controller->getParameterInfo(i, host) == kResultOk);
+            CHECK(host.unitId == kRootUnitId);
+        }
+        std::printf("VST3 units: the plugin has no groups; no IUnitInfo, every parameter in the root unit\n");
+        return;
+    }
+    CHECK(offered);
+    // Units by id: path, parent, name. Id 0 is the root.
+    struct Expected {
+        UnitID parent;
+        std::string path;
+        std::string name;
+    };
+    const int32 count = units->getUnitCount();
+    CHECK(count >= 2);
+    std::vector<Expected> seen(static_cast<size_t>(count));
+    bool root = false;
+    for (int32 n = 0; n < count; ++n) {
+        UnitInfo unit{};
+        CHECK(units->getUnitInfo(n, unit) == kResultOk);
+        CHECK(unit.id >= 0 && unit.id < count);
+        CHECK(unit.programListId == kNoProgramListId);
+        const std::string name = ascii_of(unit.name);
+        CHECK(!name.empty());
+        if (unit.id == kRootUnitId) {
+            CHECK(unit.parentUnitId == kNoParentUnitId);
+            root = true;
+            continue;
+        }
+        CHECK(unit.parentUnitId >= 0 && unit.parentUnitId < count && unit.parentUnitId != unit.id);
+        seen[static_cast<size_t>(unit.id)] = {unit.parentUnitId, "", name};
+    }
+    CHECK(root);
+    // A unit's path is its parents' names and its own, from the root.
+    for (int32 id = 1; id < count; ++id) {
+        std::string path = seen[static_cast<size_t>(id)].name;
+        for (UnitID up = seen[static_cast<size_t>(id)].parent, hops = 0; up != kRootUnitId; up = seen[static_cast<size_t>(up)].parent, ++hops) {
+            CHECK(hops < count);
+            path = seen[static_cast<size_t>(up)].name + "/" + path;
+        }
+        seen[static_cast<size_t>(id)].path = path;
+        std::printf("VST3 unit %d: \"%s\" (parent %d), path \"%s\"\n", id, seen[static_cast<size_t>(id)].name.c_str(),
+                    seen[static_cast<size_t>(id)].parent, path.c_str());
+    }
+    // Every path and every parent of a path has exactly one unit, and nothing else does.
+    std::vector<std::string> paths;
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        const std::string group = abi_group(i);
+        for (size_t at = 0; !group.empty();) {
+            const size_t slash = group.find('/', at);
+            const std::string prefix = slash == std::string::npos ? group : group.substr(0, slash);
+            if (std::find(paths.begin(), paths.end(), prefix) == paths.end()) paths.push_back(prefix);
+            if (slash == std::string::npos) break;
+            at = slash + 1;
+        }
+    }
+    CHECK(paths.size() == static_cast<size_t>(count - 1));
+    auto unitOf = [&](const std::string& path) -> UnitID {
+        if (path.empty()) return kRootUnitId;
+        UnitID found = -1;
+        for (int32 id = 1; id < count; ++id)
+            if (seen[static_cast<size_t>(id)].path == path) {
+                CHECK(found < 0);
+                found = id;
+            }
+        CHECK(found > 0);
+        return found;
+    };
+    for (const std::string& path : paths) unitOf(path);
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        ParameterInfo host{};
+        CHECK(controller->getParameterInfo(static_cast<int32>(i), host) == kResultOk);
+        CHECK(host.unitId == unitOf(abi_group(i)));
+    }
+    for (int32 i = static_cast<int32>(info.param_count); i < controller->getParameterCount(); ++i) {
+        ParameterInfo host{};
+        CHECK(controller->getParameterInfo(i, host) == kResultOk);
+        CHECK(host.unitId == kRootUnitId);
+    }
+    CHECK(units->getSelectedUnit() == kRootUnitId);
+    CHECK(units->selectUnit(1) == kResultTrue && units->getSelectedUnit() == 1);
+    CHECK(units->selectUnit(count) == kResultFalse && units->getSelectedUnit() == 1);
+    CHECK(units->selectUnit(kRootUnitId) == kResultTrue);
+    UnitInfo outside{};
+    CHECK(units->getUnitInfo(count, outside) != kResultOk);
+    CHECK(units->getProgramListCount() == 0);
+    units->release();
+    std::printf("VST3 units: %d, nested by path; every parameter in its group's unit\n", count);
+}
+
 static ParamID check_bypass_parameter(IEditController* controller) {
     OpShellInfo info{};
     CHECK(op_shell_info(&info) != 0);
@@ -594,6 +707,7 @@ int main(int argc, char** argv) {
         CHECK(factory->createInstance(controllerId, IEditController::iid, reinterpret_cast<void**>(&controller)) == kResultOk && controller);
         CHECK(controller->initialize(nullptr) == kResultOk);
         check_parameters(controller);
+        check_units(controller);
         CHECK(processor->canProcessSampleSize(kSample64) == kResultFalse);
         SpeakerArrangement arrangement = channels == 1 ? SpeakerArr::kMono : SpeakerArr::kStereo;
         CHECK(processor->setBusArrangements(&arrangement, 1, &arrangement, 1) == kResultOk);

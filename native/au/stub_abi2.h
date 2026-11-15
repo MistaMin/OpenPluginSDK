@@ -27,6 +27,13 @@ int op_shell_param_parse(uint32_t, const char* text, double* out) {
     return 1;
 }
 #endif
+#ifndef OP_STUB_HAS_PARAM_GROUP
+// ABI 5 parameter groups: none, every parameter is top level.
+size_t op_shell_param_group(uint32_t, char* buf, size_t cap) {
+    if (buf && cap > 0) buf[0] = '\0';
+    return 0;
+}
+#endif
 uint32_t op_shell_abi_version(void) { return OP_SHELL_ABI; }
 uint32_t op_shell_kind(void) { return OP_KIND_EFFECT; }
 uint32_t op_shell_note_ports(void) { return 0; }

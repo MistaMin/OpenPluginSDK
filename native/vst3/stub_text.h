@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The ABI 3 parameter text calls for the stand-in plugins. Test builds only. The
+// The ABI 3 parameter text calls (and the ABI 5 group call: no groups) for the stand-in plugins. Test builds only. The
 // text is the plain value with two decimals and " stub" (with an accent, a check mark and an emoji: 2, 3 and 4 UTF-8 bytes), so the shell's use of
 // the plugin's own text (not the normalized number) is visible.
 #pragma once
@@ -26,5 +26,10 @@ int op_shell_param_parse(uint32_t, const char* text, double* out_plain) {
     if (end == text) return 0;
     *out_plain = value;
     return 1;
+}
+// ---- ABI 5: no parameter has a group (every parameter is top level).
+size_t op_shell_param_group(uint32_t, char* buf, size_t cap) {
+    if (buf && cap > 0) buf[0] = '\0';
+    return 0;
 }
 }

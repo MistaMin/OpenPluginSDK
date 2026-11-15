@@ -1092,7 +1092,18 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
         // Probe: name, rates.
         let probe = match catch_unwind(AssertUnwindSafe(|| {
             let p = (self.make)();
-            (p.info().name.to_string(), self.opts.sample_rates.iter().map(|&r| (r, p.accepts_sample_rate(r))).collect::<Vec<_>>())
+            // A group path every format would show as the top level instead.
+            let groups: Vec<String> = p
+                .info()
+                .params
+                .iter()
+                .filter_map(|param| {
+                    openplugin_core::check_group(param.group)
+                        .err()
+                        .map(|e| format!("parameter {:?} has group {:?}, which hosts are shown as the top level: {e:?}", param.id, param.group))
+                })
+                .collect();
+            (p.info().name.to_string(), self.opts.sample_rates.iter().map(|&r| (r, p.accepts_sample_rate(r))).collect::<Vec<_>>(), groups)
         })) {
             Ok(v) => v,
             Err(e) => {
@@ -1101,6 +1112,9 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
             }
         };
         self.plugin_name = probe.0;
+        for message in probe.2 {
+            self.rec.fail(Check::ParamFuzz, "param-groups", self.opts.seed, self.opts.seed, message);
+        }
         for (rate, accepted) in probe.1 {
             if accepted {
                 self.rates_run.push(rate);

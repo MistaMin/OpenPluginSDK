@@ -24,6 +24,7 @@
 #include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/vst/ivstunits.h"
 #include "pluginterfaces/vst/vstspeaker.h"
 #include "base/source/fstreamer.h"
 #include "pluginterfaces/base/ibstream.h"
@@ -263,6 +264,63 @@ std::string shell_format(uint32_t index, double plain) {
     const size_t again = op_shell_param_format(index, plain, big.data(), big.size());
     big.resize(std::min(again, big.size() - 1));
     return big;
+}
+
+// ---- Parameter groups (ABI 5) -> IUnitInfo -----------------------------------
+// The group path of parameter `index` ("Filter/Envelope"; "" is the top level).
+std::string shell_group(uint32_t index) {
+    char small[128];
+    const size_t length = op_shell_param_group(index, small, sizeof(small));
+    if (length < sizeof(small)) return std::string(small, length);
+    std::string big(length + 1, '\0');
+    const size_t again = op_shell_param_group(index, big.data(), big.size());
+    big.resize(std::min(again, big.size() - 1));
+    return big;
+}
+
+// One VST3 unit per group path. units[0] is the root (kRootUnitId, named
+// "Root"); then one unit for every path and every parent of a path, parents
+// first, numbered from 1 in the order their first parameter is declared. A
+// unit's name is the last name of its path, its parent the unit of the rest.
+// A parameter sits in the unit of its own path, a top-level one in the root.
+// No units at all when no parameter has a group.
+struct ShellUnit {
+    UnitID id;
+    UnitID parent;
+    std::string name;
+    std::string path;
+};
+struct ShellUnits {
+    std::vector<ShellUnit> units;
+    std::vector<UnitID> unitOf;  // by parameter index
+};
+ShellUnits shell_units(uint32_t count) {
+    ShellUnits out;
+    out.unitOf.assign(count, kRootUnitId);
+    for (uint32_t i = 0; i < count; ++i) {
+        const std::string path = shell_group(i);
+        if (path.empty()) continue;
+        if (out.units.empty()) out.units.push_back({kRootUnitId, kNoParentUnitId, "Root", ""});
+        UnitID parent = kRootUnitId;
+        size_t start = 0;
+        for (;;) {
+            const size_t slash = path.find('/', start);
+            const std::string prefix = slash == std::string::npos ? path : path.substr(0, slash);
+            UnitID id = -1;
+            for (const ShellUnit& unit : out.units)
+                if (unit.id != kRootUnitId && unit.path == prefix) id = unit.id;
+            if (id < 0) {
+                id = static_cast<UnitID>(out.units.size());
+                const std::string name = slash == std::string::npos ? path.substr(start) : path.substr(start, slash - start);
+                out.units.push_back({id, parent, name, prefix});
+            }
+            parent = id;
+            if (slash == std::string::npos) break;
+            start = slash + 1;
+        }
+        out.unitOf[i] = parent;
+    }
+    return out;
 }
 
 // "6.0 dB" with unit "dB" is "6.0"; text without that unit at its end is unchanged.
@@ -1293,9 +1351,43 @@ private:
     float mixStep_ = 1.0f;
 };
 
-class Controller final : public EditController, public IMidiMapping, public ChannelContext::IInfoListener {
+class Controller final : public EditController, public IMidiMapping, public ChannelContext::IInfoListener, public IUnitInfo {
 public:
     static FUnknown* create(void*) { return static_cast<IEditController*>(new Controller); }
+    // The units come from the library's static parameter description, so a
+    // host may ask for IUnitInfo before initialize.
+    Controller() {
+        OpShellInfo info{};
+        if (load_info(info)) units_ = shell_units(info.param_count);
+    }
+    // ---- IUnitInfo: one unit per group (see shell_units); offered only when
+    // the plugin has groups, so a plugin without them is what it was. No
+    // program lists.
+    int32 PLUGIN_API getUnitCount() SMTG_OVERRIDE { return static_cast<int32>(units_.units.size()); }
+    tresult PLUGIN_API getUnitInfo(int32 unitIndex, UnitInfo& info) SMTG_OVERRIDE {
+        if (unitIndex < 0 || unitIndex >= getUnitCount()) return kInvalidArgument;
+        const ShellUnit& unit = units_.units[static_cast<size_t>(unitIndex)];
+        info.id = unit.id;
+        info.parentUnitId = unit.parent;
+        std::memset(info.name, 0, sizeof(info.name));
+        utf8_to_utf16(unit.name.data(), unit.name.size(), info.name, 128);
+        info.programListId = kNoProgramListId;
+        return kResultOk;
+    }
+    int32 PLUGIN_API getProgramListCount() SMTG_OVERRIDE { return 0; }
+    tresult PLUGIN_API getProgramListInfo(int32, ProgramListInfo&) SMTG_OVERRIDE { return kResultFalse; }
+    tresult PLUGIN_API getProgramName(ProgramListID, int32, String128) SMTG_OVERRIDE { return kResultFalse; }
+    tresult PLUGIN_API getProgramInfo(ProgramListID, int32, Steinberg::Vst::CString, String128) SMTG_OVERRIDE { return kResultFalse; }
+    tresult PLUGIN_API hasProgramPitchNames(ProgramListID, int32) SMTG_OVERRIDE { return kResultFalse; }
+    tresult PLUGIN_API getProgramPitchName(ProgramListID, int32, int16, String128) SMTG_OVERRIDE { return kResultFalse; }
+    UnitID PLUGIN_API getSelectedUnit() SMTG_OVERRIDE { return selectedUnit_; }
+    tresult PLUGIN_API selectUnit(UnitID unitId) SMTG_OVERRIDE {
+        if (unitId < 0 || unitId >= getUnitCount()) return kResultFalse;
+        selectedUnit_ = unitId;
+        return kResultTrue;
+    }
+    tresult PLUGIN_API getUnitByBus(MediaType, BusDirection, int32, int32, UnitID&) SMTG_OVERRIDE { return kResultFalse; }
+    tresult PLUGIN_API setUnitProgramData(int32, int32, IBStream*) SMTG_OVERRIDE { return kResultFalse; }
     // The host's channel: name and colour (kind is not part of VST3's channel
     // context, so the flags stay 0). A call lists what the host knows; a key
     // that is absent keeps what was said before. The processor gets it as a
@@ -1333,6 +1425,9 @@ public:
     DEFINE_INTERFACES
         DEF_INTERFACE(IMidiMapping)
         DEF_INTERFACE(ChannelContext::IInfoListener)
+        if (!units_.units.empty()) {
+            DEF_INTERFACE(IUnitInfo)
+        }
     END_DEFINE_INTERFACES(EditController)
     REFCOUNT_METHODS(EditController)
     tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE {
@@ -1349,7 +1444,9 @@ public:
             UString(unit, 128).fromAscii(desc.unit);
             int32 steps = desc.steps > 1 ? static_cast<int32>(desc.steps - 1) : 0;
             int32 flags = (desc.flags & OP_PARAM_AUTOMATABLE) ? ParameterInfo::kCanAutomate : 0;
-            parameters.addParameter(new ShellParameter(title, unit, i, desc.default_normalized, steps, flags));
+            auto* parameter = new ShellParameter(title, unit, i, desc.default_normalized, steps, flags);
+            if (i < units_.unitOf.size()) parameter->setUnitID(units_.unitOf[i]);
+            parameters.addParameter(parameter);
         }
         count_ = info.param_count;
         parameters.addParameter(new BypassParameter(kBypassId));
@@ -1493,6 +1590,8 @@ private:
     TrackState track_;
     uint32_t count_ = 0;
     bool midiIn_ = false;
+    ShellUnits units_;
+    UnitID selectedUnit_ = kRootUnitId;
 };
 
 #if OP_HAS_EDITOR

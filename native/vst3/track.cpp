@@ -25,6 +25,7 @@
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstmessage.h"
+#include "pluginterfaces/vst/ivstunits.h"
 #include "public.sdk/source/vst/hosting/hostclasses.h"
 #include <cstdio>
 #include <cstdlib>
@@ -237,6 +238,18 @@ int main(int argc, char** argv) {
             CHECK(stubCount() == 1);
             const Call c = callAt(0);
             CHECK(!c.hasName && c.rgba == 0xAABBCCFFu && c.flags == OP_TRACK_HAS_COLOUR);
+        }
+        // 8. The stand-in has no parameter groups (ABI 5): the controller offers no IUnitInfo and
+        // every parameter stays in the root unit, as before groups existed.
+        {
+            Instance e(factory, effectId, host);
+            void* units = nullptr;
+            CHECK(e.controller->queryInterface(IUnitInfo::iid, &units) != kResultOk && !units);
+            for (int32 i = 0; i < e.controller->getParameterCount(); ++i) {
+                ParameterInfo info{};
+                CHECK(e.controller->getParameterInfo(i, info) == kResultOk && info.unitId == kRootUnitId);
+            }
+            std::printf("VST3 track: no groups, no IUnitInfo, every parameter in the root unit\n");
         }
     }
     CHECK(exitFn());

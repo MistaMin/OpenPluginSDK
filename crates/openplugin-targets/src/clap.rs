@@ -950,6 +950,8 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
             info.id = index;
             info.flags = clap_param_flags(param);
             copy_cstr(&mut info.name, param.name);
+            // The group path is CLAP's module path ("Filter/Envelope"); empty is the top level.
+            copy_cstr(&mut info.module, param.host_group());
             info.min_value = param.min as f64;
             info.max_value = param.max as f64;
             info.default_value = param.default as f64;
@@ -3084,6 +3086,51 @@ mod tests {
             assert!(!(*state).load.unwrap()(second.as_plugin(), &input), "junk is refused");
             assert_eq!(second.plane().unwrap().load(0), Some(-7.5), "and changes nothing");
         }
+    }
+
+    struct Grouped;
+
+    static GROUPED_PARAMS: [ParamInfo; 4] = [
+        ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None),
+        ParamInfo::new("cutoff", "Cutoff", 20.0, 20_000.0, 1_000.0, Unit::Hz).with_group("Filter"),
+        ParamInfo::new("attack", "Attack", 0.0, 1.0, 0.01, Unit::Seconds).with_group("Filter/Envelope"),
+        ParamInfo::new("broken", "Broken", 0.0, 1.0, 0.0, Unit::None).with_group("Filter//Envelope"),
+    ];
+
+    static GROUPED_INFO: PluginInfo = PluginInfo { id: "com.opengrid.test.grouped", name: "Grouped", params: &GROUPED_PARAMS, ..INFO };
+
+    impl Plugin for Grouped {
+        fn info(&self) -> &'static PluginInfo { &GROUPED_INFO }
+        fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+        fn reset(&mut self) {}
+        fn set_param(&mut self, id: &str, _: f32) -> bool { GROUPED_INFO.param(id).is_some() }
+        fn param(&self, id: &str) -> Option<f32> { GROUPED_INFO.param(id).map(|p| p.default) }
+        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    }
+
+    fn modules<P: Plugin>(adapter: &ClapAdapter<P>) -> Vec<String> {
+        let plugin = adapter.as_plugin();
+        unsafe {
+            let params = plugin_extension(plugin, EXT_PARAMS.as_ptr() as *const c_char) as *const clap_plugin_params;
+            (0..(*params).count.unwrap()(plugin))
+                .map(|index| {
+                    let mut info = std::mem::zeroed::<clap_param_info>();
+                    info.module = [b'x' as c_char; PATH_SIZE];
+                    assert!((*params).get_info.unwrap()(plugin, index, &mut info));
+                    CStr::from_ptr(info.module.as_ptr()).to_str().unwrap().to_string()
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn param_info_carries_the_group_as_the_module_path() {
+        let grouped = ClapAdapter::new(Grouped);
+        // The invalid path is shown as the top level.
+        assert_eq!(modules(&grouped), ["", "Filter", "Filter/Envelope", ""]);
+        // Without groups every module is empty, as before groups existed.
+        let plain = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
+        assert_eq!(modules(&plain), [""]);
     }
 
     #[test]
