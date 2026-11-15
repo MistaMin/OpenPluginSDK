@@ -4,6 +4,10 @@
 // without it a host shows its generic controls.
 #include "op_shell.h"
 #if OP_HAS_EDITOR
+// The host's parameter menu and track reach the editor (op_editor.h).
+#ifndef OP_EDITOR_MENU
+#define OP_EDITOR_MENU 1
+#endif
 #include "op_editor.h"
 #include "public.sdk/source/common/pluginview.h"
 #include "pluginterfaces/vst/ivstmessage.h"
@@ -14,7 +18,10 @@
 #include "public.sdk/source/vst/vstparameters.h"
 #include "pluginterfaces/base/ustring.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstchannelcontextinfo.h"
+#include "pluginterfaces/vst/ivstcontextmenu.h"
 #include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivstmidicontrollers.h"
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "pluginterfaces/vst/vstspeaker.h"
@@ -278,6 +285,86 @@ constexpr double kBypassFadeSeconds = 0.010;
 #if OP_HAS_EDITOR
 constexpr const char* kEngineMessage = "openplugin.engine";
 #endif
+// Controller to processor: the host's track (name, colour, kind), from
+// IInfoListener::setChannelContextInfos. Attributes: "name" (TChar string,
+// absent for none), "rgba" (int, 0xRRGGBBAA), "flags" (int, OP_TRACK_*).
+constexpr const char* kTrackMessage = "openplugin.track";
+
+// What the host last said about the track, as op_shell_set_track_info takes it.
+struct TrackState {
+    bool valid = false;
+    std::string name;  // UTF-8; empty for none
+    uint32_t rgba = 0;
+    uint32_t flags = 0;
+    const char* nameOrNull() const { return name.empty() ? nullptr : name.c_str(); }
+};
+
+// UTF-16 (a VST3 TChar string) to UTF-8, with surrogate pairs; an unpaired
+// surrogate becomes U+FFFD.
+std::string utf8_from_tchar(const TChar* text) {
+    std::string out;
+    if (!text) return out;
+    for (size_t i = 0; text[i]; ++i) {
+        uint32_t c = text[i];
+        if (c >= 0xD800 && c <= 0xDBFF && text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
+            c = 0x10000 + ((c - 0xD800) << 10) + (text[i + 1] - 0xDC00);
+            ++i;
+        } else if (c >= 0xD800 && c <= 0xDFFF) {
+            c = 0xFFFD;
+        }
+        if (c < 0x80) {
+            out += static_cast<char>(c);
+        } else if (c < 0x800) {
+            out += static_cast<char>(0xC0 | (c >> 6));
+            out += static_cast<char>(0x80 | (c & 0x3F));
+        } else if (c < 0x10000) {
+            out += static_cast<char>(0xE0 | (c >> 12));
+            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (c & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (c >> 18));
+            out += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (c & 0x3F));
+        }
+    }
+    return out;
+}
+
+// UTF-8 to UTF-16 into `out` (room for `capacity` TChars, NUL included). Text
+// that is cut falls on a character boundary; invalid bytes become U+FFFD.
+void tchar_from_utf8(const std::string& text, TChar* out, size_t capacity) {
+    size_t n = 0;
+    for (size_t i = 0; i < text.size();) {
+        const uint8_t b = static_cast<uint8_t>(text[i]);
+        uint32_t c = 0xFFFD;
+        size_t len = 1;
+        if (b < 0x80) {
+            c = b;
+        } else if (b >= 0xC2 && b < 0xE0 && i + 1 < text.size() && (text[i + 1] & 0xC0) == 0x80) {
+            c = ((b & 0x1F) << 6) | (text[i + 1] & 0x3F);
+            len = 2;
+        } else if (b >= 0xE0 && b < 0xF0 && i + 2 < text.size() && (text[i + 1] & 0xC0) == 0x80 && (text[i + 2] & 0xC0) == 0x80) {
+            c = ((b & 0x0F) << 12) | ((text[i + 1] & 0x3F) << 6) | (text[i + 2] & 0x3F);
+            len = 3;
+        } else if (b >= 0xF0 && b < 0xF5 && i + 3 < text.size() && (text[i + 1] & 0xC0) == 0x80 && (text[i + 2] & 0xC0) == 0x80 && (text[i + 3] & 0xC0) == 0x80) {
+            c = ((b & 0x07) << 18) | ((text[i + 1] & 0x3F) << 12) | ((text[i + 2] & 0x3F) << 6) | (text[i + 3] & 0x3F);
+            len = 4;
+        }
+        if (c >= 0xD800 && c <= 0xDFFF) c = 0xFFFD;
+        const size_t need = c >= 0x10000 ? 2 : 1;
+        if (n + need + 1 > capacity) break;
+        if (c >= 0x10000) {
+            c -= 0x10000;
+            out[n++] = static_cast<TChar>(0xD800 + (c >> 10));
+            out[n++] = static_cast<TChar>(0xDC00 + (c & 0x3FF));
+        } else {
+            out[n++] = static_cast<TChar>(c);
+        }
+        i += len;
+    }
+    if (capacity > 0) out[n] = 0;
+}
 
 // Component state. The head is unchanged since version 1: int32 version (1),
 // int32 parameter count, one double per parameter, then an int32 bypass flag
@@ -414,7 +501,27 @@ public:
         pendingBlob_.clear();
         prepareBypass();
         announce(engine_);
+        applyTrack();
         return AudioEffect::setActive(active);
+    }
+    // The controller's message with the host's track. Message thread. Kept for
+    // an engine made later, and given to the one that exists now.
+    tresult PLUGIN_API notify(IMessage* message) SMTG_OVERRIDE {
+        if (message && message->getMessageID() && std::strcmp(message->getMessageID(), kTrackMessage) == 0) {
+            IAttributeList* attributes = message->getAttributes();
+            if (!attributes) return kInvalidArgument;
+            TrackState next;
+            TChar name[256] = {};
+            if (attributes->getString("name", name, sizeof(name)) == kResultOk) next.name = utf8_from_tchar(name);
+            int64 rgba = 0, flags = 0;
+            if (attributes->getInt("rgba", rgba) == kResultOk) next.rgba = static_cast<uint32_t>(rgba);
+            if (attributes->getInt("flags", flags) == kResultOk) next.flags = static_cast<uint32_t>(flags);
+            next.valid = true;
+            track_ = next;
+            applyTrack();
+            return kResultOk;
+        }
+        return AudioEffect::notify(message);
     }
     tresult PLUGIN_API setProcessing(TBool active) SMTG_OVERRIDE {
         if (active && engine_) {
@@ -1076,6 +1183,10 @@ private:
         (void)engine;
 #endif
     }
+    // Gives the host's track to the engine, if there is one and the host has told.
+    void applyTrack() {
+        if (engine_ && track_.valid) op_shell_set_track_info(engine_, track_.nameOrNull(), track_.rgba, track_.flags);
+    }
     void destroy() {
         if (engine_) {
             op_shell_destroy(engine_);
@@ -1083,6 +1194,7 @@ private:
         }
     }
     void* engine_ = nullptr;
+    TrackState track_;
     uint32_t count_ = 0;
     uint32_t channels_ = 2;  // engine bus width given to op_shell_create (the legacy path)
     std::unique_ptr<std::atomic<double>[]> values_;
@@ -1129,9 +1241,34 @@ private:
     float mixStep_ = 1.0f;
 };
 
-class Controller final : public EditController, public IMidiMapping {
+class Controller final : public EditController, public IMidiMapping, public ChannelContext::IInfoListener {
 public:
     static FUnknown* create(void*) { return static_cast<IEditController*>(new Controller); }
+    // The host's channel: name and colour (kind is not part of VST3's channel
+    // context, so the flags stay 0). A call lists what the host knows; a key
+    // that is absent keeps what was said before. The processor gets it as a
+    // message (the plugin object is its engine), the open editor directly.
+    tresult PLUGIN_API setChannelContextInfos(IAttributeList* list) SMTG_OVERRIDE {
+        if (!list) return kInvalidArgument;
+        TChar name[256] = {};
+        if (list->getString(ChannelContext::kChannelNameKey, name, sizeof(name)) == kResultTrue) track_.name = utf8_from_tchar(name);
+        int64 color = 0;
+        if (list->getInt(ChannelContext::kChannelColorKey, color) == kResultTrue) {
+            // ARGB (ChannelContext::GetAlpha and friends) to 0xRRGGBBAA.
+            const uint32_t argb = static_cast<uint32_t>(color);
+            track_.rgba = (argb << 8) | (argb >> 24);
+            track_.flags |= OP_TRACK_HAS_COLOUR;
+        }
+        track_.valid = true;
+        sendTrack();
+        return kResultOk;
+    }
+    // A host may tell the track before it connects the two halves.
+    tresult PLUGIN_API connect(IConnectionPoint* other) SMTG_OVERRIDE {
+        const tresult result = EditController::connect(other);
+        if (result == kResultOk && track_.valid) sendTrack();
+        return result;
+    }
     // MIDI controllers, channel pressure and pitch bend arrive as hidden
     // parameters (see kMidiParamBase). Only the first event bus maps.
     tresult PLUGIN_API getMidiControllerAssignment(int32 busIndex, int16 channel, CtrlNumber number, ParamID& id) SMTG_OVERRIDE {
@@ -1143,6 +1280,7 @@ public:
     OBJ_METHODS(Controller, EditController)
     DEFINE_INTERFACES
         DEF_INTERFACE(IMidiMapping)
+        DEF_INTERFACE(ChannelContext::IInfoListener)
     END_DEFINE_INTERFACES(EditController)
     REFCOUNT_METHODS(EditController)
     tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE {
@@ -1215,7 +1353,7 @@ public:
         return result;
     }
     // Called by the view.
-    void* openEditor(void* parent, void* frameContext, OpEditorRequestResize request) {
+    void* openEditor(void* parent, void* frameContext, OpEditorRequestResize request, OpEditorContextMenu menu) {
         closeEditor();
         OpEditorHost host{this, hostBegin, hostPerform, hostEnd};
         editor_ = op_editor_create(&host);
@@ -1226,6 +1364,8 @@ public:
         }
         op_editor_bind(editor_, engine_);
         op_editor_set_request_resize(editor_, frameContext, request);
+        op_editor_set_context_menu(editor_, frameContext, menu);
+        if (track_.valid) op_editor_set_track_info(editor_, track_.nameOrNull(), track_.rgba, track_.flags);
         if (!op_editor_attach(editor_, parent)) {
             closeEditor();
             return nullptr;
@@ -1234,6 +1374,20 @@ public:
         return editor_;
     }
     void* editor() const { return editor_; }
+    // The editor asks for the host's context menu on parameter `index`: the
+    // host's IComponentHandler3 builds it (automation, MIDI learn) and pops
+    // it up at (x, y) in `view`. False when the host has none or cannot show it.
+    bool popupHostMenu(IPlugView* view, ParamID index, int32 x, int32 y) {
+        if (!componentHandler || !view) return false;
+        FUnknownPtr<IComponentHandler3> handler(componentHandler);
+        if (!handler) return false;
+        ParamID id = index;
+        IContextMenu* menu = handler->createContextMenu(view, &id);
+        if (!menu) return false;
+        const tresult shown = menu->popup(x, y);
+        menu->release();
+        return shown == kResultOk;
+    }
     // The editor belongs to the view that opened it last. A host that opens a
     // second view replaces the first view's editor, so the first view must not
     // close, resize or read the second view's editor.
@@ -1266,6 +1420,25 @@ private:
 #endif
 
 private:
+    // Tell the processor (by message) and the open editor what the host said.
+    void sendTrack() {
+        if (IPtr<IMessage> message = owned(allocateMessage())) {
+            message->setMessageID(kTrackMessage);
+            IAttributeList* attributes = message->getAttributes();
+            if (!track_.name.empty()) {
+                TChar name[256] = {};
+                tchar_from_utf8(track_.name, name, 256);
+                attributes->setString("name", name);
+            }
+            attributes->setInt("rgba", static_cast<int64>(track_.rgba));
+            attributes->setInt("flags", static_cast<int64>(track_.flags));
+            sendMessage(message);
+        }
+#if OP_HAS_EDITOR
+        if (editor_) op_editor_set_track_info(editor_, track_.nameOrNull(), track_.rgba, track_.flags);
+#endif
+    }
+    TrackState track_;
     uint32_t count_ = 0;
     bool midiIn_ = false;
 };
@@ -1293,7 +1466,7 @@ public:
     }
     tresult PLUGIN_API attached(void* parent, FIDString type) SMTG_OVERRIDE {
         if (!parent || isPlatformTypeSupported(type) != kResultTrue || !controller_) return kResultFalse;
-        if (!controller_->openEditor(parent, this, requestResize)) return kResultFalse;
+        if (!controller_->openEditor(parent, this, requestResize, showHostMenu)) return kResultFalse;
         open_ = true;
         // The editor opens at its own size; bring it to the size the host last set.
         resizeEditor(static_cast<uint32_t>(rect.getWidth()), static_cast<uint32_t>(rect.getHeight()));
@@ -1357,6 +1530,11 @@ private:
         self->rect = asked;
         self->resizeEditor(width, height);
         return 1;
+    }
+    // The editor asks for the host's parameter menu (right-click, Control-click).
+    static uint32_t showHostMenu(void* context, uint32_t index, int32_t x, int32_t y) {
+        auto* self = static_cast<EditorView*>(context);
+        return self->controller_ && self->controller_->popupHostMenu(static_cast<IPlugView*>(self), index, x, y) ? 1 : 0;
     }
     IPtr<Controller> controller_;
     bool open_ = false;

@@ -664,7 +664,7 @@ void abi_proof(const Probe& newer, const Probe& older) {
     set_source(u, 0, &s);
     CHECK(AudioUnitInitialize(u) == kAudioUnitErr_FailedInitialization);
     CHECK(AudioComponentInstanceDispose(u) == noErr);
-    std::puts("AU ABI check: a library of version 4 works with a shell built for 3; a library of version 2 is refused at Initialize");
+    std::puts("AU ABI check: a library of version 5 works with a shell built for 4; a library of version 2 is refused at Initialize");
 }
 }  // namespace
 

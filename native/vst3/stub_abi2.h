@@ -32,6 +32,9 @@ uint32_t op_shell_layout(uint32_t index, OpLayout* out) {
 uint32_t op_shell_set_layout(void*, uint32_t index) { return index == 0; }
 uint32_t op_shell_layout_selected(void*) { return 0; }
 void op_shell_set_offline(void*, uint32_t) {}
+#ifndef OP_STUB_OWN_TRACK
+uint32_t op_shell_set_track_info(void*, const char*, uint32_t, uint32_t) { return 1; }
+#endif
 uint32_t op_shell_midi_out(void*, OpMidiEvent*, uint32_t) { return 0; }
 uint32_t op_shell_midi_dropped(const void*) { return 0; }
 uint32_t op_shell_process_events(void* instance, const OpProcess* args) {

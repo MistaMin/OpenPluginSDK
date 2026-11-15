@@ -15,13 +15,20 @@ use openplugin_core::{
 use crate::{FfiInstance, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
-pub const ABI: u32 = 3;
+pub const ABI: u32 = 4;
 pub use crate::block::{
     OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
     EVENT_PARAM_NORMALIZED, EVENT_PARAM_PLAIN, MAX_EVENTS, MAX_MIDI_OUT, TRANSPORT_HAS_BEATS,
     TRANSPORT_HAS_SECONDS, TRANSPORT_HAS_SIGNATURE, TRANSPORT_HAS_TEMPO, TRANSPORT_PLAYING,
     TRANSPORT_RECORDING,
 };
+
+/// [`track_info_from_abi`] flags: the track is a return, a bus, the master.
+pub const TRACK_RETURN: u32 = 1;
+pub const TRACK_BUS: u32 = 2;
+pub const TRACK_MASTER: u32 = 4;
+/// The colour argument is valid.
+pub const TRACK_HAS_COLOUR: u32 = 0x100;
 
 pub const KIND_EFFECT: u32 = 0;
 pub const KIND_INSTRUMENT: u32 = 1;
@@ -300,6 +307,41 @@ pub unsafe fn layout_selected(ptr: *mut ShellInstance) -> u32 {
     } else {
         unsafe { (*ptr).ffi.layout_index() }
     }
+}
+
+/// A [`TrackInfo`](openplugin_core::TrackInfo) from the ABI's arguments: `name` is a
+/// NUL-terminated UTF-8 string (null or empty for none; invalid bytes are replaced; at
+/// most 255 characters are kept), `rgba` is `0xRRGGBBAA` and counts only with
+/// [`TRACK_HAS_COLOUR`] in `flags`, and the kind comes from the low bits of `flags`.
+///
+/// # Safety
+/// `name` is null or a NUL-terminated string.
+pub unsafe fn track_info_from_abi(name: *const std::ffi::c_char, rgba: u32, flags: u32) -> openplugin_core::TrackInfo {
+    let name = if name.is_null() {
+        None
+    } else {
+        let text = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
+        Some(text.chars().take(255).collect::<String>()).filter(|n| !n.is_empty())
+    };
+    openplugin_core::TrackInfo {
+        name,
+        colour: (flags & TRACK_HAS_COLOUR != 0).then_some(rgba),
+        kind: flags & (TRACK_RETURN | TRACK_BUS | TRACK_MASTER),
+    }
+}
+
+/// Tell the plugin about the host's track. Message thread; waits for a running
+/// block like a state call. Returns 1 when delivered, 0 for a null instance or when
+/// the plugin could not be taken in time.
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`]; `name` is null or NUL-terminated.
+pub unsafe fn set_track_info(ptr: *mut ShellInstance, name: *const std::ffi::c_char, rgba: u32, flags: u32) -> u32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let info = unsafe { track_info_from_abi(name, rgba, flags) };
+    u32::from(unsafe { (*ptr).ffi.set_track_info(&info) })
 }
 
 /// Offline (bounce) flag; applied at the start of the next block.
@@ -1008,6 +1050,67 @@ mod tests {
                 }
             }
         }
+    }
+
+    static HEARD: Mutex<Vec<openplugin_core::TrackInfo>> = Mutex::new(Vec::new());
+
+    /// The gain plugin, listening for the track.
+    #[derive(Default)]
+    struct Tracked(Gain);
+
+    impl Plugin for Tracked {
+        fn info(&self) -> &'static PluginInfo {
+            self.0.info()
+        }
+        fn prepare(&mut self, rate: f32, block: usize, channels: usize) {
+            self.0.prepare(rate, block, channels)
+        }
+        fn reset(&mut self) {}
+        fn set_param(&mut self, id: &str, value: f32) -> bool {
+            self.0.set_param(id, value)
+        }
+        fn param(&self, id: &str) -> Option<f32> {
+            self.0.param(id)
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            self.0.process(io, frames)
+        }
+        fn track_info_changed(&mut self, info: &openplugin_core::TrackInfo) {
+            HEARD.lock().unwrap().push(info.clone());
+        }
+    }
+
+    #[test]
+    fn track_info_crosses_the_abi_and_reaches_the_plugin() {
+        assert_eq!(ABI, 4);
+        let instance = create::<Tracked>(48_000.0, 64, 2);
+        assert!(!instance.is_null());
+        // Name, colour as 0xRRGGBBAA and the kind bits arrive as given.
+        let name = std::ffi::CString::new("Lead Vox \u{266a}").unwrap();
+        assert_eq!(unsafe { set_track_info(instance, name.as_ptr(), 0x11_22_33_ff, TRACK_HAS_COLOUR | TRACK_BUS) }, 1);
+        // No colour flag: the colour argument is ignored. A null or empty name is no name.
+        assert_eq!(unsafe { set_track_info(instance, std::ptr::null(), 0xdead_beef, TRACK_RETURN | TRACK_MASTER) }, 1);
+        let empty = std::ffi::CString::new("").unwrap();
+        assert_eq!(unsafe { set_track_info(instance, empty.as_ptr(), 0, 0xffff_ffff) }, 1);
+        // A null instance delivers nothing.
+        assert_eq!(unsafe { set_track_info(std::ptr::null_mut(), name.as_ptr(), 0, 0) }, 0);
+        // Bytes that are not UTF-8 are replaced, and a very long name is cut.
+        let bad = std::ffi::CString::new(vec![b'a', 0xff, b'b']).unwrap();
+        assert_eq!(unsafe { set_track_info(instance, bad.as_ptr(), 0, 0) }, 1);
+        let long = std::ffi::CString::new("x".repeat(5000)).unwrap();
+        assert_eq!(unsafe { set_track_info(instance, long.as_ptr(), 0, 0) }, 1);
+        unsafe { destroy(instance) };
+        let heard = HEARD.lock().unwrap().clone();
+        assert_eq!(heard.len(), 5);
+        assert_eq!(heard[0].name.as_deref(), Some("Lead Vox \u{266a}"));
+        assert_eq!(heard[0].colour, Some(0x1122_33ff));
+        assert!(heard[0].is_bus() && !heard[0].is_return());
+        assert_eq!((heard[1].name.clone(), heard[1].colour), (None, None));
+        assert!(heard[1].is_return() && heard[1].is_master());
+        assert_eq!(heard[2].name, None);
+        assert_eq!(heard[2].kind, openplugin_core::TrackInfo::IS_RETURN | openplugin_core::TrackInfo::IS_BUS | openplugin_core::TrackInfo::IS_MASTER);
+        assert_eq!(heard[3].name.as_deref(), Some("a\u{fffd}b"));
+        assert_eq!(heard[4].name.as_ref().map(String::len), Some(255));
     }
 
     #[test]
