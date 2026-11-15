@@ -20,6 +20,12 @@
 //! while the editor is inside one of its own calls (a click that asked the
 //! host for a size, and the host answered at once) waits until that call ends.
 //!
+//! Repaint: after each tick and each input call the view asks the editor what
+//! changed ([`Editor::damage`]) and invalidates only those rectangles
+//! (`setNeedsDisplayInRect:`). An editor with nothing to repaint costs the
+//! timer tick and nothing else; an editor that does not report damage (the
+//! default) is invalidated whole, as before.
+//!
 //! Main thread only.
 
 #![allow(unsafe_code, clippy::missing_safety_doc)]
@@ -167,6 +173,8 @@ struct State {
     pending: Option<(u32, u32, bool)>,
     /// The view is changing its own frame.
     in_frame: bool,
+    /// The backing scale of the last frame drawn (0 before the first).
+    scale: f32,
 }
 
 #[repr(C)]
@@ -259,6 +267,7 @@ unsafe fn draw(this: Id, st: &mut State) {
     unsafe {
         let bounds = send_rect(this, b"bounds\0");
         let scale = backing_scale(this).clamp(1.0, 3.0);
+        st.scale = scale;
         let frame = st.editor.render(scale);
         if frame.width == 0 || frame.height == 0 || frame.pixels.len() < frame.width * frame.height {
             return;
@@ -383,7 +392,7 @@ unsafe fn key_event(this: Id, event: Id, down: bool) { unsafe {
         }
     });
     if handled {
-        redraw(this);
+        invalidate(this);
     } else {
         pass_on(this, if down { b"keyDown:\0" } else { b"keyUp:\0" }, event);
     }
@@ -413,7 +422,7 @@ extern "C" fn accepts_first_responder(this: Id, _cmd: Sel) -> i8 {
 extern "C" fn become_first_responder(this: Id, _cmd: Sel) -> i8 {
     unsafe {
         guarded(this, |st| st.editor.focus_changed(true));
-        redraw(this);
+        invalidate(this);
     }
     1
 }
@@ -421,13 +430,52 @@ extern "C" fn become_first_responder(this: Id, _cmd: Sel) -> i8 {
 extern "C" fn resign_first_responder(this: Id, _cmd: Sel) -> i8 {
     unsafe {
         guarded(this, |st| st.editor.focus_changed(false));
-        redraw(this);
+        invalidate(this);
     }
     1
 }
 
 unsafe fn redraw(this: Id) { unsafe {
     send!((), this, b"setNeedsDisplay:\0", i8 = 1);
+}}
+
+/// The view rectangle (whole points, a point more on every side for anti-aliasing and
+/// rounding) that shows an editor rectangle, or `None` when it is not finite.
+fn view_rect(r: &openplugin_core::editor::DamageRect, editor: (u32, u32), view: CGSize) -> Option<CGRect> {
+    if !r.is_finite() || editor.0 == 0 || editor.1 == 0 {
+        return None;
+    }
+    let (sx, sy) = (view.w / f64::from(editor.0), view.h / f64::from(editor.1));
+    let x0 = ((f64::from(r.x) * sx).floor() - 1.0).clamp(0.0, view.w);
+    let y0 = ((f64::from(r.y) * sy).floor() - 1.0).clamp(0.0, view.h);
+    let x1 = (((f64::from(r.x) + f64::from(r.w)) * sx).ceil() + 1.0).clamp(0.0, view.w);
+    let y1 = (((f64::from(r.y) + f64::from(r.h)) * sy).ceil() + 1.0).clamp(0.0, view.h);
+    Some(CGRect { origin: CGPoint { x: x0, y: y0 }, size: CGSize { w: (x1 - x0).max(0.0), h: (y1 - y0).max(0.0) } })
+}
+
+/// Ask the editor what changed and invalidate that: nothing, some rectangles, or the whole view.
+unsafe fn invalidate(this: Id) { unsafe {
+    let mut damage = None;
+    let mut size = (0, 0);
+    guarded(this, |st| {
+        damage = st.editor.damage();
+        size = st.size;
+    });
+    let Some(rects) = damage else { return redraw(this) };
+    if rects.is_empty() {
+        return;
+    }
+    let view = send_rect(this, b"bounds\0").size;
+    let mut cg = Vec::with_capacity(rects.len());
+    for r in &rects {
+        match view_rect(r, size, view) {
+            Some(rect) => cg.push(rect),
+            None => return redraw(this),
+        }
+    }
+    for rect in cg {
+        send!((), this, b"setNeedsDisplayInRect:\0", CGRect = rect);
+    }
 }}
 
 extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
@@ -446,7 +494,7 @@ extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
             let clicks = send!(isize, event, b"clickCount\0").max(1) as u32;
             st.editor.mouse_down(x, y, clicks);
         });
-        redraw(this);
+        invalidate(this);
     }
 }
 
@@ -467,7 +515,7 @@ extern "C" fn mouse_up(this: Id, _cmd: Sel, event: Id) {
             let (x, y) = local(this, st.size, event);
             st.editor.mouse_up(x, y);
         });
-        redraw(this);
+        invalidate(this);
     }
 }
 
@@ -496,7 +544,12 @@ extern "C" fn tick(this: Id, _cmd: Sel, _timer: Id) {
             // An editor may change its own size (a poll hook resized it).
             follow(this, st, true);
         });
-        redraw(this);
+        // A window moved to a display of another scale gets a full frame.
+        if state(this).is_some_and(|st| st.scale != 0.0 && st.scale != backing_scale(this).clamp(1.0, 3.0)) {
+            redraw(this);
+        } else {
+            invalidate(this);
+        }
     }
 }
 
@@ -573,7 +626,7 @@ impl EditorView {
             if view.is_null() {
                 return None;
             }
-            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false }));
+            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false, scale: 0.0 }));
             object_setInstanceVariable(view, IVAR.as_ptr() as *const c_char, state as *mut c_void);
 
             // Mouse-moved events need a tracking area: moved | active always | in visible rect.
@@ -760,6 +813,22 @@ pub fn run_window(title: &str, editor: Box<dyn Editor>, poll: Option<Poll>) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damage_maps_to_whole_view_points_with_a_margin() {
+        use openplugin_core::editor::DamageRect;
+        let view = CGSize { w: 240.0, h: 160.0 };
+        let r = view_rect(&DamageRect::new(10.5, 20.0, 30.0, 40.25), (240, 160), view).unwrap();
+        assert_eq!((r.origin.x, r.origin.y, r.size.w, r.size.h), (9.0, 19.0, 33.0, 43.0));
+        // Cut to the view.
+        let r = view_rect(&DamageRect::new(-50.0, 150.0, 400.0, 400.0), (240, 160), view).unwrap();
+        assert_eq!((r.origin.x, r.origin.y, r.size.w, r.size.h), (0.0, 149.0, 240.0, 11.0));
+        // A view shown at twice the editor's size.
+        let r = view_rect(&DamageRect::new(10.0, 10.0, 10.0, 10.0), (120, 80), view).unwrap();
+        assert_eq!((r.origin.x, r.origin.y, r.size.w, r.size.h), (19.0, 19.0, 22.0, 22.0));
+        assert!(view_rect(&DamageRect::new(f32::NAN, 0.0, 1.0, 1.0), (240, 160), view).is_none());
+        assert!(view_rect(&DamageRect::new(0.0, 0.0, 1.0, 1.0), (0, 0), view).is_none());
+    }
 
     #[test]
     fn flags_map_to_modifiers() {
