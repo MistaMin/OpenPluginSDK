@@ -120,6 +120,8 @@ Then **0.6.0**.
 
 Status: task 3 is done, including LV2: `openplugin_core::worker` (proven allocation-free on the audio side, with an impulse swap during playback) and its `Executor` hook, through which the LV2 entry runs jobs on the host's `worker` thread when the host offers `worker:schedule` (fake host worker tests, fallback, hostile calls, no allocation on `run`, `lv2_validate`), with the loader's own thread as the fallback.
 
+Status: task 5 is done (`Editor::accessibility_nodes`, `accessibility_action` and `accessibility_focus`; `ControlSet` and `DesignEditor` provide them automatically; the Cocoa view exposes `NSAccessibilityElement` children with name, value, role and screen frame, increment, decrement and press as mouse-equivalent gestures, focus following and value-changed notifications; proven by the `a11y` main-thread tests; speech by VoiceOver itself is not verified headlessly).
+
 Then **0.7.0**.
 
 ## 1.0: stable and publishable on macOS

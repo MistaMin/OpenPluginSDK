@@ -44,10 +44,18 @@
 //!   [`ControlSet::key_down`] returns false for every key it did not use,
 //!   which is every key while nothing is focused, so the view can pass those
 //!   to the host (transport, shortcuts).
+//! * Screen readers: [`ControlSet::accessibility_nodes`] lists every control with
+//!   its parameter name, its value as `ParamInfo::format` text, a role (slider
+//!   for knobs, faders and key banks, switch for toggles, button for momentary
+//!   buttons), its area, and whether it has focus. [`ControlSet::accessibility_action`]
+//!   answers increment, decrement and press with the same whole gestures a
+//!   key or a click sends ([`ACCESS_STEP`] of the range per step, one position
+//!   for a stepped control), and [`ControlSet::set_focus`] follows the reader's cursor.
 //! * What a control looks like is its value, hover, pressed and focus state.
 //!   [`ControlSet::take_changed`] lists the controls whose look changed since
 //!   the last call, so an editor repaints only those ([`openplugin_core::Editor::damage`]).
 
+use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, DamageRect};
 use openplugin_core::{EditorHost, ParamFlags, ParamInfo, Unit};
 
 pub use openplugin_core::editor::{Key, Modifiers};
@@ -62,6 +70,10 @@ pub const PAGE_STEP: f32 = 0.1;
 pub const WHEEL_STEP: f32 = 0.02;
 /// Drag and wheel factor while the fine modifier is held.
 pub const FINE_FACTOR: f32 = 0.1;
+/// What one screen-reader increment or decrement moves a continuous control, as a
+/// fraction of its range. VoiceOver repeats the command by hand, so a step has to be
+/// audible: 5% is twenty presses end to end. Stepped controls move one position.
+pub const ACCESS_STEP: f32 = 0.05;
 
 /// Where a control answers the mouse, in points, origin top left.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -536,6 +548,81 @@ impl ControlSet {
             c.value = new;
             self.host.set(c.param, new);
         }
+    }
+
+    /// The controls as a screen reader sees them, in the order they were added;
+    /// a node's index is its [`ControlId`]. Read-only controls are listed with
+    /// `enabled` false.
+    pub fn accessibility_nodes(&self) -> Vec<AccessNode> {
+        self.controls
+            .iter()
+            .map(|c| AccessNode {
+                label: c.info.name.to_string(),
+                value: c.info.format(c.value),
+                role: match c.kind {
+                    ControlKind::Toggle => AccessRole::Switch,
+                    ControlKind::Button => AccessRole::Button,
+                    _ => AccessRole::Slider,
+                },
+                on: c.is_on(),
+                rect: DamageRect::from_tuple(c.area.bounds()),
+                focused: c.focused,
+                enabled: c.interactive(),
+            })
+            .collect()
+    }
+
+    /// A screen reader's increment, decrement or press on control `id`. The
+    /// gestures are the ones the mouse sends: a whole begin, perform, end for
+    /// a step or a flip, and begin, maximum, minimum, end for a button. A
+    /// slider ignores Press; a button ignores steps; a toggle takes Increment
+    /// as on and Decrement as off. True when a gesture went to the host. Nothing
+    /// happens for a read-only control or while the mouse or a key holds one.
+    pub fn accessibility_action(&mut self, id: ControlId, action: AccessAction) -> bool {
+        let Some(c) = self.controls.get(id) else { return false };
+        if !c.interactive() || self.grab.is_some() || self.hold.is_some() {
+            return false;
+        }
+        let (param, info, kind) = (c.param, c.info, c.kind);
+        match (kind, action) {
+            (ControlKind::Button, AccessAction::Press) => {
+                let (on, off) = (info.clamp(info.max), info.clamp(info.min));
+                self.host.begin(param);
+                self.host.perform(param, on);
+                self.host.perform(param, off);
+                self.host.end(param);
+                self.controls[id].value = off;
+                true
+            }
+            (ControlKind::Toggle, AccessAction::Press) => {
+                let v = info.clamp(if c.is_on() { info.min } else { info.max });
+                self.access_send(id, v)
+            }
+            (ControlKind::Toggle, AccessAction::Increment) => self.access_send(id, info.clamp(info.max)),
+            (ControlKind::Toggle, AccessAction::Decrement) => self.access_send(id, info.clamp(info.min)),
+            (ControlKind::Button, _) | (_, AccessAction::Press) => false,
+            (_, step) => {
+                let dir = if step == AccessAction::Increment { 1.0 } else { -1.0 };
+                let new = if c.is_stepped() {
+                    c.info.clamp(c.value + dir * c.plain_step())
+                } else {
+                    c.info.from_normalized(c.info.to_normalized(c.value) + dir * ACCESS_STEP)
+                };
+                self.access_send(id, new)
+            }
+        }
+    }
+
+    fn access_send(&mut self, id: ControlId, new: f32) -> bool {
+        let before = self.controls[id].value;
+        self.send_value(id, new);
+        self.controls[id].value != before
+    }
+
+    /// A screen reader's cursor moved to control `id`: take keyboard focus.
+    pub fn accessibility_focus(&mut self, id: ControlId) -> bool {
+        self.set_focus(Some(id));
+        self.focus == Some(id)
     }
 
     /// The control with keyboard focus.
@@ -1486,5 +1573,86 @@ mod tests {
         // A control added later is reported on its own.
         let id = set.add(Control::knob(Area::rect(600.0, 0.0, 10.0, 10.0), 0, &GAIN));
         assert_eq!(set.take_changed(), vec![id]);
+    }
+
+    // ---- screen readers ----
+
+    #[test]
+    fn accessibility_nodes_name_value_role_and_place() {
+        let (mut set, _log) = key_rig();
+        set.param_changed(0, -6.0);
+        let nodes = set.accessibility_nodes();
+        assert_eq!(nodes.len(), 7);
+        assert_eq!((nodes[0].label.as_str(), nodes[0].value.as_str(), nodes[0].role), ("Gain", "-6.0 dB", AccessRole::Slider));
+        assert_eq!((nodes[1].value.as_str(), nodes[1].role, nodes[1].on), ("Off", AccessRole::Switch, false));
+        assert!(!nodes[2].enabled && nodes[0].enabled, "read-only is listed but disabled");
+        assert_eq!((nodes[3].value.as_str(), nodes[3].role), ("B", AccessRole::Slider));
+        assert_eq!(nodes[5].role, AccessRole::Button);
+        assert_eq!(nodes[3].rect, DamageRect::new(0.0, 100.0, 100.0, 20.0));
+        assert_eq!(nodes[5].rect, DamageRect::new(440.0, 40.0, 20.0, 20.0));
+        focus(&mut set, 1);
+        assert!(set.accessibility_nodes()[1].focused);
+        set.param_changed(1, 1.0);
+        assert!(set.accessibility_nodes()[1].on && set.accessibility_nodes()[1].value == "On");
+    }
+
+    #[test]
+    fn accessibility_steps_are_whole_gestures() {
+        let (mut set, log) = key_rig();
+        // A continuous control moves 5% of 48 dB, as a whole begin, perform, end.
+        assert!(set.accessibility_action(0, AccessAction::Increment));
+        let g = take(&log);
+        assert_eq!(g.len(), 3);
+        assert_eq!(g[0], Begin(0));
+        near(g[1], 0, 2.4);
+        assert_eq!(g[2], End(0));
+        assert!(set.accessibility_action(0, AccessAction::Decrement));
+        near(take(&log)[1], 0, 0.0);
+        // A stepped control moves one position, a key bank one key.
+        assert!(set.accessibility_action(4, AccessAction::Increment));
+        near(take(&log)[1], 2, 2.0);
+        assert!(set.accessibility_action(3, AccessAction::Increment));
+        near(take(&log)[1], 3, 2.0);
+        assert!(set.accessibility_action(6, AccessAction::Decrement));
+        near(take(&log)[1], 8, 0.0);
+        // At the end nothing is sent.
+        set.param_changed(0, 24.0);
+        assert!(!set.accessibility_action(0, AccessAction::Increment));
+        assert!(take(&log).is_empty());
+        // The same gestures a click sends.
+        let (mut clicked, clog) = key_rig();
+        clicked.mouse_down(110.0, 10.0, 1);
+        clicked.mouse_up(110.0, 10.0);
+        let by_mouse = take(&clog);
+        assert!(set.accessibility_action(1, AccessAction::Press));
+        assert_eq!(take(&log), by_mouse);
+        assert_eq!(by_mouse, vec![Begin(1), Perform(1, 1.0), End(1)]);
+    }
+
+    #[test]
+    fn accessibility_press_and_guards() {
+        let (mut set, log) = key_rig();
+        // Press pushes a button through its maximum and back, like a click.
+        assert!(set.accessibility_action(5, AccessAction::Press));
+        assert_eq!(take(&log), vec![Begin(7), Perform(7, 1.0), Perform(7, 0.0), End(7)]);
+        assert_eq!(set.get(5).unwrap().value(), 0.0);
+        // A toggle: Increment is on, Decrement is off, a repeat sends nothing.
+        assert!(set.accessibility_action(1, AccessAction::Increment));
+        assert!(!set.accessibility_action(1, AccessAction::Increment));
+        assert!(set.accessibility_action(1, AccessAction::Decrement));
+        take(&log);
+        // Meaningless pairs, read-only controls and unknown nodes do nothing.
+        assert!(!set.accessibility_action(0, AccessAction::Press));
+        assert!(!set.accessibility_action(5, AccessAction::Increment));
+        assert!(!set.accessibility_action(2, AccessAction::Increment));
+        assert!(!set.accessibility_action(99, AccessAction::Increment));
+        // The mouse holding a control keeps the reader out.
+        set.mouse_down(30.0, 30.0, 1);
+        take(&log);
+        assert!(!set.accessibility_action(1, AccessAction::Press));
+        // The reader's cursor takes keyboard focus; read-only ones cannot.
+        set.mouse_up(30.0, 30.0);
+        assert!(set.accessibility_focus(4) && set.focused() == Some(4));
+        assert!(!set.accessibility_focus(2));
     }
 }

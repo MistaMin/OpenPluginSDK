@@ -26,11 +26,25 @@
 //! timer tick and nothing else; an editor that does not report damage (the
 //! default) is invalidated whole, as before.
 //!
+//! Accessibility: the view is an accessibility group whose children are one
+//! `NSAccessibilityElement` per node of [`Editor::accessibility_nodes`]
+//! (a control with a name, a value as text and a role: slider, check box or
+//! button). The elements hold no copy: each question (role, label, value,
+//! frame, focus) asks the editor again, so the answer is always current, and the
+//! frame is converted to screen coordinates on every ask, so a resize, a scale
+//! change or a moved window needs no update. `accessibilityPerformIncrement`,
+//! `Decrement` and `Press` go to [`Editor::accessibility_action`], and a
+//! VoiceOver cursor move to [`Editor::accessibility_focus`]. After every tick
+//! and input call the view compares the nodes with what it last saw and posts
+//! `NSAccessibilityValueChangedNotification` for a value that changed (from the
+//! host's automation too), `FocusedUIElementChanged` when keyboard focus moved,
+//! and `LayoutChanged` when the controls or the size changed.
+//!
 //! Main thread only.
 
 #![allow(unsafe_code, clippy::missing_safety_doc)]
 
-use openplugin_core::editor::SizeRange;
+use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, SizeRange};
 use openplugin_core::editor::{Key, Modifiers};
 use openplugin_core::Editor;
 use std::ffi::{c_char, c_void, CString};
@@ -79,7 +93,16 @@ unsafe extern "C" {
 }
 
 #[link(name = "AppKit", kind = "framework")]
-unsafe extern "C" {}
+unsafe extern "C" {
+    static NSAccessibilitySliderRole: Id;
+    static NSAccessibilityCheckBoxRole: Id;
+    static NSAccessibilityButtonRole: Id;
+    static NSAccessibilityGroupRole: Id;
+    static NSAccessibilityValueChangedNotification: Id;
+    static NSAccessibilityFocusedUIElementChangedNotification: Id;
+    static NSAccessibilityLayoutChangedNotification: Id;
+    fn NSAccessibilityPostNotification(element: Id, notification: Id);
+}
 
 #[link(name = "Foundation", kind = "framework")]
 unsafe extern "C" {
@@ -175,6 +198,35 @@ struct State {
     in_frame: bool,
     /// The backing scale of the last frame drawn (0 before the first).
     scale: f32,
+    /// One accessibility element per node, created on demand (retained).
+    ax_elements: Vec<Id>,
+    /// What the nodes looked like when notifications were last posted.
+    ax_seen: Vec<AxSeen>,
+}
+
+/// A node as the last notification pass saw it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AxSeen {
+    value: String,
+    focused: bool,
+}
+
+/// What changed between two passes over the nodes.
+#[derive(Debug, PartialEq, Eq)]
+struct AxDiff {
+    /// The number of nodes changed.
+    layout: bool,
+    /// Nodes whose value text changed.
+    values: Vec<usize>,
+    /// The focused node changed: the new one (`None` for no focus).
+    focus: Option<Option<usize>>,
+}
+
+fn ax_diff(prev: &[AxSeen], now: &[AccessNode]) -> AxDiff {
+    let values = now.iter().enumerate().filter(|(i, n)| prev.get(*i).is_some_and(|p| p.value != n.value)).map(|(i, _)| i).collect();
+    let before = prev.iter().position(|p| p.focused);
+    let after = now.iter().position(|n| n.focused);
+    AxDiff { layout: prev.len() != now.len(), values, focus: (before != after).then_some(after) }
 }
 
 #[repr(C)]
@@ -214,6 +266,9 @@ unsafe fn follow(this: Id, st: &mut State, frame: bool) { unsafe {
         return;
     }
     st.size = now;
+    if !st.ax_elements.is_empty() {
+        NSAccessibilityPostNotification(this, NSAccessibilityLayoutChangedNotification);
+    }
     if frame {
         st.in_frame = true;
         send!((), this, b"setFrameSize:\0", CGSize = CGSize { w: f64::from(now.0), h: f64::from(now.1) });
@@ -455,6 +510,7 @@ fn view_rect(r: &openplugin_core::editor::DamageRect, editor: (u32, u32), view: 
 
 /// Ask the editor what changed and invalidate that: nothing, some rectangles, or the whole view.
 unsafe fn invalidate(this: Id) { unsafe {
+    ax_sync(this);
     let mut damage = None;
     let mut size = (0, 0);
     guarded(this, |st| {
@@ -561,6 +617,312 @@ extern "C" fn yes_event(_this: Id, _cmd: Sel, _event: Id) -> i8 {
     1
 }
 
+// ---- Accessibility -------------------------------------------------------
+
+const AX_VIEW_IVAR: &[u8] = b"openpluginAxView\0";
+const AX_INDEX_IVAR: &[u8] = b"openpluginAxIndex\0";
+
+unsafe fn ivar(obj: Id, name: &[u8]) -> *mut c_void { unsafe {
+    let mut p: *mut c_void = null_mut();
+    object_getInstanceVariable(obj, name.as_ptr() as *const c_char, &mut p);
+    p
+}}
+
+/// The element's view, its node index and the node as the editor describes it now.
+unsafe fn ax_node(element: Id) -> Option<(Id, usize, AccessNode)> { unsafe {
+    let view = ivar(element, AX_VIEW_IVAR);
+    let index = ivar(element, AX_INDEX_IVAR) as usize;
+    let st = state(view)?;
+    let node = st.editor.accessibility_nodes().into_iter().nth(index)?;
+    Some((view, index, node))
+}}
+
+/// The view's elements, one per node, made or dropped to match.
+unsafe fn ax_elements(this: Id) -> Vec<Id> { unsafe {
+    let Some(st) = state(this) else { return Vec::new() };
+    let count = st.editor.accessibility_nodes().len();
+    while st.ax_elements.len() > count {
+        if let Some(old) = st.ax_elements.pop() {
+            object_setInstanceVariable(old, AX_VIEW_IVAR.as_ptr() as *const c_char, null_mut());
+            send!((), old, b"release\0");
+        }
+    }
+    let cls = element_class();
+    while st.ax_elements.len() < count && !cls.is_null() {
+        let element = send!(Id, send!(Id, cls as Id, b"alloc\0"), b"init\0");
+        if element.is_null() {
+            break;
+        }
+        object_setInstanceVariable(element, AX_VIEW_IVAR.as_ptr() as *const c_char, this);
+        object_setInstanceVariable(element, AX_INDEX_IVAR.as_ptr() as *const c_char, st.ax_elements.len() as *mut c_void);
+        st.ax_elements.push(element);
+    }
+    st.ax_elements.clone()
+}}
+
+/// Post the notifications for what changed in the nodes since the last pass.
+unsafe fn ax_sync(this: Id) { unsafe {
+    let Some(st) = state(this) else { return };
+    let now = st.editor.accessibility_nodes();
+    if now.is_empty() && st.ax_seen.is_empty() {
+        return;
+    }
+    let diff = ax_diff(&st.ax_seen, &now);
+    st.ax_seen = now.iter().map(|n| AxSeen { value: n.value.clone(), focused: n.focused }).collect();
+    let elements = ax_elements(this);
+    if diff.layout {
+        NSAccessibilityPostNotification(this, NSAccessibilityLayoutChangedNotification);
+    }
+    for i in diff.values {
+        if let Some(&e) = elements.get(i) {
+            NSAccessibilityPostNotification(e, NSAccessibilityValueChangedNotification);
+        }
+    }
+    if let Some(focus) = diff.focus {
+        let target = focus.and_then(|i| elements.get(i).copied()).unwrap_or(this);
+        NSAccessibilityPostNotification(target, NSAccessibilityFocusedUIElementChangedNotification);
+    }
+}}
+
+/// `convertRect:toView:` style calls that return a rectangle.
+unsafe fn send_rect_to(obj: Id, name: &[u8], rect: CGRect, other: Option<Id>) -> CGRect { unsafe {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut out = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { w: 0.0, h: 0.0 } };
+        match other {
+            Some(o) => {
+                let f: unsafe extern "C" fn(*mut CGRect, Id, Sel, CGRect, Id) = std::mem::transmute(objc_msgSend_stret as unsafe extern "C" fn());
+                f(&mut out, obj, sel(name), rect, o);
+            }
+            None => {
+                let f: unsafe extern "C" fn(*mut CGRect, Id, Sel, CGRect) = std::mem::transmute(objc_msgSend_stret as unsafe extern "C" fn());
+                f(&mut out, obj, sel(name), rect);
+            }
+        }
+        out
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        match other {
+            Some(o) => {
+                let f: unsafe extern "C" fn(Id, Sel, CGRect, Id) -> CGRect = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                f(obj, sel(name), rect, o)
+            }
+            None => {
+                let f: unsafe extern "C" fn(Id, Sel, CGRect) -> CGRect = std::mem::transmute(objc_msgSend as unsafe extern "C" fn());
+                f(obj, sel(name), rect)
+            }
+        }
+    }
+}}
+
+/// An editor rectangle in points as a rectangle of the view (the view may be
+/// shown at another size than the editor).
+unsafe fn view_space(this: Id, size: (u32, u32), r: &openplugin_core::editor::DamageRect) -> CGRect { unsafe {
+    let b = send_rect(this, b"bounds\0");
+    let sx = if size.0 > 0 { b.size.w / f64::from(size.0) } else { 1.0 };
+    let sy = if size.1 > 0 { b.size.h / f64::from(size.1) } else { 1.0 };
+    CGRect {
+        origin: CGPoint { x: f64::from(r.x) * sx, y: f64::from(r.y) * sy },
+        size: CGSize { w: f64::from(r.w) * sx, h: f64::from(r.h) * sy },
+    }
+}}
+
+/// A view rectangle in screen coordinates (origin bottom left of the main
+/// display), or in window coordinates while the view has no window.
+unsafe fn screen_rect(this: Id, rect: CGRect) -> CGRect { unsafe {
+    let in_window = send_rect_to(this, b"convertRect:toView:\0", rect, Some(null_mut()));
+    let window = send!(Id, this, b"window\0");
+    if window.is_null() {
+        in_window
+    } else {
+        send_rect_to(window, b"convertRectToScreen:\0", in_window, None)
+    }
+}}
+
+fn role_name(role: AccessRole) -> Id {
+    unsafe {
+        match role {
+            AccessRole::Slider => NSAccessibilitySliderRole,
+            AccessRole::Switch => NSAccessibilityCheckBoxRole,
+            AccessRole::Button => NSAccessibilityButtonRole,
+        }
+    }
+}
+
+extern "C" fn ax_role(this: Id, _cmd: Sel) -> Id {
+    unsafe { ax_node(this).map_or(null_mut(), |(_, _, n)| role_name(n.role)) }
+}
+
+extern "C" fn ax_label(this: Id, _cmd: Sel) -> Id {
+    unsafe { ax_node(this).map_or(null_mut(), |(_, _, n)| ns_string(&n.label)) }
+}
+
+/// A slider's value is its text; a switch's is 0 or 1 (what a check box
+/// reports); a button has none.
+extern "C" fn ax_value(this: Id, _cmd: Sel) -> Id {
+    unsafe {
+        let Some((_, _, n)) = ax_node(this) else { return null_mut() };
+        match n.role {
+            AccessRole::Slider => ns_string(&n.value),
+            AccessRole::Switch => send!(Id, class(b"NSNumber\0") as Id, b"numberWithInt:\0", i32 = n.on as i32),
+            AccessRole::Button => null_mut(),
+        }
+    }
+}
+
+/// The parameter's text for every role ("On", "-6.0 dB"), which is what
+/// VoiceOver speaks after the label.
+extern "C" fn ax_value_description(this: Id, _cmd: Sel) -> Id {
+    unsafe { ax_node(this).map_or(null_mut(), |(_, _, n)| ns_string(&n.value)) }
+}
+
+extern "C" fn ax_frame(this: Id, _cmd: Sel) -> CGRect {
+    unsafe {
+        let none = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { w: 0.0, h: 0.0 } };
+        let Some((view, _, node)) = ax_node(this) else { return none };
+        let Some(st) = state(view) else { return none };
+        let rect = view_space(view, st.size, &node.rect);
+        screen_rect(view, rect)
+    }
+}
+
+extern "C" fn ax_parent(this: Id, _cmd: Sel) -> Id {
+    unsafe { ivar(this, AX_VIEW_IVAR) }
+}
+
+extern "C" fn ax_window(this: Id, _cmd: Sel) -> Id {
+    unsafe {
+        let view = ivar(this, AX_VIEW_IVAR);
+        if view.is_null() { null_mut() } else { send!(Id, view, b"window\0") }
+    }
+}
+
+extern "C" fn ax_enabled(this: Id, _cmd: Sel) -> i8 {
+    unsafe { ax_node(this).is_some_and(|(_, _, n)| n.enabled) as i8 }
+}
+
+extern "C" fn ax_focused(this: Id, _cmd: Sel) -> i8 {
+    unsafe { ax_node(this).is_some_and(|(_, _, n)| n.focused) as i8 }
+}
+
+/// VoiceOver's cursor arrives on the control: the view takes the keyboard (when
+/// it can) and the editor moves its focus there.
+extern "C" fn ax_set_focused(this: Id, _cmd: Sel, focused: i8) {
+    unsafe {
+        let Some((view, index, _)) = ax_node(this) else { return };
+        if focused == 0 {
+            return;
+        }
+        if state(view).is_some_and(|st| st.editor.wants_keys()) {
+            let window = send!(Id, view, b"window\0");
+            if !window.is_null() {
+                send!(i8, window, b"makeFirstResponder:\0", Id = view);
+            }
+        }
+        guarded(view, |st| {
+            st.editor.accessibility_focus(index);
+        });
+        invalidate(view);
+    }
+}
+
+unsafe fn ax_act(element: Id, action: AccessAction) -> i8 { unsafe {
+    let Some((view, index, node)) = ax_node(element) else { return 0 };
+    if !node.enabled || state(view).is_none_or(|st| st.busy) {
+        return 0;
+    }
+    let mut done = false;
+    guarded(view, |st| done = st.editor.accessibility_action(index, action));
+    invalidate(view);
+    done as i8
+}}
+
+extern "C" fn ax_increment(this: Id, _cmd: Sel) -> i8 {
+    unsafe { ax_act(this, AccessAction::Increment) }
+}
+
+extern "C" fn ax_decrement(this: Id, _cmd: Sel) -> i8 {
+    unsafe { ax_act(this, AccessAction::Decrement) }
+}
+
+extern "C" fn ax_press(this: Id, _cmd: Sel) -> i8 {
+    unsafe { ax_act(this, AccessAction::Press) }
+}
+
+unsafe fn ns_array(items: &[Id]) -> Id { unsafe {
+    send!(Id, class(b"NSArray\0") as Id, b"arrayWithObjects:count:\0", *const Id = items.as_ptr(), usize = items.len())
+}}
+
+/// The view is a group when the editor has nodes; otherwise it is as opaque as before.
+extern "C" fn view_is_ax_element(this: Id, _cmd: Sel) -> i8 {
+    unsafe { state(this).is_some_and(|st| !st.editor.accessibility_nodes().is_empty()) as i8 }
+}
+
+extern "C" fn view_ax_role(_this: Id, _cmd: Sel) -> Id {
+    unsafe { NSAccessibilityGroupRole }
+}
+
+extern "C" fn view_ax_children(this: Id, _cmd: Sel) -> Id {
+    unsafe { ns_array(&ax_elements(this)) }
+}
+
+extern "C" fn view_ax_focused_element(this: Id, _cmd: Sel) -> Id {
+    unsafe {
+        let focus = state(this).and_then(|st| st.editor.accessibility_nodes().iter().position(|n| n.focused));
+        let elements = ax_elements(this);
+        focus.and_then(|i| elements.get(i).copied()).unwrap_or(this)
+    }
+}
+
+/// The element under a point in screen coordinates (VoiceOver pointing, touch).
+extern "C" fn view_ax_hit_test(this: Id, _cmd: Sel, point: CGPoint) -> Id {
+    unsafe {
+        let elements = ax_elements(this);
+        for &e in elements.iter().rev() {
+            let f = ax_frame(e, sel(b"accessibilityFrame\0"));
+            if point.x >= f.origin.x && point.x < f.origin.x + f.size.w && point.y >= f.origin.y && point.y < f.origin.y + f.size.h {
+                return e;
+            }
+        }
+        this
+    }
+}
+
+unsafe fn element_class() -> Class { unsafe {
+    let name = CString::new(format!("OpenPluginAXElement_{:x}", &MARKER as *const u8 as usize)).unwrap_or_default();
+    let existing = objc_getClass(name.as_ptr());
+    if !existing.is_null() {
+        return existing;
+    }
+    let cls = objc_allocateClassPair(class(b"NSAccessibilityElement\0"), name.as_ptr(), 0);
+    if cls.is_null() {
+        return null_mut();
+    }
+    class_addIvar(cls, AX_VIEW_IVAR.as_ptr() as *const c_char, std::mem::size_of::<*mut c_void>(), 3, c"^v".as_ptr());
+    class_addIvar(cls, AX_INDEX_IVAR.as_ptr() as *const c_char, std::mem::size_of::<*mut c_void>(), 3, c"^v".as_ptr());
+    let add = |name: &[u8], imp: *const c_void, types: &[u8]| {
+        class_addMethod(cls, sel(name), imp, types.as_ptr() as *const c_char);
+    };
+    add(b"accessibilityRole\0", ax_role as *const c_void, b"@@:\0");
+    add(b"accessibilityLabel\0", ax_label as *const c_void, b"@@:\0");
+    add(b"accessibilityValue\0", ax_value as *const c_void, b"@@:\0");
+    add(b"accessibilityValueDescription\0", ax_value_description as *const c_void, b"@@:\0");
+    add(b"accessibilityFrame\0", ax_frame as *const c_void, b"{CGRect={CGPoint=dd}{CGSize=dd}}@:\0");
+    add(b"accessibilityParent\0", ax_parent as *const c_void, b"@@:\0");
+    add(b"accessibilityWindow\0", ax_window as *const c_void, b"@@:\0");
+    add(b"accessibilityTopLevelUIElement\0", ax_window as *const c_void, b"@@:\0");
+    add(b"isAccessibilityElement\0", yes as *const c_void, b"c@:\0");
+    add(b"isAccessibilityEnabled\0", ax_enabled as *const c_void, b"c@:\0");
+    add(b"isAccessibilityFocused\0", ax_focused as *const c_void, b"c@:\0");
+    add(b"setAccessibilityFocused:\0", ax_set_focused as *const c_void, b"v@:c\0");
+    add(b"accessibilityPerformIncrement\0", ax_increment as *const c_void, b"c@:\0");
+    add(b"accessibilityPerformDecrement\0", ax_decrement as *const c_void, b"c@:\0");
+    add(b"accessibilityPerformPress\0", ax_press as *const c_void, b"c@:\0");
+    objc_registerClassPair(cls);
+    cls
+}}
+
 static MARKER: u8 = 0;
 
 /// `OpenPluginEditorView_<address>`, one per loaded binary.
@@ -599,6 +961,11 @@ unsafe fn view_class() -> Class { unsafe {
     add(b"mouseUp:\0", mouse_up as *const c_void, b"v@:@\0");
     add(b"scrollWheel:\0", scroll_wheel as *const c_void, b"v@:@\0");
     add(b"openpluginTick:\0", tick as *const c_void, b"v@:@\0");
+    add(b"isAccessibilityElement\0", view_is_ax_element as *const c_void, b"c@:\0");
+    add(b"accessibilityRole\0", view_ax_role as *const c_void, b"@@:\0");
+    add(b"accessibilityChildren\0", view_ax_children as *const c_void, b"@@:\0");
+    add(b"accessibilityFocusedUIElement\0", view_ax_focused_element as *const c_void, b"@@:\0");
+    add(b"accessibilityHitTest:\0", view_ax_hit_test as *const c_void, b"@@:{CGPoint=dd}\0");
     objc_registerClassPair(cls);
     cls
 }}
@@ -626,7 +993,7 @@ impl EditorView {
             if view.is_null() {
                 return None;
             }
-            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false, scale: 0.0 }));
+            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false, scale: 0.0, ax_elements: Vec::new(), ax_seen: Vec::new() }));
             object_setInstanceVariable(view, IVAR.as_ptr() as *const c_char, state as *mut c_void);
 
             // Mouse-moved events need a tracking area: moved | active always | in visible rect.
@@ -726,6 +1093,13 @@ impl Drop for EditorView {
             if !self.timer.is_null() {
                 send!((), self.timer, b"invalidate\0");
                 send!((), self.timer, b"release\0");
+            }
+            // Elements the host still holds must not reach the view again.
+            if let Some(st) = self.state.as_mut() {
+                for e in st.ax_elements.drain(..) {
+                    object_setInstanceVariable(e, AX_VIEW_IVAR.as_ptr() as *const c_char, null_mut());
+                    send!((), e, b"release\0");
+                }
             }
             // Detach the state first: the host may keep the view a while longer.
             object_setInstanceVariable(self.view, IVAR.as_ptr() as *const c_char, null_mut());
@@ -828,6 +1202,29 @@ mod tests {
         assert_eq!((r.origin.x, r.origin.y, r.size.w, r.size.h), (19.0, 19.0, 22.0, 22.0));
         assert!(view_rect(&DamageRect::new(f32::NAN, 0.0, 1.0, 1.0), (240, 160), view).is_none());
         assert!(view_rect(&DamageRect::new(0.0, 0.0, 1.0, 1.0), (0, 0), view).is_none());
+    }
+
+    #[test]
+    fn diff_reports_values_focus_and_layout() {
+        let node = |value: &str, focused: bool| AccessNode {
+            label: "x".into(),
+            value: value.into(),
+            role: AccessRole::Slider,
+            on: false,
+            rect: openplugin_core::editor::DamageRect::new(0.0, 0.0, 1.0, 1.0),
+            focused,
+            enabled: true,
+        };
+        let seen = |value: &str, focused: bool| AxSeen { value: value.into(), focused };
+        let prev = [seen("1", false), seen("2", false)];
+        let d = ax_diff(&prev, &[node("1", false), node("2", false)]);
+        assert_eq!(d, AxDiff { layout: false, values: vec![], focus: None });
+        let d = ax_diff(&prev, &[node("1", false), node("3", true)]);
+        assert_eq!(d, AxDiff { layout: false, values: vec![1], focus: Some(Some(1)) });
+        let d = ax_diff(&[seen("1", true)], &[node("1", false)]);
+        assert_eq!(d.focus, Some(None));
+        let d = ax_diff(&[], &[node("1", false)]);
+        assert!(d.layout && d.values.is_empty());
     }
 
     #[test]

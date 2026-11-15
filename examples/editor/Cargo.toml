@@ -19,3 +19,7 @@ openplugin-core = { workspace = true }
 [[test]]
 name = "cocoa"
 harness = false
+
+[[test]]
+name = "a11y"
+harness = false

@@ -17,6 +17,7 @@ The working example is [`examples/editor`](../examples/editor): a Navy plate, a 
 | `EditorHost` | the same | where gestures go: `begin`, `perform`, `end`, or `set` for all three; `request_resize` asks the host for a size |
 | `EditorFactory` | the same | `fn(EditorHost) -> Option<Box<dyn Editor>>`, passed to the export macros |
 | `Plugin::editor_state` | `openplugin_core::Plugin` | what the engine shares with its editor (meters, an analyser ring) |
+| `AccessNode`, `AccessRole`, `AccessAction` | the same | what a screen reader sees and does (below) |
 | `EditorView` | `openplugin_dri::cocoa` | the `NSView`, its 30 Hz timer, the CoreGraphics blit, and `run_window` for a standalone |
 
 ```rust
@@ -92,6 +93,33 @@ Cocoa mapping, in `openplugin_dri::cocoa`:
 
 The CLAP, LV2 and shell hosts reach the editor through this same view, so none of them needed a change. How a given host's window routes keys to a plugin view (some forward them to the plugin's view only when it is first responder, and some keep them) differs per host and is not claimed here.
 
+## Accessibility
+
+The editor is a picture, so to VoiceOver it is one empty box until the editor says what is in it. Three optional methods on `Editor`, all with defaults that change nothing (no nodes, no actions), so an editor written before them behaves as it did:
+
+| Call | Meaning |
+|---|---|
+| `accessibility_nodes() -> Vec<AccessNode>` | one node per control, in reading order: `label` (the parameter's name), `value` (the text of `ParamInfo::format`), `role` (`Slider`, `Switch` or `Button`), `on`, `rect` in editor points, `focused`, `enabled` |
+| `accessibility_action(node, AccessAction) -> bool` | `Increment`, `Decrement` or `Press` on a node. The editor sends the gestures the mouse would, through its `EditorHost`, and returns whether it did anything |
+| `accessibility_focus(node) -> bool` | VoiceOver's cursor arrived on the node: take keyboard focus there |
+
+An editor built on `ControlSet` (`examples/editor`, `DesignEditor`) forwards the three calls to the set and has nothing else to write; `DesignEditor` already does. A custom editor that draws its own controls returns its own nodes. `ControlSet` gives:
+
+| Control | Role | Value | Increment, Decrement | Press |
+|---|---|---|---|---|
+| knob, fader | slider | `ParamInfo::format` | 5% of the travel along the taper (`ACCESS_STEP`); one position for a stepped parameter. One whole begin, perform, end | none |
+| key bank | slider | the choice's name | the next or previous key | none |
+| toggle | check box | 0 or 1 (`On` or `Off` as the value description) | on, off | flips: begin, perform, end |
+| momentary button | button | none | none | begin, maximum, minimum, end |
+
+A read-only control is listed with `enabled` false and takes no action. Nothing is sent when the value would not change (at the end of the range), when the mouse or a key holds a control, or for a pair that means nothing (Press on a slider). Values sent are clamped like every other gesture.
+
+The macOS view (`openplugin_dri::cocoa`) is an accessibility group (`AXGroup`) whose `accessibilityChildren` are one `NSAccessibilityElement` subclass per node. The elements keep no copy of the node: role, label, value, value description, enabled and focused are asked of the editor on every call, so they are always current. `accessibilityFrame` is worked out on every call too, from the node's rectangle scaled to the view's bounds, then `convertRect:toView:` and `convertRectToScreen:`, so a resize, a moved window or another display needs no update. `accessibilityPerformIncrement`, `Decrement` and `Press` become `accessibility_action`; `setAccessibilityFocused:` makes the view first responder (when the editor wants keys) and calls `accessibility_focus`; the view answers `accessibilityFocusedUIElement` with the element of the focused node and `accessibilityHitTest:` with the element under a screen point.
+
+After every tick and every input call the view compares the nodes with the last ones it saw and posts: `NSAccessibilityValueChangedNotification` on an element whose value text changed (a drag, a step, host automation, a preset), `NSAccessibilityFocusedUIElementChangedNotification` when keyboard focus moved, and `NSAccessibilityLayoutChangedNotification` on the view when the number of nodes or the editor's size changed. When the view goes away, elements that the host still holds stop answering.
+
+The proof is `cargo test -p example-editor --test a11y` and `cargo test -p example-design-editor --test a11y`: main-thread tests with the editor in an `EditorView` in a borderless window that is never shown. They read `accessibilityChildren`, role, label, value and frame from the view (the frames checked against the window's screen position computed separately), perform increment, decrement and press on the elements, check the exact gestures that reach a recording `EditorHost`, change a value from the host side and read it back, move focus and resize. What they cannot show: that VoiceOver itself speaks the tree, or that it receives the notifications (the notification pass is tested as a pure comparison, `ax_diff`, and run in the tests without error). A manual check with VoiceOver on a real host is still owed.
+
 ## Repaint
 
 The Cocoa view used to redraw the whole frame 30 times a second. One optional method now lets an editor say what changed:
@@ -139,6 +167,8 @@ Everything those shells call is Rust: the audio contract (`op_shell_*`), the tai
 - `cargo test -p example-editor`: a test with no harness that runs on the main thread. It opens the editor through the shell ABI, CLAP and LV2. It clicks it, checks the gestures, and reads pixels back from the view. It then resizes the editor through each of the three (`op_editor_resize`, CLAP `adjust_size` and `set_size`, LV2 `ui:resize`), and checks that the view's size, the drawn pixels and the click positions follow: a click at the old position of the Warm switch hits nothing, a click at the scaled one does. It also has the editor ask for a size (a double-click on the bare plate) through `op_editor_set_request_resize`, `clap_host_gui::request_resize` (the host calls `set_size` inside the request) and the host's `ui:resize`. The editor's own tests (`cargo test -p example-editor --lib`) drive a session through two editors fed the same events, one repainting only its damage and one repainting everything, at scales 1, 1.5 and 2, and compare every frame pixel for pixel; `cargo test -p openplugin-dri` does the same for `SceneCanvas` and `DesignEditor`. A last case sends real `NSEvent`s to the shell view with a recording responder standing in for the host: modifier flags from mouse events and `flagsChanged:` (a Shift arrow steps a tenth as far), a handled arrow (a whole gesture, nothing for the next responder), unhandled keys and the up of a key the editor did not take (both reach the next responder), Tab, Space and Escape, and the focus ring in the pixels. `flagsChanged:` is exercised with a key event that carries the flags, because `NSEvent` cannot build a flags-changed event directly. No window is used, so first-responder handoff in a real window is not exercised.
 - `cargo test -p openplugin-core`: the clamping rules of `SizeRange` (bounds, aspect, a result clamps to itself).
 - `VST3EditorProof` (`native/vst3/editor_host.mm`, built with `-DOP_EDITOR=ON`): loads the VST3 bundle in process and opens the view. It re-creates the engine with the view open. If `OP_EDITOR_PROOF_CLICK` is `x;y;param`, it clicks there and checks the paired edits.
+
+- `cargo test -p example-editor --test a11y` and `cargo test -p example-design-editor --test a11y`: the accessibility tree and its actions, as in the Accessibility section.
 
 None of these is a session in Logic, Cubase, Pro Tools, Bitwig or Reaper.
 
