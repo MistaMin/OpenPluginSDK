@@ -34,6 +34,18 @@
 //! whatever thread drops it. Drop it from the main thread (for example when
 //! the plugin instance is destroyed), not from `process`.
 //!
+//! # Running jobs on a host's thread
+//!
+//! A format entry can supply its own worker thread through [`Executor`] (the
+//! LV2 entry hands jobs to the host's `worker` extension this way). The entry
+//! wraps plugin construction in [`with_executor`]; a [`loader`] created inside
+//! it runs its jobs on the executor instead of starting a thread, and falls
+//! back to its own thread if the executor refuses. The plugin's code does not
+//! change. Create the loader in the constructor (or `prepare`), not later.
+//! The audio side then calls [`Waker::wake`] after a submit and after a swap,
+//! which is a lock-free atomic update; the executor decides when to run the
+//! task. `submit` still boxes the closure on the calling thread.
+//!
 //! # Example
 //!
 //! ```
@@ -51,6 +63,7 @@
 
 use crate::spsc;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::{Builder, JoinHandle, Thread};
@@ -75,6 +88,63 @@ impl std::error::Error for QueueFull {}
 
 type Job<T> = Box<dyn FnOnce() -> T + Send + 'static>;
 
+/// What one call of [`Task::work`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Nothing to run (old values were freed, if any were waiting).
+    Idle,
+    /// A job ran and its result is in the queue for the audio thread.
+    Done,
+    /// Work is left over: a result waits for room in the queue. Call again.
+    Retry,
+}
+
+/// A loader's background half, for an [`Executor`] to run on its own thread.
+pub trait Task: Send {
+    /// Runs at most one job, or hands over a result that was waiting for
+    /// room. Not for the audio thread: it may run a long job. One thread at
+    /// a time.
+    fn work(&mut self) -> Step;
+}
+
+/// Wakes a task. Callable from any thread, including the audio thread.
+pub trait Waker: Send + Sync {
+    /// Asks the executor to call [`Task::work`] once more. Lock-free and
+    /// allocation-free.
+    fn wake(&self);
+    /// The loader is gone: stop running the task and drop it. Waits for a
+    /// running call to finish. Not for the audio thread.
+    fn detach(&self);
+}
+
+/// A way to run loader tasks other than on a thread of their own.
+pub trait Executor: Send + Sync {
+    /// Takes over `task`. An `Err` hands the task back (no room, say); the
+    /// loader then starts its own thread for it.
+    fn spawn(&self, task: Box<dyn Task>) -> Result<Arc<dyn Waker>, Box<dyn Task>>;
+}
+
+thread_local! {
+    static AMBIENT: RefCell<Option<Arc<dyn Executor>>> = const { RefCell::new(None) };
+}
+
+/// Runs `f` with `executor` as the one new loaders on this thread use.
+pub fn with_executor<R>(executor: Arc<dyn Executor>, f: impl FnOnce() -> R) -> R {
+    struct Restore(Option<Arc<dyn Executor>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            AMBIENT.with(|a| *a.borrow_mut() = previous);
+        }
+    }
+    let _restore = Restore(AMBIENT.with(|a| a.borrow_mut().replace(executor)));
+    f()
+}
+
+fn ambient() -> Option<Arc<dyn Executor>> {
+    AMBIENT.with(|a| a.borrow().clone())
+}
+
 #[derive(Default)]
 struct Counters {
     submitted: AtomicUsize,
@@ -91,8 +161,12 @@ struct Counters {
 pub struct Loader<T: Send + 'static> {
     jobs: spsc::Producer<Job<T>>,
     counters: Arc<Counters>,
-    thread: Thread,
-    handle: Option<JoinHandle<()>>,
+    backend: Backend,
+}
+
+enum Backend {
+    Thread { thread: Thread, handle: Option<JoinHandle<()>> },
+    Host(Arc<dyn Waker>),
 }
 
 /// The audio-thread half: owns the live value and picks up new ones.
@@ -102,6 +176,8 @@ pub struct Slot<T: Send + 'static> {
     retired: spsc::Producer<T>,
     /// An old value the return queue had no room for yet.
     stalled: Option<T>,
+    /// Set when an executor runs the task: told after an old value is retired.
+    waker: Option<Arc<dyn Waker>>,
 }
 
 /// Starts a worker thread and returns both halves.
@@ -119,66 +195,100 @@ pub fn loader<T: Send + 'static>(initial: T, capacity: usize) -> (Loader<T>, Slo
     let (ready_tx, ready_rx) = spsc::channel::<T>(capacity);
     let (retired_tx, retired_rx) = spsc::channel::<T>(capacity);
     let counters = Arc::new(Counters::default());
-    let worker_counters = counters.clone();
-    let handle = Builder::new()
-        .name("openplugin-worker".into())
-        .spawn(move || run(job_rx, ready_tx, retired_rx, worker_counters))
-        .expect("could not start the openplugin worker thread");
-    let thread = handle.thread().clone();
+    let core: Box<dyn Task> = Box::new(Core {
+        jobs: job_rx,
+        ready: ready_tx,
+        retired: retired_rx,
+        waiting: None,
+        counters: counters.clone(),
+    });
+    let hosted = match ambient() {
+        Some(executor) => executor.spawn(core),
+        None => Err(core),
+    };
+    let (backend, waker) = match hosted {
+        Ok(waker) => (Backend::Host(waker.clone()), Some(waker)),
+        Err(core) => {
+            let stop = counters.clone();
+            let handle = Builder::new()
+                .name("openplugin-worker".into())
+                .spawn(move || run(core, stop))
+                .expect("could not start the openplugin worker thread");
+            let thread = handle.thread().clone();
+            (Backend::Thread { thread, handle: Some(handle) }, None)
+        }
+    };
     (
         Loader {
             jobs: job_tx,
             counters,
-            thread,
-            handle: Some(handle),
+            backend,
         },
         Slot {
             current: initial,
             ready: ready_rx,
             retired: retired_tx,
             stalled: None,
+            waker,
         },
     )
 }
 
-fn run<T: Send + 'static>(
-    mut jobs: spsc::Consumer<Job<T>>,
-    mut ready: spsc::Producer<T>,
-    mut retired: spsc::Consumer<T>,
+/// The loader's background half: runs jobs and frees retired values.
+struct Core<T: Send + 'static> {
+    jobs: spsc::Consumer<Job<T>>,
+    ready: spsc::Producer<T>,
+    retired: spsc::Consumer<T>,
+    /// A finished result that the audio thread has not made room for yet.
+    waiting: Option<T>,
     counters: Arc<Counters>,
-) {
-    // A finished result that the audio thread has not made room for yet.
-    let mut waiting: Option<T> = None;
-    loop {
+}
+
+impl<T: Send + 'static> Task for Core<T> {
+    fn work(&mut self) -> Step {
         // Old values come back here to be freed off the audio thread.
-        while let Some(old) = retired.pop() {
+        while let Some(old) = self.retired.pop() {
             drop(old);
         }
-        if counters.stop.load(Ordering::Acquire) {
-            break;
-        }
-        if let Some(result) = waiting.take() {
-            if let Err(result) = ready.push(result) {
-                waiting = Some(result);
-                std::thread::park_timeout(IDLE);
-                continue;
-            }
-        }
-        match jobs.pop() {
-            Some(job) => {
-                match catch_unwind(AssertUnwindSafe(job)) {
-                    Ok(value) => waiting = Some(value),
-                    Err(_) => {
-                        counters.failed.fetch_add(1, Ordering::Release);
-                    }
+        if let Some(result) = self.waiting.take() {
+            return match self.ready.push(result) {
+                Ok(()) => Step::Done,
+                Err(result) => {
+                    self.waiting = Some(result);
+                    Step::Retry
                 }
-                counters.finished.fetch_add(1, Ordering::Release);
+            };
+        }
+        let Some(job) = self.jobs.pop() else { return Step::Idle };
+        match catch_unwind(AssertUnwindSafe(job)) {
+            Ok(value) => {
+                if let Err(value) = self.ready.push(value) {
+                    self.waiting = Some(value);
+                }
             }
-            None => std::thread::park_timeout(IDLE),
+            Err(_) => {
+                self.counters.failed.fetch_add(1, Ordering::Release);
+            }
+        }
+        self.counters.finished.fetch_add(1, Ordering::Release);
+        if self.waiting.is_some() { Step::Retry } else { Step::Done }
+    }
+}
+
+impl<T: Send + 'static> Drop for Core<T> {
+    fn drop(&mut self) {
+        while let Some(old) = self.retired.pop() {
+            drop(old);
         }
     }
-    while let Some(old) = retired.pop() {
-        drop(old);
+}
+
+/// The worker thread: runs the task until the loader stops it.
+fn run(mut task: Box<dyn Task>, counters: Arc<Counters>) {
+    while !counters.stop.load(Ordering::Acquire) {
+        if task.work() != Step::Done {
+            std::thread::park_timeout(IDLE);
+        }
     }
 }
 
@@ -197,7 +307,10 @@ impl<T: Send + 'static> Loader<T> {
         self.counters.submitted.fetch_add(1, Ordering::AcqRel);
         match self.jobs.push(Box::new(job)) {
             Ok(()) => {
-                self.thread.unpark();
+                match &self.backend {
+                    Backend::Thread { thread, .. } => thread.unpark(),
+                    Backend::Host(waker) => waker.wake(),
+                }
                 Ok(())
             }
             Err(_) => {
@@ -239,9 +352,14 @@ impl<T: Send + 'static> Loader<T> {
 impl<T: Send + 'static> Drop for Loader<T> {
     fn drop(&mut self) {
         self.counters.stop.store(true, Ordering::Release);
-        self.thread.unpark();
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+        match &mut self.backend {
+            Backend::Thread { thread, handle } => {
+                thread.unpark();
+                if let Some(handle) = handle.take() {
+                    let _ = handle.join();
+                }
+            }
+            Backend::Host(waker) => waker.detach(),
         }
     }
 }
@@ -259,16 +377,26 @@ impl<T: Send + 'static> Slot<T> {
                 self.stalled = Some(old);
                 return false;
             }
+            self.wake();
         }
         match self.ready.pop() {
             Some(new) => {
                 let old = std::mem::replace(&mut self.current, new);
-                if let Err(old) = self.retired.push(old) {
-                    self.stalled = Some(old);
+                match self.retired.push(old) {
+                    Ok(()) => self.wake(),
+                    Err(old) => self.stalled = Some(old),
                 }
                 true
             }
             None => false,
+        }
+    }
+
+    /// Asks an executor-run task to free what was just retired. A no-op when
+    /// the loader has its own thread (it polls on a timer).
+    fn wake(&self) {
+        if let Some(waker) = &self.waker {
+            waker.wake();
         }
     }
 
@@ -472,5 +600,90 @@ mod tests {
         }
         drop(loader);
         drop(slot);
+    }
+
+    /// Keeps tasks for the test to run by hand, like a host's worker would.
+    struct Manual {
+        tasks: Tasks,
+        wakes: Arc<AtomicUsize>,
+        accept: bool,
+    }
+
+    struct CountWake(Arc<AtomicUsize>, Arc<AtomicBool>);
+
+    impl Waker for CountWake {
+        fn wake(&self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        fn detach(&self) {
+            self.1.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl Executor for Manual {
+        fn spawn(&self, task: Box<dyn Task>) -> Result<Arc<dyn Waker>, Box<dyn Task>> {
+            if !self.accept {
+                return Err(task);
+            }
+            self.tasks.lock().unwrap().push(task);
+            Ok(Arc::new(CountWake(self.wakes.clone(), Arc::new(AtomicBool::new(false)))))
+        }
+    }
+
+    type Tasks = Arc<std::sync::Mutex<Vec<Box<dyn Task>>>>;
+
+    fn manual(accept: bool) -> (Arc<Manual>, Tasks, Arc<AtomicUsize>) {
+        let tasks = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let wakes = Arc::new(AtomicUsize::new(0));
+        (Arc::new(Manual { tasks: tasks.clone(), wakes: wakes.clone(), accept }), tasks, wakes)
+    }
+
+    #[test]
+    fn executor_runs_the_jobs_and_is_woken() {
+        let (exec, tasks, wakes) = manual(true);
+        let (mut loader, mut slot) = with_executor(exec, || loader(0u32, 2));
+        loader.submit(|| 9).unwrap();
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        // No thread of our own: nothing happens until the executor runs the task.
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!slot.poll());
+        assert_eq!(tasks.lock().unwrap()[0].work(), Step::Done);
+        assert!(slot.poll());
+        assert_eq!(*slot.get(), 9);
+        // The swap retired the old value and woke the task to free it.
+        assert_eq!(wakes.load(Ordering::SeqCst), 2);
+        assert_eq!(tasks.lock().unwrap()[0].work(), Step::Idle);
+        assert_eq!(loader.pending(), 0);
+    }
+
+    #[test]
+    fn refusing_executor_falls_back_to_a_thread() {
+        let (exec, tasks, _) = manual(false);
+        let (mut loader, mut slot) = with_executor(exec, || loader(0u32, 2));
+        assert!(tasks.lock().unwrap().is_empty());
+        loader.submit(|| 4).unwrap();
+        settle(&loader);
+        let start = Instant::now();
+        while !slot.poll() {
+            assert!(start.elapsed() < WAIT);
+        }
+        assert_eq!(*slot.get(), 4);
+        // The executor applies only inside `with_executor`.
+        assert!(ambient().is_none());
+    }
+
+    #[test]
+    fn full_ready_queue_asks_for_a_retry() {
+        let (exec, tasks, _) = manual(true);
+        let (mut loader, mut slot) = with_executor(exec, || loader(0u32, 1));
+        loader.submit(|| 1).unwrap();
+        assert_eq!(tasks.lock().unwrap()[0].work(), Step::Done);
+        loader.submit(|| 2).unwrap();
+        // The first result is still queued, so the second has nowhere to go.
+        assert_eq!(tasks.lock().unwrap()[0].work(), Step::Retry);
+        assert!(slot.poll());
+        assert_eq!(tasks.lock().unwrap()[0].work(), Step::Done);
+        assert!(slot.poll());
+        assert_eq!(*slot.get(), 2);
     }
 }

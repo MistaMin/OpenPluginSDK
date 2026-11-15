@@ -118,7 +118,7 @@ Then **0.6.0**.
 5. **Accessibility.** Controls from the registry appear to VoiceOver with name, value and role, and respond to its increment and decrement. Owns `cocoa.rs` and the registry. Proof: the main-thread test reads the accessibility tree.
 6. **Typing a value, tooltips, files.** Double-click or a key opens a text field that parses through `ParamInfo::parse`; controls show tooltips; the editor can open a file dialog and accept dropped files. Owns `cocoa.rs`, the registry. Proof: the main-thread test types a value and drops a file.
 
-Status: task 3 is done (`openplugin_core::worker`, proven allocation-free on the audio side, with an impulse swap during playback); its LV2 `worker` extension hookup waits until the LV2 parity task lands.
+Status: task 3 is done, including LV2: `openplugin_core::worker` (proven allocation-free on the audio side, with an impulse swap during playback) and its `Executor` hook, through which the LV2 entry runs jobs on the host's `worker` thread when the host offers `worker:schedule` (fake host worker tests, fallback, hostile calls, no allocation on `run`, `lv2_validate`), with the loader's own thread as the fallback.
 
 Then **0.7.0**.
 

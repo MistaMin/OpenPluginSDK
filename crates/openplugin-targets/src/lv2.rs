@@ -33,10 +33,32 @@
 //! (`extension_data`), and the editor asks the host for a size through the
 //! host's `ui:resize` feature.
 //! [`Lv2Harness`] drives the same render path in-process.
+//!
+//! # Worker
+//!
+//! When the host offers `worker:schedule`, the plugin's
+//! [`openplugin_core::worker`] loaders run their jobs on the host's worker
+//! thread instead of one of their own, through the `worker:interface`
+//! extension data (`work`, `work_response`, `end_run`). A plugin needs no LV2
+//! code for this: the entry builds the plugin inside
+//! [`openplugin_core::worker::with_executor`], so a `loader` created in the
+//! constructor or `prepare` is bridged. `submit` and `Slot::poll` only bump
+//! atomic counters; the end of `run` turns them into `schedule_work` calls
+//! (a four-byte task number each), so scheduling happens on the audio thread
+//! and does not allocate. The host calls `work` on its thread, which runs one
+//! job and answers with `respond`; the host then calls `work_response` at the
+//! start of a later `run` (it is a notice; the result itself is taken by
+//! `Slot::poll`, which swaps without locking). A host that refuses
+//! `schedule_work` keeps the request for the next `run`; one that has no
+//! worker feature gets the loader's own thread. More than eight loaders in
+//! one instance: the extra ones use their own threads.
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::fmt::Write as _;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use openplugin_core::worker::{self, Executor, Step, Task, Waker};
 
 use openplugin_core::midi::{self, Message, Parser};
 use openplugin_core::{
@@ -417,6 +439,223 @@ impl OutSequence {
     }
 }
 
+const WORKER_SCHEDULE: &[u8] = b"http://lv2plug.in/ns/ext/worker#schedule";
+const WORKER_INTERFACE: &[u8] = b"http://lv2plug.in/ns/ext/worker#interface";
+/// Loaders one instance bridges to the host; further ones use their own thread.
+const WORKER_SLOTS: usize = 8;
+/// `schedule_work` calls one slot makes per `run`; the rest wait for the next.
+const SCHEDULE_PER_RUN: u32 = 16;
+const WORKER_OK: u32 = 0;
+const WORKER_ERR_UNKNOWN: u32 = 1;
+
+#[repr(C)]
+struct WorkerSchedule {
+    handle: *mut c_void,
+    schedule_work: Option<unsafe extern "C" fn(*mut c_void, u32, *const c_void) -> u32>,
+}
+
+type RespondFn = unsafe extern "C" fn(*mut c_void, u32, *const c_void) -> u32;
+
+#[repr(C)]
+struct WorkerInterface {
+    work: unsafe extern "C" fn(*mut c_void, Option<RespondFn>, *mut c_void, u32, *const c_void) -> u32,
+    work_response: unsafe extern "C" fn(*mut c_void, u32, *const c_void) -> u32,
+    end_run: unsafe extern "C" fn(*mut c_void) -> u32,
+}
+
+unsafe impl Sync for WorkerInterface {}
+
+static WORKER_IFACE: WorkerInterface = WorkerInterface { work: lv2_work, work_response: lv2_work_response, end_run: lv2_end_run };
+
+/// Counts of what the worker bridge did, for tests and diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorkerStats {
+    /// `schedule_work` calls the host accepted.
+    pub scheduled: usize,
+    /// `schedule_work` calls the host refused (kept and retried).
+    pub refused: usize,
+    /// `work` calls that ran a task.
+    pub worked: usize,
+    /// `work` calls rejected as malformed.
+    pub rejected: usize,
+    /// `work_response` calls.
+    pub responses: usize,
+}
+
+struct BridgeSlot {
+    /// Requests for `work` not yet passed to the host.
+    pending: AtomicU32,
+    used: AtomicBool,
+    task: Mutex<Option<Box<dyn Task>>>,
+}
+
+/// Runs loader tasks on the host's worker. Shared by the instance (audio
+/// thread: counters only), the loaders' wakers and the host's worker thread.
+struct Bridge {
+    slots: [BridgeSlot; WORKER_SLOTS],
+    scheduled: AtomicUsize,
+    refused: AtomicUsize,
+    worked: AtomicUsize,
+    rejected: AtomicUsize,
+    responses: AtomicUsize,
+}
+
+struct SlotWaker {
+    bridge: Arc<Bridge>,
+    index: usize,
+    live: AtomicBool,
+}
+
+impl Bridge {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            slots: std::array::from_fn(|_| BridgeSlot { pending: AtomicU32::new(0), used: AtomicBool::new(false), task: Mutex::new(None) }),
+            scheduled: AtomicUsize::new(0),
+            refused: AtomicUsize::new(0),
+            worked: AtomicUsize::new(0),
+            rejected: AtomicUsize::new(0),
+            responses: AtomicUsize::new(0),
+        })
+    }
+
+    fn stats(&self) -> WorkerStats {
+        WorkerStats {
+            scheduled: self.scheduled.load(Ordering::Relaxed),
+            refused: self.refused.load(Ordering::Relaxed),
+            worked: self.worked.load(Ordering::Relaxed),
+            rejected: self.rejected.load(Ordering::Relaxed),
+            responses: self.responses.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Turn the requests loaders made into `schedule_work` calls. Audio
+    /// thread: atomics and the host's call only. A refusal keeps the rest.
+    fn flush(&self, schedule: &WorkerSchedule) {
+        let Some(call) = schedule.schedule_work else { return };
+        for (index, slot) in self.slots.iter().enumerate() {
+            if !slot.used.load(Ordering::Acquire) {
+                continue;
+            }
+            let wanted = slot.pending.swap(0, Ordering::AcqRel);
+            if wanted == 0 {
+                continue;
+            }
+            let now = wanted.min(SCHEDULE_PER_RUN);
+            let mut left = wanted;
+            let payload = (index as u32).to_ne_bytes();
+            for _ in 0..now {
+                if unsafe { call(schedule.handle, 4, payload.as_ptr().cast()) } != WORKER_OK {
+                    self.refused.fetch_add(1, Ordering::Relaxed);
+                    break;
+                }
+                self.scheduled.fetch_add(1, Ordering::Relaxed);
+                left -= 1;
+            }
+            if left > 0 {
+                slot.pending.fetch_add(left, Ordering::AcqRel);
+            }
+        }
+    }
+}
+
+/// The `Arc<Bridge>` as an [`Executor`].
+struct BridgeHandle(Arc<Bridge>);
+
+impl Executor for BridgeHandle {
+    fn spawn(&self, task: Box<dyn Task>) -> Result<Arc<dyn Waker>, Box<dyn Task>> {
+        for (index, slot) in self.0.slots.iter().enumerate() {
+            if slot.used.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                slot.pending.store(0, Ordering::Release);
+                *slot.task.lock().unwrap_or_else(|e| e.into_inner()) = Some(task);
+                return Ok(Arc::new(SlotWaker { bridge: self.0.clone(), index, live: AtomicBool::new(true) }));
+            }
+        }
+        Err(task)
+    }
+}
+
+impl Waker for SlotWaker {
+    fn wake(&self) {
+        if self.live.load(Ordering::Acquire) {
+            self.bridge.slots[self.index].pending.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn detach(&self) {
+        if self.live.swap(false, Ordering::AcqRel) {
+            let slot = &self.bridge.slots[self.index];
+            // Waits for a `work` call in progress, then frees the task here.
+            let task = slot.task.lock().unwrap_or_else(|e| e.into_inner()).take();
+            drop(task);
+            slot.pending.store(0, Ordering::Release);
+            slot.used.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// Live instances' bridges by handle address. The host calls `work` on its
+/// own thread with the instance handle; looking the bridge up here keeps that
+/// thread away from the audio thread's `Instance`.
+static BRIDGES: Mutex<Vec<(usize, Arc<Bridge>)>> = Mutex::new(Vec::new());
+
+fn bridge_of(handle: *mut c_void) -> Option<Arc<Bridge>> {
+    let list = BRIDGES.lock().unwrap_or_else(|e| e.into_inner());
+    list.iter().find(|(key, _)| *key == handle as usize).map(|(_, bridge)| bridge.clone())
+}
+
+/// Worker counters of a live instance handle (for tests and diagnostics).
+pub fn worker_stats(handle: *mut c_void) -> Option<WorkerStats> {
+    bridge_of(handle).map(|bridge| bridge.stats())
+}
+
+/// `worker:interface` `work`: runs one task step on the host's thread.
+unsafe extern "C" fn lv2_work(handle: *mut c_void, respond: Option<RespondFn>, respond_handle: *mut c_void, size: u32, data: *const c_void) -> u32 {
+    let Some(bridge) = bridge_of(handle) else { return WORKER_ERR_UNKNOWN };
+    // Our requests are exactly one `u32` task number; anything else is not ours.
+    let index = if size == 4 && !data.is_null() && data as usize % 4 == 0 { Some(unsafe { *(data as *const u32) } as usize) } else { None };
+    let Some(slot) = index.and_then(|i| bridge.slots.get(i)) else {
+        bridge.rejected.fetch_add(1, Ordering::Relaxed);
+        return WORKER_ERR_UNKNOWN;
+    };
+    let step = {
+        let mut guard = slot.task.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_mut() {
+            Some(task) => task.work(),
+            None => {
+                bridge.rejected.fetch_add(1, Ordering::Relaxed);
+                return WORKER_ERR_UNKNOWN;
+            }
+        }
+    };
+    bridge.worked.fetch_add(1, Ordering::Relaxed);
+    match step {
+        Step::Idle => {}
+        Step::Done => {
+            if let Some(respond) = respond {
+                unsafe { respond(respond_handle, size, data) };
+            }
+        }
+        // A result is waiting for room: ask for another call on the next run.
+        Step::Retry => {
+            slot.pending.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+    WORKER_OK
+}
+
+/// `worker:interface` `work_response`: runs on the audio thread before `run`
+/// when a task finished. The result itself is taken by `Slot::poll`.
+unsafe extern "C" fn lv2_work_response(handle: *mut c_void, _size: u32, _data: *const c_void) -> u32 {
+    if let Some(bridge) = bridge_of(handle) {
+        bridge.responses.fetch_add(1, Ordering::Relaxed);
+    }
+    WORKER_OK
+}
+
+unsafe extern "C" fn lv2_end_run(_handle: *mut c_void) -> u32 {
+    WORKER_OK
+}
+
 /// Install the plugin `lv2_descriptor` will instantiate.
 pub fn set_creator(create: CreateFn) {
     *CREATOR.lock().expect("lv2 creator lock") = Some(create);
@@ -486,6 +725,10 @@ struct Instance {
     scratch: [Vec<f32>; 2],
     prepared: usize,
     editor_state: Option<EditorState>,
+    bridge: Arc<Bridge>,
+    /// The host's `worker:schedule`, if it offered one that works.
+    schedule: Option<WorkerSchedule>,
+    handle_key: usize,
 }
 
 const PREPARED: usize = 8192;
@@ -524,7 +767,14 @@ fn instantiate_rate(sample_rate: f64) -> Option<f32> {
 
 fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<Box<Instance>> {
     let create = creator()?;
-    let mut inner = create();
+    let bridge = Bridge::new();
+    let schedule = worker_schedule(features);
+    // With the host's worker, loaders made while building the plugin run on it.
+    let mut inner = if schedule.is_some() {
+        worker::with_executor(Arc::new(BridgeHandle(bridge.clone())), create)
+    } else {
+        create()
+    };
     let info = inner.info();
     let plane = ParamPlane::new(info);
     plane.seed_from(inner.as_ref());
@@ -535,10 +785,17 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
     }
     let map = PortMap::of(inner.as_ref());
     let layout = layout_of(inner.as_ref());
-    if inner.set_layout(layout) {
-        inner.prepare_layout(rate, PREPARED, layout);
+    let prepare = |inner: &mut Box<dyn Plugin>| {
+        if inner.set_layout(layout) {
+            inner.prepare_layout(rate, PREPARED, layout);
+        } else {
+            inner.prepare(rate, PREPARED, 2);
+        }
+    };
+    if schedule.is_some() {
+        worker::with_executor(Arc::new(BridgeHandle(bridge.clone())), || prepare(&mut inner));
     } else {
-        inner.prepare(rate, PREPARED, 2);
+        prepare(&mut inner);
     }
     cursor.invalidate();
     cursor.pull(&plane, inner.as_mut());
@@ -567,7 +824,24 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
         scratch: [vec![0.0; PREPARED], vec![0.0; PREPARED]],
         prepared: PREPARED,
         editor_state,
+        bridge,
+        schedule,
+        handle_key: 0,
     }))
+}
+
+/// The host's `worker:schedule` feature, if it is usable.
+fn worker_schedule(features: *const *const Lv2Feature) -> Option<WorkerSchedule> {
+    let mut next = features;
+    while !next.is_null() && !unsafe { *next }.is_null() {
+        let feature = unsafe { &**next };
+        if !feature.uri.is_null() && unsafe { CStr::from_ptr(feature.uri) }.to_bytes() == WORKER_SCHEDULE {
+            let schedule = unsafe { (feature.data as *const WorkerSchedule).as_ref()? };
+            return schedule.schedule_work.map(|call| WorkerSchedule { handle: schedule.handle, schedule_work: Some(call) });
+        }
+        next = unsafe { next.add(1) };
+    }
+    None
 }
 
 /// Copy the connected control ports into the plane. A port the host never
@@ -711,7 +985,11 @@ extern "C" fn lv2_instantiate(
     features: *const *const Lv2Feature,
 ) -> *mut c_void {
     match new_instance(sample_rate, features) {
-        Some(instance) => Box::into_raw(instance) as *mut c_void,
+        Some(mut instance) => {
+            instance.handle_key = &*instance as *const Instance as usize;
+            BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).push((instance.handle_key, instance.bridge.clone()));
+            Box::into_raw(instance) as *mut c_void
+        }
         None => std::ptr::null_mut(),
     }
 }
@@ -767,6 +1045,7 @@ extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
         if frames == 0 {
             // An empty output sequence is still a valid one.
             drain_midi(instance, 0);
+            flush_worker(instance);
             return;
         }
         if instance.has_position {
@@ -791,6 +1070,14 @@ extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
         render_range(instance, done, frames);
         advance_transport(instance, frames);
         drain_midi(instance, frames);
+        flush_worker(instance);
+    }
+}
+
+/// Pass the loaders' requests to the host's worker. Audio thread.
+fn flush_worker(instance: &Instance) {
+    if let Some(schedule) = &instance.schedule {
+        instance.bridge.flush(schedule);
     }
 }
 
@@ -810,11 +1097,15 @@ extern "C" fn lv2_cleanup(instance: *mut c_void) {
     unsafe {
         let mut instance = Box::from_raw(instance as *mut Instance);
         instance.magic = 0;
+        BRIDGES.lock().unwrap_or_else(|e| e.into_inner()).retain(|(key, _)| *key != instance.handle_key);
         drop(instance);
     }
 }
 
-extern "C" fn lv2_extension(_uri: *const c_char) -> *const c_void {
+extern "C" fn lv2_extension(uri: *const c_char) -> *const c_void {
+    if !uri.is_null() && unsafe { CStr::from_ptr(uri) }.to_bytes() == WORKER_INTERFACE {
+        return (&WORKER_IFACE as *const WorkerInterface).cast();
+    }
     std::ptr::null()
 }
 
@@ -1198,6 +1489,7 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
         ("ui", "http://lv2plug.in/ns/extensions/ui#"),
         ("units", "http://lv2plug.in/ns/extensions/units#"),
         ("urid", "http://lv2plug.in/ns/ext/urid#"),
+        ("work", "http://lv2plug.in/ns/ext/worker#"),
     ] {
         let _ = writeln!(out, "@prefix {prefix}: <{iri}> .");
     }
@@ -1214,7 +1506,8 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
     let _ = writeln!(out, "    rdfs:comment {} ;", quoted(&format!("{} {}", info.name, info.version)));
     let _ = writeln!(out, "    lv2:minorVersion {minor} ;");
     let _ = writeln!(out, "    lv2:microVersion {micro} ;");
-    out.push_str("    lv2:optionalFeature lv2:hardRTCapable ;\n");
+    out.push_str("    lv2:optionalFeature lv2:hardRTCapable , work:schedule ;\n");
+    out.push_str("    lv2:extensionData work:interface ;\n");
     let map = PortMap::of(plugin);
     if map.notes_in || map.notes_out {
         out.push_str("    lv2:requiredFeature urid:map ;\n");
