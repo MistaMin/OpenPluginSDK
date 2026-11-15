@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
-# Builds a plugin written with OpenPluginSDK into Linux plug-ins: a CLAP file
-# and an LV2 bundle. The macOS packager is scripts/build_plugin.sh; this script
+# Builds a plugin written with OpenPluginSDK into Linux plug-ins: a CLAP file,
+# an LV2 bundle and a standalone executable with its desktop entry. The macOS packager is scripts/build_plugin.sh; this script
 # takes the same option names where they mean the same thing. See
 # docs/BUILD.md. Run with --help.
 set -euo pipefail
@@ -17,8 +17,11 @@ Every option can also be set by the environment variable in brackets.
 
   CLAP  OUT/NAME.clap        the shared library itself (one ELF file)
   LV2   OUT/STEM.lv2/        STEM.so, manifest.ttl and STEM.ttl
+  standalone OUT/NAME        the executable (one ELF file)
+             OUT/ID.desktop  its freedesktop desktop entry
 
-STEM is NAME reduced to letters, digits and '_'.
+STEM is NAME reduced to letters, digits and '_'. ID is NAME in lower case
+with every character other than letters, digits, '_', '.' and '-' as '-'.
 
 Plugin
   --manifest-path FILE   Cargo.toml of the plugin crate               [OP_MANIFEST]
@@ -31,12 +34,13 @@ Plugin
                          descriptor, not this)                         [OP_VERSION]
   --ttl-bin NAME         the plugin's cargo bin that writes the LV2 files;
                          called as `NAME <folder> <stem>`              [OP_TTL_BIN]
+  --standalone-bin NAME  the plugin's cargo bin that runs standalone   [OP_STANDALONE_BIN]
   --features LIST        cargo features for the plugin crate           [OP_FEATURES]
 
 Formats and options
-  --formats LIST         comma list of clap,lv2, or "all" (the same two)
-                         (default: clap,lv2). vst3, au, aax and standalone
-                         are not built on Linux yet                    [OP_FORMATS]
+  --formats LIST         comma list of clap,lv2,standalone, or "all"
+                         (default: clap,lv2). vst3, au and aax are not
+                         built on Linux yet                            [OP_FORMATS]
   --strip                strip the symbol table from the libraries
                          (the dynamic exports stay)                    [OP_STRIP=1]
   --allow-lib SONAME     a shared library the plug-in may need besides
@@ -60,7 +64,7 @@ USAGE
 # ---------- settings ----------
 MANIFEST="${OP_MANIFEST:-}"; PACKAGE="${OP_PACKAGE:-}"; LIB_NAME="${OP_LIB_NAME:-}"
 NAME="${OP_NAME:-}"; VERSION="${OP_VERSION:-}"
-TTL_BIN="${OP_TTL_BIN:-}"; FEATURES="${OP_FEATURES:-}"
+TTL_BIN="${OP_TTL_BIN:-}"; STANDALONE_BIN="${OP_STANDALONE_BIN:-}"; FEATURES="${OP_FEATURES:-}"
 FORMATS="${OP_FORMATS:-clap,lv2}"
 STRIP="${OP_STRIP:-0}"; ALLOW_LIBS="${OP_ALLOW_LIBS:-}"
 OUT="${OP_OUT:-$PWD/dist}"; WORK="${OP_WORK_DIR:-$PWD/build/openplugin-linux}"
@@ -77,6 +81,7 @@ while [ $# -gt 0 ]; do
     --name) need "$@"; NAME="$2"; shift 2 ;;
     --version) need "$@"; VERSION="$2"; shift 2 ;;
     --ttl-bin) need "$@"; TTL_BIN="$2"; shift 2 ;;
+    --standalone-bin) need "$@"; STANDALONE_BIN="$2"; shift 2 ;;
     --features) need "$@"; FEATURES="$2"; shift 2 ;;
     --formats) need "$@"; FORMATS="$2"; shift 2 ;;
     --strip) STRIP=1; shift ;;
@@ -87,7 +92,7 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift ;;
     --no-verify) VERIFY=0; shift ;;
     -h|--help) usage; exit 0 ;;
-    --bundle-id|--manufacturer|--au-subtype|--au-manufacturer|--standalone-bin|--archs|--deployment-target|--vst3-sdk|--au-sdk|--aax-sdk)
+    --bundle-id|--manufacturer|--au-subtype|--au-manufacturer|--archs|--deployment-target|--vst3-sdk|--au-sdk|--aax-sdk)
       die "$1 is a macOS option of scripts/build_plugin.sh; it has no meaning for the Linux formats" ;;
     --editor|--no-editor|--tail|--no-tail|--aax-pages|--pkg)
       die "$1 is a macOS option of scripts/build_plugin.sh; it has no meaning for the Linux formats" ;;
@@ -111,11 +116,11 @@ has_format() { case ",$FORMATS," in *",$1,"*) return 0 ;; esac; return 1; }
 [ -n "$MANIFEST" ] || die "--manifest-path is required"
 [ -f "$MANIFEST" ] || die "$MANIFEST not found"
 MANIFEST="$(abspath "$MANIFEST")"
-if [ "$FORMATS" = all ]; then FORMATS="clap,lv2"; fi
+if [ "$FORMATS" = all ]; then FORMATS="clap,lv2,standalone"; fi
 for f in $(echo "$FORMATS" | tr ',' ' '); do
   case "$f" in
-    clap|lv2) ;;
-    vst3|au|aax|standalone) die "format $f is not built on Linux yet (Linux builds clap and lv2); use scripts/build_plugin.sh on macOS for it" ;;
+    clap|lv2|standalone) ;;
+    vst3|au|aax) die "format $f is not built on Linux yet (Linux builds clap, lv2 and standalone); use scripts/build_plugin.sh on macOS for it" ;;
     *) die "unknown format $f" ;;
   esac
 done
@@ -131,6 +136,10 @@ if [ -z "$VERSION" ]; then
 fi
 VERSION="${VERSION%%-*}"   # numbers only, as on macOS
 if has_format lv2 && [ -z "$TTL_BIN" ]; then die "lv2 needs --ttl-bin, the plugin's bin that writes the description files"; fi
+if has_format standalone && [ -z "$STANDALONE_BIN" ]; then die "standalone needs --standalone-bin, the plugin's bin that runs standalone"; fi
+case "$STANDALONE_BIN" in */*) die "--standalone-bin must not contain '/'" ;; esac
+NEED_LIB=0
+if has_format clap || has_format lv2; then NEED_LIB=1; fi
 for t in strings nm readelf ldd file; do
   if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then command -v "$t" >/dev/null || die "$t is needed for the checks (binutils, glibc); or give --no-verify"; fi
 done
@@ -141,6 +150,9 @@ TARGET_DIR="$WORK/target"
 REL="$TARGET_DIR/release"
 STEM="$(echo "$NAME" | tr -cd 'A-Za-z0-9_')"   # file stem safe inside an LV2 IRI
 if [ -z "$STEM" ]; then STEM=plugin; fi
+# Desktop file ID: the characters the Desktop Entry spec allows in one.
+DESKTOP_ID="$(printf '%s' "$NAME" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_.-' '-')"
+case "$DESKTOP_ID" in ''|[0-9]*|.*|-*) DESKTOP_ID="app-$DESKTOP_ID" ;; esac
 
 # ---------- environment for the build ----------
 export CARGO_BUILD_JOBS="$JOBS"
@@ -173,11 +185,17 @@ run mkdir -p "$WORK" "$OUT"
 cargo_build() {
   run cargo build --release --manifest-path "$MANIFEST" -p "$PACKAGE" ${CARGO_FEATURES[@]+"${CARGO_FEATURES[@]}"} "$@"
 }
-note "Rust library"
-cargo_build --lib
 SO="$REL/lib$LIB_NAME.so"
+if [ "$NEED_LIB" = 1 ]; then
+  note "Rust library"
+  cargo_build --lib
+fi
 if has_format lv2; then cargo_build --bin "$TTL_BIN"; fi
-if [ "$DRY" = 0 ] && [ ! -f "$SO" ]; then die "$SO was not built: is the crate a cdylib, and is --lib-name right?"; fi
+if has_format standalone; then
+  note "Rust standalone"
+  cargo_build --bin "$STANDALONE_BIN"
+fi
+if [ "$NEED_LIB" = 1 ] && [ "$DRY" = 0 ] && [ ! -f "$SO" ]; then die "$SO was not built: is the crate a cdylib, and is --lib-name right?"; fi
 
 # ---------- plug-ins ----------
 LIBS=()     # every shared library shipped, for the checks
@@ -205,6 +223,33 @@ if has_format lv2; then
   LIBS+=("$B/$STEM.so"); KINDS+=(lv2)
 fi
 
+# A Desktop Entry string: backslash, newline, tab and carriage return escaped.
+desktop_string() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' | sed -e ':a;N;$!ba;s/\n/\\n/g'; }
+# An Exec argument: double-quoted, with ", `, $ and \ backslash-escaped, then
+# escaped again as a string; '%' is doubled (field codes).
+desktop_exec() { desktop_string "\"$(printf '%s' "$1" | sed -e 's/[\\"`$]/\\&/g' -e 's/%/%%/g')\""; }
+if has_format standalone; then
+  note "standalone"
+  B="$OUT/$NAME"
+  D="$OUT/$DESKTOP_ID.desktop"
+  run rm -rf "$B"
+  run cp "$REL/$STANDALONE_BIN" "$B"
+  if [ "$STRIP" = 1 ]; then run strip --strip-all "$B"; fi
+  run chmod 755 "$B"
+  # Exec names the executable as installed on PATH; its folder is not known here.
+  ENTRY="[Desktop Entry]
+Type=Application
+Version=1.5
+Name=$(desktop_string "$NAME")
+Exec=$(desktop_exec "$NAME")
+Terminal=false
+Categories=AudioVideo;Audio;
+StartupWMClass=OpenPlugin"
+  printf '+ write %q\n' "$D"
+  if [ "$DRY" = 0 ]; then printf '%s\n' "$ENTRY" > "$D"; fi
+  LIBS+=("$B"); KINDS+=(standalone)
+fi
+
 # ---------- checks ----------
 bad=0
 if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
@@ -218,7 +263,10 @@ if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
     f="${LIBS[$i]}"; kind="${KINDS[$i]}"
     echo "-- $f"
     file -b "$f"
-    if ! file -b "$f" | grep -q 'ELF .* shared object'; then echo "not an ELF shared object: $f"; bad=1; fi
+    if [ "$kind" = standalone ]; then
+      if ! file -b "$f" | grep -q 'ELF .* executable'; then echo "not an ELF executable: $f"; bad=1; fi
+      if [ ! -x "$f" ]; then echo "not executable: $f"; bad=1; fi
+    elif ! file -b "$f" | grep -q 'ELF .* shared object'; then echo "not an ELF shared object: $f"; bad=1; fi
     # No build path in a shipped binary.
     for p in "$WORK" "$WS_PARENT" "$MANIFEST_DIR" "$SDK_ROOT" "$HOME"; do
       if strings -a "$f" | grep -qF "$p"; then echo "path leak: $f contains $p"; bad=1; fi
@@ -238,8 +286,8 @@ if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
         case "$rp" in *"$p"*) echo "run path into the build tree: $f has $rp"; bad=1 ;; esac
       done
     done < <(readelf -d "$f" | sed -n 's/.*(\(RPATH\|RUNPATH\)).*\[\(.*\)\].*/\2/p')
-    # The format's entry point is exported.
-    case "$kind" in clap) sym=clap_entry ;; lv2) sym=lv2_descriptor ;; esac
+    # The format's entry point is exported (an executable has none).
+    case "$kind" in clap) sym=clap_entry ;; lv2) sym=lv2_descriptor ;; standalone) continue ;; esac
     if nm -D --defined-only "$f" | awk '{print $NF}' | grep -qx "$sym"; then
       echo "exports $sym"
     else
@@ -252,6 +300,16 @@ if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
       if [ -s "$B/$t" ]; then echo "lv2 file: $t"; else echo "missing or empty: $B/$t"; bad=1; fi
     done
     if ! grep -qF "lv2:binary <$STEM.so>" "$B/manifest.ttl"; then echo "manifest.ttl does not name $STEM.so as lv2:binary"; bad=1; fi
+  fi
+  if has_format standalone; then
+    D="$OUT/$DESKTOP_ID.desktop"
+    if [ -s "$D" ]; then echo "desktop entry: $DESKTOP_ID.desktop"; else echo "missing or empty: $D"; bad=1; fi
+    # desktop-file-utils is optional; without it the entry is not validated.
+    if command -v desktop-file-validate >/dev/null; then
+      if desktop-file-validate "$D"; then echo "desktop-file-validate: no errors"; else echo "desktop-file-validate failed on $D"; bad=1; fi
+    else
+      echo "desktop-file-validate not found: desktop entry not validated"
+    fi
   fi
   if [ "$bad" = 0 ]; then echo "all checks passed"; fi
 fi
