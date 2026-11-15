@@ -7,6 +7,7 @@ members = [
     "crates/openplugin-ffi",
     "crates/openplugin-testing",
     "crates/openplugin",
+    "crates/openplugin-port",
     "examples/gain",
     "examples/console_eq",
     "examples/editor",

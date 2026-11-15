@@ -1,0 +1,26 @@
+[package]
+name = "openplugin-port"
+description = "Porting toolkit for OpenPluginSDK: scan an existing CLAP, VST3, Audio Unit or AAX plugin and write a manifest and a Rust parameter table"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+name = "openplugin_port"
+
+[[bin]]
+name = "openplugin-port"
+path = "src/main.rs"
+
+[dependencies]
+openplugin-targets = { workspace = true }
+serde = { workspace = true }
+serde_json = "1"
+
+[dev-dependencies]
+openplugin-core = { workspace = true }
+openplugin-ffi = { workspace = true }
+example-editor = { path = "../../examples/editor" }
