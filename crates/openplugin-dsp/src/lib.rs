@@ -30,6 +30,7 @@
 //! - [`TransistorLadder`], [`DiodeLadder`], [`Korg35`], the [`wdf`] building blocks with [`DiodeClipper`], and [`TapeHysteresis`]: virtual analog (zero-delay-feedback filters, wave digital filters, Jiles-Atherton tape).
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 //! - [`PluckedString`], [`WaveguideString`], [`WaveguideBore`], [`ModalBank`]: physical models (Karplus-Strong with the Jaffe-Smith extensions, digital waveguides, modal resonators with bar, plate and membrane presets).
+//! - [`TimeStretch`], [`PitchShifter`] (phase vocoder with identity phase locking and onset phase reset), [`DelayPitchShifter`] (low-latency modulated-delay taps), [`YinDetector`], [`MpmDetector`] (pitch detection with confidence).
 //! - [`BandlimitedOsc`], [`WavetableOsc`], [`Adsr`], [`PinkNoise`], [`VoiceAllocator`], [`SincKernel`]: synthesis (PolyBLEP/BLAMP oscillators with hard sync, mip-mapped wavetables, envelopes, noise, voice stealing and glide, a windowed-sinc resampler).
 
 pub mod adaa;
@@ -45,6 +46,7 @@ pub mod deesser;
 pub mod dynamic_eq;
 pub mod multiband;
 pub mod transient;
+pub mod delay_pitch;
 pub mod delta;
 pub mod downmix;
 pub mod dither;
@@ -84,6 +86,7 @@ pub mod modal;
 mod phys_common;
 pub mod pluck;
 pub mod waveguide;
+pub mod pitch_detect;
 pub mod ppm;
 pub mod true_peak;
 pub mod rate;
@@ -99,6 +102,7 @@ pub mod voice;
 pub mod true_peak_meter;
 pub mod spectrum;
 pub mod stft;
+pub mod vocoder;
 pub mod voice_alloc;
 pub mod wavetable;
 pub mod wdf;
@@ -118,6 +122,7 @@ pub use dynamic_eq::{DynEqKind, DynEqMode, DynamicEqBand, DynamicEqParams};
 pub use multiband::MultibandCompressor;
 pub use transient::TransientShaper;
 pub use crossover::{Crossover, LinkwitzRiley, LrOrder, MAX_BANDS};
+pub use delay_pitch::{DelayPitchShifter, MAX_DELAY_PITCH_TAPS};
 pub use delta::Delta;
 pub use delay::DelayLine;
 pub use downmix::{
@@ -182,6 +187,7 @@ pub use modal::{
 pub use phys_common::{stiff_partial_hz, MAX_DISPERSION_SECTIONS};
 pub use pluck::{PluckedString, Tuning};
 pub use waveguide::{BoreEnd, WaveguideBore, WaveguideString};
+pub use pitch_detect::{MpmDetector, Pitch, PitchDetector, YinDetector};
 pub use plate::PlateReverb;
 pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
 pub use resample::{playback_ratio, Quality, SincConfig, SincKernel, SincPlayer};
@@ -192,6 +198,7 @@ pub use wdf::{
     wright_omega, Capacitor, DiodeClipper, DiodePair, DiodeParams, Inductor, Inverter, Parallel,
     Resistor, ResistiveVoltageSource, Series, SingleDiode, WdfPort,
 };
+pub use vocoder::{PhaseLocking, PitchShifter, TimeStretch, VocoderConfig};
 pub use voice::{Polyphony, SampleVoice};
 pub use voice_alloc::{
     Allocation, GlideMode, NoteOff, StealPolicy, Voice, VoiceAllocator, VoiceMode, VoicePhase,
