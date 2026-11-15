@@ -15,9 +15,13 @@
 #include "op_shell.h"
 #include "proof_stub.h"
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <new>
+#include <string>
 #include <vector>
 
 #ifndef OP_STUB_PARAMS
@@ -109,12 +113,24 @@ uint32_t op_shell_param(uint32_t index, OpParamDesc* out) {
     out->default_plain = defaultFor(index);
     out->default_normalized = defaultFor(index);
     out->flags = OP_PARAM_AUTOMATABLE;
+#ifdef OP_STUB_TEXT
+    // The text proof: 0 Gain -24..24 dB, 1 a three-way choice, 2 a toggle, 3 a value whose text is multi-byte.
+    if (index == 0) { out->min = -24.0; out->max = 24.0; out->default_plain = out->default_normalized = 0.0; std::strcpy(out->unit, "dB"); }
+    if (index == 1) { out->max = 2.0; out->steps = 3; out->flags |= OP_PARAM_DISCRETE; out->default_plain = out->default_normalized = 0.0; }
+    if (index == 2) { out->steps = 2; out->flags |= OP_PARAM_DISCRETE; out->default_plain = out->default_normalized = 0.0; }
+    if (index == 3) { out->default_plain = out->default_normalized = 0.5; }
+#endif
     std::snprintf(out->name, sizeof(out->name), "Param %u", index);
     std::snprintf(out->id, sizeof(out->id), "p%u", index);
     return 1;
 }
+#ifdef OP_STUB_TEXT
+double op_shell_to_plain(uint32_t index, double normalized) { return index == 0 ? -24.0 + 48.0 * normalized : index == 1 ? 2.0 * normalized : normalized; }
+double op_shell_to_normalized(uint32_t index, double plain) { return index == 0 ? (plain + 24.0) / 48.0 : index == 1 ? plain / 2.0 : plain; }
+#else
 double op_shell_to_plain(uint32_t, double normalized) { return normalized; }
 double op_shell_to_normalized(uint32_t, double plain) { return plain; }
+#endif
 void* op_shell_create(double, uint32_t, uint32_t channels) {
     auto* stub = new (std::nothrow) Stub;
     if (stub) {
@@ -334,6 +350,58 @@ void op_stub_seen(void* instance, StubSeen* out) {
     if (instance && out) *out = static_cast<Stub*>(instance)->seen;
 }
 uint32_t op_stub_param_count(void) { return kParams; }
+// ---- ABI 3: parameter text. Plain text "%.1f" except in the text proof (see op_shell_param above). ----
+size_t op_shell_param_format(uint32_t index, double plain, char* buf, size_t cap) {
+    if (index >= kParams) {
+        if (buf && cap) buf[0] = '\0';
+        return 0;
+    }
+    if (!std::isfinite(plain)) plain = defaultFor(index);
+    char text[64];
+#ifdef OP_STUB_TEXT
+    static const char* const kChoice[] = {"Hall", "Plate", "Room"};
+    if (index == 0) std::snprintf(text, sizeof text, "%.1f dB", plain);
+    else if (index == 1) std::snprintf(text, sizeof text, "%s", kChoice[std::min(2, std::max(0, static_cast<int>(std::lround(plain))))]);
+    else if (index == 2) std::snprintf(text, sizeof text, "%s", plain >= 0.5 ? "On" : "Off");
+    else std::snprintf(text, sizeof text, "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E %.1f", plain);  // "日本語 0.5"
+#else
+    std::snprintf(text, sizeof text, "%.3f", plain);
+#endif
+    const size_t length = std::strlen(text);
+    if (buf && cap) {
+        size_t n = std::min(length, cap - 1);
+        while (n > 0 && n < length && (static_cast<unsigned char>(text[n]) & 0xC0) == 0x80) --n;
+        std::memcpy(buf, text, n);
+        buf[n] = '\0';
+    }
+    return length;
+}
+int op_shell_param_parse(uint32_t index, const char* text, double* out_plain) {
+    if (!text || !out_plain || index >= kParams) return 0;
+#ifdef OP_STUB_TEXT
+    if (index == 1 || index == 2) {
+        static const char* const kChoice[] = {"hall", "plate", "room"};
+        static const char* const kToggle[] = {"off", "on"};
+        std::string lower(text);
+        for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const int count = index == 1 ? 3 : 2;
+        for (int i = 0; i < count; ++i)
+            if (lower == (index == 1 ? kChoice[i] : kToggle[i])) { *out_plain = i; return 1; }
+        return 0;
+    }
+#endif
+    char* end = nullptr;
+    const double value = std::strtod(text, &end);
+    if (end == text || !std::isfinite(value)) return 0;
+    while (*end == ' ') ++end;
+    if (*end != '\0' && std::strcmp(end, "dB") != 0) return 0;
+#ifdef OP_STUB_TEXT
+    *out_plain = index == 0 ? std::min(24.0, std::max(-24.0, value)) : std::min(1.0, std::max(0.0, value));
+#else
+    *out_plain = std::min(1.0, std::max(0.0, value));
+#endif
+    return 1;
+}
 #if OP_HAS_TAIL
 double op_shell_tail_seconds(void*) { return 0.0; }
 #endif
