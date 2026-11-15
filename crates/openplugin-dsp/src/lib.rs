@@ -25,6 +25,7 @@
 //! - [`utility`]: mid/side, width, pan laws, balance, polarity, smoothed dB gain, [`DenormalGuard`].
 //! - [`TruePeakMeter`], [`Ppm`] (EBU, DIN, Nordic, BBC), [`KMeter`], [`VuIec`], [`EbuMeter`], and the lock-free [`scope_feed`] for correlation and goniometer.
 //! - [`FdnReverb`], [`PlateReverb`], [`EarlyReflections`]: Jot-Chaigne feedback delay network, Dattorro plate, and tapped-delay early reflections.
+//! - [`design_kaiser`], [`design_least_squares`], [`linear_phase_eq`], [`minimum_phase_eq`], [`MinPhaseHalfband`]: FIR design off the audio thread (windowed sinc with Kaiser's formulas, least squares, linear and minimum phase from a magnitude curve, minimum-phase half-band oversampling).
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 //! - [`BandlimitedOsc`], [`WavetableOsc`], [`Adsr`], [`PinkNoise`], [`VoiceAllocator`], [`SincKernel`]: synthesis (PolyBLEP/BLAMP oscillators with hard sync, mip-mapped wavetables, envelopes, noise, voice stealing and glide, a windowed-sinc resampler).
 
@@ -44,7 +45,10 @@ pub mod dynamics;
 pub mod envelope;
 pub mod limiter;
 pub mod filters;
+pub mod fir_design;
+pub mod fir_phase;
 pub mod flanger;
+pub mod halfband_min;
 pub mod interp;
 pub mod early;
 pub mod fdn;
@@ -106,6 +110,17 @@ pub use filters::{
     Allpass1, Allpass2, Butterworth, ButterworthKind, DcBlocker, OnePoleFilter, OnePoleMode,
     MAX_BUTTERWORTH_ORDER,
 };
+pub use fir_design::{
+    design_kaiser, design_least_squares, design_windowed, fir_group_delay, fir_magnitude_db,
+    fir_response, kaiser_attenuation_db, kaiser_beta, kaiser_taps, ls_grid, FirError, FirKind,
+    LsBand, LsFit, LsPoint,
+};
+pub use fir_phase::{
+    linear_phase_eq, linear_phase_from_magnitude, linear_phase_latency, minimum_phase_eq,
+    minimum_phase_from_linear, minimum_phase_from_magnitude, mixed_phase_eq,
+    mixed_phase_from_magnitude, partial_energy, sample_curve, EqPoint,
+};
+pub use halfband_min::MinPhaseHalfband;
 pub use flanger::{Flanger, MAX_FLANGER_FEEDBACK, MAX_FLANGER_MS};
 pub use early::{EarlyPattern, EarlyReflections, EarlyTap, MAX_EARLY_TAPS};
 pub use fdn::{FdnMatrix, FdnReverb};

@@ -928,3 +928,105 @@ The kernel is a Kaiser-windowed sinc stored as a table of 256 to 2048 phases per
 | `Best` | 128 | 0.44 | 0.00002 dB | -118.9 dB |
 
 Folding test (a 0.30 cycles/sample tone read at ratio 1.7 would land above Nyquist): the residue is -60.4, -84.4, -101.3 and -132.3 dB for the four qualities, and a tone that stays in band keeps unit gain to within 0.14 % (`Low`) or better. `SincConfig` sets the taps, attenuation and phases by hand.
+
+## FIR design and phase
+
+All of this designs on a worker thread (it allocates); only the finished taps reach the audio thread. Sources: Oppenheim and Schafer, "Discrete-Time Signal Processing" (windowed sinc, Kaiser's formulas, the real cepstrum and minimum phase); Parks and Burrus, "Digital Filter Design" (least squares); Smith, "Spectral Audio Signal Processing" (spectral factorisation of a linear-phase design); Vaidyanathan, "Multirate Systems and Filter Banks" (half-band filters). Parks-McClellan (Remez) is not implemented.
+
+### Windowed sinc and Kaiser
+
+```rust
+use openplugin_dsp::{design_kaiser, design_windowed, kaiser_attenuation_db, FirKind, WindowKind};
+
+// 80 dB, 500 Hz transition, cutoff (-6 dB point) 6 kHz at 48 kHz: 483 taps, odd.
+let taps = design_kaiser(FirKind::LowPass { cutoff_hz: 6000.0 }, 48_000.0, 80.0, 500.0)?;
+// Any window from windows.rs, your own length (odd for HighPass / BandStop):
+let hp = design_windowed(FirKind::HighPass { cutoff_hz: 80.0 }, 48_000.0, 1023, WindowKind::Blackman)?;
+// From a ripple and attenuation pair (the stricter deviation rules):
+let a = kaiser_attenuation_db(0.01 /* dB peak ripple */, 60.0);
+```
+
+Measured at 48 kHz (peak over the whole stopband; ripple over the whole passband):
+
+| spec (A dB, transition) | Kaiser estimate | stopband peak | passband ripple | achieved transition |
+| --- | --- | --- | --- | --- |
+| 60 dB, 1000 Hz | 175 taps | -59.6 dB | 0.0087 dB | 1085 Hz |
+| 80 dB, 500 Hz | 483 taps | -80.2 dB | 0.0009 dB | 521 Hz |
+| 100 dB, 2000 Hz | 155 taps | -100.0 dB | 0.0001 dB | 2049 Hz |
+
+The formula is an estimate: attenuation lands within 0.4 dB and the transition within 9 % of the request. Pad the spec by a dB if it is a hard limit. High-pass, band-pass and band-stop at 70 dB / 800 Hz come out at 261 taps and meet the stopband to within 2 dB of the request.
+
+### Least squares
+
+```rust
+use openplugin_dsp::{design_least_squares, ls_grid, LsBand};
+let bands = [LsBand::flat(0.0, 5000.0, 1.0, 1.0), LsBand::flat(7000.0, 24_000.0, 0.0, 1.0)];
+let fit = design_least_squares(101, 48_000.0, &ls_grid(&bands, 48_000.0, 101))?;
+// fit.taps, fit.rms_error, fit.condition_estimate
+```
+
+Bands may slope (`gain_lo` to `gain_hi`) and carry weights; arbitrary grids go in as `LsPoint`s. It solves the normal equations by Cholesky. With the grid covering the band, conditioning is about 5; leave a wide gap with many taps (801 taps, a 10 kHz gap) and the estimate rises to 3e5; a longer or wider gap fails with `FirError::Singular` rather than returning noise. Measured: 101 taps, 5 kHz / 7 kHz edges, RMS amplitude error 7.9e-5, against 9.0e-4 for a Kaiser design on the same measure; weighting the stopband by 100 lowers the stopband peak.
+
+### Linear-phase EQ from a curve
+
+```rust
+use openplugin_dsp::{linear_phase_eq, linear_phase_latency, EqPoint, WindowKind};
+let curve: [EqPoint; 4] = [(100.0, 0.0), (1000.0, 12.0), (3000.0, 0.0), (8000.0, -9.0)];
+let taps = linear_phase_eq(&curve, 48_000.0, 2049, WindowKind::Kaiser { beta: 8.0 })?;
+let latency = linear_phase_latency(taps.len()); // (N-1)/2 = 1024, report via Plugin::latency
+```
+
+The curve is linear in dB over log frequency and flat outside its ends. Taps are exactly symmetric; the measured group delay error is 5e-12 samples; the magnitude is within 0.15 dB of the curve at test points for 2049 taps. Resolution is limited by the length: about `4 fs / N` smoothing.
+
+### Minimum-phase and mixed-phase EQ
+
+```rust
+use openplugin_dsp::{minimum_phase_eq, mixed_phase_eq, partial_energy};
+let min = minimum_phase_eq(&curve, 48_000.0, 2049)?;       // almost no latency
+let mix = mixed_phase_eq(&curve, 48_000.0, 2049, 0.5)?;    // half the pre-ringing, about half the delay
+let kept = partial_energy(&min, 256);                       // share of energy in the first 256 taps
+```
+
+The cepstral method uses an FFT of at least 32 times the length; a 4x larger FFT changes the taps by 1.5e-8, so aliasing is not the limit. At 2049 taps against a linear-phase design of the same curve: magnitude within 0.02 dB of the target; group delay at 1 kHz 33 samples against 1024; 99.9965 % of the energy in the first 256 taps against 2.5e-10 for linear phase. Mixed phase at amount 1, 0.5, 0 has 3.8, 258 and 512 samples of delay at 400 Hz. Minimum phase changes the phase, so apply the same filter to both channels of a stereo pair, and expect phase differences against the dry signal in parallel mixes.
+
+### Handing taps to a running convolver
+
+```rust
+use openplugin_core::worker::loader;
+use openplugin_dsp::partitioned::{ConvolverConfig, Layout};
+
+// prepare:
+let config = ConvolverConfig::new(Layout::Mono, 4096);
+let mut conv = config.build()?;                       // audio-side state
+let (mut loader, mut slot) = loader(config.build_ir(&[&[1.0]])?, 4);
+
+// UI / message thread, when the curve changes:
+let cfg = config.clone();
+loader.submit(move || cfg.build_ir(&[&minimum_phase_eq(&curve, 48_000.0, 1024).unwrap()]).unwrap())?;
+
+// audio thread, every block:
+slot.poll();                                          // picks up the new ConvolutionIr
+conv.process_mono(slot.get(), block);
+```
+
+`tests/fir_swap_no_alloc.rs` runs this with a counting allocator: no allocation or free on the audio thread across the swap and the blocks after it, and the output equals direct convolution with the designed taps (max difference 6e-8). The swap switches the impulse between blocks, so a sharp change can click; crossfade two convolvers if the EQ moves fast. A linear-phase EQ adds `(N-1)/2` samples of latency.
+
+### Minimum-phase half-band oversampling
+
+```rust
+use openplugin_dsp::MinPhaseHalfband;
+let mut os = MinPhaseHalfband::design(44_100.0, 20_000.0, 80.0)?; // prepare, allocates
+os.upsample_2x(&input, &mut doubled);       // same call shape as Oversampler2x
+/* process at 2x */
+os.downsample_2x(&doubled, &mut output);
+```
+
+It is a new type; `Oversampler2x` is unchanged. The prototype (Kaiser, linear phase, asked for `2A + 10` dB) is spectrally factored into a minimum-phase filter of about half its length. Measured at 44.1 kHz base rate:
+
+| passband edge / rejection | taps (at 2x) | stopband (24.1 kHz and up) | passband ripple | group delay, DC to edge (base samples) | linear-phase equivalent |
+| --- | --- | --- | --- | --- | --- |
+| 18 kHz / 60 dB | 48 | -61.8 dB | 2e-6 dB | 0.97 to 2.56 | 10.0 |
+| 20 kHz / 80 dB | 123 | -81.5 dB | below 1e-6 dB | 1.40 to 6.50 | 27.0 |
+| 20 kHz / 100 dB | 153 | -101.0 dB | below 1e-6 dB | 1.72 to 7.89 | 34.5 |
+
+Signal path at 80 dB: a 10 kHz tone upsamples to unity (1.0002) with its image at 34.1 kHz 78 dB down (the measurement window limits this reading; the filter response above is the reference), a 2x-rate tone that folds onto 10 kHz leaves -85 dB, and a 5 kHz round trip has unity gain. The delay is not constant, so the pair is not linear phase: use it where phase at the band edge does not matter (non-linear processing, most effects). Taps are `f32`, which bounds usable rejection to about 130 dB.
