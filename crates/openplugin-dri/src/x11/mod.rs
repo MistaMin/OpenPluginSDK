@@ -65,11 +65,59 @@
 //! ignored; when the window is destroyed with its parent, or the connection
 //! is lost, the view stops talking to the server and keeps ticking the editor.
 //!
+//! Editor services, which the macOS view gets from AppKit widgets, are the
+//! view's own here, drawn with the SDK's drawing stack (the GoodLookin scene
+//! and its software rasteriser, the same face the editors use), so they look
+//! like the editor and not like a foreign toolkit. They follow `cocoa.rs`:
+//!
+//! - The type-in field ([`Editor::take_text_edit`], `text_field.rs`): a child
+//!   window over the control with the text selected. While it is open every
+//!   key goes to it and none reaches the editor or the host (the view selects
+//!   keys and takes the input focus for that time). Printable characters
+//!   (through the core keyboard mapping with Shift, Caps Lock, Num Lock, the
+//!   second group and Mod5 as level three), Backspace, Delete, Left, Right,
+//!   Home, End (Shift extends the selection), Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V.
+//!   Return and keypad Enter commit; refused text keeps the field open, red,
+//!   with a bell. Escape cancels. Focus leaving, Tab, the window being
+//!   unmapped or hidden commit valid text and drop invalid text. A click on
+//!   the view outside the field, the right button and a size change cancel.
+//!   Not there: compose and dead keys, input methods (no XIM/XKB), the legacy
+//!   national keysym sets, dragging a selection with the mouse.
+//! - The parameter menu ([`Editor::take_param_menu`], `menu.rs`): the items of
+//!   [`PARAM_MENU_ITEMS`] in an override-redirect window at the click, kept
+//!   on the screen. The pointer and the keyboard are grabbed while it is open
+//!   and released on every way out (an item chosen, a press outside, Escape,
+//!   the view hidden, unmapped, unfocused or dropped). Up, Down and Return
+//!   work too. The menu does not block: the editor keeps ticking under it.
+//!   Under Xwayland a press on a Wayland-native window is not seen by X; the
+//!   menu then goes when the view loses the focus.
+//! - The clipboard (`clipboard.rs`): the view owns and serves the `CLIPBOARD`
+//!   selection (`UTF8_STRING`, `STRING`, `TEXT`, `text/plain`, `TARGETS`)
+//!   from its window for as long as it lives; the text is gone with the view
+//!   (no clipboard manager hand-over, `SAVE_TARGETS`). Reading asks the owner
+//!   (`ConvertSelection`) and takes the answer in a later [`EditorView::pump`]:
+//!   the host's thread never waits. An owner that has not answered within
+//!   [`CLIPBOARD_WAIT_MS`] counts as an empty clipboard. Texts sent in pieces
+//!   (`INCR`, texts larger than a request) are neither read nor served.
+//! - Tooltips ([`Editor::tooltips`], `tooltip.rs`): once the pointer has
+//!   rested [`TOOLTIP_DELAY_MS`] inside a tooltip rectangle, a small
+//!   override-redirect window shows the text, asked of the editor at that
+//!   moment. It goes when the pointer leaves the rectangle or the window, on
+//!   a click, a key the view receives, and when the view is hidden.
+//!
+//! Hyprland keeps the id and geometry of root windows it never saw destroyed
+//! and applies them to a later window with the same id; the first ids of a
+//! connection are the likely ones, so the view leaves them unused for its
+//! pop-up windows.
+//!
+//! Changes a host may look for at once (the view hidden or shown, a pop-up
+//! mapped or destroyed, the focus taken on a click, a key sent on) are
+//! followed by one round trip to the server, so they are done when the call
+//! returns; nothing else waits for the server.
+//!
 //! Not served here (the view never calls these [`Editor`] hooks):
-//! `take_text_edit` and the text field, `take_param_menu` and the SDK's
-//! parameter menu, the clipboard, `tooltips`, `take_file_dialog`,
-//! `wants_drops`/`files_dropped`, and the accessibility nodes. The macOS view
-//! serves them with native widgets; X11 has none.
+//! `take_file_dialog`, `wants_drops`/`files_dropped` (no XDND), and the
+//! accessibility nodes (no AT-SPI).
 //!
 //! Main thread only: the thread that made the view makes every call.
 
@@ -77,6 +125,10 @@ use openplugin_core::editor::{DamageRect, Key, Modifiers, SizeRange};
 use openplugin_core::Editor;
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
+
+pub use clipboard::CLIPBOARD_WAIT_MS;
+pub use menu::{MenuHook, PARAM_MENU_ITEMS};
+pub use tooltip::TOOLTIP_DELAY_MS;
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xproto::{
     self, AtomEnum, ChangeWindowAttributesAux, ColormapAlloc, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask,
@@ -108,6 +160,9 @@ const TICK_SLACK_MS: f32 = 5.0;
 const MAX_IMAGE_BYTES: usize = 1 << 22;
 
 const SHIFT: u16 = 1;
+const LOCK: u16 = 2;
+/// Mod5: level three (AltGr) in the core mapping XKB servers keep.
+const LEVEL3: u16 = 0x80;
 const CONTROL: u16 = 4;
 
 /// One colour channel of the visual: where it sits and how wide it is.
@@ -182,6 +237,8 @@ struct Click {
     x: i16,
     y: i16,
     count: u32,
+    /// The window the press was in: the view's, or the field's.
+    window: Window,
 }
 
 /// The server's keyboard mapping and which modifier bits mean what.
@@ -213,6 +270,35 @@ impl Keymap {
         } else {
             first
         }
+    }
+
+    /// The symbol a key types with the modifiers in `state`, and the
+    /// character of it (Shift, Caps Lock, Num Lock, group two, level three).
+    fn typed(&self, code: u8, state: u16) -> (u32, Option<char>) {
+        let group = usize::from((state >> 13) & 3);
+        let mut base = if group > 0 && self.sym(code, 2) != 0 { 2 } else { 0 };
+        if state & LEVEL3 != 0 && self.sym(code, 4) != 0 {
+            base = 4;
+        }
+        let (first, second) = (self.sym(code, base), self.sym(code, base + 1));
+        let (shift, lock) = (state & SHIFT != 0, state & LOCK != 0);
+        if (0xff80..=0xffbd).contains(&second) {
+            let sym = if (state & self.num_lock != 0) != shift { second } else { first };
+            return (sym, char_from_keysym(sym));
+        }
+        let sym = if shift && second != 0 { second } else { first };
+        let mut c = char_from_keysym(sym);
+        // A key with one symbol has its upper case under Shift; Caps Lock turns letters over.
+        let upper = (shift && second == 0) != (lock && c.is_some_and(char::is_alphabetic) && (second == 0 || !shift));
+        let lower = lock && shift && second != 0;
+        if let Some(ch) = c {
+            if lower {
+                c = ch.to_lowercase().next();
+            } else if upper {
+                c = ch.to_uppercase().next();
+            }
+        }
+        (sym, c)
     }
 
     /// The modifier bit a modifier key holds, if the symbol is one.
@@ -258,6 +344,18 @@ fn key_from_keysym(sym: u32) -> Option<Key> {
         }
         _ => return None,
     })
+}
+
+/// The character a keysym types, if it types one: Latin-1, the keypad and
+/// the Unicode keysyms. The legacy national sets type nothing here.
+fn char_from_keysym(sym: u32) -> Option<char> {
+    match sym {
+        0x20..=0x7e | 0xa0..=0xff => char::from_u32(sym),
+        0xff80 => Some(' '),
+        0xffaa..=0xffb9 | 0xffbd => char::from_u32(sym - 0xff80),
+        0x0100_0100..=0x0110_ffff => char::from_u32(sym - 0x0100_0000).filter(|c| !c.is_control()),
+        _ => None,
+    }
 }
 
 fn lower(c: char) -> Key {
@@ -332,6 +430,21 @@ pub struct EditorView {
     wm_protocols: u32,
     wm_delete: u32,
     close_requested: bool,
+    /// Server time of the last input event.
+    last_time: u32,
+    /// Draws the field, the menu and the tooltip.
+    painter: popup::Painter,
+    /// The open type-in field.
+    field: Option<text_field::Field>,
+    /// The size changed under the field: it closes at the next poll.
+    field_cancel: bool,
+    /// The open parameter menu.
+    menu: Option<menu::Menu>,
+    /// The parameter the menu was last asked for.
+    menu_param: u32,
+    menu_hook: Option<MenuHook>,
+    clip: clipboard::Clipboard,
+    tips: tooltip::Tips,
 }
 
 /// Run an X request; a lost connection marks the view dead.
@@ -342,6 +455,12 @@ macro_rules! x {
         }
     };
 }
+
+mod clipboard;
+mod menu;
+mod popup;
+mod text_field;
+mod tooltip;
 
 impl EditorView {
     /// Connects to the X server named by `DISPLAY` and reserves the window's
@@ -409,7 +528,12 @@ impl EditorView {
         }
         let visual = visual.visual_id;
         let max_request = conn.maximum_request_bytes().min(MAX_IMAGE_BYTES);
+        // Ids left unused: see the module notes on Hyprland.
+        for _ in 0..16 {
+            conn.generate_id().ok()?;
+        }
         let keymap = read_keymap(&conn)?;
+        let clip = clipboard::Clipboard::new(&conn)?;
         conn.flush().ok()?;
 
         Some(EditorView {
@@ -448,6 +572,15 @@ impl EditorView {
             wm_protocols: 0,
             wm_delete: 0,
             close_requested: false,
+            last_time: 0,
+            painter: popup::Painter::new(),
+            field: None,
+            field_cancel: false,
+            menu: None,
+            menu_param: 0,
+            menu_hook: None,
+            clip,
+            tips: tooltip::Tips::default(),
         })
     }
 
@@ -494,6 +627,9 @@ impl EditorView {
         if parent == 0 || self.dead || !self.alive {
             return false;
         }
+        if self.created {
+            self.services_hide();
+        }
         let done = if self.created {
             // Attached before: move to the new parent.
             match self.conn.reparent_window(self.window, parent, 0, 0) {
@@ -528,12 +664,21 @@ impl EditorView {
             return;
         }
         if hidden {
+            self.services_hide();
             x!(self, self.conn.unmap_window(self.window));
         } else {
             self.full = true;
             x!(self, self.conn.map_window(self.window));
         }
-        self.flush();
+        self.settle();
+    }
+
+    /// Send what is queued and wait until the server has done it, so that
+    /// another client (the host) sees it done when the call returns.
+    fn settle(&mut self) {
+        if !self.dead && self.conn.get_input_focus().map_err(|_| ()).and_then(|cookie| cookie.reply().map_err(|_| ())).is_err() {
+            self.dead = true;
+        }
     }
 
     /// The hosted editor.
@@ -566,9 +711,11 @@ impl EditorView {
             }
             if pass == 0 {
                 self.tick_if_due();
+                self.service_timers();
             }
             if self.touched {
                 self.touched = false;
+                self.poll_requests();
                 self.invalidate();
             }
             self.present();
@@ -651,6 +798,7 @@ impl EditorView {
         }
         self.size = now;
         self.full = true;
+        self.field_cancel = self.field.is_some();
         if frame {
             self.set_window_size((device(now.0, self.scale), device(now.1, self.scale)));
         }
@@ -662,6 +810,7 @@ impl EditorView {
         }
         self.win = win;
         self.full = true;
+        self.field_cancel = self.field.is_some();
         if !self.usable() {
             return;
         }
@@ -702,7 +851,8 @@ impl EditorView {
     /// Select key events while the editor wants keys, and only then, so the
     /// host keeps every key of an editor that wants none.
     fn select_keys(&mut self) {
-        let wants = self.editor.wants_keys();
+        // The field and the menu take every key while they are open.
+        let wants = self.editor.wants_keys() || self.field.is_some() || self.menu.is_some();
         if wants == self.keys_selected || !self.usable() {
             return;
         }
@@ -739,8 +889,11 @@ impl EditorView {
                 self.configured = None;
             }
         }
+        if self.service_event(event) {
+            return;
+        }
         match event {
-            Event::Expose(_) => self.full = true,
+            Event::Expose(e) if e.window == self.window => self.full = true,
             Event::ConfigureNotify(e) if e.window == self.window => {
                 let win = (u32::from(e.width), u32::from(e.height));
                 if self.configured.is_some() || win == self.win || win.0 == 0 || win.1 == 0 {
@@ -749,6 +902,7 @@ impl EditorView {
                 // The host (or the window manager) sized the window: the editor follows.
                 self.win = win;
                 self.full = true;
+                self.field_cancel = self.field.is_some();
                 let points = |v: u32| ((v as f32 / self.scale).round() as u32).max(1);
                 let (w, h) = (points(win.0), points(win.1));
                 if (w, h) != self.size {
@@ -756,7 +910,8 @@ impl EditorView {
                 }
             }
             Event::DestroyNotify(e) if e.window == self.window => self.alive = false,
-            Event::ButtonPress(e) => {
+            Event::ButtonPress(e) if e.event == self.window => {
+                self.last_time = e.time;
                 let (x, y) = self.point(e.event_x, e.event_y);
                 let state = u16::from(e.state);
                 match e.detail {
@@ -764,7 +919,8 @@ impl EditorView {
                         let slop = (4.0 * self.scale) as i32;
                         let count = match self.click {
                             Some(c)
-                                if e.time.wrapping_sub(c.time) <= DOUBLE_CLICK_MS
+                                if c.window == self.window
+                                    && e.time.wrapping_sub(c.time) <= DOUBLE_CLICK_MS
                                     && (i32::from(e.event_x) - i32::from(c.x)).abs() <= slop
                                     && (i32::from(e.event_y) - i32::from(c.y)).abs() <= slop =>
                             {
@@ -772,10 +928,11 @@ impl EditorView {
                             }
                             _ => 1,
                         };
-                        self.click = Some(Click { time: e.time, x: e.event_x, y: e.event_y, count });
+                        self.click = Some(Click { time: e.time, x: e.event_x, y: e.event_y, count, window: self.window });
                         // A click gives the editor the keyboard, when it wants keys.
                         if self.editor.wants_keys() && !self.focused && self.usable() {
                             x!(self, self.conn.set_input_focus(InputFocus::PARENT, self.window, e.time));
+                            self.settle();
                         }
                         self.input(state, |v| v.editor.mouse_down(x, y, count));
                     }
@@ -787,11 +944,11 @@ impl EditorView {
                     _ => {}
                 }
             }
-            Event::ButtonRelease(e) if e.detail == 1 => {
+            Event::ButtonRelease(e) if e.detail == 1 && e.event == self.window => {
                 let (x, y) = self.point(e.event_x, e.event_y);
                 self.input(u16::from(e.state), |v| v.editor.mouse_up(x, y));
             }
-            Event::MotionNotify(e) => {
+            Event::MotionNotify(e) if e.event == self.window => {
                 // Only the last of a run of moves matters.
                 if matches!(next, Some(Event::MotionNotify(_))) {
                     return;
@@ -799,7 +956,7 @@ impl EditorView {
                 let (x, y) = self.point(e.event_x, e.event_y);
                 self.input(u16::from(e.state), |v| v.editor.mouse_move(x, y));
             }
-            Event::EnterNotify(e) => self.input(u16::from(e.state), |_| ()),
+            Event::EnterNotify(e) if e.event == self.window => self.input(u16::from(e.state), |_| ()),
             Event::KeyPress(e) => self.key(e, true),
             Event::KeyRelease(e) => {
                 // Auto-repeat is a release and a press at the same instant: the
@@ -857,6 +1014,7 @@ impl EditorView {
     }
 
     fn key(&mut self, e: &xproto::KeyPressEvent, down: bool) {
+        self.last_time = e.time;
         let mut state = u16::from(e.state);
         let sym = self.keymap.lookup(e.detail, state);
         // The state of an event is the one before it: a modifier key's own
@@ -883,6 +1041,8 @@ impl EditorView {
             let mask = if down { EventMask::KEY_PRESS } else { EventMask::KEY_RELEASE };
             let forward = xproto::KeyPressEvent { event: self.parent, child: self.window, ..*e };
             x!(self, self.conn.send_event(true, self.parent, mask, forward));
+            // The host has the key before it looks for it.
+            self.settle();
         }
     }
 
@@ -895,6 +1055,12 @@ impl EditorView {
         self.focused = focused;
         self.guarded(|v| v.editor.focus_changed(focused));
         self.touched = true;
+        if !focused {
+            // Focus left the view: the field commits what is valid, the menu goes.
+            self.field_lost_focus();
+            self.close_menu();
+            self.hide_tip();
+        }
     }
 
     /// Ask the editor what changed and queue that: nothing, some rectangles, or the whole window.
@@ -978,6 +1144,154 @@ impl EditorView {
         }
     }
 
+    /// Requests the editor made during its last call: the parameter menu, the
+    /// type-in field. Never called inside an editor call.
+    fn poll_requests(&mut self) {
+        if std::mem::take(&mut self.field_cancel) {
+            self.close_field(true);
+        }
+        let (edit, menu) = self.guarded(|v| (v.editor.take_text_edit(), v.editor.take_param_menu()));
+        if let Some(menu) = menu {
+            self.show_param_menu(menu);
+        }
+        if let Some(edit) = edit {
+            self.open_field(edit);
+        }
+    }
+
+    /// What waits on time, not on events: an unanswered clipboard request, a
+    /// pointer at rest, a menu whose view is no longer on screen.
+    fn service_timers(&mut self) {
+        self.clipboard_timeout();
+        if self.menu.is_some() && !self.shown() {
+            self.close_menu();
+        }
+        self.tip_check();
+    }
+
+    /// The view goes off screen (hidden, unmapped, moved, destroyed): the
+    /// field commits what is valid, the menu and the tooltip go.
+    fn services_hide(&mut self) {
+        self.field_lost_focus();
+        self.close_menu();
+        self.hide_tip();
+    }
+
+    /// Events of the field, the menu, the tooltip and the clipboard. True
+    /// when the event was theirs alone.
+    fn service_event(&mut self, event: &Event) -> bool {
+        let is = |window: Option<Window>, w: Window| window == Some(w);
+        let (field, menu, tip) = (self.field.as_ref().map(|f| f.window), self.menu.as_ref().map(|m| m.window), self.tips.window());
+        match event {
+            Event::Expose(e) if e.window != self.window => {
+                if e.count == 0 {
+                    if is(field, e.window) {
+                        self.paint_field();
+                    } else if is(menu, e.window) {
+                        self.paint_menu();
+                    } else if is(tip, e.window) {
+                        self.paint_tip();
+                    }
+                }
+                true
+            }
+            Event::ButtonPress(e) => {
+                self.hide_tip();
+                if is(field, e.event) {
+                    self.field_click(e);
+                    true
+                } else if is(menu, e.event) {
+                    self.menu_button(e, true);
+                    true
+                } else if e.event == self.window {
+                    // A press that reached the view: the menu held no grab.
+                    self.close_menu();
+                    // A click on the view abandons the field, as the right button does.
+                    if matches!(e.detail, 1 | 3) {
+                        self.close_field(true);
+                    }
+                    false
+                } else {
+                    true
+                }
+            }
+            Event::ButtonRelease(e) if e.event != self.window => {
+                if is(menu, e.event) {
+                    self.menu_button(e, false);
+                }
+                true
+            }
+            Event::MotionNotify(e) => {
+                if is(menu, e.event) {
+                    self.menu_motion(e);
+                    true
+                } else if e.event == self.window {
+                    self.tip_motion(e);
+                    false
+                } else {
+                    true
+                }
+            }
+            Event::LeaveNotify(e) => {
+                if e.event == self.window && e.mode == NotifyMode::NORMAL {
+                    self.hide_tip();
+                    self.tips.forget();
+                }
+                true
+            }
+            Event::KeyPress(e) => {
+                self.hide_tip();
+                self.tips.forget();
+                if self.menu.is_some() {
+                    self.menu_key(e);
+                    true
+                } else if self.field.is_some() {
+                    self.last_time = e.time;
+                    self.field_key(e);
+                    true
+                } else {
+                    false
+                }
+            }
+            Event::KeyRelease(_) => self.menu.is_some() || self.field.is_some(),
+            Event::UnmapNotify(e) if e.window == self.window => {
+                self.services_hide();
+                false
+            }
+            Event::DestroyNotify(e) if e.window != self.window => {
+                // A pop-up taken away from outside: forget it, and its grabs.
+                if is(field, e.window) {
+                    self.field = None;
+                    self.guarded(|v| v.editor.text_edit_cancel());
+                    self.select_keys();
+                    self.touched = true;
+                } else if is(menu, e.window) {
+                    self.close_menu();
+                } else if is(tip, e.window) {
+                    self.hide_tip();
+                }
+                true
+            }
+            Event::DestroyNotify(_) => {
+                self.services_hide();
+                false
+            }
+            Event::SelectionRequest(e) => {
+                self.selection_request(e);
+                true
+            }
+            Event::SelectionClear(e) => {
+                self.selection_clear(e);
+                true
+            }
+            Event::SelectionNotify(e) => {
+                self.selection_notify(e);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Make the window a top-level one with a title, a close button and size hints.
     fn make_top_level(&mut self, title: &str) -> Option<()> {
         if !self.create(self.root) {
@@ -1038,6 +1352,9 @@ impl Drop for EditorView {
         if self.dead {
             return;
         }
+        // The grabs go first, then the pop-up windows (the field goes with the window).
+        self.close_menu();
+        self.hide_tip();
         // Errors (the window went with its parent) come back unread and are dropped.
         if self.created {
             let _ = self.conn.free_gc(self.gc);
@@ -1060,6 +1377,7 @@ fn event_mask(keys: bool) -> EventMask {
         | EventMask::POINTER_MOTION
         | EventMask::BUTTON_MOTION
         | EventMask::ENTER_WINDOW
+        | EventMask::LEAVE_WINDOW
         | EventMask::FOCUS_CHANGE;
     if keys {
         mask | EventMask::KEY_PRESS | EventMask::KEY_RELEASE
