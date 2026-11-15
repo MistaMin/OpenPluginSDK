@@ -199,13 +199,18 @@ fn hostile_atoms_are_ignored() {
     // Output capacities that cannot hold a sequence: nothing is written.
     for capacity in [0usize, 1, 7] {
         let mut out = OutSeq::new(capacity);
+        // The input lives until `run` has read it.
+        let mut input = good.buf();
         (rig.desc.connect_port)(rig.instance, 5, out.buf.ptr());
-        (rig.desc.connect_port)(rig.instance, 4, good.buf().ptr());
+        (rig.desc.connect_port)(rig.instance, 4, input.ptr());
         (rig.desc.run)(rig.instance, FRAMES);
         assert!(out.sentinel_intact());
         assert_eq!(out.size() as usize, capacity);
     }
     (rig.desc.connect_port)(rig.instance, 5, rig.out.buf.ptr());
+    // Those blocks played the note, and it is still held: start the last
+    // check from silence.
+    (rig.desc.activate)(rig.instance);
 
     // And a good event still plays.
     assert_eq!(rig.delivered(good.buf().ptr()), 1);
