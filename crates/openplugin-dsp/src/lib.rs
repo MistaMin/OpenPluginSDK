@@ -95,6 +95,7 @@ pub mod plate;
 mod reverb_common;
 pub mod resample;
 pub mod saturation;
+pub mod simd;
 pub mod svf;
 pub mod tape;
 pub mod utility;
