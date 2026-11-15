@@ -41,3 +41,30 @@ L4: Public Facade (openplugin)
 1. **Audio Callback Isolation:** The `Plugin::process` callback must never block on locks, allocate heap memory, or perform file/network I/O. Hosts publish parameters with `ParamPlane::store` and the audio thread applies them with `ParamCursor::pull`. Meter frames go out through a `Seqlock`. Neither crosses a mutex.
 2. **Denormal Protection:** Recursive filter structures (`Biquad`) flush denormal values (`< 1e-25`) to prevent CPU spikes in silent passages.
 3. **Hostile Input Boundary:** Parameter values provided by third-party DAWs are clamped to `[min, max]` and checked for `NaN`/`inf` before reaching DSP blocks.
+
+## Loading heavy data off the audio thread
+
+Impulse responses, samples and tables are built on a background thread and swapped in without a lock. `openplugin_core::worker` has the pattern:
+
+```rust,ignore
+use openplugin_core::worker::loader;
+
+// Plugin construction (main thread): the audio side keeps the Slot.
+let (mut loader, mut slot) = loader(initial_table, 4);
+
+// UI thread: build the new value on the worker. A full queue returns QueueFull.
+loader.submit(move || build_table_from_file(&path))?;
+
+// Audio thread, top of process: one poll, then use the live value.
+slot.poll();
+let table = slot.get();
+```
+
+- `Loader::submit` queues a closure for a single worker thread (started by `loader`, stopped and joined when the `Loader` drops). The job's return value is the new value.
+- `Slot::poll` takes a finished value if one is ready and swaps it in. It does not lock, allocate, free, park or call the system. The old value goes back to the worker through a second bounded queue and is dropped there.
+- Every queue is bounded (the `capacity` argument). `submit` returns `QueueFull` rather than blocking. If the return queue is full, `poll` keeps the old value and swaps on a later call; it never drops it on the audio thread.
+- A panicking job is counted by `Loader::failed` and the current value stays.
+- Drop the `Slot` (which owns the live value) from the main thread, not from `process`.
+- Results apply one per `poll`, in submit order. Retired values are freed within a few milliseconds, since the audio thread does not wake the worker.
+
+Proofs: `crates/openplugin-core/tests/worker_no_alloc.rs` (counting allocator on the audio thread: zero allocations and frees in `poll`), `worker_stress.rs` (20,000 swaps against a running process loop), and `crates/openplugin-dsp/tests/convolve_ir_swap.rs` (a new `BlockConvolver` impulse loaded during playback). The LV2 `worker` extension is not connected to this yet.

@@ -84,6 +84,10 @@ Then **0.4.0**: version bump, notes, CI green.
 
 Then **0.5.0**.
 
+## 0.7: host integration and editor polish
+
+3. **Loading files off the audio thread.** Done in `openplugin_core::worker`: a background worker, a lock-free handoff to `process`, old values dropped off the audio thread (see ARCHITECTURE.md). **Deferred:** hooking up the LV2 `worker` extension, which waits until `lv2.rs` is free.
+
 ## 1.0: stable and publishable on macOS
 
 1. **Crate metadata.** Every crate inherits the workspace's `authors`, `homepage`, `keywords` and `categories`; unused dependencies (`log` in core, `cpal` in targets) are removed or justified; `cargo publish --dry-run` passes for every crate that does not depend on an unpublished path.

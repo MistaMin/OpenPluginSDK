@@ -24,6 +24,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 - `openplugin_dri::hit`: a control registry (knobs, faders, toggles, buttons, key banks) that turns mouse input into host gestures, with double-click reset, fine adjustment, wheel and stepped snapping; `Editor::modifiers_changed`.
 - `openplugin_dri::DesignEditor`: an editor built from a GoodLookin design CSV, each row bound to a parameter by id; `examples/design_editor`.
 - `docs/PUBLISHING.md`, `CHANGELOG.md`, `docs/VERSIONING.md` and `docs/API_REVIEW.md`; crate metadata (authors, homepage, keywords, categories, readme, documentation) inherited by every crate; GoodLookin DRI named by version as well as path.
+- `openplugin_core::worker` (`loader`, `Loader`, `Slot`): load impulse responses, samples and tables on a background thread and swap them into `process` with no lock and no allocation. Old values are returned to the worker and dropped off the audio thread; all queues are bounded and a full job queue returns `QueueFull`. Documented in `docs/ARCHITECTURE.md`.
 - `docs/ROADMAP.md` for macOS to 1.0 and `docs/ROADMAP_WINDOWS_LINUX.md`.
 
 ### Changed
