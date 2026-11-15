@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use openplugin::core::editor::{Key, Modifiers, SizeRange};
+use openplugin::core::editor::{DamageRect, DamageTracker, Key, Modifiers, SizeRange};
 use openplugin::core::{Editor, EditorHost, EditorState, Frame, PresetBank};
 use openplugin::dri::goodlookindri::color::Color as GlColor;
 use openplugin::dri::goodlookindri::scene::{Rect, Scene};
@@ -214,6 +214,34 @@ pub struct GainEditor {
     level: f32,
     size: (u32, u32),
     canvas: SceneCanvas,
+    /// What the next frame has to repaint.
+    damage: DamageTracker,
+    /// The picture the meter shows (see [`ladder_picture`]) in the last frame accounted for.
+    meter_picture: Option<u32>,
+}
+
+/// How far a knob paints past its hit area, in points at the opening layout: its legend and
+/// value text sit below it, and its reflections and shadow reach out.
+const KNOB_REACH: (f32, f32, f32, f32) = (24.0, 18.0, 24.0, 40.0);
+/// The focus ring: 4 points out, 2 wide, plus the anti-aliased edge.
+const RING_REACH: f32 = 6.0;
+/// The "WARM" legend under the toggle reaches this far below it, and as far to each side.
+const LEGEND_REACH: (f32, f32) = (14.0, 24.0);
+/// The ladder's recessed channel, bloom and shadow reach out of the meter's rectangle.
+const METER_REACH: f32 = 10.0;
+
+/// What `draw_led_ladder` shows for a level: the set of lit segments, as bits. There are 16, each
+/// lit from 1.5 dB below its own 3 dB step, and the peak segment is lit whatever the level. Two
+/// levels with the same set draw the same pixels, so the meter is repainted only when it changes.
+fn ladder_picture(level_db: f32) -> u32 {
+    let peak = (((level_db + 48.0) / 48.0).clamp(0.0, 1.0) * 15.0 + 0.5).floor() as i32;
+    let mut lit = 0u32;
+    for i in 0..16 {
+        if level_db >= -48.0 + 48.0 * (i + 1) as f32 / 16.0 - 1.5 || i == peak {
+            lit |= 1 << i;
+        }
+    }
+    lit
 }
 
 impl GainEditor {
@@ -228,6 +256,42 @@ impl GainEditor {
             level: 0.0,
             size: (WIDTH, HEIGHT),
             canvas: SceneCanvas::new(WIDTH as f32, HEIGHT as f32),
+            damage: DamageTracker::new(),
+            meter_picture: None,
+        }
+    }
+
+    fn level_db(&self) -> f32 {
+        20.0 * self.level.max(1e-6).log10()
+    }
+
+    /// The rectangle a control's drawing can change, in points.
+    fn reach(&self, c: &Control) -> DamageRect {
+        let k = layout(self.size.0, self.size.1).scale;
+        let (x, y, w, h) = c.area.bounds();
+        let r = match c.kind {
+            ControlKind::Knob => {
+                let (l, t, r, b) = KNOB_REACH;
+                DamageRect::new(x - l * k, y - t * k, w + (l + r) * k, h + (t + b) * k)
+            }
+            _ => DamageRect::new(x - LEGEND_REACH.0 * k, y - 4.0 * k, w + 2.0 * LEGEND_REACH.0 * k, h + LEGEND_REACH.1 * k + 4.0 * k),
+        };
+        // A ring around a focused control reaches in every direction.
+        r.union(&DamageRect::new(x, y, w, h).expanded(RING_REACH * k))
+    }
+
+    /// Mark what changed since the last time: controls whose look changed, and the meter when its picture did.
+    fn collect_damage(&mut self) {
+        for id in self.controls.take_changed() {
+            if let Some(rect) = self.controls.get(id).map(|c| self.reach(c)) {
+                self.damage.add(rect);
+            }
+        }
+        let picture = ladder_picture(self.level_db());
+        if self.meter_picture != Some(picture) {
+            self.meter_picture = Some(picture);
+            let lay = layout(self.size.0, self.size.1);
+            self.damage.add(DamageRect::from_tuple(lay.meter).expanded(METER_REACH * lay.scale));
         }
     }
 
@@ -261,6 +325,7 @@ impl Editor for GainEditor {
             return;
         }
         self.size = size;
+        self.damage.add_all();
         self.canvas.resize(size.0 as f32, size.1 as f32);
         // New hit areas at the new size; the values carry over without a gesture.
         let values = self.values();
@@ -288,17 +353,28 @@ impl Editor for GainEditor {
         self.level = peak.max(self.level * fall);
     }
 
+    fn damage(&mut self) -> Option<Vec<DamageRect>> {
+        self.collect_damage();
+        self.damage.pending().map(<[DamageRect]>::to_vec)
+    }
+
     fn render(&mut self, scale: f32) -> Frame<'_> {
-        let level_db = 20.0 * self.level.max(1e-6).log10();
+        self.collect_damage();
+        let level_db = self.level_db();
         let controls = &self.controls;
         let keys_active = self.keys_active;
         let lay = layout(self.size.0, self.size.1);
         let (width, height) = (self.size.0 as f32, self.size.1 as f32);
         // The plate is static: painted once per size and scale, then reused under the moving parts.
         let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, width, height, "Navy");
-        self.canvas.frame_layered(scale, 0, plate, |dl| {
+        let damage = self.damage.pending();
+        // A part that cannot reach into a damaged rectangle is not even built.
+        let touched = |r: &DamageRect| damage.is_none_or(|d| d.iter().any(|x| x.touches(r)));
+        let reach: Vec<DamageRect> = controls.iter().map(|c| self.reach(c)).collect();
+        let meter_reach = DamageRect::from_tuple(lay.meter).expanded(METER_REACH * lay.scale);
+        let frame = self.canvas.frame_damaged(scale, 0, plate, |dl| {
             let mut parts = Scene::new();
-            for c in controls.iter() {
+            for (c, _) in controls.iter().zip(&reach).filter(|(_, r)| touched(r)) {
                 let (x, y, w, h) = c.area.bounds();
                 match c.kind {
                     ControlKind::Knob => draw_knob_code(
@@ -325,8 +401,11 @@ impl Editor for GainEditor {
                     _ => {}
                 }
             }
-            meters::draw_led_ladder(&mut parts, rect(lay.meter), false, level_db, level_db, 16);
-            if let Some(c) = controls.focused().and_then(|id| controls.get(id)).filter(|_| keys_active) {
+            if touched(&meter_reach) {
+                meters::draw_led_ladder(&mut parts, rect(lay.meter), false, level_db, level_db, 16);
+            }
+            let ringed = controls.focused().filter(|&id| touched(&reach[id])).and_then(|id| controls.get(id));
+            if let Some(c) = ringed.filter(|_| keys_active) {
                 let (x, y, w, h) = c.area.bounds();
                 let ring = rect((x, y, w, h)).expanded(4.0 * lay.scale);
                 let color = GlColor(0xff5cc8ff);
@@ -336,7 +415,9 @@ impl Editor for GainEditor {
                 }
             }
             dl.append(parts);
-        })
+        }, damage);
+        self.damage.clear();
+        frame
     }
 
     fn modifiers_changed(&mut self, modifiers: Modifiers) {
@@ -358,6 +439,10 @@ impl Editor for GainEditor {
 
     fn focus_changed(&mut self, focused: bool) {
         self.keys_active = focused;
+        // The ring shows only while the view has the keyboard.
+        if let Some(rect) = self.controls.focused().and_then(|id| self.controls.get(id)).map(|c| self.reach(c)) {
+            self.damage.add(rect);
+        }
         if !focused {
             self.controls.release_keys();
         }
@@ -393,3 +478,198 @@ impl Editor for GainEditor {
 openplugin::targets::export_clap!(EditorGain, editor = make_editor);
 openplugin::targets::export_lv2!(EditorGain, editor = make_editor);
 openplugin::targets::export_shell!(EditorGain, editor = make_editor);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two editors fed the same events. `part` repaints only what it reports; `whole` is told to
+    /// repaint everything before every frame, which is what the view did before damage existed.
+    struct Pair {
+        part: GainEditor,
+        whole: GainEditor,
+        peaks: [Arc<Shared>; 2],
+        frames: usize,
+        skipped: usize,
+        partial: usize,
+    }
+
+    impl Pair {
+        fn new() -> Self {
+            let peaks = [0, 1].map(|_| Arc::new(Shared { peak: AtomicU32::new(0) }));
+            let mut part = GainEditor::new(EditorHost::detached());
+            let mut whole = GainEditor::new(EditorHost::detached());
+            part.bind(Some(peaks[0].clone()));
+            whole.bind(Some(peaks[1].clone()));
+            Self { part, whole, peaks, frames: 0, skipped: 0, partial: 0 }
+        }
+
+        fn both(&mut self, f: impl Fn(&mut GainEditor)) {
+            f(&mut self.part);
+            f(&mut self.whole);
+        }
+
+        /// One view tick followed by the frame the view would draw, and the comparison.
+        fn frame(&mut self, scale: f32, what: &str) {
+            self.both(|e| e.tick(1.0 / 30.0));
+            let damage = self.part.damage();
+            let expected = {
+                self.whole.damage.add_all();
+                self.whole.render(scale).pixels.to_vec()
+            };
+            self.frames += 1;
+            match &damage {
+                // The view draws nothing. Rendering anyway must give the same frame.
+                Some(rects) if rects.is_empty() => self.skipped += 1,
+                Some(_) => self.partial += 1,
+                None => {}
+            }
+            let got = self.part.render(scale);
+            let w = got.width;
+            let bad: Vec<usize> = (0..got.pixels.len()).filter(|&i| got.pixels[i] != expected[i]).collect();
+            let bbox = bad.iter().fold((usize::MAX, usize::MAX, 0, 0), |b, &i| (b.0.min(i % w), b.1.min(i / w), b.2.max(i % w), b.3.max(i / w)));
+            assert!(bad.is_empty(), "{what}: the damaged frame differs from a full repaint in {} pixels, device bbox {bbox:?} at scale {scale} (damage {damage:?})", bad.len());
+        }
+    }
+
+    fn run(scale: f32) -> Pair {
+        let mut p = Pair::new();
+        p.frame(scale, "first frame");
+        for i in 0..3 {
+            p.frame(scale, &format!("idle {i}"));
+        }
+        let lay = layout(WIDTH, HEIGHT);
+        let centre = |r: (f32, f32, f32, f32)| (r.0 + r.2 * 0.5, r.1 + r.3 * 0.5);
+        let (kx, ky) = centre(lay.knob);
+        let (sx, sy) = centre(lay.switch);
+        // Hover, then a drag through the whole range and back, one frame per move.
+        p.both(|e| e.mouse_move(kx, ky));
+        p.frame(scale, "hover the knob");
+        p.both(|e| e.mouse_down(kx, ky, 1));
+        p.frame(scale, "press the knob");
+        for i in 1..=14 {
+            let y = ky - i as f32 * 8.0;
+            p.both(|e| e.mouse_move(kx, y));
+            p.frame(scale, &format!("drag up {i}"));
+        }
+        for i in 1..=14 {
+            let y = ky - 112.0 + i as f32 * 14.0;
+            p.both(|e| e.mouse_move(kx, y));
+            p.frame(scale, &format!("drag down {i}"));
+        }
+        p.both(|e| e.mouse_up(kx, ky));
+        p.frame(scale, "release the knob");
+        // Toggle: hover, click, host echo.
+        p.both(|e| e.mouse_move(sx, sy));
+        p.frame(scale, "hover the toggle");
+        p.both(|e| e.mouse_down(sx, sy, 1));
+        p.both(|e| e.mouse_up(sx, sy));
+        p.frame(scale, "click the toggle");
+        p.both(|e| e.param_changed(1, 0.0));
+        p.frame(scale, "host turns it off");
+        p.both(|e| e.mouse_move(5.0, 5.0));
+        p.frame(scale, "leave");
+        // Keyboard: focus ring, steps, a lost and regained view focus.
+        for key in [Key::Tab, Key::Up, Key::PageDown, Key::Home, Key::End, Key::Tab, Key::Space, Key::Tab, Key::Escape] {
+            p.both(|e| {
+                e.key_down(key, Modifiers::NONE);
+                e.key_up(key, Modifiers::NONE);
+            });
+            p.frame(scale, &format!("key {key:?}"));
+        }
+        p.both(|e| {
+            e.key_down(Key::Tab, Modifiers::NONE);
+        });
+        p.frame(scale, "focus the knob");
+        p.both(|e| e.focus_changed(false));
+        p.frame(scale, "view loses the keyboard");
+        p.both(|e| e.focus_changed(true));
+        p.frame(scale, "view gets the keyboard");
+        // Host automation and the wheel.
+        for v in [-24.0, -3.3, 7.1, 24.0, 0.0] {
+            p.both(|e| e.param_changed(0, v));
+            p.frame(scale, &format!("automation {v}"));
+        }
+        p.both(|e| e.wheel(kx, ky, 3.0));
+        p.frame(scale, "wheel");
+        // The meter: peaks, then the fall over a few seconds, a frame at a time.
+        for peak in [0.001f32, 0.2, 1.0, 0.05] {
+            for peaks in &p.peaks {
+                peaks.raise(peak);
+            }
+            p.frame(scale, &format!("peak {peak}"));
+            for i in 0..22 {
+                p.frame(scale, &format!("fall after {peak}, tick {i}"));
+            }
+        }
+        // A new size, and back.
+        p.both(|e| e.resize(360, 240));
+        p.frame(scale, "resized large");
+        p.both(|e| e.mouse_move(180.0, 120.0));
+        p.frame(scale, "hover at the large size");
+        p.both(|e| e.resize(WIDTH, HEIGHT));
+        p.frame(scale, "resized back");
+        p
+    }
+
+    #[test]
+    fn damage_only_frames_equal_full_repaints_through_a_long_session() {
+        for scale in [2.0, 1.0, 1.5] {
+            let p = run(scale);
+            // The comparison would be empty if everything were repainted every time.
+            assert!(p.partial > 40, "scale {scale}: only {} partial frames of {}", p.partial, p.frames);
+            assert!(p.skipped > 10, "scale {scale}: only {} idle frames of {}", p.skipped, p.frames);
+        }
+    }
+
+    #[test]
+    fn an_idle_editor_reports_nothing_and_a_meter_change_reports_only_the_meter() {
+        let mut p = Pair::new();
+        p.frame(2.0, "first");
+        assert_eq!(p.part.damage(), Some(vec![]), "nothing changed");
+        p.peaks[0].raise(1.0);
+        p.part.tick(1.0 / 30.0);
+        let d = p.part.damage().unwrap();
+        assert_eq!(d.len(), 1);
+        let meter = DamageRect::from_tuple(layout(WIDTH, HEIGHT).meter);
+        let r = d[0];
+        assert!(r.x <= meter.x && r.y <= meter.y && r.x + r.w >= meter.x + meter.w && r.y + r.h >= meter.y + meter.h);
+        assert!(r.w < 60.0 && r.h < 160.0, "the meter's area only: {r:?}");
+        // Nothing in the ladder's picture changed: still nothing to draw.
+        p.part.render(2.0);
+        p.part.level *= 0.999;
+        assert_eq!(p.part.damage(), Some(vec![]));
+        // A knob move reports the knob and not the meter.
+        p.part.param_changed(0, 6.0);
+        let d = p.part.damage().unwrap();
+        let k = DamageRect::from_tuple(layout(WIDTH, HEIGHT).knob);
+        assert!(d.len() == 1 && d[0].x <= k.x && d[0].x + d[0].w >= k.x + k.w && d[0].x + d[0].w < meter.x, "{d:?}");
+    }
+
+    #[test]
+    fn meter_picture_changes_exactly_when_the_pixels_do() {
+        let mut canvas = SceneCanvas::new(WIDTH as f32, HEIGHT as f32);
+        let lay = layout(WIDTH, HEIGHT);
+        let mut draw = |db: f32| {
+            canvas
+                .frame(1.0, |dl| {
+                    let mut s = Scene::new();
+                    meters::draw_led_ladder(&mut s, rect(lay.meter), false, db, db, 16);
+                    dl.append(s);
+                })
+                .pixels
+                .to_vec()
+        };
+        let mut last = (ladder_picture(-130.0), draw(-130.0));
+        let mut changes = 0;
+        let mut db = -130.0f32;
+        while db < 12.0 {
+            db += 0.013;
+            let now = (ladder_picture(db), draw(db));
+            assert!(now.0 != last.0 || now.1 == last.1, "{db} dB: the same picture key, different pixels");
+            changes += usize::from(now.0 != last.0);
+            last = now;
+        }
+        assert!(changes >= 15, "{changes}");
+    }
+}

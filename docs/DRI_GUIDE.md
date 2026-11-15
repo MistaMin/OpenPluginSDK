@@ -50,7 +50,38 @@ Use `frame_layered` for anything with a plate. A 0.2 plate is shaded per pixel a
 | a lit knob alone (sprite cached) | 0.23 ms |
 | a plate alone at 1080 × 700 points | 310 ms |
 
-The view repaints 30 times a second on the main thread, so an editor of any size needs the layer. Change the key when the static look changes, or call `invalidate_layer`.
+The view ticks 30 times a second on the main thread, so an editor of any size needs the layer. Change the key when the static look changes, or call `invalidate_layer`.
+
+### Repainting only what changed
+
+`frame_damaged(scale, key, layer, paint, damage)` is `frame_layered` that also takes the rectangles that changed (`Option<&[DamageRect]>`, points). `None` paints everything, `Some(&[])` returns the last frame and runs neither closure, and `Some(rects)` restores the cached layer under each rectangle (rounded outwards to whole device pixels) and replays the `paint` scene clipped to it, leaving every other pixel alone. `paint` still runs once, so an editor can skip building a part that cannot reach a damaged rectangle. The pixels equal a full frame provided the rectangles cover everything that differs from the last frame; the canvas falls back to a full frame when it cannot know that (a new size, scale or key, an invalidated layer, a `frame` in between, more than six separate rectangles, or more than 60% of the frame).
+
+```rust
+fn render(&mut self, scale: f32) -> Frame<'_> {
+    self.collect_damage();                         // controls.take_changed(), the meter, ...
+    let damage = self.damage.pending();            // DamageTracker
+    let frame = self.canvas.frame_damaged(scale, 0, plate, paint, damage);
+    self.damage.clear();
+    frame
+}
+fn damage(&mut self) -> Option<Vec<DamageRect>> {
+    self.collect_damage();
+    self.damage.pending().map(<[_]>::to_vec)
+}
+```
+
+The clip is a rectangle a hundredth of a pixel wider than the damage on each side, which keeps edge pixels at full coverage whatever the rounding of `pixels / scale * scale`; the ring of pixels around a rectangle is put back as it was, so nothing outside is touched. `ControlSet::take_changed()` lists the controls whose value, hover, pressed or focus state changed since the last call (the first call lists all), and an editor turns each into the rectangle its drawing can change: the control's area plus whatever the style paints past it (a lit knob's legend and value text, a focus ring, a meter's bloom). Too small a rectangle shows as stale pixels, so the tests compare a damage-only session with full repaints, frame by frame, and fail when a margin is too tight.
+
+Measured with `examples/editor/src/bin/frames.rs` (the view's loop without the CoreGraphics blit: tick, `damage`, `render` unless empty), 240 × 160 points at 2×, Apple M1 Max, macOS 15.7, rustc 1.98, `--release` (`opt-level = 3`, thin LTO, one codegen unit), mean of 600 frames, three runs each:
+
+| situation | before (every frame full) | after |
+|---|---|---|
+| idle | 1.55 to 1.65 ms | 0 ms, nothing drawn |
+| knob dragged (a new lit sprite per frame) | 6.8 to 7.2 ms | 6.5 to 6.6 ms |
+| knob moved between eight cached values | 1.6 ms | 1.13 ms |
+| meter level changing every frame | 2.0 ms | 0.30 ms (draws in 144 of 600 frames) |
+
+A drag does not get faster because the lit knob is shaded per pixel for each new value (milliseconds, then cached by GoodLookin DRI); repainting less does not change that. At 1× the same runs give idle 0.49 ms to 0, a dragged knob 1.76 to 1.58 ms, cached knob values 0.48 to 0.34 ms and the meter 0.60 to 0.09 ms. The Cocoa side (a smaller CoreGraphics blit and compositing) is not in these numbers.
 
 ## Resizable editors
 
@@ -168,7 +199,7 @@ Both key calls return whether the set used the key. Everything it does not use r
 | Escape | clears focus. Not handled when nothing is focused |
 | any other key | not handled |
 
-Every step is a whole `Begin`, `Perform`, `End` through the `EditorHost`, as for the wheel, and the value is `ParamInfo::clamp`ed. At an end of the range the key is handled and nothing is sent; a value equal to the current one is never sent. Home, End, Return, Space, Delete, Backspace, Escape and Tab with Command, Control or Alt held are not handled, so the host's shortcuts win; the arrows and Page keys step with any modifier. Keys are ignored while the mouse holds a control. `key_up` returns true for a key whose down was handled and false otherwise, so the host sees the up of exactly the keys it saw go down. `release_keys()` lets go of a held button and forgets held keys; call it when the view loses keyboard focus (focus itself stays). `set_focus(Option<ControlId>)` moves focus in code, for an editor that rebuilds its set (as `examples/editor` does on resize). `DesignEditor` does not forward keys yet.
+Every step is a whole `Begin`, `Perform`, `End` through the `EditorHost`, as for the wheel, and the value is `ParamInfo::clamp`ed. At an end of the range the key is handled and nothing is sent; a value equal to the current one is never sent. Home, End, Return, Space, Delete, Backspace, Escape and Tab with Command, Control or Alt held are not handled, so the host's shortcuts win; the arrows and Page keys step with any modifier. Keys are ignored while the mouse holds a control. `key_up` returns true for a key whose down was handled and false otherwise, so the host sees the up of exactly the keys it saw go down. `release_keys()` lets go of a held button and forgets held keys; call it when the view loses keyboard focus (focus itself stays). `set_focus(Option<ControlId>)` moves focus in code, for an editor that rebuilds its set (as `examples/editor` does on resize). `DesignEditor` forwards the keys to its set and draws the same ring, around the focused control while the view holds the keyboard.
 
 ## Editors from a design file
 

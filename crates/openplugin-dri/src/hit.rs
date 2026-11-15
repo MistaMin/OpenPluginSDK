@@ -44,6 +44,9 @@
 //!   [`ControlSet::key_down`] returns false for every key it did not use,
 //!   which is every key while nothing is focused, so the view can pass those
 //!   to the host (transport, shortcuts).
+//! * What a control looks like is its value, hover, pressed and focus state.
+//!   [`ControlSet::take_changed`] lists the controls whose look changed since
+//!   the last call, so an editor repaints only those ([`openplugin_core::Editor::damage`]).
 
 use openplugin_core::{EditorHost, ParamFlags, ParamInfo, Unit};
 
@@ -147,11 +150,22 @@ pub struct Control {
     pressed: bool,
     focused: bool,
     drag_range: f32,
+    /// The look last reported by [`ControlSet::take_changed`].
+    seen: Option<Look>,
+}
+
+/// Everything about a control that changes how it is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Look {
+    value: u32,
+    hover: bool,
+    pressed: bool,
+    focused: bool,
 }
 
 impl Control {
     fn new(kind: ControlKind, area: Area, param: usize, info: &'static ParamInfo) -> Self {
-        Self { area, kind, param, info, value: info.clamp(info.default), hover: false, pressed: false, focused: false, drag_range: 0.0 }
+        Self { area, kind, param, info, value: info.clamp(info.default), hover: false, pressed: false, focused: false, drag_range: 0.0, seen: None }
     }
 
     pub fn knob(area: Area, param: usize, info: &'static ParamInfo) -> Self {
@@ -323,6 +337,22 @@ impl ControlSet {
     /// The controls in the order they were added (back to front), to draw.
     pub fn iter(&self) -> std::slice::Iter<'_, Control> {
         self.controls.iter()
+    }
+
+    /// The controls whose look (value, hover, pressed, focus) changed since the
+    /// last call, in order. The first call reports every control, and so does
+    /// the first call after a control is added. An editor turns these into the
+    /// rectangles of [`openplugin_core::Editor::damage`].
+    pub fn take_changed(&mut self) -> Vec<ControlId> {
+        let mut changed = Vec::new();
+        for (id, c) in self.controls.iter_mut().enumerate() {
+            let now = Look { value: c.value.to_bits(), hover: c.hover, pressed: c.pressed, focused: c.focused };
+            if c.seen != Some(now) {
+                c.seen = Some(now);
+                changed.push(id);
+            }
+        }
+        changed
     }
 
     /// The first control on a parameter.
@@ -1420,5 +1450,41 @@ mod tests {
                 assert!((-24.0..=24.0).contains(&v), "{v}");
             }
         }
+    }
+
+    #[test]
+    fn take_changed_reports_value_hover_pressed_and_focus_once() {
+        let (mut set, _log) = key_rig();
+        let all: Vec<ControlId> = (0..set.len()).collect();
+        assert_eq!(set.take_changed(), all, "the first call reports everything");
+        assert!(set.take_changed().is_empty(), "and then only changes");
+        // Hover.
+        set.mouse_move(30.0, 30.0);
+        assert_eq!(set.take_changed(), vec![0]);
+        set.mouse_move(31.0, 31.0);
+        assert!(set.take_changed().is_empty(), "moving inside a control changes nothing drawn");
+        // Press and drag: pressed, focus and value.
+        set.mouse_down(30.0, 30.0, 1);
+        assert_eq!(set.take_changed(), vec![0]);
+        set.mouse_move(30.0, 10.0);
+        assert_eq!(set.take_changed(), vec![0]);
+        set.mouse_up(30.0, 10.0);
+        assert_eq!(set.take_changed(), vec![0], "released");
+        // Moving to another control changes the old and the new one.
+        set.mouse_move(110.0, 10.0);
+        assert_eq!(set.take_changed(), vec![0, 1]);
+        // A value from the host, and a value that is already there.
+        set.param_changed(1, 1.0);
+        assert_eq!(set.take_changed(), vec![1]);
+        set.param_changed(1, 1.0);
+        assert!(set.take_changed().is_empty());
+        // Keyboard focus and a key step.
+        set.key_down(Key::Tab, NO);
+        assert_eq!(set.take_changed(), vec![0, 1], "focus left the knob and arrived on the toggle");
+        set.key_down(Key::Down, NO);
+        assert_eq!(set.take_changed().len(), 1);
+        // A control added later is reported on its own.
+        let id = set.add(Control::knob(Area::rect(600.0, 0.0, 10.0, 10.0), 0, &GAIN));
+        assert_eq!(set.take_changed(), vec![id]);
     }
 }
