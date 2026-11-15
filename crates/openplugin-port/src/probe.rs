@@ -66,6 +66,7 @@ pub fn run_helper<T: serde::de::DeserializeOwned>(helper: &Path, args: &[std::ff
     }
 }
 
+#[cfg(unix)]
 fn describe_exit(status: &std::process::ExitStatus) -> String {
     use std::os::unix::process::ExitStatusExt;
     if let Some(sig) = status.signal() {
@@ -80,6 +81,25 @@ fn describe_exit(status: &std::process::ExitStatus) -> String {
     } else {
         format!("the probe process exited with {} without a result", status.code().unwrap_or(-1))
     }
+}
+
+/// Windows has no signals: a crash ends the process with its exception code
+/// (an NTSTATUS whose top two bits are set) as the exit code.
+#[cfg(windows)]
+fn describe_exit(status: &std::process::ExitStatus) -> String {
+    let code = status.code().unwrap_or(-1) as u32;
+    if code & 0xC000_0000 != 0xC000_0000 {
+        return format!("the probe process exited with {} without a result", code as i32);
+    }
+    let name = match code {
+        0xC000_0005 => "access violation",
+        0xC000_001D => "illegal instruction",
+        0xC000_0094 => "integer divide by zero",
+        0xC000_00FD => "stack overflow",
+        0xC000_0409 => "fast fail, as from abort",
+        _ => "an exception",
+    };
+    format!("the plugin crashed the probe process ({name}, 0x{code:08X})")
 }
 
 /// The child's entry point: `__probe <format> <path>`. Never returns.
