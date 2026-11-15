@@ -14,6 +14,7 @@
 //! - [`LoudnessMatch`]: automatic gain that holds the output at the input's K-weighted loudness.
 //! - [`Downmix`], [`Upmix`]: surround to stereo or mono by channel role (BS.775 / A/52), and the passive stereo upmix.
 //! - [`Dither`]: RPDF/TPDF dither to 8..=24 bits with noise shaping and auto-blank.
+//! - [`FdnReverb`], [`PlateReverb`], [`EarlyReflections`]: Jot-Chaigne feedback delay network, Dattorro plate, and tapped-delay early reflections.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 
 pub mod adaa;
@@ -25,6 +26,8 @@ pub mod downmix;
 pub mod dither;
 pub mod delay;
 pub mod dynamics;
+pub mod early;
+pub mod fdn;
 pub mod gain_comp;
 pub mod linear_phase;
 pub mod loudness;
@@ -34,7 +37,9 @@ pub mod oscillator;
 pub mod oversampling;
 pub mod pcm;
 pub mod pitch;
+pub mod plate;
 pub mod rate;
+mod reverb_common;
 pub mod saturation;
 pub mod voice;
 pub mod window;
@@ -49,6 +54,8 @@ pub use downmix::{
     roles_of, Downmix, DownmixTarget, MixSettings, Normalize, SurroundFill, Upmix, UpmixSettings,
 };
 pub use dynamics::Compressor;
+pub use early::{EarlyPattern, EarlyReflections, EarlyTap, MAX_EARLY_TAPS};
+pub use fdn::{FdnMatrix, FdnReverb};
 pub use gain_comp::GainComp;
 pub use linear_phase::{LinearPhaseOversampler, OversampleError};
 pub use loudness::{KWeighting, Loudness, LoudnessMatch};
@@ -61,6 +68,7 @@ pub use oversampling::{OversampleFactor, Oversampler2x};
 pub use dither::{Dither, DitherKind, NoiseShaping};
 pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to_f32, lerp};
 pub use pitch::{hz_from_midi, midi_from_hz};
+pub use plate::PlateReverb;
 pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, STUDIO_RATES_HZ};
 pub use saturation::{saturate_sample, SaturationMode};
 pub use voice::{Polyphony, SampleVoice};
