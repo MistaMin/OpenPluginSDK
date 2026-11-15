@@ -173,3 +173,6 @@ void op_test_grow_after_query(void* instance, uint32_t extra) {
     engine->growAfterQuery = extra;
 }
 }
+
+// The ABI 2 calls, mapped onto the op_shell_process above.
+#include "stub_abi2.h"

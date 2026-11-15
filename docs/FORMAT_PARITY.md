@@ -17,7 +17,7 @@ Every path is quoted, so the repository and `--work` may contain spaces. A forma
 | CLAP | `parity-host clap` (Rust, `dlopen`) | `Editor Gain.clap/Contents/MacOS/Editor Gain`: `clap_entry`, the factory, `clap_plugin.process` with parameter events |
 | LV2 | `parity-host lv2` (Rust, `dlopen`) | `EditorGain.lv2/EditorGain.dylib`: `lv2_descriptor`, `connect_port`, `run` |
 | VST3 | `ParityVST3` (C++) | `Example Gain.vst3` through the VST3 hosting interfaces: `IAudioProcessor::process` with `IParameterChanges` |
-| Audio Unit | `ParityAU` (C++) | `Example Gain.component` through AudioToolbox: `AudioUnitSetParameter`, `AudioUnitRender` |
+| Audio Unit | `ParityAU` (C++) | `Example Gain.component` through AudioToolbox: `AudioUnitScheduleParameters` (immediate events at their offsets), `AudioUnitRender` |
 | AAX | `ParityAAX` (C++) | the shell's process callback `openplugin_aax::process` with a controls packet, as `aax_process_proof` calls it. Not Pro Tools. |
 
 The CLAP and LV2 bundles are the example's `cdylib` copied into the layout `scripts/build_plugin.sh` uses. The C++ hosts use only their format's API, never `op_shell_*`: parameters are found by name and converted by the format (the VST3 controller's `plainParamToNormalized`). `examples/gain` has no format exports (it is a binary), so `examples/editor`, which has the same gain and exports every format, is the plugin under test.
@@ -43,8 +43,8 @@ The reference peak is 2.163.
 
 The same automation is applied to every format the way that format's contract allows:
 
-- **CLAP and VST3** are sample-accurate. The host puts each change at its offset in the block (a CLAP `param_value` event with that `time`, a VST3 queue point with that `sampleOffset`), and the shell splits the block there.
-- **LV2, Audio Unit and AAX** apply a parameter value once per `run`, render call or process callback (an LV2 control port is read at the start of `run`; the Audio Unit shell reads its parameters at the start of a render; AAX posts one controls packet per callback). For these the host cuts the block at every change frame and sets the value before the sub-block that starts there. The sample positions of the changes are identical; only the way the host expresses them differs. This is the format's contract, not a loosened tolerance. A host that sends one value per 512-frame block to these formats gets block-rate automation by that contract, and this test does not claim otherwise.
+- **CLAP, VST3 and the Audio Unit** are sample-accurate. The host puts each change at its offset in the block (a CLAP `param_value` event with that `time`, a VST3 queue point with that `sampleOffset`, an Audio Unit immediate event of `AudioUnitScheduleParameters` with that `bufferOffset`), and the shell splits the block there.
+- **LV2 and AAX** apply a parameter value once per `run` or process callback (an LV2 control port is read at the start of `run`; AAX posts one controls packet per callback). For these the host cuts the block at every change frame and sets the value before the sub-block that starts there. The sample positions of the changes are identical; only the way the host expresses them differs. This is the format's contract, not a loosened tolerance. A host that sends one value per 512-frame block to these formats gets block-rate automation by that contract, and this test does not claim otherwise.
 
 The reference applies each change at its frame, so all six are comparing the same function of time.
 
@@ -56,7 +56,7 @@ The tolerance is an absolute sample difference of **1e-6** (`--tolerance`). The 
 
 A comparison that cannot fail proves nothing, so the run also requires failures that must be caught:
 
-1. **Altered shells (VST3, Audio Unit, AAX).** `scripts/format_parity/parity.cmake`, included only by `-DOP_FORMAT_PARITY=ON`, builds the shell's unmodified sources a second time with `-Dop_shell_process=parity_faulty_process`. `native/parity_fault.cpp` runs the real engine and scales the output by `1 + 1e-4` (8.7e-4 dB). The VST3 shell processes through `op_shell_process_events`, so its copy is built with `-Dop_shell_process_events=parity_faulty_process_events` and `native/parity_fault_events.cpp`, which does the same scaling. Nothing in a shipped target changes, and the option is off by default. The test fails these on the same comparison: maximum difference 2.162e-4, 216 times the tolerance.
+1. **Altered shells (VST3, Audio Unit, AAX).** `scripts/format_parity/parity.cmake`, included only by `-DOP_FORMAT_PARITY=ON`, builds each shell's unmodified sources a second time with its process call renamed to a faulty one that runs the real engine and scales the output by `1 + 1e-4` (8.7e-4 dB). Shells that process through `op_shell_process_events` (VST3 and the Audio Unit) are built with `-Dop_shell_process_events=parity_faulty_process_events` (`native/parity_fault_events.cpp` for VST3, `native/au/parity_fault_events.cpp` for the Audio Unit); the others with `-Dop_shell_process=parity_faulty_process` and `native/parity_fault.cpp`. Nothing in a shipped target changes, and the option is off by default. The test fails these on the same comparison: maximum difference 2.162e-4, 216 times the tolerance.
 2. **Late automation.** The reference is rendered again with every change one frame late and compared with the real reference: maximum difference 1.219, so a host or format that applied a change a sample off would fail. This shows the test is sensitive to the sample position of a change, which the gain error above is not.
 
 The run exits non-zero if any parity comparison fails, any host errors, or any control passes.

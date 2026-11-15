@@ -243,9 +243,51 @@ if(OP_BUILD_AU)
   target_compile_features(openplugin_au_sdk PUBLIC cxx_std_23)
   set_target_properties(openplugin_au_sdk PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_include_directories(openplugin_au_sdk PUBLIC "${OP_AU_SDK}/include")
-  target_link_libraries(openplugin_au_sdk PUBLIC "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation")
+  target_link_libraries(openplugin_au_sdk PUBLIC "-framework AudioToolbox" "-framework CoreAudio" "-framework CoreFoundation" "-framework CoreMIDI")
+  # The component type: aufx (effect), aumu (instrument) or aumf (music effect, an effect that
+  # takes MIDI). "auto" asks the plugin (op_shell_kind) by building and running au/kind_probe.c
+  # against OP_RUST_LIB; an effect is aufx even though every plugin's default note ports have a
+  # MIDI input, so a plugin that wants aumf says -DOP_AU_TYPE=aumf. The same name is
+  # @OP_AU_TYPE@ in the Info.plist and OP_AU_TYPE_CODE in the shell (op_au_type_code).
+  set(OP_AU_TYPE "auto" CACHE STRING "Audio Unit component type: auto, aufx, aumu or aumf")
+  if(OP_AU_TYPE STREQUAL "auto")
+    unset(OP_AU_KIND_RUN CACHE)
+    unset(OP_AU_KIND_COMPILE CACHE)
+    try_run(OP_AU_KIND_RUN OP_AU_KIND_COMPILE
+      "${CMAKE_BINARY_DIR}/au-kind-probe"
+      "${CMAKE_CURRENT_SOURCE_DIR}/au/kind_probe.c"
+      CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${CMAKE_CURRENT_SOURCE_DIR}/include"
+      LINK_LIBRARIES "${OP_RUST_LIB}" "-framework CoreFoundation" "-framework Foundation" "-framework Security"
+        "-framework SystemConfiguration" "-liconv" "-framework AppKit" "-framework CoreGraphics" "-lobjc"
+      RUN_OUTPUT_VARIABLE OP_AU_KIND_OUTPUT)
+    string(STRIP "${OP_AU_KIND_OUTPUT}" OP_AU_KIND_OUTPUT)
+    if(OP_AU_KIND_COMPILE AND "${OP_AU_KIND_RUN}" STREQUAL "0" AND OP_AU_KIND_OUTPUT MATCHES "^(aufx|aumu|aumf)$")
+      set(OP_AU_TYPE "${OP_AU_KIND_OUTPUT}")
+    else()
+      message(WARNING "OP_AU_TYPE=auto could not ask the plugin; building aufx. Pass -DOP_AU_TYPE=aufx|aumu|aumf.")
+      set(OP_AU_TYPE "aufx")
+    endif()
+    message(STATUS "Audio Unit type from the plugin: ${OP_AU_TYPE}")
+  elseif(NOT OP_AU_TYPE MATCHES "^(aufx|aumu|aumf)$")
+    message(FATAL_ERROR "OP_AU_TYPE must be auto, aufx, aumu or aumf")
+  endif()
+  function(op_au_type_code out type)
+    if(type STREQUAL "aumu")
+      set(${out} 1 PARENT_SCOPE)
+    elseif(type STREQUAL "aumf")
+      set(${out} 2 PARENT_SCOPE)
+    else()
+      set(${out} 0 PARENT_SCOPE)
+    endif()
+  endfunction()
+  # Every target that compiles au/OpenPluginAU.cpp says which component it is.
+  function(op_au_set_type target type)
+    op_au_type_code(code "${type}")
+    target_compile_definitions(${target} PRIVATE OP_AU_TYPE_CODE=${code})
+  endfunction()
   configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-Info.plist" @ONLY)
   add_library(OpenPluginAU MODULE au/OpenPluginAU.cpp)
+  op_au_set_type(OpenPluginAU "${OP_AU_TYPE}")
   if(OP_EDITOR)
     target_sources(OpenPluginAU PRIVATE au/OpenPluginAUView.mm)
     target_compile_definitions(OpenPluginAU PRIVATE
@@ -305,10 +347,12 @@ if(OP_BUILD_AU)
       set(OP_MANUFACTURER "OpenPlugin")
       set(OP_AU_SUBTYPE "LtTs")
       set(OP_AU_MANUFACTURER "OpTs")
+      set(OP_AU_TYPE "aufx")
       configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-latency-Info.plist" @ONLY)
     endfunction()
     op_au_latency_plist()
     add_library(OpenPluginAULatency MODULE au/OpenPluginAU.cpp au/latency_shell.cpp)
+    op_au_set_type(OpenPluginAULatency aufx)
     target_compile_features(OpenPluginAULatency PRIVATE cxx_std_23)
     target_include_directories(OpenPluginAULatency PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
     set_target_properties(OpenPluginAULatency PROPERTIES
@@ -334,10 +378,12 @@ if(OP_BUILD_AU)
       set(OP_MANUFACTURER "OpenPlugin")
       set(OP_AU_SUBTYPE "StTs")
       set(OP_AU_MANUFACTURER "OpTs")
+      set(OP_AU_TYPE "aufx")
       configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-state-Info.plist" @ONLY)
     endfunction()
     op_au_state_plist()
     add_library(OpenPluginAUState MODULE au/OpenPluginAU.cpp au/state_shell.cpp)
+    op_au_set_type(OpenPluginAUState aufx)
     target_compile_features(OpenPluginAUState PRIVATE cxx_std_23)
     target_include_directories(OpenPluginAUState PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
     set_target_properties(OpenPluginAUState PROPERTIES
@@ -353,6 +399,46 @@ if(OP_BUILD_AU)
     target_link_libraries(AUStateProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
     add_dependencies(AUStateProof OpenPluginAUState)
     add_test(NAME au_state_proof COMMAND AUStateProof "$<TARGET_BUNDLE_DIR:OpenPluginAUState>")
+    # Shell ABI 2 parity (events, MIDI in and out, transport, sidechain, layouts, offline, the ABI
+    # check) over au/probe_shell.cpp, a stand-in that implements all of ABI 2 and reports what it
+    # received. Five components of the same shell source: an effect (aufx), an instrument (aumu), a
+    # music effect (aumf), and two effects whose library reports ABI 3 and ABI 1.
+    function(op_au_probe_bundle target product subtype type kind abi)
+      set(OP_PRODUCT "${product}")
+      set(OP_BUNDLE_ID "com.opengrid.test.${subtype}")
+      set(OP_VERSION "1")
+      set(OP_MANUFACTURER "OpenPlugin")
+      set(OP_AU_SUBTYPE "${subtype}")
+      set(OP_AU_MANUFACTURER "OpTs")
+      set(OP_AU_TYPE "${type}")
+      configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/${target}-Info.plist" @ONLY)
+      add_library(${target} MODULE au/OpenPluginAU.cpp au/probe_shell.cpp)
+      op_au_set_type(${target} ${type})
+      target_compile_definitions(${target} PRIVATE OP_PROBE_KIND=${kind} OP_PROBE_ABI=${abi})
+      target_compile_features(${target} PRIVATE cxx_std_23)
+      target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+      set_target_properties(${target} PROPERTIES
+        OUTPUT_NAME "${product}"
+        BUNDLE TRUE
+        BUNDLE_EXTENSION component
+        PREFIX ""
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/${target}-Info.plist")
+      target_link_libraries(${target} PRIVATE openplugin_au_sdk)
+    endfunction()
+    op_au_probe_bundle(OpenPluginAUProbeFx "ProbeFx" "PrFx" aufx 0 2)
+    op_au_probe_bundle(OpenPluginAUProbeInst "ProbeInst" "PrIn" aumu 1 2)
+    op_au_probe_bundle(OpenPluginAUProbeMidiFx "ProbeMidiFx" "PrMf" aumf 2 2)
+    op_au_probe_bundle(OpenPluginAUProbeNewer "ProbeNewer" "PrNw" aufx 0 3)
+    op_au_probe_bundle(OpenPluginAUProbeOlder "ProbeOlder" "PrOl" aufx 0 1)
+    add_executable(AUEventsProof au/events_host.cpp)
+    target_compile_features(AUEventsProof PRIVATE cxx_std_23)
+    target_include_directories(AUEventsProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/au")
+    target_link_libraries(AUEventsProof PRIVATE OpenPluginAllocHook "-framework AudioToolbox" "-framework CoreFoundation" "-framework CoreMIDI")
+    add_dependencies(AUEventsProof OpenPluginAUProbeFx OpenPluginAUProbeInst OpenPluginAUProbeMidiFx OpenPluginAUProbeNewer OpenPluginAUProbeOlder)
+    add_test(NAME au_events_proof COMMAND AUEventsProof
+      "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeFx>" "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeInst>"
+      "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeMidiFx>" "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeNewer>"
+      "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeOlder>")
   endif()
 endif()
 
