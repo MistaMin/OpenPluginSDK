@@ -12,6 +12,7 @@
 //! - [`Delta`]: what the processing adds or removes (processed minus the aligned dry), with a glide.
 //! - [`Loudness`]: BS.1770-4 / EBU R 128 momentary, short-term and gated integrated LUFS ([`KWeighting`]).
 //! - [`LoudnessMatch`]: automatic gain that holds the output at the input's K-weighted loudness.
+//! - [`Downmix`], [`Upmix`]: surround to stereo or mono by channel role (BS.775 / A/52), and the passive stereo upmix.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 
 pub mod adaa;
@@ -19,6 +20,7 @@ pub mod biquad;
 pub mod bypass;
 pub mod convolve;
 pub mod delta;
+pub mod downmix;
 pub mod delay;
 pub mod dynamics;
 pub mod gain_comp;
@@ -41,6 +43,9 @@ pub use bypass::SoftBypass;
 pub use convolve::BlockConvolver;
 pub use delta::Delta;
 pub use delay::DelayLine;
+pub use downmix::{
+    roles_of, Downmix, DownmixTarget, MixSettings, Normalize, SurroundFill, Upmix, UpmixSettings,
+};
 pub use dynamics::Compressor;
 pub use gain_comp::GainComp;
 pub use linear_phase::{LinearPhaseOversampler, OversampleError};
