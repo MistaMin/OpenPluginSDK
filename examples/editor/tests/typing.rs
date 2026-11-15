@@ -312,8 +312,19 @@ mod mac {
 
             // A resize moves the rectangles with the controls.
             rig.view.as_ref().unwrap().resize(360, 240);
-            run_loop(0.1);
             let lay2 = layout(360, 240);
+            // Wait for the view to lay out at the new size (slow CI runners take longer than a fixed wait).
+            run_until(
+                || {
+                    tips(&rig).iter().zip(want(&lay2)).all(|((r, _), w)| {
+                        (r[0] as f32 - w.0).abs() < 1e-3
+                            && (r[1] as f32 - w.1).abs() < 1e-3
+                            && (r[2] as f32 - w.2).abs() < 1e-3
+                            && (r[3] as f32 - w.3).abs() < 1e-3
+                    })
+                },
+                5.0,
+            );
             let t = tips(&rig);
             assert_eq!(t.len(), 3);
             for ((r, _), w) in t.iter().zip(want(&lay2)) {
