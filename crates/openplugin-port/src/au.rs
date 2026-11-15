@@ -14,6 +14,9 @@ use crate::bundle;
 use crate::manifest::*;
 use crate::sys::*;
 
+mod render;
+pub use render::render;
+
 /// What `Info.plist` says about one component.
 #[derive(Debug, Clone)]
 pub struct PlistComponent {

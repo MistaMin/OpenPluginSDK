@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use openplugin_port::{ScanOptions, probe, scan, write_outputs};
+use openplugin_port::null::{self, NullOptions};
+use openplugin_port::{ScanOptions, probe, render, scan, write_outputs};
 
 const HELP: &str = "\
 openplugin-port: move a plugin from another SDK to OpenPluginSDK
@@ -19,6 +20,25 @@ Usage:
   --timeout   seconds each plugin gets to load and answer (default 30)
   --format    clap, vst3, au or aax, when the extension does not say
 
+  openplugin-port null <original> <port> [--format FMT] [--port-format FMT]
+                       [--input SIGNAL|file.wav] [--automation SPEC] [--rate HZ]
+                       [--block N] [--tolerance T] [--param-map map.json]
+                       [--save DIR] [--json FILE] [--timeout SECONDS]
+  openplugin-port param-map <original> <port> [--out map.json]
+
+  null        render the original and the port (CLAP, VST3 or Audio Unit, each
+              loaded by path in its own child process) through the same input and
+              parameter automation, align them by their reported latencies and
+              compare. Exit 0 when within the tolerance, 1 when not, 3 when a
+              plugin could not be rendered (crash, hang, load failure).
+  --input     sweep, noise, impulses, burst or silence, optionally ':seconds'
+              (default sweep:2), or a 16/24/32-bit int or float WAV file
+  --automation  'frame:param=value' entries separated by commas; a time may end
+              in s or ms; param is the original's id or name; '@file' reads a file
+  --save DIR  write input, original, port and difference as WAV files
+  param-map   write the original-to-port parameter id map the scanner manifests
+              give (same name, else same id)
+
 Each plugin is loaded in a child process, so a crash or a hang in the plugin
 fails that one scan and nothing else. The exit code is 0 when every plugin scanned.
 ";
@@ -27,7 +47,10 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("__probe") => probe::child_main(&args[1..]),
+        Some("__render") => render::child_main(&args[1..]),
         Some("scan") => run_scan(&args[1..]),
+        Some("null") => run_null(&args[1..]),
+        Some("param-map") => run_param_map(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{HELP}");
             ExitCode::SUCCESS
@@ -108,6 +131,118 @@ fn run_scan(args: &[String]) -> ExitCode {
         }
     }
     if failures == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+fn run_null(args: &[String]) -> ExitCode {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let helper = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("openplugin-port: cannot find myself to start the renderer: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut o = NullOptions::new(helper, PathBuf::new(), PathBuf::new());
+    let mut json: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let r: Result<(), String> = (|| {
+            let mut value = |what: &str| it.next().cloned().ok_or_else(|| format!("{a} needs {what}"));
+            match a.as_str() {
+                "--format" => o.original_format = Some(value("a format")?),
+                "--port-format" => o.port_format = Some(value("a format")?),
+                "--input" => o.input = value("a signal or a WAV file")?,
+                "--automation" => o.automation = Some(value("a spec")?),
+                "--rate" => o.rate = Some(value("a rate")?.parse().map_err(|_| "--rate needs a number")?),
+                "--block" => o.block = value("a number")?.parse().map_err(|_| "--block needs a number")?,
+                "--tolerance" => o.tolerance = value("a number")?.parse().map_err(|_| "--tolerance needs a number")?,
+                "--param-map" => o.param_map = Some(PathBuf::from(value("a file")?)),
+                "--save" => o.save_dir = Some(PathBuf::from(value("a folder")?)),
+                "--json" => json = Some(PathBuf::from(value("a file")?)),
+                "--timeout" => o.timeout = Duration::from_secs(value("seconds")?.parse().map_err(|_| "--timeout needs a number of seconds")?),
+                flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
+                path => paths.push(PathBuf::from(path)),
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            return usage(&e);
+        }
+    }
+    if paths.len() != 2 {
+        return usage("null needs the original plugin and the port");
+    }
+    o.original = paths[0].clone();
+    o.port = paths[1].clone();
+    o.port_format = o.original_format.clone();
+    match null::run_null(&o) {
+        Ok(report) => {
+            print!("{}", report.to_text());
+            if let Some(j) = json {
+                if let Err(e) = std::fs::write(&j, serde_json::to_string_pretty(&report).unwrap_or_default() + "\n") {
+                    eprintln!("openplugin-port: cannot write {}: {e}", j.display());
+                    return ExitCode::from(3);
+                }
+            }
+            if report.pass { ExitCode::SUCCESS } else { ExitCode::from(1) }
+        }
+        Err(e) => {
+            println!("ERROR {e}");
+            ExitCode::from(3)
+        }
+    }
+}
+
+fn run_param_map(args: &[String]) -> ExitCode {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut out: Option<PathBuf> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--out" => match it.next() {
+                Some(v) => out = Some(PathBuf::from(v)),
+                None => return usage("--out needs a file"),
+            },
+            flag if flag.starts_with("--") => return usage(&format!("unknown option {flag}")),
+            path => paths.push(PathBuf::from(path)),
+        }
+    }
+    if paths.len() != 2 {
+        return usage("param-map needs the original plugin and the port");
+    }
+    let helper = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("openplugin-port: cannot find myself to start the probe: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut manifests = Vec::new();
+    for p in &paths {
+        match scan(p, &ScanOptions::new(helper.clone())) {
+            Ok(mut m) => manifests.push(m.remove(0)),
+            Err(e) => {
+                println!("FAIL  {}: {e}", p.display());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let (map, unmatched) = null::generate_param_map(&manifests[0], &manifests[1], &[]);
+    let text = serde_json::to_string_pretty(&map).unwrap_or_default() + "\n";
+    match out {
+        Some(f) => {
+            if let Err(e) = std::fs::write(&f, &text) {
+                eprintln!("openplugin-port: cannot write {}: {e}", f.display());
+                return ExitCode::FAILURE;
+            }
+            println!("wrote {}", f.display());
+        }
+        None => print!("{text}"),
+    }
+    for u in &unmatched {
+        eprintln!("no port parameter for the original's {u}: add it by hand");
+    }
+    if unmatched.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) }
 }
 
 fn usage(why: &str) -> ExitCode {

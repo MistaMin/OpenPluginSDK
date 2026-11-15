@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use crate::manifest::*;
 use crate::sys;
 
+use render::ProcessData;
+
 type Tuid = [u8; 16];
 type TResult = i32;
 const OK: TResult = 0;
@@ -137,13 +139,13 @@ struct BusInfo {
 #[repr(C)]
 struct ProcessorVtbl {
     base: UnknownVtbl,
-    set_bus_arrangements: usize,
+    set_bus_arrangements: unsafe extern "system" fn(*mut c_void, *mut u64, i32, *mut u64, i32) -> TResult,
     get_bus_arrangement: unsafe extern "system" fn(*mut c_void, i32, i32, *mut u64) -> TResult,
     can_process_sample_size: usize,
     get_latency_samples: unsafe extern "system" fn(*mut c_void) -> u32,
     setup_processing: unsafe extern "system" fn(*mut c_void, *mut ProcessSetup) -> TResult,
-    set_processing: usize,
-    process: usize,
+    set_processing: unsafe extern "system" fn(*mut c_void, u8) -> TResult,
+    process: unsafe extern "system" fn(*mut c_void, *mut ProcessData) -> TResult,
     get_tail_samples: unsafe extern "system" fn(*mut c_void) -> u32,
 }
 
@@ -168,7 +170,7 @@ struct ControllerVtbl {
     get_param_string_by_value: unsafe extern "system" fn(*mut c_void, u32, f64, *mut u16) -> TResult,
     get_param_value_by_string: usize,
     normalized_param_to_plain: unsafe extern "system" fn(*mut c_void, u32, f64) -> f64,
-    plain_param_to_normalized: usize,
+    plain_param_to_normalized: unsafe extern "system" fn(*mut c_void, u32, f64) -> f64,
     get_param_normalized: usize,
     set_param_normalized: usize,
     set_component_handler: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
@@ -789,3 +791,6 @@ fn read_param(controller: *mut c_void, info: &ParameterInfo) -> Param {
         step_texts,
     }
 }
+
+mod render;
+pub use render::render;

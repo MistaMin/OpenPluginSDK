@@ -9,6 +9,9 @@ use openplugin_targets::clap_abi::*;
 use crate::manifest::*;
 use crate::sys;
 
+mod render;
+pub use render::render;
+
 static HOST_NAME: &[u8] = b"openplugin-port\0";
 static EMPTY: &[u8] = b"\0";
 static HOST_VERSION: &[u8] = b"0.3.1\0";

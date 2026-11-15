@@ -20,11 +20,15 @@ pub const FAULT_ENV: &str = "OPENPLUGIN_PORT_FAULT";
 
 /// Run the probe for `format` on `path` in a child process.
 pub fn run_child(helper: &Path, format: &str, path: &Path, timeout: Duration, env: &[(String, String)]) -> Result<ProbeResult, String> {
+    run_helper(helper, &["__probe".into(), format.into(), path.as_os_str().to_owned()], timeout, env)
+}
+
+/// Run the helper executable with `args` and read the one result line it prints.
+/// The helper is killed at `timeout`; a crash becomes an error message.
+pub fn run_helper<T: serde::de::DeserializeOwned>(helper: &Path, args: &[std::ffi::OsString], timeout: Duration, env: &[(String, String)]) -> Result<T, String> {
     let mut child = Command::new(helper)
         .envs(env.iter().map(|(k, v)| (k, v)))
-        .arg("__probe")
-        .arg(format)
-        .arg(path)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -54,7 +58,7 @@ pub fn run_child(helper: &Path, format: &str, path: &Path, timeout: Duration, en
     let text = String::from_utf8_lossy(&bytes);
     let line = text.lines().rev().find_map(|l| l.strip_prefix(MARK));
     match line {
-        Some(json) => match serde_json::from_str::<Result<ProbeResult, String>>(json) {
+        Some(json) => match serde_json::from_str::<Result<T, String>>(json) {
             Ok(r) => r,
             Err(e) => Err(format!("unreadable probe result: {e}")),
         },
@@ -81,7 +85,12 @@ fn describe_exit(status: &std::process::ExitStatus) -> String {
 /// The child's entry point: `__probe <format> <path>`. Never returns.
 pub fn child_main(args: &[String]) -> ! {
     let result = child_probe(args);
-    let json = serde_json::to_string(&result).unwrap_or_else(|e| format!("{{\"Err\":\"cannot encode the result: {e}\"}}"));
+    emit_result(&result)
+}
+
+/// Print the one marked result line and leave without running any teardown. Never returns.
+pub fn emit_result<T: serde::Serialize>(result: &Result<T, String>) -> ! {
+    let json = serde_json::to_string(result).unwrap_or_else(|e| format!("{{\"Err\":\"cannot encode the result: {e}\"}}"));
     let mut out = std::io::stdout().lock();
     let _ = writeln!(out);
     let _ = writeln!(out, "{MARK}{json}");
