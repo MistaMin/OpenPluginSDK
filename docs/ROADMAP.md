@@ -102,6 +102,8 @@ The Rust `Plugin` trait already has notes, MIDI output, transport, sidechain, ch
 6. **Parameter groups.** `ParamInfo` gains a group path; CLAP module paths, VST3 units, Audio Unit clumps, AAX pages and LV2 port groups show it. After tasks 1 to 5. Proof: each format's proof reads the groups back.
 7. **Telling the host about changes.** A plugin reports a new latency or new parameter info at run time: CLAP `latency.changed` and `params.rescan`, VST3 `restartComponent`, Audio Unit property notifications, AAX `SetSignalLatency`, LV2 latency port. After tasks 1 to 5. Proof: each format's proof changes latency mid-session and sees the host told.
 8. **One channel order in every format.** A plugin always sees surround channels in the SDK's order (the CLAP order: L R C LFE, then sides, backs and heights), whatever the host uses. Each shell reorders at the edge: VST3 speaker arrangements, Audio Unit channel layout tags, Pro Tools' film order (L C R Ls Rs LFE) in AAX, LV2 port order. Helpers in `layout.rs` find a channel by role (`index_of(SURROUND_LFE)`) and iterate the non-LFE channels, so plugin code never hard-codes an index. Adds the Atmos beds 5.1.2, 5.1.4, 7.1.2 and 9.1.6. Owns `layout.rs` and the layout parts of each entry. After tasks 1 to 5. Proof: a test plugin that tags each channel with its role passes every layout through every format, and every role arrives at the right index.
+9. **Downmix and upmix matrices.** A module in `openplugin-dsp` folds any SDK layout to stereo or mono (ITU-R BS.775 for 5.x; documented, matching folds for 6.1, 7.1 and the Atmos beds), with the centre, surround and LFE levels as parameters, and the matching passive upmix. Owns a new `openplugin-dsp` module. Proof: unit tests against the published coefficients, energy checks, no allocation.
+10. **Stereo plugins on surround buses.** A plugin written for stereo opts in to an adapter that runs it on a surround bus: one engine per channel pair (L/R, sides, backs, height pairs), the centre as mono, the LFE processed, passed or muted by the plugin's choice, every parameter linked, and an optional shared detector so dynamics move every channel together. A `fold to stereo` mode uses task 9 for surround in, stereo out. Opt-in only: wideners and reverbs that need the speaker positions keep their own surround code. Owns a new `openplugin-core` adapter module and the layout lists the entries publish. After tasks 8 and 9. Proof: a stereo test plugin on 5.1 and 7.1.4 matches running the engines by hand, with linked gain reduction, in every format.
 
 Then **0.6.0**.
 
@@ -132,6 +134,7 @@ The freeze itself and the crates.io publish are the owner's decisions.
 
 ## After 1.0
 
+- **Binaural rendering.** Any SDK layout to headphones through head-related impulse responses, convolved per channel with `openplugin-dsp`'s convolver, loaded through the 0.7 worker. Needs an HRTF set whose license allows shipping it, or one the user supplies; choosing the set is the owner's decision.
 - **AUv3.** An app extension for iPad, iPhone and the Mac, built on the shell ABI. It is a new native shell and an app container, so it is its own milestone.
 - **Windows and Linux.** See [ROADMAP_WINDOWS_LINUX.md](ROADMAP_WINDOWS_LINUX.md).
 
