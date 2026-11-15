@@ -119,4 +119,32 @@ On 15 November 2026, `examples/editor` was built for every format with `--archs 
 
 - `--pkg` on the example, every format except standalone, from a work folder under `/Volumes/Developer 2/...` (a space in the path), unsigned: `scripts/test_pkg.sh` passed, with all five bundles in their component packages at the install locations above.
 
+### Universal binaries
+
+On 15 November 2026, on an Apple Silicon Mac with Rosetta, the same example was built for every format (CLAP, LV2, VST3, Audio Unit, AAX, with the editor, tail and AAX page table) with `--archs universal`. The Rust library is built for `aarch64-apple-darwin` and `x86_64-apple-darwin` and joined with `lipo`. The VST3 SDK, the AudioUnitSDK sources and the AAX SDK's `AAXLibrary` sources are compiled by `native/CMakeLists.txt` with `CMAKE_OSX_ARCHITECTURES=arm64;x86_64`, so each is built for both slices in the build folder (no SDK file is changed). Nothing in the build had to change. `lipo -archs` on each bundle binary:
+
+| Bundle | `lipo -archs` |
+|---|---|
+| `.clap` | `x86_64 arm64` |
+| `.lv2` library | `x86_64 arm64` |
+| `.vst3` | `x86_64 arm64` |
+| `.component` (Audio Unit) | `x86_64 arm64` |
+| `.aaxplugin` | `x86_64 arm64` |
+
+`build_plugin.sh` now makes this check itself: after signing it runs `lipo -archs` on every binary in every bundle and fails if the slices differ from `--archs`.
+
+The x86_64 slice ran under Rosetta (`arch -x86_64`), the arm64 slice natively:
+
+| Check | arm64 | x86_64 (Rosetta) |
+|---|---|---|
+| Native ctest proofs, 18 tests (`vst3_*` 5, `au_*` 5, `aax_*` 8; the Audio Unit proofs register the bundle in the test process and install nothing) | 18 of 18 pass | 18 of 18 pass |
+| Format parity (`scripts/format_parity/run.sh`, `--arch x86_64` for Intel): CLAP, LV2, VST3, Audio Unit and AAX match the reference with a maximum difference of 0; the three gain-error controls and the timing control fail as they must | pass | pass |
+| `clap-validator` (built from the pinned commit for each architecture) on the universal CLAP bundle | 44 run, 34 passed, 0 failed, 10 skipped | 44 run, 34 passed, 0 failed, 10 skipped |
+
+To run the proofs in the other slice, configure the proof build with `"-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"`, build everything, run `ctest`, then re-run `cmake` with `"-DCMAKE_TEST_LAUNCHER=arch;-x86_64"` (it only rewrites the test list) and run `ctest` again. The format parity script needs `--arch x86_64` because it builds its host and plugin per architecture.
+
+CI runs all of the above except AAX (its SDK is not redistributable) in the `universal` job on the arm64 runner. The job installs Rosetta with `softwareupdate --install-rosetta --agree-to-license` only if `arch -x86_64` does not already work. That job has not run on GitHub yet; its steps were run locally.
+
+Not covered by the universal checks: Intel hardware (Rosetta is not a real Intel CPU), a signed or notarised universal build, `auval` and `pluginval` on the x86_64 slice, and the editor proofs (they need a window server).
+
 Not covered: installing the package, a signed or notarised package (shown with `make_pkg.sh --dry-run` only), the standalone path (the example has no standalone binary), real Developer ID signing, notarisation and PACE signing (shown with `--dry-run` only), and Intel hardware.

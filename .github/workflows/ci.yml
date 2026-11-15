@@ -293,6 +293,134 @@ jobs:
           AU_SDK: ${{ github.workspace }}/AudioUnitSDK
         run: scripts/format_parity/run.sh --work "$RUNNER_TEMP/format-parity"
 
+  # Universal binaries, proven (docs/BUILD.md). build_plugin.sh --archs universal
+  # builds CLAP, LV2, VST3 and the Audio Unit as two-slice bundles and checks
+  # `lipo -archs` on each binary. Then the x86_64 slice runs under Rosetta on
+  # the arm64 runner: the VST3 and Audio Unit proofs, the format parity test and
+  # clap-validator (built for x86_64). The arm64 slice runs the same proofs
+  # natively. AAX is not here: its SDK is not redistributable, so it is proven
+  # locally. Nothing is installed in a plug-in folder.
+  universal:
+    name: Universal binaries (arm64 and x86_64 under Rosetta)
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      VST3_SDK_REF: v3.8.0_build_66
+      # clap-validator 0.4.1 (build 127-g152b982), built from this commit
+      # because the release zip holds an arm64 binary only.
+      CLAP_VALIDATOR_REV: 152b9823e992d782c5c1fd33bca0295478b919aa
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Check out the public VST3 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: steinbergmedia/vst3sdk
+          ref: ${{ env.VST3_SDK_REF }}
+          submodules: recursive
+          path: vst3sdk
+      - name: Check out AudioUnitSDK
+        uses: actions/checkout@v4
+        with:
+          repository: apple/AudioUnitSDK
+          ref: ${{ env.AUDIOUNITSDK_REF }}
+          path: AudioUnitSDK
+      - name: Install stable Rust with both Apple targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # Rosetta is already on GitHub's arm64 runners; this installs it only if
+      # it is missing, and fails the job if x86_64 code still cannot run.
+      - name: Make sure Rosetta runs x86_64 code
+        run: |
+          set -euo pipefail
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+          arch -x86_64 /usr/bin/true
+          echo "Rosetta: $(arch -x86_64 uname -m)"
+      - name: Build every available format as a universal bundle
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          scripts/build_plugin.sh \
+            --manifest-path examples/editor/Cargo.toml --version 0.3.1 \
+            --name "Example Gain" --bundle-id com.opengrid.example --manufacturer OpenGrid \
+            --au-subtype ExGn --au-manufacturer OpGd \
+            --ttl-bin lv2_ttl --formats clap,lv2,vst3,au --editor --tail \
+            --archs universal --jobs 3 \
+            --vst3-sdk "$GITHUB_WORKSPACE/vst3sdk" --au-sdk "$GITHUB_WORKSPACE/AudioUnitSDK" \
+            --out "$RUNNER_TEMP/universal-dist" --work-dir "$RUNNER_TEMP/universal-work"
+      # The script already compares each binary with the requested slices;
+      # this is the same check, written out, so a regression in the script
+      # cannot hide it.
+      - name: Both slices in every bundle binary
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/universal-dist"
+          for f in "$d/Example Gain.clap/Contents/MacOS/Example Gain" \
+                   "$d/ExampleGain.lv2/ExampleGain.dylib" \
+                   "$d/Example Gain.vst3/Contents/MacOS/Example Gain" \
+                   "$d/Example Gain.component/Contents/MacOS/Example Gain"; do
+            archs="$(lipo -archs "$f" | tr ' ' '\n' | sort | tr '\n' ' ')"
+            echo "$archs: $f"
+            test "$archs" = "arm64 x86_64 "
+          done
+      # The shells and proofs, again as universal binaries (the proofs are not
+      # part of the bundle build). No editor, so the stand-in plugins build too.
+      - name: Build the shells and proofs as universal binaries
+        run: |
+          set -euo pipefail
+          cmake -S OpenPluginSDK/native -B "$RUNNER_TEMP/universal-proofs" -DCMAKE_BUILD_TYPE=Release \
+            "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DOP_RUST_LIB="$RUNNER_TEMP/universal-work/universal/libexample_editor.a" \
+            -DOP_VST3_SDK="$GITHUB_WORKSPACE/vst3sdk" -DOP_AU_SDK="$GITHUB_WORKSPACE/AudioUnitSDK" \
+            -DOP_BUILD_AAX=OFF \
+            -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
+            -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid \
+            -DOP_AU_SUBTYPE=ExGn -DOP_AU_MANUFACTURER=OpGd \
+            -DOP_TAIL=ON -DOP_EDITOR=OFF
+          cmake --build "$RUNNER_TEMP/universal-proofs" -j 3
+      - name: Run the proofs, arm64 slice
+        run: ctest --test-dir "$RUNNER_TEMP/universal-proofs" --output-on-failure
+      # CMAKE_TEST_LAUNCHER puts `arch -x86_64` in front of every test
+      # command. Changing it only rewrites the test list; nothing rebuilds.
+      - name: Run the proofs, x86_64 slice under Rosetta
+        run: |
+          set -euo pipefail
+          cmake -S OpenPluginSDK/native -B "$RUNNER_TEMP/universal-proofs" "-DCMAKE_TEST_LAUNCHER=arch;-x86_64"
+          ctest --test-dir "$RUNNER_TEMP/universal-proofs" --output-on-failure
+      - name: Build clap-validator for x86_64 and arm64
+        run: |
+          set -euo pipefail
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/cv-target"
+          for t in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo install --git https://github.com/free-audio/clap-validator --rev "$CLAP_VALIDATOR_REV" \
+              --locked --target "$t" --root "$RUNNER_TEMP/cv-$t" clap-validator
+          done
+          file "$RUNNER_TEMP"/cv-*/bin/clap-validator
+      - name: Validate the universal CLAP bundle, both slices
+        run: |
+          set -euo pipefail
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            echo "== clap-validator $t"
+            "$RUNNER_TEMP/cv-$t/bin/clap-validator" validate "$RUNNER_TEMP/universal-dist/Example Gain.clap"
+          done
+      - name: Format parity, x86_64 under Rosetta
+        working-directory: OpenPluginSDK
+        env:
+          VST3_SDK: ${{ github.workspace }}/vst3sdk
+          AU_SDK: ${{ github.workspace }}/AudioUnitSDK
+        run: scripts/format_parity/run.sh --arch x86_64 --work "$RUNNER_TEMP/format-parity-x86_64"
+
   # Third-party validators against the example. The Audio Unit is installed
   # into the runner's own Components folder, which only a CI runner may do.
   shell-validators:
