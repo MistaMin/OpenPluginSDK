@@ -262,14 +262,20 @@ void check_one(AudioComponent component, UInt32 channels, const char* label) {
             start += kProofBlock;
         }
     });
+    // Let the renderer start first: on a slow machine (x86_64 under Rosetta in CI) the
+    // 100 saves can otherwise finish before it renders a single block.
+    while (blocks.load() == 0) std::this_thread::yield();
     for (int i = 0; i < 100; ++i) {
         CFDictionaryRef during = class_info(live);
         CHECK(set_class_info(live, during) == noErr);
         CFRelease(during);
     }
+    const int before_stop = blocks.load();
+    while (blocks.load() < before_stop + 2) std::this_thread::yield();
     stop.store(true);
     renderer.join();
-    CHECK(failures.load() == 0 && blocks.load() > 0);
+    CHECK(failures.load() == 0);
+    CHECK(blocks.load() > 0);
     CHECK(chunk(live) == kChunkA && param(live, kGain) == 2.5f);
     std::printf("AU state %s: 100 saves and restores beside %d rendered blocks, no render failure\n", label, blocks.load());
 

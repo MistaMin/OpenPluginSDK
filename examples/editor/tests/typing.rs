@@ -158,7 +158,7 @@ mod mac {
             rig.click(kx, ky, 2, 0);
             assert!(rig.has_field());
             rig.view.as_ref().unwrap().resize(360, 240);
-            run_loop(0.1);
+            run_until(|| !rig.has_field(), 5.0);
             assert!(!rig.has_field());
         }
     }
