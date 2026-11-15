@@ -14,6 +14,10 @@
 #include "public.sdk/source/vst/vstparameters.h"
 #include "pluginterfaces/base/ustring.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstevents.h"
+#include "pluginterfaces/vst/ivstmidicontrollers.h"
+#include "pluginterfaces/vst/ivstprocesscontext.h"
+#include "pluginterfaces/vst/vstspeaker.h"
 #include "base/source/fstreamer.h"
 #include "pluginterfaces/base/ibstream.h"
 #include <algorithm>
@@ -22,16 +26,105 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <vector>
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
 
 namespace openplugin_vst {
+// The library must be at least the ABI this shell was written for (see
+// docs/SHELL.md, Versioning): a newer library only adds. Checked before any
+// ABI 2 symbol is called, so the shell never runs on an older library.
 bool load_info(OpShellInfo& info) {
     std::memset(&info, 0, sizeof(info));
-    return op_shell_info(&info) && info.abi == OP_SHELL_ABI && info.param_count > 0;
+    if (op_shell_abi_version() < OP_SHELL_ABI) return false;
+    return op_shell_info(&info) && info.abi >= OP_SHELL_ABI && info.param_count > 0;
 }
+
+// ---- Channel order at the edge ---------------------------------------------
+// The ABI lists channels in the SDK's canonical order (the CLAP surround ids).
+// A VST3 SpeakerArrangement is a bit set whose channels sit in ascending bit
+// order in the host's buffers. Bits 0..17 (L R C Lfe Ls Rs Lc Rc Cs Sl Sr Tc
+// Tfl Tfc Tfr Trl Trc Trr) are numbered exactly like the CLAP ids, so the role
+// of a speaker is its bit number and the host index of a role is the number of
+// lower bits set. Mono is kSpeakerM, ambisonics are the ACN speakers.
+constexpr uint32_t kLegacyLayout = ~0u;  // not an ABI layout: create() channels only
+constexpr int kMaxVstRole = 17;
+constexpr uint32_t kMaxAmbisonicChannels = 25;  // VST3 names ACN 0..24.
+
+SpeakerArrangement acn_bit(uint32_t k) { return static_cast<SpeakerArrangement>(1) << (k < 4 ? 20 + k : 34 + k); }
+
+// The arrangement that carries `bus`; false when VST3 cannot name it (discrete
+// buses, a repeated or out-of-range role, ambisonics beyond 4th order).
+bool arrangement_of(const OpBus& bus, SpeakerArrangement& out) {
+    out = SpeakerArr::kEmpty;
+    switch (bus.kind) {
+    case OP_BUS_ABSENT: return bus.channels == 0;
+    case OP_BUS_MONO: out = SpeakerArr::kMono; return bus.channels == 1;
+    case OP_BUS_STEREO: out = SpeakerArr::kStereo; return bus.channels == 2;
+    case OP_BUS_SURROUND: {
+        if (bus.channels == 0 || bus.channels > OP_ROLE_SLOTS) return false;
+        for (uint32_t i = 0; i < bus.channels; ++i) {
+            if (bus.roles[i] > kMaxVstRole) return false;
+            const SpeakerArrangement bit = static_cast<SpeakerArrangement>(1) << bus.roles[i];
+            if (out & bit) return false;
+            out |= bit;
+        }
+        return true;
+    }
+    case OP_BUS_AMBISONIC:
+        if (bus.channels == 0 || bus.channels > kMaxAmbisonicChannels) return false;
+        for (uint32_t k = 0; k < bus.channels; ++k) out |= acn_bit(k);
+        return true;
+    default: return false;
+    }
+}
+
+// map[i] = the host channel that carries canonical channel i of `bus`.
+void channel_map(const OpBus& bus, SpeakerArrangement arrangement, uint8_t* map) {
+    for (uint32_t i = 0; i < bus.channels && i < OP_MAX_CHANNELS; ++i) {
+        if (bus.kind == OP_BUS_SURROUND && i < OP_ROLE_SLOTS && bus.roles[i] <= kMaxVstRole) {
+            const SpeakerArrangement below = (static_cast<SpeakerArrangement>(1) << bus.roles[i]) - 1;
+            map[i] = static_cast<uint8_t>(SpeakerArr::getChannelCount(arrangement & below));
+        } else {
+            map[i] = static_cast<uint8_t>(i);
+        }
+    }
+}
+
+// One layout of the plugin as VST3 arrangements.
+struct LayoutEntry {
+    OpLayout layout{};
+    SpeakerArrangement input = 0, output = 0, sidechain = 0;
+};
+struct Entry : LayoutEntry {
+    uint32_t index = 0;  // op_shell_set_layout index, or kLegacyLayout
+};
+
+// The VST3 category string. The library's own category for an effect; an
+// instrument is "Instrument|Synth" unless the plugin named its own
+// "Instrument|..." sub-category; a note effect is an "Fx".
+std::string category_for(const char* library, uint32_t kind) {
+    const std::string name = library ? library : "";
+    const bool instrument = name.rfind("Instrument|", 0) == 0;
+    if (kind == OP_KIND_INSTRUMENT) return instrument ? name : "Instrument|Synth";
+    if (name.rfind("Fx", 0) == 0) return name;
+    return "Fx";
+}
+
+// ---- MIDI input through IMidiMapping ---------------------------------------
+// The standard way in VST3 3.x to receive MIDI controllers, pitch bend and
+// channel pressure is IMidiMapping: the controller maps (channel, controller
+// number) to a hidden parameter and the host sends that parameter's changes
+// in IParameterChanges, with sample offsets. The processor turns each point
+// back into a MIDI message. Controller numbers 0..127 are CCs, kAfterTouch
+// (128) channel pressure, kPitchBend (129) pitch bend. A plugin with a note
+// input gets 16 x 130 hidden parameters from kMidiParamBase. Legacy
+// kLegacyMIDICCOutEvent events on the event input are accepted too.
+constexpr ParamID kMidiParamBase = 0x4D494400;  // "MID", clear of 0..n-1 and kBypassId
+constexpr uint32_t kMidiControllers = 130;
+constexpr uint32_t kMidiParamCount = 16 * kMidiControllers;
 
 FUID fuid_from(const uint8_t bytes[16]) {
     TUID cid{};
@@ -105,6 +198,10 @@ public:
             if (op_shell_param(i, &desc)) values_[i].store(desc.default_normalized);
             else values_[i].store(0.0);
         }
+        loadLayouts();
+        const uint32_t ports = op_shell_note_ports();
+        noteIn_ = (ports & OP_NOTE_PORT_INPUT) != 0;
+        noteOut_ = (ports & OP_NOTE_PORT_OUTPUT) != 0;
     }
     ~Processor() override { destroy(); }
     static FUnknown* create(void*) { return static_cast<IAudioProcessor*>(new Processor); }
@@ -113,15 +210,51 @@ public:
         if (count_ == 0) return kResultFalse;
         tresult result = AudioEffect::initialize(context);
         if (result != kResultOk) return result;
-        addAudioInput(STR16("Input"), SpeakerArr::kStereo);
-        addAudioOutput(STR16("Output"), SpeakerArr::kStereo);
+        // Buses follow the plugin's layouts: a main input and output when any
+        // layout has one, an aux input for the sidechain (inactive until the
+        // host activates it, the VST3 convention), an event bus per note port.
+        if (hasIn_) addAudioInput(STR16("Input"), firstArrangement(&LayoutEntry::input));
+        if (hasSide_) addAudioInput(STR16("Sidechain"), firstArrangement(&LayoutEntry::sidechain), kAux, 0);
+        if (hasOut_) addAudioOutput(STR16("Output"), firstArrangement(&LayoutEntry::output));
+        if (noteIn_) addEventInput(STR16("MIDI In"), 16);
+        if (noteOut_) addEventOutput(STR16("MIDI Out"), 16);
+        select(0);
         return kResultOk;
     }
+    // Accepts an arrangement set when it equals the buses of one of the
+    // plugin's layouts (op_shell_layout*); that layout is then selected for the
+    // next activation. A host that offers something else gets false and reads
+    // the current arrangement back through getBusArrangement.
     tresult PLUGIN_API setBusArrangements(SpeakerArrangement* inputs, int32 inputCount, SpeakerArrangement* outputs, int32 outputCount) SMTG_OVERRIDE {
-        if (!inputs || !outputs || inputCount != 1 || outputCount != 1 || inputs[0] != outputs[0]) return kResultFalse;
-        if (inputs[0] != SpeakerArr::kMono && inputs[0] != SpeakerArr::kStereo) return kResultFalse;
-        channels_ = inputs[0] == SpeakerArr::kMono ? 1u : 2u;
-        return AudioEffect::setBusArrangements(inputs, inputCount, outputs, outputCount);
+        const int32 mainIn = hasIn_ ? 1 : 0;
+        const int32 fullIn = mainIn + (hasSide_ ? 1 : 0);
+        const int32 fullOut = hasOut_ ? 1 : 0;
+        if (inputCount < 0 || outputCount < 0 || (inputCount && !inputs) || (outputCount && !outputs)) return kInvalidArgument;
+        if ((inputCount != fullIn && inputCount != mainIn) || outputCount != fullOut) return kResultFalse;
+        SpeakerArrangement in = SpeakerArr::kEmpty, out = SpeakerArr::kEmpty, side = SpeakerArr::kEmpty;
+        if (hasIn_) in = inputs[0];
+        if (hasSide_) {
+            if (inputCount == fullIn) side = inputs[mainIn];
+            else getBusArrangement(kInput, mainIn, side);
+        }
+        if (hasOut_) out = outputs[0];
+        // A host that names no aux bus leaves the sidechain to the plugin: the
+        // layout that keeps the current aux arrangement, else the first with
+        // these main buses.
+        const bool sideGiven = !hasSide_ || inputCount == fullIn;
+        for (size_t i = 0; i < layouts_.size() && !sideGiven; ++i) {
+            if (layouts_[i].input == in && layouts_[i].output == out && layouts_[i].sidechain == side) {
+                select(i);
+                return AudioEffect::setBusArrangements(inputs, inputCount, outputs, outputCount);
+            }
+        }
+        for (size_t i = 0; i < layouts_.size(); ++i) {
+            const LayoutEntry& entry = layouts_[i];
+            if (entry.input != in || entry.output != out || (sideGiven && entry.sidechain != side)) continue;
+            select(i);
+            return AudioEffect::setBusArrangements(inputs, inputCount, outputs, outputCount);
+        }
+        return kResultFalse;
     }
     tresult PLUGIN_API canProcessSampleSize(int32 size) SMTG_OVERRIDE { return size == kSample32 ? kResultTrue : kResultFalse; }
     tresult PLUGIN_API setupProcessing(ProcessSetup& setup) SMTG_OVERRIDE {
@@ -139,6 +272,11 @@ public:
         if (processSetup.maxSamplesPerBlock < 1) return kResultFalse;
         void* next = op_shell_create(processSetup.sampleRate, static_cast<uint32_t>(processSetup.maxSamplesPerBlock), channels_);
         if (!next) return kResultFalse;
+        if (layoutIndex_ != kLegacyLayout && !op_shell_set_layout(next, layoutIndex_)) {
+            op_shell_destroy(next);
+            return kResultFalse;
+        }
+        offline_ = false;
         keepChunk();
         destroy();
         engine_ = next;
@@ -232,49 +370,108 @@ public:
         if (stream->write(blob.data(), static_cast<int32>(blob.size()), &written) != kResultOk || written != static_cast<int32>(blob.size())) return kResultFalse;
         return kResultOk;
     }
+    // One host block through op_shell_process_events. Parameter points,
+    // notes and mapped MIDI are one sample-offset event list; the engine cuts
+    // the block at each offset, so changes are sample-accurate. The bypass
+    // switch cuts the block here instead, because the crossfade is the shell's.
+    // A block longer than the prepared size, or with more than OP_MAX_EVENTS
+    // events, is passed to the engine in consecutive chunks.
     tresult PLUGIN_API process(ProcessData& data) SMTG_OVERRIDE {
         const int32 numSamples = std::max<int32>(data.numSamples, 0);
-        const uint32_t pending = collectChanges(data.inputParameterChanges, numSamples);
-        uint32_t next = 0;
+        collect(data, numSamples);
         if (data.numSamples == 0) {
-            applyDue(next, pending, 0, true);
+            applyHeld(0);
             return kResultOk;
         }
-        if (!engine_ || data.symbolicSampleSize != kSample32 || data.numSamples < 0 || data.numInputs != 1 || data.numOutputs != 1 || !data.inputs || !data.outputs)
-            return kResultFalse;
-        auto& input = data.inputs[0];
-        auto& output = data.outputs[0];
-        int32 channels = input.numChannels;
-        if ((channels != 1 && channels != 2) || output.numChannels != channels || !input.channelBuffers32 || !output.channelBuffers32)
-            return kResultFalse;
-        // Start from the values held at the end of the previous block.
+        if (!engine_ || data.symbolicSampleSize != kSample32 || data.numSamples < 0) return kResultFalse;
+        // The buses of the selected layout, in the host's channel order.
+        AudioBusBuffers* hostIn = nullptr;
+        AudioBusBuffers* hostOut = nullptr;
+        AudioBusBuffers* hostSide = nullptr;
+        if (inCh_ > 0 && data.numInputs >= 1 && data.inputs && data.inputs[0].numChannels > 0) {
+            hostIn = &data.inputs[0];
+            if (hostIn->numChannels < static_cast<int32>(inCh_) || !hostIn->channelBuffers32) return kResultFalse;
+        }
+        if (outCh_ > 0) {
+            if (data.numOutputs < 1 || !data.outputs) return kResultFalse;
+            hostOut = &data.outputs[0];
+            if (hostOut->numChannels < static_cast<int32>(outCh_) || !hostOut->channelBuffers32) return kResultFalse;
+        }
+        const int32 sideBus = hasIn_ ? 1 : 0;
+        if (sideCh_ > 0 && hasSide_ && data.numInputs > sideBus && data.inputs && data.inputs[sideBus].numChannels >= static_cast<int32>(sideCh_) &&
+            data.inputs[sideBus].channelBuffers32)
+            hostSide = &data.inputs[sideBus];
+
+        const bool offline = data.processMode == kOffline;
+        if (offline != offline_) {
+            op_shell_set_offline(engine_, offline ? 1 : 0);
+            offline_ = offline;
+        }
+        // Start from the values held at the end of the previous block, then
+        // record the values this block's points leave behind.
         for (uint32_t i = 0; i < count_; ++i) {
             if (!op_shell_set_normalized(engine_, i, static_cast<float>(values_[i].load()))) return kResultFalse;
         }
+        for (uint32_t i = 0; i < nTagged_; ++i) {
+            const OpEvent& ev = tagged_[i].ev;
+            if (ev.kind == OP_EVENT_PARAM_NORMALIZED) values_[ev.index].store(ev.value);
+        }
+        const bool haveTransport = data.processContext != nullptr;
+        if (haveTransport) buildTransport(*data.processContext);
+
         const int32 limit = processSetup.maxSamplesPerBlock > 0 ? processSetup.maxSamplesPerBlock : data.numSamples;
-        int32 offset = 0;
-        while (offset < data.numSamples) {
-            if (!applyDue(next, pending, offset, false)) return kResultFalse;
-            // The segment runs to the next change point, the end of the block, or
-            // the prepared block size, whichever comes first.
-            int32 end = data.numSamples;
-            if (next < pending) end = std::min(end, changes_[next].offset);
-            const uint32_t frames = static_cast<uint32_t>(std::min(limit, end - offset));
+        int32 start = 0;
+        uint32_t next = 0;
+        uint32_t nextBypass = 0;
+        while (start < data.numSamples) {
+            while (nextBypass < nBypass_ && bypassPoints_[nextBypass].offset <= start) bypass_.store(bypassPoints_[nextBypass++].on);
+            int32 end = std::min(data.numSamples, start + limit);
+            if (nextBypass < nBypass_) end = std::min(end, bypassPoints_[nextBypass].offset);
+            uint32_t count = 0;
+            while (next + count < nTagged_ && count < OP_MAX_EVENTS && static_cast<int32>(tagged_[next + count].ev.offset) < end) ++count;
+            if (count == OP_MAX_EVENTS && next + count < nTagged_ && static_cast<int32>(tagged_[next + count].ev.offset) < end) {
+                // Too many events for one call: end the chunk where the first
+                // one left over starts (at least one sample on).
+                end = std::max(static_cast<int32>(tagged_[next + count].ev.offset), start + 1);
+                while (count > 0 && static_cast<int32>(tagged_[next + count - 1].ev.offset) >= end) --count;
+            }
+            for (uint32_t k = 0; k < count; ++k) {
+                chunk_[k] = tagged_[next + k].ev;
+                const int32 at = static_cast<int32>(chunk_[k].offset);
+                chunk_[k].offset = at > start ? static_cast<uint32_t>(at - start) : 0;
+            }
+            const uint32_t frames = static_cast<uint32_t>(end - start);
+            if (hostIn)
+                for (uint32_t i = 0; i < inCh_; ++i) inPtr_[i] = hostIn->channelBuffers32[inMap_[i]] + start;
+            if (hostOut)
+                for (uint32_t i = 0; i < outCh_; ++i) outPtr_[i] = hostOut->channelBuffers32[outMap_[i]] + start;
+            if (hostSide)
+                for (uint32_t i = 0; i < sideCh_; ++i) sidePtr_[i] = hostSide->channelBuffers32[sideMap_[i]] + start;
+            OpProcess args{};
+            args.struct_size = sizeof(OpProcess);
+            args.frames = frames;
+            args.inputs = hostIn ? inPtr_ : nullptr;
+            args.input_channels = hostIn ? inCh_ : 0;
+            args.output_channels = hostOut ? outCh_ : 0;
+            args.outputs = hostOut ? outPtr_ : nullptr;
+            args.sidechain = hostSide ? sidePtr_ : nullptr;
+            args.sidechain_channels = hostSide ? sideCh_ : 0;
+            args.event_count = count;
+            args.events = count ? chunk_ : nullptr;
+            args.transport = haveTransport ? &transport_ : nullptr;
             const float target = bypass_.load() ? 1.0f : 0.0f;
-            const float* inLeft = input.channelBuffers32[0] + offset;
-            const float* inRight = channels > 1 ? input.channelBuffers32[1] + offset : nullptr;
-            float* outLeft = output.channelBuffers32[0] + offset;
-            float* outRight = channels > 1 ? output.channelBuffers32[1] + offset : nullptr;
             // The delayed dry signal is taken before the engine runs, because the
             // host may have given the same buffer for input and output.
-            captureDry(inLeft, inRight, channels, frames);
-            if (!op_shell_process(engine_, inLeft, inRight, outLeft, outRight, frames)) return kResultFalse;
-            applyBypass(outLeft, outRight, channels, frames, target);
-            offset += static_cast<int32>(frames);
+            if (hostOut) captureDry(hostIn, start, frames);
+            if (!op_shell_process_events(engine_, &args)) return kResultFalse;
+            if (hostOut) applyBypass(*hostOut, start, frames, target);
+            emitMidi(data.outputEvents, start);
+            next += count;
+            start = end;
         }
         // Points at the very end of the block hold for the next one.
-        if (!applyDue(next, pending, data.numSamples, true)) return kResultFalse;
-        output.silenceFlags = 0;
+        applyHeld(next);
+        if (hostOut) hostOut->silenceFlags = 0;
         return kResultOk;
     }
 
@@ -334,27 +531,135 @@ private:
         if (engine_ && !save_blob(engine_, pendingBlob_)) pendingBlob_.clear();
     }
     std::vector<uint8_t> pendingBlob_;
-    struct Change {
-        int32 offset;
-        uint32_t order;
-        ParamID id;
-        double value;
-    };
-    // Room for this many points per block. A block never allocates; if it
-    // carries more, collectChanges thins each queue. One point per parameter
-    // always fits.
-    static constexpr uint32_t kMinChangeCapacity = 4096;
-    bool relevant(ParamID id) const { return id < count_ || id == kBypassId; }
-    // Gathers the points of every queue into changes_, ordered by (offset,
-    // arrival). Returns how many it kept. Offsets are clamped into the block.
-    // If the queues carry more points than changes_ holds, each queue keeps an
-    // even share of its own points (first, last and evenly spaced between), so
-    // the final value of every parameter is always kept and the ramp shape is
-    // approximated; a queue beyond the capacity is ignored. Hosts send one queue
-    // per parameter, so that last case does not occur in practice.
-    uint32_t collectChanges(IParameterChanges* queues, int32 numSamples) {
-        if (!queues || changes_.empty()) return 0;
-        const uint32_t capacity = static_cast<uint32_t>(changes_.size());
+    // ---- layouts -----------------------------------------------------------
+    void loadLayouts() {
+        const uint32_t n = std::min<uint32_t>(op_shell_layout_count(), 64);
+        for (uint32_t i = 0; i < n; ++i) {
+            Entry entry;
+            if (!op_shell_layout(i, &entry.layout)) continue;
+            entry.index = i;
+            if (arrangement_of(entry.layout.input, entry.input) && arrangement_of(entry.layout.output, entry.output) &&
+                arrangement_of(entry.layout.sidechain, entry.sidechain))
+                layouts_.push_back(entry);
+        }
+        // Shells before ABI 2 took mono or stereo for any plugin. A plugin that
+        // only declares the default stereo layout keeps accepting mono (an
+        // engine bus of one channel); a plugin whose layouts VST3 cannot name
+        // is stereo and mono as well.
+        const bool plainStereo = n == 1 && layouts_.size() == 1 && layouts_[0].input == SpeakerArr::kStereo &&
+                                 layouts_[0].output == SpeakerArr::kStereo && layouts_[0].sidechain == SpeakerArr::kEmpty;
+        if (layouts_.empty()) {
+            layouts_.push_back(legacyEntry(2));
+            layouts_.push_back(legacyEntry(1));
+        } else if (plainStereo) {
+            layouts_.push_back(legacyEntry(1));
+        }
+        for (const Entry& entry : layouts_) {
+            hasIn_ = hasIn_ || entry.input != SpeakerArr::kEmpty;
+            hasOut_ = hasOut_ || entry.output != SpeakerArr::kEmpty;
+            hasSide_ = hasSide_ || entry.sidechain != SpeakerArr::kEmpty;
+        }
+    }
+    static Entry legacyEntry(uint32_t channels) {
+        Entry entry;
+        entry.index = kLegacyLayout;
+        OpBus bus{};
+        bus.kind = channels == 1 ? OP_BUS_MONO : OP_BUS_STEREO;
+        bus.channels = channels;
+        std::memset(bus.roles, OP_ROLE_NONE, sizeof(bus.roles));
+        if (channels == 2) {
+            bus.roles[0] = 0;
+            bus.roles[1] = 1;
+        }
+        entry.layout.input = entry.layout.output = bus;
+        entry.layout.sidechain.kind = OP_BUS_ABSENT;
+        entry.input = entry.output = channels == 1 ? SpeakerArr::kMono : SpeakerArr::kStereo;
+        entry.sidechain = SpeakerArr::kEmpty;
+        return entry;
+    }
+    SpeakerArrangement firstArrangement(SpeakerArrangement LayoutEntry::*bus) const {
+        for (const Entry& entry : layouts_)
+            if (entry.*bus != SpeakerArr::kEmpty) return entry.*bus;
+        return SpeakerArr::kStereo;
+    }
+    // Makes layouts_[i] the layout of the next activation and builds the
+    // canonical-to-host channel tables for its three buses.
+    void select(size_t i) {
+        if (i >= layouts_.size()) return;
+        const Entry& entry = layouts_[i];
+        layoutIndex_ = entry.index;
+        channels_ = entry.index == kLegacyLayout && entry.layout.input.channels == 1 ? 1u : 2u;
+        inCh_ = entry.layout.input.channels;
+        outCh_ = entry.layout.output.channels;
+        sideCh_ = entry.layout.sidechain.channels;
+        channel_map(entry.layout.input, entry.input, inMap_);
+        channel_map(entry.layout.output, entry.output, outMap_);
+        channel_map(entry.layout.sidechain, entry.sidechain, sideMap_);
+    }
+
+    // ---- events ------------------------------------------------------------
+    bool relevant(ParamID id) const {
+        return id < count_ || id == kBypassId || (noteIn_ && id >= kMidiParamBase && id < kMidiParamBase + kMidiParamCount);
+    }
+    static uint8_t to_midi7(double normalized) {
+        return static_cast<uint8_t>(std::lround(std::clamp(normalized, 0.0, 1.0) * 127.0));
+    }
+    static uint8_t velocity7(float velocity) {
+        return static_cast<uint8_t>(std::clamp<long>(std::lround(velocity * 127.0f), 0, 127));
+    }
+    void addEvent(const OpEvent& ev) {
+        if (nTagged_ < tagged_.size()) tagged_[nTagged_++] = Tagged{ev, order_++};
+    }
+    void addMidi(int32 at, uint8_t status, uint8_t d1, uint8_t d2) {
+        OpEvent ev{};
+        ev.offset = static_cast<uint32_t>(at);
+        ev.kind = OP_EVENT_MIDI;
+        ev.midi[0] = status;
+        ev.midi[1] = d1;
+        ev.midi[2] = d2;
+        addEvent(ev);
+    }
+    // One point of a parameter queue: a plugin parameter (normalized event at
+    // its offset), the bypass switch (kept apart: it cuts the block), or a
+    // mapped MIDI controller (a MIDI message).
+    void addPoint(ParamID id, int32 at, double value, int32 numSamples) {
+        if (id == kBypassId) {
+            if (nBypass_ < bypassPoints_.size())
+                bypassPoints_[nBypass_++] = BypassPoint{std::clamp(at, 0, numSamples), order_++, value >= 0.5};
+            return;
+        }
+        if (id < count_) {
+            OpEvent ev{};
+            ev.offset = static_cast<uint32_t>(std::clamp(at, 0, numSamples));
+            ev.kind = OP_EVENT_PARAM_NORMALIZED;
+            ev.index = id;
+            ev.value = static_cast<float>(std::clamp(value, 0.0, 1.0));
+            addEvent(ev);
+            return;
+        }
+        if (numSamples < 1) return;
+        const int32 when = std::clamp(at, 0, numSamples - 1);
+        const uint32_t slot = id - kMidiParamBase;
+        const uint8_t channel = static_cast<uint8_t>(slot / kMidiControllers);
+        const uint32_t controller = slot % kMidiControllers;
+        if (controller < 128) {
+            addMidi(when, static_cast<uint8_t>(0xB0 | channel), static_cast<uint8_t>(controller), to_midi7(value));
+        } else if (controller == kAfterTouch) {
+            addMidi(when, static_cast<uint8_t>(0xD0 | channel), to_midi7(value), 0);
+        } else {
+            const long bend = std::lround(std::clamp(value, 0.0, 1.0) * 16383.0);
+            addMidi(when, static_cast<uint8_t>(0xE0 | channel), static_cast<uint8_t>(bend & 0x7F), static_cast<uint8_t>(bend >> 7));
+        }
+    }
+    // Gathers the points of every queue, ordered by (offset, arrival). Offsets
+    // are clamped into the block. If the queues carry more points than fit,
+    // each queue keeps an even share of its own points (first, last and evenly
+    // spaced between), so the final value of every parameter is always kept
+    // and the ramp shape is approximated. Hosts send one queue per parameter,
+    // so that does not occur in practice.
+    void collectParams(IParameterChanges* queues, int32 numSamples) {
+        if (!queues || tagged_.empty()) return;
+        const uint32_t capacity = paramCapacity_;
         const int32 queueCount = queues->getParameterCount();
         uint64_t total = 0;
         uint32_t used = 0;
@@ -366,12 +671,11 @@ private:
             total += static_cast<uint64_t>(points);
             ++used;
         }
-        if (used == 0) return 0;
+        if (used == 0) return;
         const bool thin = total > capacity;
         const uint32_t share = thin ? std::max<uint32_t>(capacity / used, 1) : 0;
-        uint32_t count = 0;
-        uint32_t order = 0;
-        for (int32 q = 0; q < queueCount && count < capacity; ++q) {
+        uint32_t taken = 0;
+        for (int32 q = 0; q < queueCount && taken < capacity; ++q) {
             IParamValueQueue* queue = queues->getParameterData(q);
             if (!queue) continue;
             const ParamID id = queue->getParameterId();
@@ -379,52 +683,218 @@ private:
             const int32 points = queue->getPointCount();
             if (points < 1) continue;
             const uint32_t keep = thin ? std::min<uint32_t>(share, static_cast<uint32_t>(points)) : static_cast<uint32_t>(points);
-            for (uint32_t k = 0; k < keep && count < capacity; ++k) {
+            for (uint32_t k = 0; k < keep && taken < capacity; ++k) {
                 int32 index = static_cast<int32>(k);
                 if (keep < static_cast<uint32_t>(points))
                     index = keep == 1 ? points - 1 : static_cast<int32>(static_cast<uint64_t>(k) * static_cast<uint64_t>(points - 1) / (keep - 1));
                 int32 at = 0;
                 ParamValue value = 0.0;
                 if (queue->getPoint(index, at, value) != kResultTrue || !std::isfinite(value)) continue;
-                changes_[count++] = Change{std::clamp(at, 0, numSamples), order++, id, value};
+                addPoint(id, at, value, numSamples);
+                ++taken;
             }
         }
-        auto before = [](const Change& a, const Change& b) { return a.offset != b.offset ? a.offset < b.offset : a.order < b.order; };
-        if (!std::is_sorted(changes_.begin(), changes_.begin() + count, before))
-            std::sort(changes_.begin(), changes_.begin() + count, before);
-        return count;
     }
-    // Applies every change whose offset is at or before `offset` (all of them
-    // when `all`), in order. The plugin sees each value on its next process.
-    bool applyDue(uint32_t& next, uint32_t pending, int32 offset, bool all) {
-        while (next < pending && (all || changes_[next].offset <= offset)) {
-            const Change& change = changes_[next++];
-            if (change.id == kBypassId) {
-                bypass_.store(change.value >= 0.5);
-                continue;
+    // Notes, polyphonic pressure and legacy MIDI controller events of the input
+    // event list. Note-on with velocity 0 is a note-off. Tuning and note
+    // expression are not carried (per-note expression is a later task).
+    void collectNotes(IEventList* events, int32 numSamples) {
+        if (!noteIn_ || !events || numSamples < 1) return;
+        const int32 count = events->getEventCount();
+        uint32_t taken = 0;
+        for (int32 i = 0; i < count && taken < kNoteCapacity; ++i) {
+            Event e{};
+            if (events->getEvent(i, e) != kResultOk) continue;
+            const int32 at = std::clamp(e.sampleOffset, 0, numSamples - 1);
+            const uint32_t before = nTagged_;
+            OpEvent ev{};
+            ev.offset = static_cast<uint32_t>(at);
+            switch (e.type) {
+            case Event::kNoteOnEvent:
+                if (e.noteOn.pitch < 0 || e.noteOn.pitch > 127) break;
+                ev.channel = static_cast<uint8_t>(std::clamp<int>(e.noteOn.channel, 0, 15));
+                ev.note = static_cast<uint8_t>(e.noteOn.pitch);
+                if (e.noteOn.velocity > 0.0f) {
+                    ev.kind = OP_EVENT_NOTE_ON;
+                    ev.velocity = std::max<uint8_t>(velocity7(e.noteOn.velocity), 1);
+                } else {
+                    ev.kind = OP_EVENT_NOTE_OFF;
+                }
+                addEvent(ev);
+                break;
+            case Event::kNoteOffEvent:
+                if (e.noteOff.pitch < 0 || e.noteOff.pitch > 127) break;
+                ev.kind = OP_EVENT_NOTE_OFF;
+                ev.channel = static_cast<uint8_t>(std::clamp<int>(e.noteOff.channel, 0, 15));
+                ev.note = static_cast<uint8_t>(e.noteOff.pitch);
+                ev.velocity = velocity7(e.noteOff.velocity);
+                addEvent(ev);
+                break;
+            case Event::kPolyPressureEvent:
+                if (e.polyPressure.pitch < 0 || e.polyPressure.pitch > 127) break;
+                addMidi(at, static_cast<uint8_t>(0xA0 | std::clamp<int>(e.polyPressure.channel, 0, 15)), static_cast<uint8_t>(e.polyPressure.pitch),
+                        velocity7(e.polyPressure.pressure));
+                break;
+            case Event::kLegacyMIDICCOutEvent: {
+                const uint8_t ch = static_cast<uint8_t>(std::clamp<int>(e.midiCCOut.channel, 0, 15));
+                const uint8_t v1 = static_cast<uint8_t>(e.midiCCOut.value & 0x7F);
+                const uint8_t v2 = static_cast<uint8_t>(e.midiCCOut.value2 & 0x7F);
+                const uint8_t number = e.midiCCOut.controlNumber;
+                if (number < 128) addMidi(at, static_cast<uint8_t>(0xB0 | ch), number, v1);
+                else if (number == kAfterTouch) addMidi(at, static_cast<uint8_t>(0xD0 | ch), v1, 0);
+                else if (number == kPitchBend) addMidi(at, static_cast<uint8_t>(0xE0 | ch), v1, v2);
+                else if (number == kCtrlProgramChange) addMidi(at, static_cast<uint8_t>(0xC0 | ch), v1, 0);
+                else if (number == kCtrlPolyPressure) addMidi(at, static_cast<uint8_t>(0xA0 | ch), v1, v2);
+                break;
             }
-            const double clamped = std::clamp(change.value, 0.0, 1.0);
-            values_[change.id].store(clamped);
-            if (engine_ && !op_shell_set_normalized(engine_, change.id, static_cast<float>(clamped))) return false;
+            default: break;
+            }
+            taken += nTagged_ - before;
         }
-        return true;
     }
+    void collect(ProcessData& data, int32 numSamples) {
+        nTagged_ = 0;
+        nBypass_ = 0;
+        order_ = 0;
+        collectParams(data.inputParameterChanges, numSamples);
+        collectNotes(data.inputEvents, numSamples);
+        auto before = [](const Tagged& a, const Tagged& b) { return a.ev.offset != b.ev.offset ? a.ev.offset < b.ev.offset : a.order < b.order; };
+        if (!std::is_sorted(tagged_.begin(), tagged_.begin() + nTagged_, before)) std::sort(tagged_.begin(), tagged_.begin() + nTagged_, before);
+        auto bypassBefore = [](const BypassPoint& a, const BypassPoint& b) { return a.offset != b.offset ? a.offset < b.offset : a.order < b.order; };
+        if (!std::is_sorted(bypassPoints_.begin(), bypassPoints_.begin() + nBypass_, bypassBefore))
+            std::sort(bypassPoints_.begin(), bypassPoints_.begin() + nBypass_, bypassBefore);
+    }
+    // ProcessContext to the ABI transport. Quarter notes, tempo and signature
+    // are passed when the host marks them valid. VST3 has no bar number and
+    // no seconds: the bar start is the host's when valid, else the start of
+    // the bar that holds the position under the current signature; the bar
+    // number counts bars of that length from zero; seconds are samples over
+    // the sample rate.
+    void buildTransport(const ProcessContext& ctx) {
+        OpTransport t{};
+        if (ctx.state & ProcessContext::kPlaying) t.flags |= OP_TRANSPORT_PLAYING;
+        if (ctx.state & ProcessContext::kRecording) t.flags |= OP_TRANSPORT_RECORDING;
+        if ((ctx.state & ProcessContext::kTempoValid) && ctx.tempo > 0.0) {
+            t.flags |= OP_TRANSPORT_HAS_TEMPO;
+            t.tempo = ctx.tempo;
+        }
+        double barLength = 0.0;
+        if ((ctx.state & ProcessContext::kTimeSigValid) && ctx.timeSigNumerator > 0 && ctx.timeSigDenominator > 0) {
+            t.flags |= OP_TRANSPORT_HAS_SIGNATURE;
+            t.numerator = static_cast<uint32_t>(ctx.timeSigNumerator);
+            t.denominator = static_cast<uint32_t>(ctx.timeSigDenominator);
+            barLength = 4.0 * ctx.timeSigNumerator / ctx.timeSigDenominator;
+        }
+        t.sample_pos = ctx.projectTimeSamples;
+        const double rate = ctx.sampleRate > 0.0 ? ctx.sampleRate : processSetup.sampleRate;
+        if (rate > 0.0) {
+            t.flags |= OP_TRANSPORT_HAS_SECONDS;
+            t.seconds = static_cast<double>(ctx.projectTimeSamples) / rate;
+        }
+        if ((ctx.state & ProcessContext::kProjectTimeMusicValid) && std::isfinite(ctx.projectTimeMusic)) {
+            t.flags |= OP_TRANSPORT_HAS_BEATS;
+            t.quarter_notes = ctx.projectTimeMusic;
+            if ((ctx.state & ProcessContext::kBarPositionValid) && std::isfinite(ctx.barPositionMusic)) t.bar_start = ctx.barPositionMusic;
+            else if (barLength > 0.0) t.bar_start = std::floor(ctx.projectTimeMusic / barLength) * barLength;
+            if (barLength > 0.0) t.bar_number = static_cast<int64_t>(std::floor(t.bar_start / barLength + 1e-6));
+        }
+        transport_ = t;
+    }
+    // MIDI the plugin wrote in the chunk just processed, as VST3 events on the
+    // output bus: notes as note on and off, polyphonic pressure as its event,
+    // everything else as legacy MIDI CC events (the VST3 form of raw MIDI).
+    void emitMidi(IEventList* out, int32 chunkStart) {
+        if (!noteOut_) return;
+        const uint32_t count = op_shell_midi_out(engine_, midi_, OP_MAX_MIDI_OUT);
+        if (!out) return;
+        for (uint32_t i = 0; i < count; ++i) {
+            const OpMidiEvent& m = midi_[i];
+            const uint8_t status = m.data[0];
+            const uint8_t channel = status & 0x0F;
+            Event e{};
+            e.busIndex = 0;
+            e.sampleOffset = chunkStart + static_cast<int32>(m.offset);
+            e.ppqPosition = 0;
+            e.flags = 0;
+            switch (status & 0xF0) {
+            case 0x90:
+                if (m.data[2] != 0) {
+                    e.type = Event::kNoteOnEvent;
+                    e.noteOn.channel = channel;
+                    e.noteOn.pitch = m.data[1];
+                    e.noteOn.tuning = 0.0f;
+                    e.noteOn.velocity = m.data[2] / 127.0f;
+                    e.noteOn.length = 0;
+                    e.noteOn.noteId = -1;
+                    break;
+                }
+                [[fallthrough]];
+            case 0x80:
+                e.type = Event::kNoteOffEvent;
+                e.noteOff.channel = channel;
+                e.noteOff.pitch = m.data[1];
+                e.noteOff.velocity = (status & 0xF0) == 0x80 ? m.data[2] / 127.0f : 0.0f;
+                e.noteOff.noteId = -1;
+                e.noteOff.tuning = 0.0f;
+                break;
+            case 0xA0:
+                e.type = Event::kPolyPressureEvent;
+                e.polyPressure.channel = channel;
+                e.polyPressure.pitch = m.data[1];
+                e.polyPressure.pressure = m.data[2] / 127.0f;
+                e.polyPressure.noteId = -1;
+                break;
+            case 0xB0: legacy(e, m.data[1], channel, m.data[2], 0); break;
+            case 0xC0: legacy(e, kCtrlProgramChange, channel, m.data[1], 0); break;
+            case 0xD0: legacy(e, kAfterTouch, channel, m.data[1], 0); break;
+            case 0xE0: legacy(e, kPitchBend, channel, m.data[1], m.data[2]); break;
+            default: continue;
+            }
+            out->addEvent(e);
+        }
+    }
+    static void legacy(Event& e, uint8_t number, uint8_t channel, uint8_t v1, uint8_t v2) {
+        e.type = Event::kLegacyMIDICCOutEvent;
+        e.midiCCOut.controlNumber = number;
+        e.midiCCOut.channel = static_cast<int8>(channel);
+        e.midiCCOut.value = static_cast<int8>(v1);
+        e.midiCCOut.value2 = static_cast<int8>(v2);
+    }
+    // A block with no samples: the host only sets values. They reach the
+    // engine and are held for the next block.
+    void applyHeld(uint32_t from) {
+        for (uint32_t i = from; i < nTagged_; ++i) {
+            const OpEvent& ev = tagged_[i].ev;
+            if (ev.kind != OP_EVENT_PARAM_NORMALIZED) continue;
+            values_[ev.index].store(ev.value);
+            if (engine_) op_shell_set_normalized(engine_, ev.index, ev.value);
+        }
+        if (nBypass_ > 0) bypass_.store(bypassPoints_[nBypass_ - 1].on);
+    }
+
+    // ---- bypass ------------------------------------------------------------
     // Pushes the input through a delay of the reported latency into dry_, so a
     // bypassed signal stays aligned with what the host compensates for. The
-    // line always runs, so switching never starts from stale audio.
-    void captureDry(const float* left, const float* right, int32 channels, uint32_t frames) {
-        const float* in[2] = {left, right};
-        for (int32 c = 0; c < channels; ++c) {
-            float* dry = dry_[c].data();
-            if (delay_ == 0) {
-                std::memcpy(dry, in[c], frames * sizeof(float));
+    // line always runs, so switching never starts from stale audio. Host
+    // channel h of the output is bypassed to host channel h of the input;
+    // outputs without an input are silent when bypassed.
+    void captureDry(const AudioBusBuffers* input, int32 offset, uint32_t frames) {
+        for (uint32_t h = 0; h < outCh_; ++h) {
+            float* dry = dry_[h].data();
+            if (!input || h >= inCh_) {
+                std::memset(dry, 0, frames * sizeof(float));
                 continue;
             }
-            float* line = line_[c].data();
+            const float* in = input->channelBuffers32[h] + offset;
+            if (delay_ == 0) {
+                std::memcpy(dry, in, frames * sizeof(float));
+                continue;
+            }
+            float* line = line_[h].data();
             size_t pos = linePos_;
             for (uint32_t i = 0; i < frames; ++i) {
                 dry[i] = line[pos];
-                line[pos] = in[c][i];
+                line[pos] = in[i];
                 if (++pos == delay_) pos = 0;
             }
         }
@@ -432,30 +902,33 @@ private:
     }
     // Crossfades the engine output towards the dry signal (or back). Fully
     // bypassed output is the dry signal exactly.
-    void applyBypass(float* left, float* right, int32 channels, uint32_t frames, float target) {
-        float* out[2] = {left, right};
+    void applyBypass(AudioBusBuffers& output, int32 offset, uint32_t frames, float target) {
         if (mix_ == target) {
             if (target == 0.0f) return;
-            for (int32 c = 0; c < channels; ++c) std::memcpy(out[c], dry_[c].data(), frames * sizeof(float));
+            for (uint32_t h = 0; h < outCh_; ++h) std::memcpy(output.channelBuffers32[h] + offset, dry_[h].data(), frames * sizeof(float));
             return;
         }
         float mix = mix_;
         for (uint32_t i = 0; i < frames; ++i) {
             if (mix < target) mix = std::min(target, mix + mixStep_);
             else if (mix > target) mix = std::max(target, mix - mixStep_);
-            for (int32 c = 0; c < channels; ++c) out[c][i] = mix >= 1.0f ? dry_[c][i] : out[c][i] + (dry_[c][i] - out[c][i]) * mix;
+            for (uint32_t h = 0; h < outCh_; ++h) {
+                float& sample = output.channelBuffers32[h][offset + i];
+                sample = mix >= 1.0f ? dry_[h][i] : sample + (dry_[h][i] - sample) * mix;
+            }
         }
         mix_ = mix;
     }
-    // Allocates everything the bypass needs; process never allocates.
+    // Allocates everything process needs; process never allocates.
     void prepareBypass() {
         delay_ = engine_ ? op_shell_latency(engine_) : 0;
         const size_t block = static_cast<size_t>(std::max(processSetup.maxSamplesPerBlock, 1));
-        changes_.assign(std::max<size_t>(kMinChangeCapacity, static_cast<size_t>(count_) + 1), Change{0, 0, 0, 0.0});
-        for (int c = 0; c < 2; ++c) {
-            dry_[c].assign(block, 0.0f);
-            line_[c].assign(delay_, 0.0f);
-        }
+        paramCapacity_ = static_cast<uint32_t>(std::max<size_t>(kMinChangeCapacity, static_cast<size_t>(count_) + 1));
+        tagged_.assign(paramCapacity_ + kNoteCapacity, Tagged{});
+        bypassPoints_.assign(paramCapacity_, BypassPoint{0, 0, false});
+        dry_.assign(outCh_, std::vector<float>(block, 0.0f));
+        line_.assign(outCh_, std::vector<float>());
+        for (uint32_t h = 0; h < outCh_ && h < inCh_; ++h) line_[h].assign(delay_, 0.0f);
         linePos_ = 0;
         mixStep_ = static_cast<float>(1.0 / std::max(1.0, kBypassFadeSeconds * processSetup.sampleRate));
         mix_ = bypass_.load() ? 1.0f : 0.0f;
@@ -485,22 +958,67 @@ private:
     }
     void* engine_ = nullptr;
     uint32_t count_ = 0;
-    uint32_t channels_ = 2;
+    uint32_t channels_ = 2;  // engine bus width given to op_shell_create (the legacy path)
     std::unique_ptr<std::atomic<double>[]> values_;
     std::atomic<bool> bypass_{false};
-    // Bypass state, touched only by the audio thread after setActive.
-    std::vector<Change> changes_;
-    std::vector<float> dry_[2];
-    std::vector<float> line_[2];
+
+    // Layouts as VST3 arrangements, the buses they imply, and the selection.
+    
+    std::vector<Entry> layouts_;
+    bool hasIn_ = false, hasOut_ = false, hasSide_ = false;
+    bool noteIn_ = false, noteOut_ = false;
+    uint32_t layoutIndex_ = 0;
+    uint32_t inCh_ = 0, outCh_ = 0, sideCh_ = 0;
+    uint8_t inMap_[OP_MAX_CHANNELS] = {}, outMap_[OP_MAX_CHANNELS] = {}, sideMap_[OP_MAX_CHANNELS] = {};
+
+    // Everything below is touched only by the audio thread after setActive.
+    struct Tagged {
+        OpEvent ev;
+        uint32_t order;
+    };
+    struct BypassPoint {
+        int32 offset;
+        uint32_t order;
+        bool on;
+    };
+    // Room for this many parameter points per block; a block never allocates.
+    // One point per parameter always fits.
+    static constexpr uint32_t kMinChangeCapacity = 4096;
+    static constexpr uint32_t kNoteCapacity = OP_MAX_EVENTS;
+    std::vector<Tagged> tagged_;
+    std::vector<BypassPoint> bypassPoints_;
+    uint32_t paramCapacity_ = 0, nTagged_ = 0, nBypass_ = 0, order_ = 0;
+    OpEvent chunk_[OP_MAX_EVENTS] = {};
+    OpMidiEvent midi_[OP_MAX_MIDI_OUT] = {};
+    OpTransport transport_{};
+    const float* inPtr_[OP_MAX_CHANNELS] = {};
+    float* outPtr_[OP_MAX_CHANNELS] = {};
+    const float* sidePtr_[OP_MAX_CHANNELS] = {};
+    bool offline_ = false;
+    std::vector<std::vector<float>> dry_;
+    std::vector<std::vector<float>> line_;
     size_t delay_ = 0;
     size_t linePos_ = 0;
     float mix_ = 0.0f;
     float mixStep_ = 1.0f;
 };
 
-class Controller final : public EditController {
+class Controller final : public EditController, public IMidiMapping {
 public:
     static FUnknown* create(void*) { return static_cast<IEditController*>(new Controller); }
+    // MIDI controllers, channel pressure and pitch bend arrive as hidden
+    // parameters (see kMidiParamBase). Only the first event bus maps.
+    tresult PLUGIN_API getMidiControllerAssignment(int32 busIndex, int16 channel, CtrlNumber number, ParamID& id) SMTG_OVERRIDE {
+        if (!midiIn_ || busIndex != 0 || channel < 0 || channel > 15 || number < 0 || number >= static_cast<CtrlNumber>(kMidiControllers))
+            return kResultFalse;
+        id = kMidiParamBase + static_cast<ParamID>(channel) * kMidiControllers + static_cast<ParamID>(number);
+        return kResultTrue;
+    }
+    OBJ_METHODS(Controller, EditController)
+    DEFINE_INTERFACES
+        DEF_INTERFACE(IMidiMapping)
+    END_DEFINE_INTERFACES(EditController)
+    REFCOUNT_METHODS(EditController)
     tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE {
         tresult result = EditController::initialize(context);
         if (result != kResultOk) return result;
@@ -519,6 +1037,20 @@ public:
         }
         count_ = info.param_count;
         parameters.addParameter(STR16("Bypass"), nullptr, 1, 0.0, ParameterInfo::kCanAutomate | ParameterInfo::kIsBypass, kBypassId);
+        midiIn_ = (op_shell_note_ports() & OP_NOTE_PORT_INPUT) != 0;
+        if (midiIn_) {
+            for (uint32_t channel = 0; channel < 16; ++channel) {
+                for (uint32_t number = 0; number < kMidiControllers; ++number) {
+                    char name[40];
+                    if (number < 128) std::snprintf(name, sizeof(name), "MIDI Ch %u CC %u", channel + 1, number);
+                    else std::snprintf(name, sizeof(name), "MIDI Ch %u %s", channel + 1, number == kAfterTouch ? "Pressure" : "Pitch Bend");
+                    String128 title{};
+                    UString(title, 128).fromAscii(name);
+                    parameters.addParameter(title, nullptr, 0, number == kPitchBend ? 0.5 : 0.0, ParameterInfo::kIsHidden,
+                                            kMidiParamBase + channel * kMidiControllers + number);
+                }
+            }
+        }
         return kResultOk;
     }
     tresult PLUGIN_API setComponentState(IBStream* stream) SMTG_OVERRIDE {
@@ -609,6 +1141,7 @@ private:
 
 private:
     uint32_t count_ = 0;
+    bool midiIn_ = false;
 };
 
 #if OP_HAS_EDITOR
@@ -724,7 +1257,8 @@ extern "C" SMTG_EXPORT_SYMBOL IPluginFactory* GetPluginFactory() {
         TUID controller{};
         std::memcpy(processor, info.processor_cid, 16);
         std::memcpy(controller, info.controller_cid, 16);
-        PClassInfo2 processorClass(processor, PClassInfo::kManyInstances, kVstAudioEffectClass, info.name, kDistributable, info.category, info.vendor, info.version, kVstVersionString);
+        const std::string category = openplugin_vst::category_for(info.category, op_shell_kind());
+        PClassInfo2 processorClass(processor, PClassInfo::kManyInstances, kVstAudioEffectClass, info.name, kDistributable, category.c_str(), info.vendor, info.version, kVstVersionString);
         PClassInfo2 controllerClass(controller, PClassInfo::kManyInstances, kVstComponentControllerClass, info.name, 0, "", info.vendor, info.version, kVstVersionString);
         gPluginFactory->registerClass(&processorClass, openplugin_vst::Processor::create);
         gPluginFactory->registerClass(&controllerClass, openplugin_vst::Controller::create);

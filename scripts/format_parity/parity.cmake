@@ -12,6 +12,8 @@ set(OP_PARITY_FAULT_SCALE "1e-4" CACHE STRING "Output error of the negative-cont
 set(OP_PARITY_FAULT_DEFS "op_shell_process=parity_faulty_process")
 set_source_files_properties("${OP_PARITY_DIR}/native/parity_fault.cpp" PROPERTIES
   COMPILE_DEFINITIONS "PARITY_FAULT_SCALE=${OP_PARITY_FAULT_SCALE}f")
+set_source_files_properties("${OP_PARITY_DIR}/native/parity_fault_events.cpp" PROPERTIES
+  COMPILE_DEFINITIONS "PARITY_FAULT_SCALE=${OP_PARITY_FAULT_SCALE}f")
 
 if(OP_BUILD_VST3)
   add_executable(ParityVST3 "${OP_PARITY_DIR}/native/vst3_parity.cpp"
@@ -26,10 +28,10 @@ if(OP_BUILD_VST3)
   set(OP_PRODUCT "${OP_PRODUCT_SAVED}")
   add_library(OpenPluginVST3Fault MODULE
     vst3/OpenPluginVST3.cpp
-    "${OP_PARITY_DIR}/native/parity_fault.cpp"
+    "${OP_PARITY_DIR}/native/parity_fault_events.cpp"
     "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
   target_include_directories(OpenPluginVST3Fault PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-  target_compile_definitions(OpenPluginVST3Fault PRIVATE ${OP_PARITY_FAULT_DEFS})
+  target_compile_definitions(OpenPluginVST3Fault PRIVATE "op_shell_process_events=parity_faulty_process_events")
   set_target_properties(OpenPluginVST3Fault PROPERTIES
     OUTPUT_NAME "Parity Fault"
     BUNDLE TRUE
