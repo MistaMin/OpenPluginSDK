@@ -187,8 +187,10 @@ fn the_audio_thread_does_not_allocate_during_a_save_or_a_load() {
     // Phase 3: churn. Saves and loads allocate on this thread; the audio
     // thread, running the whole time, does not.
     let stop = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicBool::new(false));
     let audio = {
         let stop = Arc::clone(&stop);
+        let started = Arc::clone(&started);
         thread::spawn(move || {
             let input = [1.0f32; 128];
             let mut out = [0.0f32; 128];
@@ -208,12 +210,15 @@ fn the_audio_thread_does_not_allocate_during_a_save_or_a_load() {
                 };
                 assert_eq!(result, 1);
                 ran += 1;
+                started.store(true, Ordering::SeqCst);
             }
             ARMED.with(|armed| armed.set(false));
             let after = counts();
             (after.0 - before.0, after.1 - before.1, ran)
         })
     };
+    // The churn must overlap processing, even when the machine is loaded.
+    wait_for(&started);
     let unarmed_before = counts();
     for _ in 0..300 {
         assert!(load(a.ptr(), &state));
