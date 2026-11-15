@@ -9,6 +9,8 @@ use openplugin_targets::clap_abi::*;
 use crate::manifest::*;
 use crate::sys;
 
+mod capture;
+pub use capture::capture;
 mod render;
 pub use render::render;
 

@@ -270,3 +270,32 @@ unsafe extern "C" {
 pub fn fourcc_text(code: u32) -> String {
     code.to_be_bytes().iter().map(|b| if (0x20..0x7f).contains(b) { *b as char } else { '?' }).collect()
 }
+
+// ---------- state capture ----------
+
+pub type CFDataRef = *const c_void;
+pub const AU_PROP_CLASS_INFO: u32 = 0;
+pub const AU_PROP_FACTORY_PRESETS: u32 = 24;
+pub const AU_PROP_PRESENT_PRESET: u32 = 36;
+/// `kCFPropertyListBinaryFormat_v1_0`.
+pub const K_CF_PROPERTY_LIST_BINARY_FORMAT: isize = 200;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct AUPreset {
+    pub preset_number: i32,
+    pub preset_name: CFStringRef,
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    pub fn CFPropertyListCreateData(alloc: CFAllocatorRef, plist: CFTypeRef, format: isize, options: usize, error: *mut CFTypeRef) -> CFDataRef;
+    pub fn CFDataGetLength(data: CFDataRef) -> isize;
+    pub fn CFDataGetBytePtr(data: CFDataRef) -> *const u8;
+}
+
+#[link(name = "AudioToolbox", kind = "framework")]
+unsafe extern "C" {
+    pub fn AudioUnitGetParameter(unit: AudioComponentInstance, param: u32, scope: u32, element: u32, value: *mut f32) -> OSStatus;
+    pub fn AudioUnitSetParameter(unit: AudioComponentInstance, param: u32, scope: u32, element: u32, value: f32, buffer_offset: u32) -> OSStatus;
+}

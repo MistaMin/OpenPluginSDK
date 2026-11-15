@@ -2,7 +2,7 @@
 
 `openplugin-port` is a set of tools for moving a plugin that already ships in CLAP, VST3, Audio Unit or AAX onto OpenPluginSDK without losing what its users depend on: the same parameters, in the same ranges, with the same identity, so sessions and presets keep working. Each tool answers one question and writes something a person can read and check. None of them edits your plugin or installs anything.
 
-Today the toolkit has two tools: the scanner (porting task 1), which answers "what is this plugin?", and the null test (porting task 4), which answers "does the port sound the same?". The tasks that follow build on the scanner's manifest.
+Today the toolkit has three tools: the scanner (porting task 1), which answers "what is this plugin?", the null test (porting task 4), which answers "does the port sound the same?", and the state import (porting task 3), which answers "will the port open the old plugin's sessions and presets?". The tasks that follow build on the scanner's manifest.
 
 Shipping before the DSP is rewritten? [CPP_BRIDGE.md](CPP_BRIDGE.md) shows how to call your existing C++ DSP from a Rust plugin through `cxx` (porting task 7), with the real-time rules and how to test them.
 
@@ -10,6 +10,7 @@ Shipping before the DSP is rewritten? [CPP_BRIDGE.md](CPP_BRIDGE.md) shows how t
 |---|---|---|
 | 1 | `scan`: read an existing plugin into a manifest and a Rust snippet | this document |
 | 4 | `null`: render the original and the port through the same input and automation and compare | [The null test](#the-null-test) |
+| 3 | `capture` and `openplugin_core::foreign_state`: save the old plugin's state for each preset, and read the containers it is made of | [Foreign state import](#foreign-state-import) |
 | 2 | Pin identity the SDK derives today (explicit VST3 parameter ids, class ids) | later; the scanner marks each spot with a `TODO(porting task 2)` |
 
 ## The scanner
@@ -236,9 +237,104 @@ Start with `first sample over tolerance`. A difference at sample 0 of an input t
 
 - Audio only: no MIDI input, so instruments render silence unless they make sound on their own; no transport (a tempo-synced plugin sees none).
 - The main audio buses only; a sidechain is not fed.
-- Parameter values are set, not ramped, and only parameters named in the automation move; everything else keeps its default. Plugin state (presets) cannot be loaded yet; the foreign state import (porting task 3) will add that.
+- Parameter values are set, not ramped, and only parameters named in the automation move; everything else keeps its default. Plugin state (presets) cannot be loaded into the null test yet; `capture` (see [Foreign state import](#foreign-state-import)) saves it, and loading it into a render is not wired in.
 - Both plugins render at the same sample rate and block size, in 32-bit float.
 - The latency tests need the test bundles of `native/` built by CMake; without them (and without `OPENPLUGIN_PORT_FIXTURES`) the VST3 and Audio Unit tests print "skipped".
+
+## Foreign state import
+
+A port must open the sessions and presets its users already have. The host hands the port the bytes the old plugin saved, through `Plugin::load_state`. Two tools cover this: `capture` saves those bytes from the old plugin, one set for each of its presets, so you can see what the old format looks like and keep them as test data; `openplugin_core::foreign_state` reads the containers that formats are usually made of.
+
+### Capture
+
+```bash
+openplugin-port capture "/Library/Audio/Plug-Ins/Components/Some Synth.component" --out port-out --set cutoff=800 --set Resonance=0.3
+```
+
+```
+openplugin-port capture <plugin>... [--out DIR] [--format FORMAT] [--set PARAM=VALUE]...
+                        [--max-presets N] [--timeout SECONDS]
+```
+
+The plugin is loaded in a child process from where it is (nothing is installed or copied; a crash or hang costs one capture, as for the scanner). It is hosted the way the format's hosts do, and each state is saved exactly as a host would store it:
+
+| Format | Blob roles | How the states are made |
+|---|---|---|
+| CLAP | `clap-state`: the bytes the plugin writes to the `clap.state` stream | Default after activation. Factory presets through the bundle's preset-discovery factory (`clap.preset-discovery-factory/2` or its draft name): the host declares itself as the indexer, the provider's locations are walked (a folder is searched, depth 8, for the declared file extensions), each preset listed for this plugin's id is loaded through the plugin's `clap.preset-load/2` and the state saved. |
+| VST3 | `vst3-component`: `IComponent::getState`; `vst3-controller`: `IEditController::getState` (left out when the controller has no state); `vst3-program-data`: `IProgramListData::getProgramData` when offered | Default after both halves are created and connected. Factory presets are the `IUnitInfo` program lists: each program is selected through the list's program-change parameter (set on the controller and sent to the component in a process block, as a host does), then the streams are read. A list with neither a program-change parameter nor program data is noted and skipped. |
+| Audio Unit | `au-classinfo`: the `kAudioUnitProperty_ClassInfo` dictionary as a binary property list (`bplist00`), the form hosts write into sessions | Default after `AudioUnitInitialize`. Factory presets from `kAudioUnitProperty_FactoryPresets`, each selected through `kAudioUnitProperty_PresentPreset`. |
+
+`--set PARAM=VALUE` (repeatable) adds one more state, named `set`, from a fresh instance with those parameters moved (the parameter's id or its name, and a plain value). It is how to get a non-default state from a plugin with no presets. `--max-presets` (default 128) bounds the presets taken; the rest are noted, not dropped silently.
+
+After each state is loaded, every parameter's plain value is read back from the plugin (CLAP `get_value`, the VST3 controller's normalised value converted by `normalizedParamToPlain`, `AudioUnitGetParameter`). Those are the numbers a port's loader has to reproduce.
+
+The output is `<name>.<format>.capture.json` and a folder `<name>.<format>.blobs/` holding `NNN-<state>.<role>.bin`, next to each other in `--out`. The manifest:
+
+```json
+{
+  "schema_version": 1,
+  "tool": "openplugin-port 0.3.1-beta",
+  "source": { "format": "au", "path": "...", "index": 0, "count": 1, "bundle_id": "com.acme.synth.au" },
+  "plugin": { "name": "...", "vendor": "...", "version": "...", "ids": { "clap": null, "vst3": null, "au": { "...": "as in the scanner manifest" }, "aax": null } },
+  "states": [
+    {
+      "name": "default",
+      "kind": "default",
+      "location": null,
+      "blobs": [ { "role": "au-classinfo", "file": "synth.au.blobs/000-default.au-classinfo.bin", "bytes": 222, "fnv1a64": "971e7d5600a61506" } ],
+      "params": [ { "id": 0, "name": "Gain", "plain": 0.0, "normalized": null } ],
+      "notes": []
+    }
+  ],
+  "notes": []
+}
+```
+
+- `schema_version` is 1; a reader must refuse a higher number. `plugin.ids` is the scanner manifest's, so parameter ids in `params[].id` are the scanner's `params[].id`.
+- `states[].kind` is `default`, `set`, `factory-preset` (from a location the provider marks as factory content, a VST3 program list or an Audio Unit factory preset) or `preset` (CLAP content a provider lists that is not factory content). `location` says where it came from: `plugin#KEY` or a file path (CLAP), `program-list:ID/INDEX` (VST3), `factory-preset:NUMBER` (Audio Unit).
+- `blobs[].file` is relative to the manifest's folder; `bytes` and `fnv1a64` (FNV-1a 64 as 16 hex digits) let a test notice a damaged copy.
+- `params[].normalized` is set for VST3 only. `notes` (per state and for the capture) lists what could not be done.
+
+Bytes are saved as the plugin wrote them, with no interpretation. A blob can hold a host-side wrapper the plugin did not write: for example, the Audio Unit dictionary has the keys the Audio Unit base class always writes (`version`, `type`, `subtype`, `manufacturer`, `name`, `data`) around whatever the plugin adds.
+
+### Reading the old format: `openplugin_core::foreign_state`
+
+The module has readers for the containers old formats are made of. Each takes untrusted bytes and returns an error, never a panic, and checks every declared length against what is really there before allocating. `Limits` bounds nesting depth (default 64), node count (2^20), input and single-blob size (64 MiB) and the total size built (128 MiB).
+
+| Module | Reads |
+|---|---|
+| `bytes::Reader` | A cursor over little- or big-endian data: integers of any width, floats, length-prefixed bytes and strings, zero-terminated strings, UTF-16, `check_count` for sizing a vector before it is built. A refused field consumes nothing. |
+| `kv` | A run of `key, value` records, each with a length prefix of a chosen width and byte order, with or without a leading record count. Typed getters over the values. |
+| `chunk` | One block of `magic, [version], size, payload` with the size counting the header or not (`read_chunk`, `read_exact`), and a sequence of `tag, size, payload` chunks (`TaggedChunks`, with optional even padding). |
+| `xml` | One root element, nested elements, attributes, text, CDATA, comments, the five entities and numeric character references. Strict: no DTD or `<!DOCTYPE>` (so no custom entities), UTF-8 only, no duplicate attributes, no control characters, no unclosed or mismatched tags. The parse is iterative, so depth costs no stack. |
+| `plist` | Apple property lists: the XML form and `bplist00` (null, booleans, integers up to 128 bits, reals, dates, data, ASCII and UTF-16 strings, UIDs, arrays, sets, dictionaries). `Value` has getters (`get`, `as_str`, `as_data`, ...). A binary list is checked first (trailer, offset table, every offset and reference); shared or cyclic references are followed with a depth limit and a node and byte budget, so a few hundred bytes cannot expand to gigabytes. Apple's own XML plists carry a `<!DOCTYPE>`, which the strict XML reader refuses: remove that line before parsing, as the module tests do. |
+| `import` | The pattern below. |
+
+### The `load_state` pattern
+
+`Plugin` is unchanged. The port's `load_state` first asks whether the bytes are a format it knows from the old plugin; if so it decodes, maps, validates, and only then sets anything; if not it reads its own format.
+
+1. Run `capture` on the old plugin and look at the blobs. Find what tells each format and version apart (a magic, a version field, a root element, a plist key).
+2. For each, write a `StateFormat { name, detect, decode }`. `detect(&[u8]) -> Option<u32>` returns the format version if the bytes are that format (cheap: look at the front); `decode(&[u8], version) -> Result<ImportedState>` reads them with the readers above into the old plugin's own parameter ids (`ForeignId::Index(u32)` for a numeric id, `ForeignId::Name(String)` for a key) and values as stored, tagged plain or normalised, plus an opaque `chunk` if the port interprets more itself.
+3. Build a `ParamMap` from those ids (the scanner manifest's `params[].id`) to your `ParamInfo::id`s: `map(from, "gain")`, or `map_with(from, "cutoff", convert)` where the units differ. `ParamMap::apply(&PARAMS, &state)` returns the values, clamped to your ranges, as table indices, and the old ids it could not place (`unmapped`); a normalised value with no `convert` follows your parameter's own taper.
+4. In `load_state`, call `import(&FORMATS, data)`: `None` means no format recognised it (use your own format), `Some(Err(_))` means it was recognised but damaged (refuse it; do not fall back), `Some(Ok(state))` is the decoded state. Decide your policy on `unmapped` (the test refuses a state with any), and set nothing until the whole state is accepted: a refused `load_state` must change nothing.
+
+`crates/openplugin-core/src/foreign_state/import.rs` has a short example that runs as a doctest. The full worked version is in `crates/openplugin-port/tests/state_import.rs`: a "port" whose parameters are in the opposite order of the original's reads a plane of `f32` values (CLAP), a VST3 component state (normalised `f64`s and a trailer) and an Audio Unit property list whose `data` holds big-endian `(id, value)` pairs, and falls back to its own format.
+
+### What the proof covers
+
+- `crates/openplugin-core/tests/foreign_state.rs` (17 tests) reads hand-written fixtures in every container and refuses hostile input without a panic: every truncation of a good XML document, `bplist00` document, key/value run and chunk; invalid UTF-8 and UTF-16; XML nested 200,000 deep (refused by the depth limit, no stack overflow) and a `<!DOCTYPE>` entity bomb; a binary plist array declaring 2^40 entries, data and strings declaring 4 GiB, a self-referencing array, and a 1 MiB blob referenced 20,000 times (refused by the byte budget); bad offsets, references and trailer sizes; a key/value count of 4 billion; chunk sizes of 2^32 and 2^64 - 1; and 60,000 random mutations of three valid documents.
+- `crates/openplugin-port/tests/state_import.rs` captures the SDK's own example. The CLAP capture always runs (the example's `cdylib` is built by the test); VST3 and Audio Unit run when `OPENPLUGIN_PORT_FIXTURES` names the folder of built bundles, as for the scanner. In each format, the default state and a `--set gain=-6 --set Warm=1` state are captured, the blob checksums and sizes match the manifest, the test port loads every blob, and each parameter equals the plain value the capture read back (to 1e-6 for CLAP and Audio Unit, 1e-5 for VST3). The port's parameter table is in the other order, and the scanner manifest's ids map onto it by name. Truncations, single-byte corruptions and extensions of each blob never panic, and a refused load leaves the port's parameters as they were. The Audio Unit blob is read with the SDK's own plist reader, and its `type` and `subtype` equal `aufx` and `ExGn`.
+- The CLAP preset-discovery path is tested against a provider built for the test (`crates/openplugin-port/tests/fixtures/preset_provider.rs`, compiled with `rustc`): factory presets at the plugin location, file presets found by walking a folder (with a nested folder and a file of the wrong extension ignored), a preset listed for another plugin id left out, `--max-presets` noting what it dropped. The fixture declares the preset-discovery structures a second time from the CLAP headers, so it checks the code against a second reading of them, not against a third-party provider.
+- Read-only smoke over plugins installed on the development machine (not named here): on 15 November 2026, `capture` loaded 30 CLAP bundles (none has a preset-discovery factory, so default state only), 20 VST3 bundles (two have program lists with a program-change parameter: 11 states each, with distinct parameter vectors; the rest have no program list, or a list with no program-change parameter or program data) and 41 Audio Unit components (all captured; 40 have factory presets, 27 of them just one, the rest up to the 20 asked for). All 259 Audio Unit ClassInfo blobs read with the plist reader (`OPENPLUGIN_PORT_SMOKE_DIR`, test `captured_class_info_blobs_of_other_plugins_read_with_the_plist_reader`).
+
+### Limits of the capture
+
+- State only: audio, editors and the plugin's behaviour are not captured. Where a format's save depends on the plugin being played first (a plugin that builds state from audio), the state is as at load.
+- VST3 programs are selected the way hosts do it, through a program-change parameter. A plugin that exposes programs only through `IUnitInfo::setUnitProgramData`, or whose programs the component applies only on a later block, may give states that equal the default; the manifest's `params` shows it (equal vectors). `IProgramListData` data is saved when offered, not interpreted.
+- CLAP presets need both a preset-discovery factory and the plugin's `clap.preset-load/2`; a bundle with only the first is noted. A provider that lists presets only through a `file` location it expects the host to scan from a path it chose itself is read from the locations it declares.
+- A preset that needs a licence, a download or a dialog is skipped with a note. Presets that load into only a part of the state (a layer of a multi-timbral instrument) save the whole state afterwards.
+- Preset names and locations come from the plugin's own provider and are written to the manifest as given.
 
 ## Limits of the scanner
 

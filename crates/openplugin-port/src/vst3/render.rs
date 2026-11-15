@@ -303,3 +303,37 @@ pub fn render(job: &crate::render::Job, feed: &crate::render::Feed) -> Result<cr
     }
     Ok(crate::render::Rendered { latency, in_channels: n_in as u32, out })
 }
+
+/// Run one block of silence through the processor with `changes` (parameter id, normalized value)
+/// as points at offset 0, so the component sees them as a host would send them.
+pub(super) fn process_changes(proc_: *mut c_void, n_in: usize, n_out: usize, changes: &[(u32, f64)]) -> TResult {
+    const FRAMES: usize = 64;
+    let mut queued = Changes { vtbl: &CHANGES_VTBL, queues: Vec::new() };
+    for (id, value) in changes {
+        let mut index = 0i32;
+        let q = unsafe { ch_add((&mut queued as *mut Changes).cast(), id, &mut index) };
+        let mut point = 0i32;
+        unsafe { q_add(q, 0, *value, &mut point) };
+    }
+    let mut in_bufs = vec![vec![0f32; FRAMES]; n_in];
+    let mut out_bufs = vec![vec![0f32; FRAMES]; n_out];
+    let mut in_ptrs: Vec<*mut f32> = in_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+    let mut out_ptrs: Vec<*mut f32> = out_bufs.iter_mut().map(|b| b.as_mut_ptr()).collect();
+    let mut input = AudioBusBuffers { num_channels: n_in as i32, silence_flags: 0, channel_buffers32: in_ptrs.as_mut_ptr() };
+    let mut output = AudioBusBuffers { num_channels: n_out as i32, silence_flags: 0, channel_buffers32: out_ptrs.as_mut_ptr() };
+    let mut data = ProcessData {
+        process_mode: 0,
+        symbolic_sample_size: 0,
+        num_samples: FRAMES as i32,
+        num_inputs: i32::from(n_in > 0),
+        num_outputs: i32::from(n_out > 0),
+        inputs: if n_in > 0 { &mut input } else { std::ptr::null_mut() },
+        outputs: if n_out > 0 { &mut output } else { std::ptr::null_mut() },
+        input_parameter_changes: if queued.queues.is_empty() { std::ptr::null_mut() } else { (&mut queued as *mut Changes).cast() },
+        output_parameter_changes: std::ptr::null_mut(),
+        input_events: std::ptr::null_mut(),
+        output_events: std::ptr::null_mut(),
+        process_context: std::ptr::null_mut(),
+    };
+    call!(proc_, ProcessorVtbl, process, &mut data)
+}
