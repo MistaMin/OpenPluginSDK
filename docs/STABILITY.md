@@ -156,7 +156,9 @@ The policy has four parts, and it is the same in every filter the SDK ships:
 2. **A result outside the `f32` range** (which only enormous finite input can produce) **resets the
    state and outputs `0.0`**, so one bad sample cannot silence the filter until the host resets it.
 3. **State below `1e-30` is flushed to zero**, so tails reach exact zero and never become
-   subnormal (see [PERFORMANCE.md](PERFORMANCE.md#3-denormals-and-flush-to-zero)).
+   subnormal (see [PERFORMANCE.md](PERFORMANCE.md#3-denormals-and-flush-to-zero)). The format
+   entries also run the plugin with the CPU's flush-to-zero mode on; the flush in code is what
+   holds where the mode is off (the kit, a plugin that opts out with `Plugin::flush_denormals`).
 4. **A configuration call with a NaN or infinite frequency, Q or gain is ignored** and the previous
    coefficients are kept.
 
@@ -265,6 +267,15 @@ division, no integer overflow in release-profile arithmetic you do not control, 
 - **Containment through the shell is tested.** The shell now also zeroes the outputs when it catches a
   panic. [`shell_panic.rs`](../crates/openplugin-ffi/tests/shell_panic.rs): `process_events` and
   `process` return 0 with silent outputs, state calls return failure, and a later call works.
+- **The floating-point mode comes back after a panic.** Every audio-thread entry (CLAP `process`,
+  `params.flush` and `reset`, LV2 `run`, the shell's `process`, `process_events`, `reset` and
+  `midi_out`) runs the plugin with flush-to-zero on and restores the host's own mode when the call
+  ends; the guard is dropped on the panic path as well, so a panicking plugin cannot leave the host's
+  audio thread flushing (or not flushing). See
+  [PERFORMANCE.md](PERFORMANCE.md#3-denormals-and-flush-to-zero). Tests: the `a_panic_in_*` cases of
+  [`clap_denormals.rs`](../crates/openplugin-targets/tests/clap_denormals.rs),
+  [`lv2_denormals.rs`](../crates/openplugin-targets/tests/lv2_denormals.rs) and
+  [`shell_denormals.rs`](../crates/openplugin-ffi/tests/shell_denormals.rs).
 - **`Biquad::configure` rejects a NaN or infinite parameter** (the previous coefficients stay) and
   `Biquad` flushes its state below 1e-30. Tests in
   [`biquad.rs`](../crates/openplugin-dsp/src/biquad.rs).

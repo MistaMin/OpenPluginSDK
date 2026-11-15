@@ -24,6 +24,7 @@ use std::sync::atomic::{fence, AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as Clock};
 
+use openplugin_core::DenormalGuard;
 use openplugin_core::{
     decode_params, encode_params, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
     ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
@@ -239,6 +240,9 @@ struct Instance {
     activated: bool,
     /// Set when a callback into the plugin panicked; see [`guarded`]. Cleared by `activate`.
     poisoned: AtomicBool,
+    /// [`Plugin::flush_denormals`], read once at creation: `process`, `params.flush` and
+    /// `reset` hold a [`DenormalGuard`] while they are inside the plugin.
+    flush_denormals: bool,
 }
 
 fn instance<'a>(plugin: *const clap_plugin) -> Option<&'a mut Instance> {
@@ -688,11 +692,23 @@ unsafe extern "C" fn plugin_start(_plugin: *const clap_plugin) -> bool {
 unsafe extern "C" fn plugin_stop(_plugin: *const clap_plugin) {}
 
 unsafe extern "C" fn plugin_reset(plugin: *const clap_plugin) {
+    // `[audio-thread & active]`: the plugin's own code runs, so it runs flushed like `process`.
+    let _flush = DenormalGuard::new_if(flushes(plugin));
     guarded(plugin, (), || {
         if let Some(instance) = instance(plugin) {
             instance.inner.reset();
         }
     })
+}
+
+/// [`Plugin::flush_denormals`] of the instance behind `plugin`, read through a field pointer
+/// (no `&mut Instance`). False for a null plugin or instance: then nothing is called anyway.
+fn flushes(plugin: *const clap_plugin) -> bool {
+    if plugin.is_null() {
+        return false;
+    }
+    let data = unsafe { (*plugin).plugin_data } as *mut Instance;
+    !data.is_null() && unsafe { *std::ptr::addr_of!((*data).flush_denormals) }
 }
 
 const GATE_AUDIO: u32 = 1;
@@ -841,7 +857,11 @@ unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const 
         return unsafe { skipped_block(plane, &*process) };
     }
     let _held = AudioGate(gate);
+    // Flush-to-zero for the plugin, the host's mode back when this drops: after the block,
+    // and after a panic, which `guarded` catches inside.
+    let flush = DenormalGuard::new_if(unsafe { *std::ptr::addr_of!((*raw).flush_denormals) });
     let result = guarded(plugin, PROCESS_ERROR, || process_block(unsafe { &mut *raw }, process));
+    drop(flush);
     if result == PROCESS_ERROR && is_poisoned(plugin) {
         silence_outputs(unsafe { &*process });
     }
@@ -1149,6 +1169,9 @@ fn report_gestures(instance: &Instance, out: *const clap_output_events) {
 }
 
 unsafe extern "C" fn params_flush(plugin: *const clap_plugin, input: *const clap_input_events, output: *const clap_output_events) {
+    // On the audio thread while active, and `set_param` runs here as it does inside
+    // `process`: flushed alike, so a coefficient computed here matches one computed there.
+    let _flush = DenormalGuard::new_if(flushes(plugin));
     guarded(plugin, (), || {
         if !plugin.is_null() && is_poisoned(plugin) {
             return;
@@ -1979,6 +2002,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
     let editor_state = inner.editor_state();
     let expressions = inner.note_expressions();
     let mpe = MpeReceiver::for_plugin(inner.as_ref());
+    let flush_denormals = inner.flush_denormals();
     let instance = Box::new(Instance {
         plugin: clap_plugin {
             desc: std::ptr::null(),
@@ -2042,6 +2066,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
         layout_index: 0,
         activated: false,
         poisoned: AtomicBool::new(false),
+        flush_denormals,
     });
     let raw = Box::into_raw(instance);
     unsafe {

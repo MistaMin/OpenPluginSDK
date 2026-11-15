@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use openplugin_core::{
     decode_session, encode_session, release_momentary, sample_rate_supported, BusMeters,
-    EditorState, HostNotifier, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane,
+    DenormalGuard, EditorState, HostNotifier, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane,
     PluginInfo, Seqlock, Tail, Taper, Unit, MAX_AUDIO_CHANNELS,
 };
 
@@ -147,12 +147,18 @@ pub const STATE_WAIT: Duration = Duration::from_secs(2);
 const GATE_AUDIO: u32 = 1;
 const GATE_STATE: u32 = 2;
 
-/// Releases the audio side of the gate when a block (or reset) ends.
-struct AudioGuard<'a>(&'a AtomicU32);
+/// Releases the audio side of the gate when a block (or reset) ends. While it
+/// lives the thread runs with denormals flushed ([`Plugin::flush_denormals`]);
+/// the host's mode comes back when it drops, at the end of the call or while
+/// a panic unwinds out of the plugin.
+struct AudioGuard<'a> {
+    gate: &'a AtomicU32,
+    _flush: DenormalGuard,
+}
 
 impl Drop for AudioGuard<'_> {
     fn drop(&mut self) {
-        self.0.fetch_and(!GATE_AUDIO, Ordering::SeqCst);
+        self.gate.fetch_and(!GATE_AUDIO, Ordering::SeqCst);
     }
 }
 
@@ -199,6 +205,9 @@ pub struct FfiInstance {
     reset_pending: AtomicBool,
     /// MIDI output events lost to a full buffer since the last read.
     midi_dropped: AtomicU32,
+    /// [`Plugin::flush_denormals`], read once at creation: every call that
+    /// enters the audio side (blocks, `reset`, MIDI out) runs flushed.
+    flush_denormals: bool,
 }
 
 unsafe impl Send for FfiInstance {}
@@ -222,6 +231,7 @@ impl FfiInstance {
         let presets = collect_presets(plugin.as_ref());
         let editor_state = plugin.editor_state();
         let state_in_params = plugin.state_is_parameters_only();
+        let flush_denormals = plugin.flush_denormals();
         let plane = ParamPlane::new(info);
         plane.seed_from(plugin.as_ref());
         let max_block = max_block.clamp(1, 65_536);
@@ -277,17 +287,19 @@ impl FfiInstance {
             state_lock: Mutex::new(()),
             reset_pending: AtomicBool::new(false),
             midi_dropped: AtomicU32::new(0),
+            flush_denormals,
         }
     }
 
     /// Audio side of the gate. `None` when a state call holds or wants the
     /// plugin object (or another block is somehow in flight): the caller
-    /// skips. Never blocks, never allocates. Runs a deferred reset first.
+    /// skips. Never blocks, never allocates. Sets flush-to-zero for as long as
+    /// the guard lives. Runs a deferred reset first.
     fn enter_audio(&self) -> Option<AudioGuard<'_>> {
         self.gate
             .compare_exchange(0, GATE_AUDIO, Ordering::SeqCst, Ordering::SeqCst)
             .ok()?;
-        let guard = AudioGuard(&self.gate);
+        let guard = AudioGuard { gate: &self.gate, _flush: DenormalGuard::new_if(self.flush_denormals) };
         if self.reset_pending.swap(false, Ordering::AcqRel) {
             let audio = unsafe { &mut *self.audio.get() };
             audio.inner.reset();
