@@ -22,6 +22,8 @@ pub mod hit;
 pub mod render;
 pub mod styles;
 pub mod window;
+#[cfg(target_os = "linux")]
+pub mod x11;
 
 pub use canvas::{DrawCmd, DrawList};
 pub use goodlookindri::draw::KnobMode as KnobTier;
