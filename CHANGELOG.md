@@ -25,6 +25,7 @@ Everything after the 0.3.1 Beta release commit `a708cac`: the 0.4 work on macOS 
 - `openplugin_dri::DesignEditor`: an editor built from a GoodLookin design CSV, each row bound to a parameter by id; `examples/design_editor`.
 - `docs/PUBLISHING.md`, `CHANGELOG.md`, `docs/VERSIONING.md` and `docs/API_REVIEW.md`; crate metadata (authors, homepage, keywords, categories, readme, documentation) inherited by every crate; GoodLookin DRI named by version as well as path.
 - `docs/ROADMAP.md` for macOS to 1.0 and `docs/ROADMAP_WINDOWS_LINUX.md`.
+- Format parity test, `scripts/format_parity/run.sh` (`docs/FORMAT_PARITY.md`): one input and one parameter automation, with changes mid-block, rendered by the Rust plugin directly and through the built CLAP, LV2, VST3, Audio Unit and AAX entries of `examples/editor`; every output must match sample for sample within 1e-6 (measured difference 0 in every format). Negative controls: VST3, Audio Unit and AAX shells built with a deliberate gain error (test builds only, `-DOP_FORMAT_PARITY=ON`) and a reference with the automation one frame late must fail. A `format-parity` CI job runs everything but AAX, which runs locally.
 
 ### Changed
 
