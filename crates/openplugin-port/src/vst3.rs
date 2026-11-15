@@ -122,8 +122,8 @@ struct ComponentVtbl {
     get_routing_info: usize,
     activate_bus: unsafe extern "system" fn(*mut c_void, i32, i32, i32, u8) -> TResult,
     set_active: unsafe extern "system" fn(*mut c_void, u8) -> TResult,
-    set_state: usize,
-    get_state: usize,
+    set_state: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
+    get_state: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
 }
 
 #[repr(C)]
@@ -162,17 +162,17 @@ struct ControllerVtbl {
     base: UnknownVtbl,
     initialize: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
     terminate: unsafe extern "system" fn(*mut c_void) -> TResult,
-    set_component_state: usize,
-    set_state: usize,
-    get_state: usize,
+    set_component_state: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
+    set_state: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
+    get_state: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
     get_parameter_count: unsafe extern "system" fn(*mut c_void) -> i32,
     get_parameter_info: unsafe extern "system" fn(*mut c_void, i32, *mut ParameterInfo) -> TResult,
     get_param_string_by_value: unsafe extern "system" fn(*mut c_void, u32, f64, *mut u16) -> TResult,
     get_param_value_by_string: usize,
     normalized_param_to_plain: unsafe extern "system" fn(*mut c_void, u32, f64) -> f64,
     plain_param_to_normalized: unsafe extern "system" fn(*mut c_void, u32, f64) -> f64,
-    get_param_normalized: usize,
-    set_param_normalized: usize,
+    get_param_normalized: unsafe extern "system" fn(*mut c_void, u32) -> f64,
+    set_param_normalized: unsafe extern "system" fn(*mut c_void, u32, f64) -> TResult,
     set_component_handler: unsafe extern "system" fn(*mut c_void, *mut c_void) -> TResult,
     create_view: usize,
 }
@@ -792,5 +792,7 @@ fn read_param(controller: *mut c_void, info: &ParameterInfo) -> Param {
     }
 }
 
+mod capture;
+pub use capture::capture;
 mod render;
 pub use render::render;

@@ -14,6 +14,8 @@ use crate::bundle;
 use crate::manifest::*;
 use crate::sys::*;
 
+mod capture;
+pub use capture::capture;
 mod render;
 pub use render::render;
 

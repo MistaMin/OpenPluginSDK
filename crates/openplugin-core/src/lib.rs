@@ -13,6 +13,7 @@
 pub mod automation;
 pub mod build;
 pub mod editor;
+pub mod foreign_state;
 pub mod layout;
 pub mod midi;
 pub mod plane;

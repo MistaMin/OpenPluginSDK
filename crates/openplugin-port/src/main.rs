@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use openplugin_port::capture::{self, CaptureOptions};
 use openplugin_port::null::{self, NullOptions};
 use openplugin_port::{ScanOptions, probe, render, scan, write_outputs};
 
@@ -19,6 +20,20 @@ Usage:
               (default: the current folder)
   --timeout   seconds each plugin gets to load and answer (default 30)
   --format    clap, vst3, au or aax, when the extension does not say
+
+  openplugin-port capture <plugin>... [--out DIR] [--format FORMAT] [--set PARAM=VALUE]...
+                          [--max-presets N] [--timeout SECONDS]
+
+  capture     load the plugin in a child process (nothing is installed) and save
+              its state blobs exactly as a host stores them: CLAP state stream
+              bytes, VST3 component and controller streams, the Audio Unit
+              ClassInfo dictionary as a binary plist. One state for the default
+              settings, one per factory preset (CLAP preset discovery, VST3
+              program lists, Audio Unit factory presets), and one after --set
+              (a parameter id or name and a plain value, repeatable). Writes
+              <name>.<format>.capture.json and a <name>.<format>.blobs folder in
+              --out (default: the current folder), with every parameter's plain
+              value read back after each state was loaded.
 
   openplugin-port null <original> <port> [--format FMT] [--port-format FMT]
                        [--input SIGNAL|file.wav] [--automation SPEC] [--rate HZ]
@@ -48,6 +63,8 @@ fn main() -> ExitCode {
     match args.first().map(String::as_str) {
         Some("__probe") => probe::child_main(&args[1..]),
         Some("__render") => render::child_main(&args[1..]),
+        Some("__capture") => capture::child_main(&args[1..]),
+        Some("capture") => run_capture(&args[1..]),
         Some("scan") => run_scan(&args[1..]),
         Some("null") => run_null(&args[1..]),
         Some("param-map") => run_param_map(&args[1..]),
@@ -124,6 +141,60 @@ fn run_scan(args: &[String]) -> ExitCode {
                     println!("FAIL  {}: cannot write to {}: {e}", path.display(), out.display());
                 }
             },
+            Err(e) => {
+                failures += 1;
+                println!("FAIL  {}: {e}", path.display());
+            }
+        }
+    }
+    if failures == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+fn run_capture(args: &[String]) -> ExitCode {
+    let helper = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("openplugin-port: cannot find myself to start the capture: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let mut o = CaptureOptions::new(helper, PathBuf::from("."));
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let r: Result<(), String> = (|| {
+            let mut value = |what: &str| it.next().cloned().ok_or_else(|| format!("{a} needs {what}"));
+            match a.as_str() {
+                "--out" => o.out_dir = PathBuf::from(value("a folder")?),
+                "--format" => o.format = Some(value("a name")?),
+                "--set" => o.sets.push(capture::parse_set(&value("param=value")?)?),
+                "--max-presets" => o.max_presets = value("a number")?.parse().map_err(|_| "--max-presets needs a number")?,
+                "--timeout" => o.timeout = Duration::from_secs(value("seconds")?.parse().map_err(|_| "--timeout needs a number of seconds")?),
+                flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
+                path => paths.push(PathBuf::from(path)),
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            return usage(&e);
+        }
+    }
+    if paths.is_empty() {
+        return usage("capture needs at least one plugin path");
+    }
+    let mut failures = 0;
+    for path in &paths {
+        match capture::run(path, &o) {
+            Ok(list) => {
+                for (c, file) in list {
+                    let blobs: usize = c.states.iter().map(|s| s.blobs.len()).sum();
+                    println!("ok    {}  {} {:?}: {} states, {} blobs, {} notes", path.display(), c.source.format, c.plugin.name, c.states.len(), blobs, c.notes.len());
+                    println!("      wrote {}", file.display());
+                    for n in &c.notes {
+                        println!("      note: {n}");
+                    }
+                }
+            }
             Err(e) => {
                 failures += 1;
                 println!("FAIL  {}: {e}", path.display());
