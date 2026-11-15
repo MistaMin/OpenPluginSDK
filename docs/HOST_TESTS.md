@@ -97,6 +97,26 @@ Hosts: REAPER 7.80/macOS-arm64 (rev 9d9fa7, 13 September 2026, evaluation licenc
 - **REAPER envelopes for CLAP and the Audio Unit speak the parameter's real range (-24 to 24), for VST3 the normalized range (0 to 1).**
 - **OpenGrid9 headless can crash in `Route::add_processors` when the plug-in is not in its plug-in list.** `new_plugin` then returns a null plug-in, and adding it segfaults the process. The worker checks `isnil()` first and reports "not found". OpenGrid9's own `LuaAPI.get/set_plugin_insert_param` index control inputs only, so for LV2 (audio ports first) the worker maps the port index to its control ordinal.
 
+## Pro Tools (AAX), 15 November 2026
+
+Run by hand through computer-use automation, not by `scripts/host_smoke`: Pro Tools Studio 2025.10 on macOS 15.7.5 (arm64), the example built with `scripts/build_plugin.sh --formats aax --editor --tail`, signed with the owner's Developer ID and PACE-signed with `wraptool` (the owner's account, an existing wrap configuration), installed in `/Library/Application Support/Avid/Audio/Plug-Ins`. A session with one stereo audio track, Signal Generator on insert A (a tone at -20.0 dBFS peak) and Editor Gain (stereo) on insert B.
+
+| Check | Result |
+|---|---|
+| Scan, PACE authorization, plug-in cache | pass: listed as "Editor Gain" by OpenGrid, mono and stereo |
+| Insert on a stereo track, audio through it | pass, after the fix below |
+| Editor window opens and draws, meter moves | pass |
+| Gain by dragging the knob to +9.6 dB | pass: track peak -10.4 dBFS (-20.0 + 9.6), Pro Tools lights COMPARE |
+| Warm on at +9.6 dB | pass: peak -10.7 dBFS, as tanh predicts (tanh(0.302) = 0.293) |
+| Pro Tools bypass | pass: peak back to -20.0 dBFS |
+| Save, close, reopen: Gain and Warm restored | pass: peak -10.7 dBFS again, editor shows 9.6 dB |
+| Typing a value (double-click, type, Return) | fail: see finding 5 |
+
+Findings:
+
+4. **Fixed: the AAX shell faulted on the first block in Pro Tools.** Pro Tools reported "Found stuck plugin com.opengrid.example.editor-gain" and DAE error -9004, and its audio engine wedged until Pro Tools was force-quit. Cause: `process` in `native/aax/OpenPluginAAXProcess.cpp` read `context->midiIn`, `context->midiOut` and `context->sideChain` whenever they were non-null, but Describe registers those fields only when the plugin has note ports or a sidechain, and Pro Tools leaves an unregistered field undefined, not null. The example has no MIDI, so the shell called through a garbage pointer. The shell now reads each optional field only when it registered it, and `aax_process_proof` fills the unregistered fields with faulting addresses as Pro Tools does: the old code segfaults there, the fixed code passes. No fake host before this one could catch it, since they all zeroed the context.
+5. **Open: Return does not commit the type-in field inside Pro Tools.** Double-click opens the field with the formatted value and typing reaches it, but Pro Tools takes Return and Enter for its own commands, so the field never commits (Escape-style cancel by clicking elsewhere works). Likely fix: commit on loss of focus rather than cancel, or take the keys before the host's key handling; not done yet. Pressing Enter in the field may have added a marker to the session.
+
 ## Not covered
 
 - Audio through the plug-in in OpenGrid9: the headless backend renders no signal through inserts (see OpenGrid9's own notes), so OpenGrid9 proves loading, parameters and session state, not level. REAPER proves level.
