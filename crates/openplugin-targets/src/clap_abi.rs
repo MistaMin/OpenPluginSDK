@@ -564,3 +564,54 @@ pub struct clap_plugin_track_info {
 pub struct clap_host_track_info {
     pub get: Option<unsafe extern "C" fn(host: *const clap_host, info: *mut clap_track_info) -> bool>,
 }
+
+// ---- Linux: the X11 window API, timers and file descriptors (`clap/ext/gui.h`,
+// `timer-support.h`, `posix-fd-support.h`) -----------------------------------------
+
+/// `CLAP_WINDOW_API_X11`. On X11 `clap_window` carries the parent's XID (an
+/// `unsigned long`) in its handle union, and `clap.gui` sizes are physical pixels.
+#[cfg(target_os = "linux")]
+pub const WINDOW_API_X11: &[u8] = b"x11\0";
+
+#[cfg(target_os = "linux")]
+pub const EXT_TIMER_SUPPORT: &[u8] = b"clap.timer-support\0";
+
+/// `clap_plugin_timer_support`: the host's timer fired. Main thread.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub struct clap_plugin_timer_support {
+    pub on_timer: Option<unsafe extern "C" fn(plugin: *const clap_plugin, timer_id: u32)>,
+}
+
+/// `clap_host_timer_support`: a periodic main-thread call into the plugin.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub struct clap_host_timer_support {
+    pub register_timer: Option<unsafe extern "C" fn(host: *const clap_host, period_ms: u32, timer_id: *mut u32) -> bool>,
+    pub unregister_timer: Option<unsafe extern "C" fn(host: *const clap_host, timer_id: u32) -> bool>,
+}
+
+#[cfg(target_os = "linux")]
+pub const EXT_POSIX_FD_SUPPORT: &[u8] = b"clap.posix-fd-support\0";
+#[cfg(target_os = "linux")]
+pub const POSIX_FD_READ: u32 = 1 << 0;
+#[cfg(target_os = "linux")]
+pub const POSIX_FD_WRITE: u32 = 1 << 1;
+#[cfg(target_os = "linux")]
+pub const POSIX_FD_ERROR: u32 = 1 << 2;
+
+/// `clap_plugin_posix_fd_support`: a descriptor the plugin registered is ready. Main thread.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub struct clap_plugin_posix_fd_support {
+    pub on_fd: Option<unsafe extern "C" fn(plugin: *const clap_plugin, fd: i32, flags: u32)>,
+}
+
+/// `clap_host_posix_fd_support`: the host watches descriptors in its event loop.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+pub struct clap_host_posix_fd_support {
+    pub register_fd: Option<unsafe extern "C" fn(host: *const clap_host, fd: i32, flags: u32) -> bool>,
+    pub modify_fd: Option<unsafe extern "C" fn(host: *const clap_host, fd: i32, flags: u32) -> bool>,
+    pub unregister_fd: Option<unsafe extern "C" fn(host: *const clap_host, fd: i32) -> bool>,
+}
