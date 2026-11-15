@@ -753,3 +753,67 @@ jobs:
           assert frames_out == frames_in, "frame count changed"
           assert 1.9 * peak_in <= peak_out <= 2.1 * peak_in, "+6 dB did not double the peak"
           PY
+
+  # scripts/build_plugin_linux.sh on examples/editor: the CLAP file and the LV2
+  # bundle, with the script's own checks (no build path, only system libraries,
+  # the entry points exported, no run path into the build tree). Then
+  # lv2_validate on the LV2 bundle and clap-validator on the CLAP file.
+  # Every command here was run on an Arch Linux machine; the apt package names
+  # are the Ubuntu ones and have not run on GitHub yet.
+  linux-package:
+    name: Linux packaging, lv2_validate and clap-validator (examples/editor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # clap-validator 0.4.1 (build 127-g152b982), the commit the universal job
+      # builds. There is no Linux binary in the release, so it is built.
+      CLAP_VALIDATOR_REV: 152b9823e992d782c5c1fd33bca0295478b919aa
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      # lv2-dev has lv2_validate and the specifications it reads; sordi has
+      # sord_validate, which lv2_validate runs.
+      - name: Install the LV2 tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends lv2-dev sordi
+          command -v lv2_validate sord_validate
+      - name: Build clap-validator
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR="$RUNNER_TEMP/cv-target" cargo install --git https://github.com/free-audio/clap-validator \
+            --rev "$CLAP_VALIDATOR_REV" --locked --root "$RUNNER_TEMP/cv" clap-validator
+          "$RUNNER_TEMP/cv/bin/clap-validator" --version
+      - name: Package the example
+        working-directory: OpenPluginSDK
+        run: >
+          scripts/build_plugin_linux.sh
+          --manifest-path examples/editor/Cargo.toml --version 0.4.0
+          --name "Example Gain" --ttl-bin lv2_ttl
+          --out "$RUNNER_TEMP/linux-dist" --work-dir "$RUNNER_TEMP/linux-work"
+      # lv2_validate takes the TTL files by name, so it runs inside the bundle.
+      # It skips a file it cannot open and still prints "0 errors", so a
+      # skipped bundle file fails the step too.
+      - name: lv2_validate
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/linux-dist/ExampleGain.lv2"
+          lv2_validate manifest.ttl ExampleGain.ttl 2>&1 | tee "$RUNNER_TEMP/lv2_validate.log"
+          grep -q '^Found 0 errors' "$RUNNER_TEMP/lv2_validate.log"
+          if grep -Eq '^error|Skipping file (manifest|ExampleGain)\.ttl' "$RUNNER_TEMP/lv2_validate.log"; then exit 1; fi
+      # clap-validator exits non-zero when any test fails.
+      - name: clap-validator
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/cv/bin/clap-validator" validate "$RUNNER_TEMP/linux-dist/Example Gain.clap"
