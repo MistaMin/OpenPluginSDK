@@ -27,3 +27,7 @@ harness = false
 [[test]]
 name = "typing"
 harness = false
+
+[[test]]
+name = "menu"
+harness = false
