@@ -3,6 +3,8 @@
 //! Realtime-safe DSP building blocks:
 //! - [`Biquad`]: Robert Bristow-Johnson cookbook audio filters.
 //! - [`Compressor`]: Log-domain dynamics processor with soft knee.
+//! - [`Dynamics`], [`GainComputer`], [`EnvelopeFollower`], [`Ballistics`]: linked compressor / expander / gate with soft knee, hysteresis, range, hold, a sidechain hook (Giannoulis, Massberg, Reiss 2012).
+//! - [`Limiter`], [`TruePeak`]: lookahead brickwall limiter with a 4x/8x true-peak ceiling (ITU-R BS.1770-4 Annex 2) and a reported latency.
 //! - [`VuMeter`]: ANSI standard 300 ms ballistic level detector.
 //! - [`MeterBank`]: stereo peak, RMS, PPM, and VU, plus envelope gain reduction.
 //! - [`LinearPhaseOversampler`]: 1x/2x/4x linear-phase resampling, 64 host samples at 2x and 4x.
@@ -21,7 +23,10 @@ pub mod convolve;
 pub mod delta;
 pub mod delay;
 pub mod dynamics;
+pub mod envelope;
+pub mod limiter;
 pub mod gain_comp;
+pub mod gain_computer;
 pub mod linear_phase;
 pub mod loudness;
 pub mod meter;
@@ -33,6 +38,7 @@ pub mod pitch;
 pub mod rate;
 pub mod saturation;
 pub mod voice;
+pub mod true_peak;
 pub mod window;
 
 pub use adaa::{Adaa2Taylor, ResidualAdaa1};
@@ -42,6 +48,10 @@ pub use convolve::BlockConvolver;
 pub use delta::Delta;
 pub use delay::DelayLine;
 pub use dynamics::Compressor;
+pub use envelope::{Ballistics, Detection, Domain, EnvelopeFollower, Topology};
+pub use gain_computer::{Dynamics, DynamicsMode, DynamicsParams, GainComputer, Link, Smoothing};
+pub use limiter::Limiter;
+pub use true_peak::TruePeak;
 pub use gain_comp::GainComp;
 pub use linear_phase::{LinearPhaseOversampler, OversampleError};
 pub use loudness::{KWeighting, Loudness, LoudnessMatch};
