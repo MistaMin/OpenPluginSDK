@@ -19,6 +19,8 @@ pub use openplugin_ffi::shell::{
     reset, save_state, set_normalized, set_plain, tail_seconds, to_normalized, to_plain, trace, write_info,
     write_param, OpParamDesc, OpShellInfo, ShellInstance, ABI, AAX_MAX_PARAMS, PARAM_AUTOMATABLE,
     PARAM_DISCRETE, PARAM_LOG, STATE_MAX, STATE_OK, STATE_TOO_SMALL,
+    // ABI 6: telling the host about changes.
+    take_changes, CHANGE_LATENCY, CHANGE_PARAM_INFO,
 };
 
 #[cfg(target_os = "macos")]
@@ -468,6 +470,12 @@ macro_rules! export_shell {
             flags: u32,
         ) -> u32 {
             unsafe { $crate::shell::set_track_info(instance as *mut $crate::shell::ShellInstance, name, rgba, flags) }
+        }
+
+        // ABI 6: telling the host about changes.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_take_changes(instance: *mut ::std::ffi::c_void) -> u32 {
+            unsafe { $crate::shell::take_changes(instance as *const $crate::shell::ShellInstance) }
         }
 
         #[unsafe(no_mangle)]

@@ -12,7 +12,10 @@
 //! control port (always; maps to [`Plugin::set_offline`]), an `atom:Sequence`
 //! input when the plugin takes notes (`midi:MidiEvent` and `time:Position`),
 //! an `atom:Sequence` output when it sends MIDI, and one `lv2:isSideChain`
-//! audio input per sidechain channel. An instrument has no main audio input:
+//! audio input per sidechain channel, and last the `latency` control output
+//! (`lv2:designation lv2:latency`, `lv2:reportsLatency`), which `run` writes
+//! with [`Plugin::latency`] after every block, so a host that reads it after
+//! `run` sees a new latency at once. An instrument has no main audio input:
 //! its outputs are ports 0 and 1 and its parameters start at port 2. Every
 //! port an effect had before keeps its index.
 //! MIDI is delivered at its frame offsets by rendering in segments, the way
@@ -144,6 +147,11 @@ impl PortMap {
 
     pub fn sidechain_first(self) -> u32 {
         self.freewheel() + 1 + u32::from(self.notes_in) + u32::from(self.notes_out)
+    }
+
+    /// The latency control output, after every other port.
+    pub fn latency(self) -> u32 {
+        self.sidechain_first() + self.sidechain
     }
 
     /// Slot in the four-entry audio table (in L, in R, out L, out R) of an
@@ -720,6 +728,8 @@ struct Instance {
     ports: [*mut f32; 4],
     controls: Vec<*const f32>,
     freewheel: *const f32,
+    /// The host's latency output port, written after every `run`.
+    latency_port: *mut f32,
     offline: bool,
     atom_in: *const u8,
     atom_out: *mut u8,
@@ -782,6 +792,9 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
     } else {
         create()
     };
+    // LV2 has no call for new parameter info, and the latency port is written
+    // after every block, so the notifier has no one to tell: nobody reads it.
+    inner.set_host_notifier(openplugin_core::HostNotifier::new());
     let info = inner.info();
     let plane = ParamPlane::new(info);
     plane.seed_from(inner.as_ref());
@@ -822,6 +835,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
         ports: [std::ptr::null_mut(); 4],
         controls,
         freewheel: std::ptr::null(),
+        latency_port: std::ptr::null_mut(),
         offline: false,
         atom_in: std::ptr::null(),
         atom_out: std::ptr::null_mut(),
@@ -1045,6 +1059,9 @@ extern "C" fn lv2_connect(instance: *mut c_void, port: u32, data: *mut c_void) {
             instance.atom_in = data as *const u8;
         } else if Some(port) == map.atom_out() {
             instance.atom_out = data as *mut u8;
+        } else if port == map.latency() {
+            instance.latency_port = data as *mut f32;
+            write_latency(instance);
         } else if port >= map.sidechain_first() {
             if let Some(slot) = instance.side_ports.get_mut((port - map.sidechain_first()) as usize) {
                 *slot = data as *const f32;
@@ -1066,8 +1083,18 @@ extern "C" fn lv2_activate(instance: *mut c_void) {
             instance.inner.reset();
             instance.cursor.invalidate();
             instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+            write_latency(instance);
         }
     })
+}
+
+/// Write [`Plugin::latency`] to the host's latency port, if it connected one.
+/// Audio thread (and `connect_port`, `activate`); one store.
+fn write_latency(instance: &mut Instance) {
+    if !instance.latency_port.is_null() {
+        let latency = instance.inner.latency().min(1 << 24) as f32;
+        unsafe { *instance.latency_port = latency };
+    }
 }
 
 extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
@@ -1105,6 +1132,8 @@ fn run_block(instance: *mut Instance, frames: usize) {
         if frames == 0 {
             // An empty output sequence is still a valid one.
             drain_midi(instance, 0);
+            instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+            write_latency(instance);
             flush_worker(instance);
             return;
         }
@@ -1130,6 +1159,7 @@ fn run_block(instance: *mut Instance, frames: usize) {
         render_range(instance, done, frames);
         advance_transport(instance, frames);
         drain_midi(instance, frames);
+        write_latency(instance);
         flush_worker(instance);
     }
 }
@@ -1661,6 +1691,10 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
             channel + 1
         ));
     }
+    ports.push(format!(
+        "    [ a lv2:ControlPort , lv2:OutputPort ;\n      lv2:index {} ; lv2:symbol \"latency\" ; lv2:name \"Latency\" ;\n      lv2:minimum 0 ; units:unit units:frame ;\n      lv2:designation lv2:latency ;\n      lv2:portProperty lv2:reportsLatency , lv2:integer , lv2:connectionOptional ]",
+        map.latency()
+    ));
     out.push_str(&ports.join(" ,\n"));
     out.push_str(" .\n");
     if with_ui {
@@ -1947,8 +1981,10 @@ mod tests {
         assert!(!sized.contains("noUserResize") && sized.contains("lv2:extensionData ui:resize .") && sized.trim_end().ends_with('.'));
         assert!(!plugin_ttl_sized(&Wide, None).contains("a ui:CocoaUI"));
         // Every port block is closed and separated.
-        assert_eq!(ttl.matches("lv2:index").count(), 10);
-        assert_eq!(ttl.matches(" ] ,\n").count(), 9);
+        assert_eq!(ttl.matches("lv2:index").count(), 11);
+        assert_eq!(ttl.matches(" ] ,\n").count(), 10);
+        // The latency output comes last, after the freewheel port (index 9 here).
+        assert!(ttl.contains("lv2:index 10 ; lv2:symbol \"latency\"") && ttl.contains("lv2:designation lv2:latency"));
         let manifest = manifest_ttl(&Wide, "Wide", false);
         assert!(manifest.contains("lv2:binary <Wide."));
         assert!(!manifest.contains("CocoaUI"));

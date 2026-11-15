@@ -116,6 +116,8 @@ int op_shell_param_parse(uint32_t, const char* text, double* out) {
     return 1;
 }
 uint32_t op_shell_abi_version(void) { return OP_PROBE_ABI; }
+// ABI 6: the probes never change their latency or parameter info.
+uint32_t op_shell_take_changes(void*) { return 0; }
 uint32_t op_shell_kind(void) { return OP_PROBE_KIND == 1 ? OP_KIND_INSTRUMENT : OP_KIND_EFFECT; }
 uint32_t op_shell_note_ports(void) {
 #if OP_PROBE_KIND == 0

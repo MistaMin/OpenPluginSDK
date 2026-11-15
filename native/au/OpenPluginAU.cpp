@@ -196,12 +196,14 @@ public:
         }
         scIndex_ = hasMainIn_ ? 1 : 0;
         this->Inputs().SetNumberOfElements(hasMainIn_ ? 1 : 0);
+        if (abiOk_) startPolling();
 #if OP_HAS_EDITOR
         std::lock_guard<std::mutex> lock(gLiveLock);
         gLive.push_back(this);
 #endif
     }
     ~OpenPluginAUImpl() override {
+        stopPolling();
 #if OP_HAS_EDITOR
         {
             std::lock_guard<std::mutex> lock(gLiveLock);
@@ -1081,6 +1083,39 @@ private:
             engine_ = nullptr;
         }
     }
+    // ---- telling the host about changes (ABI 6) ---------------------------------------
+    // A timer on the main run loop asks the engine what changed and tells the host through
+    // property notifications, which reach the listeners on the main thread, never inside a
+    // render. A new latency: kAudioUnitProperty_Latency (GetLatency reads the engine, so the
+    // host reads the new value at once). New parameter info: kAudioUnitProperty_ParameterList
+    // on the global scope, then kAudioUnitProperty_ParameterInfo for each parameter.
+    static constexpr CFTimeInterval kChangesPollSeconds = 0.030;
+    static void onTimer(CFRunLoopTimerRef, void* info) { static_cast<OpenPluginAUImpl*>(info)->pollChanges(); }
+    void startPolling() {
+        CFRunLoopTimerContext context{};
+        context.info = this;
+        timer_ = CFRunLoopTimerCreate(nullptr, CFAbsoluteTimeGetCurrent() + kChangesPollSeconds, kChangesPollSeconds, 0, 0, &OpenPluginAUImpl::onTimer, &context);
+        if (timer_) CFRunLoopAddTimer(CFRunLoopGetMain(), timer_, kCFRunLoopCommonModes);
+    }
+    void stopPolling() {
+        if (timer_) {
+            CFRunLoopTimerInvalidate(timer_);
+            CFRelease(timer_);
+            timer_ = nullptr;
+        }
+    }
+    // Main thread. Returns the OP_CHANGE_* bits it told the host about.
+    uint32_t pollChanges() {
+        if (!engine_) return 0;
+        const uint32_t flags = op_shell_take_changes(engine_) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
+        if (flags & OP_CHANGE_LATENCY) this->PropertyChanged(kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0);
+        if (flags & OP_CHANGE_PARAM_INFO) {
+            this->PropertyChanged(kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0);
+            for (uint32_t i = 0; i < params_.size(); ++i) this->PropertyChanged(kAudioUnitProperty_ParameterInfo, kAudioUnitScope_Global, i);
+        }
+        return flags;
+    }
+    CFRunLoopTimerRef timer_ = nullptr;
     void* engine_ = nullptr;
     bool abiOk_ = false;
     bool kindOk_ = false;

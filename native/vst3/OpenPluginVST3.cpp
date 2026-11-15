@@ -26,6 +26,7 @@
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include "pluginterfaces/vst/vstspeaker.h"
 #include "base/source/fstreamer.h"
+#include "base/source/timer.h"
 #include "pluginterfaces/base/ibstream.h"
 #include <algorithm>
 #include <atomic>
@@ -299,6 +300,12 @@ constexpr double kBypassFadeSeconds = 0.010;
 #if OP_HAS_EDITOR
 constexpr const char* kEngineMessage = "openplugin.engine";
 #endif
+// Processor to controller (ABI 6): the plugin's latency or parameter info
+// changed. Attribute "flags" (int, OP_CHANGE_*). Sent from the processor's
+// main-thread timer; the controller answers with restartComponent.
+constexpr const char* kChangesMessage = "openplugin.changes";
+// How often the processor asks its engine what changed (op_shell_take_changes).
+constexpr uint32 kChangesPollMs = 30;
 // Controller to processor: the host's track (name, colour, kind), from
 // IInfoListener::setChannelContextInfos. Attributes: "name" (TChar string,
 // absent for none), "rgba" (int, 0xRRGGBBAA), "flags" (int, OP_TRACK_*).
@@ -412,7 +419,7 @@ bool save_blob(void* instance, std::vector<uint8_t>& out) {
     return false;
 }
 
-class Processor final : public AudioEffect {
+class Processor final : public AudioEffect, public ITimerCallback {
 public:
     Processor() {
         OpShellInfo info{};
@@ -430,7 +437,10 @@ public:
         noteIn_ = (ports & OP_NOTE_PORT_INPUT) != 0;
         noteOut_ = (ports & OP_NOTE_PORT_OUTPUT) != 0;
     }
-    ~Processor() override { destroy(); }
+    ~Processor() override {
+        stopPolling();
+        destroy();
+    }
     static FUnknown* create(void*) { return static_cast<IAudioProcessor*>(new Processor); }
 
     tresult PLUGIN_API initialize(FUnknown* context) SMTG_OVERRIDE {
@@ -491,6 +501,7 @@ public:
     }
     tresult PLUGIN_API setActive(TBool active) SMTG_OVERRIDE {
         if (!active) {
+            stopPolling();
             announce(nullptr);
             keepChunk();
             destroy();
@@ -507,15 +518,18 @@ public:
         keepChunk();
         destroy();
         engine_ = next;
-        op_shell_reset(engine_);
         // The plugin's state set while inactive, or kept from the engine that
-        // just went away, goes into the new engine.
-        if (!pendingBlob_.empty() && op_shell_load_state(engine_, pendingBlob_.data(), static_cast<uint32_t>(pendingBlob_.size())))
-            pushValues(engine_);
+        // just went away, goes into the new engine, then the values held here.
+        // The reset applies them, so the latency the host reads next (after a
+        // kLatencyChanged restart, too) is the latency of these values.
+        if (!pendingBlob_.empty()) op_shell_load_state(engine_, pendingBlob_.data(), static_cast<uint32_t>(pendingBlob_.size()));
         pendingBlob_.clear();
+        pushValues(engine_);
+        op_shell_reset(engine_);
         prepareBypass();
         announce(engine_);
         applyTrack();
+        startPolling();
         return AudioEffect::setActive(active);
     }
     // The controller's message with the host's track. Message thread. Kept for
@@ -1184,6 +1198,32 @@ private:
         for (auto& line : line_) std::fill(line.begin(), line.end(), 0.0f);
         linePos_ = 0;
     }
+    // ---- telling the host about changes (ABI 6) -----------------------------
+    // A main-thread timer runs while an engine exists. Each tick asks the
+    // engine what changed and hands it to the controller, which owns the host's
+    // IComponentHandler and calls restartComponent. Never on the audio thread.
+    void onTimer(Timer*) SMTG_OVERRIDE { pollChanges(); }
+    void pollChanges() {
+        if (!engine_) return;
+        const uint32_t flags = op_shell_take_changes(engine_) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
+        if (flags == 0) return;
+        if (IPtr<IMessage> message = owned(allocateMessage())) {
+            message->setMessageID(kChangesMessage);
+            message->getAttributes()->setInt("flags", static_cast<int64>(flags));
+            sendMessage(message);
+        }
+    }
+    void startPolling() {
+        if (!timer_) timer_ = Timer::create(this, kChangesPollMs);
+    }
+    void stopPolling() {
+        if (timer_) {
+            timer_->stop();
+            timer_->release();
+            timer_ = nullptr;
+        }
+    }
+    Timer* timer_ = nullptr;
     // Tells the controller which engine an open editor should show. The pointer
     // only means something in this process, and the editor checks it is live.
     void announce(void* engine) {
@@ -1348,10 +1388,17 @@ public:
         setParamNormalized(kBypassId, bypass != 0 ? 1.0 : 0.0);
         return kResultOk;
     }
-#if OP_HAS_EDITOR
-    IPlugView* PLUGIN_API createView(FIDString name) SMTG_OVERRIDE;
+    // The processor's messages: what changed (ABI 6) and, with an editor, the engine.
     tresult PLUGIN_API notify(IMessage* message) SMTG_OVERRIDE {
-        if (message && message->getMessageID() && std::strcmp(message->getMessageID(), kEngineMessage) == 0) {
+        const char* id = message ? message->getMessageID() : nullptr;
+        if (id && std::strcmp(id, kChangesMessage) == 0) {
+            int64 flags = 0;
+            if (!message->getAttributes() || message->getAttributes()->getInt("flags", flags) != kResultOk) return kInvalidArgument;
+            tellHost(static_cast<uint32_t>(flags));
+            return kResultOk;
+        }
+#if OP_HAS_EDITOR
+        if (id && std::strcmp(id, kEngineMessage) == 0) {
             int64 value = 0;
             if (message->getAttributes()->getInt("engine", value) == kResultOk) {
                 engine_ = reinterpret_cast<void*>(static_cast<intptr_t>(value));
@@ -1359,8 +1406,21 @@ public:
             }
             return kResultOk;
         }
+#endif
         return EditController::notify(message);
     }
+    // The plugin's latency or parameter info changed: one restartComponent with
+    // every flag it needs. A new latency makes the host deactivate and activate
+    // the component and read getLatencySamples; new parameter info makes it
+    // read getParameterInfo and the values again. UI thread.
+    void tellHost(uint32_t flags) {
+        int32 restart = 0;
+        if (flags & OP_CHANGE_LATENCY) restart |= kLatencyChanged;
+        if (flags & OP_CHANGE_PARAM_INFO) restart |= kParamTitlesChanged | kParamValuesChanged;
+        if (restart && componentHandler) componentHandler->restartComponent(restart);
+    }
+#if OP_HAS_EDITOR
+    IPlugView* PLUGIN_API createView(FIDString name) SMTG_OVERRIDE;
     tresult PLUGIN_API setParamNormalized(ParamID tag, ParamValue value) SMTG_OVERRIDE {
         const tresult result = EditController::setParamNormalized(tag, value);
         if (editor_ && result == kResultOk && tag < count_) op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, value)));

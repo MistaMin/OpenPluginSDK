@@ -15,7 +15,7 @@ use openplugin_core::{
 use crate::{FfiInstance, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
-pub const ABI: u32 = 4;
+pub const ABI: u32 = 6;
 pub use crate::block::{
     OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
     EVENT_PARAM_NORMALIZED, EVENT_PARAM_PLAIN, MAX_EVENTS, MAX_MIDI_OUT, TRANSPORT_HAS_BEATS,
@@ -29,6 +29,15 @@ pub const TRACK_BUS: u32 = 2;
 pub const TRACK_MASTER: u32 = 4;
 /// The colour argument is valid.
 pub const TRACK_HAS_COLOUR: u32 = 0x100;
+
+// ---- ABI 6: telling the host about changes ----
+/// [`take_changes`] bit: the latency moved; read `op_shell_latency` again and
+/// tell the host. The same bit as [`openplugin_core::HostNotifier::LATENCY`].
+pub const CHANGE_LATENCY: u32 = openplugin_core::HostNotifier::LATENCY;
+/// [`take_changes`] bit: parameter names, units or value text changed; tell the
+/// host to read them again. The same bit as
+/// [`openplugin_core::HostNotifier::PARAM_INFO`].
+pub const CHANGE_PARAM_INFO: u32 = openplugin_core::HostNotifier::PARAM_INFO;
 
 pub const KIND_EFFECT: u32 = 0;
 pub const KIND_INSTRUMENT: u32 = 1;
@@ -702,6 +711,20 @@ pub unsafe fn latency(ptr: *const ShellInstance) -> u32 {
     }
 }
 
+/// What changed since the last call ([`CHANGE_LATENCY`], [`CHANGE_PARAM_INFO`]);
+/// each change is reported once. 0 for a null instance. Any thread; never
+/// blocks, never allocates. ABI 6.
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`].
+pub unsafe fn take_changes(ptr: *const ShellInstance) -> u32 {
+    if ptr.is_null() {
+        0
+    } else {
+        unsafe { (*ptr).ffi.take_changes() }
+    }
+}
+
 /// # Safety
 /// `ptr` is null or a live [`ShellInstance`].
 pub unsafe fn set_plain(ptr: *mut ShellInstance, index: u32, plain: f32) -> u32 {
@@ -1082,7 +1105,7 @@ mod tests {
 
     #[test]
     fn track_info_crosses_the_abi_and_reaches_the_plugin() {
-        assert_eq!(ABI, 4);
+        const { assert!(ABI >= 4, "track info is ABI 4") };
         let instance = create::<Tracked>(48_000.0, 64, 2);
         assert!(!instance.is_null());
         // Name, colour as 0xRRGGBBAA and the kind bits arrive as given.

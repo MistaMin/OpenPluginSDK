@@ -26,7 +26,7 @@ use std::time::{Duration, Instant as Clock};
 
 use openplugin_core::{
     decode_params, encode_params, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Gesture, GestureQueue,
-    IoConfig, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
+    HostNotifier, IoConfig, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
     Seqlock, SpeakerLayout, Tail, TrackInfo, Transport, MAX_AUDIO_CHANNELS,
 };
 
@@ -206,7 +206,14 @@ struct Instance {
     sample_rate: f32,
     max_block: usize,
     host: *const clap_host,
+    /// The latency the host was last told (`latency.changed` in `activate`).
     reported_latency: u32,
+    /// The plugin's [`HostNotifier`] (a clone of the one it was given).
+    notifier: HostNotifier,
+    /// `request_restart` was called for a latency change; cleared by `activate`.
+    restart_requested: AtomicBool,
+    /// `request_callback` was called for pending changes; cleared by `on_main_thread`.
+    callback_requested: AtomicBool,
     reported_tail: Option<u32>,
     layout_index: u32,
     activated: bool,
@@ -565,9 +572,14 @@ unsafe extern "C" fn plugin_activate(plugin: *const clap_plugin, sample_rate: f6
         instance.cursor.invalidate();
         instance.cursor.pull(&instance.plane, instance.inner.as_mut());
         sync_bypass(instance);
+        // `latency.changed` is allowed here only; it reports whatever moved, whether
+        // a block saw it or the plugin said so.
+        instance.notifier.take_some(HostNotifier::LATENCY);
         notify_latency(instance);
+        instance.restart_requested.store(false, Ordering::Release);
         instance.poisoned.store(false, Ordering::Release);
         instance.activated = true;
+        unsafe { main_thread_changes(instance as *mut Instance) };
         true
     })
 }
@@ -576,6 +588,7 @@ unsafe extern "C" fn plugin_deactivate(plugin: *const clap_plugin) {
     guarded(std::ptr::null(), (), || {
         if let Some(instance) = instance(plugin) {
             instance.activated = false;
+            unsafe { main_thread_changes(instance as *mut Instance) };
         }
     })
 }
@@ -1156,6 +1169,8 @@ unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_
                 unsafe { &mut *std::ptr::addr_of_mut!((*raw).cursor) }.invalidate();
                 drop(held);
                 notify_params_rescan(host);
+                // `load_state` may have said its latency or parameter info changed.
+                unsafe { main_thread_changes(raw) };
                 return true;
             }
         }
@@ -1172,6 +1187,7 @@ unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_
             }
         });
         notify_params_rescan(host);
+        unsafe { main_thread_changes(raw) };
         true
     })
 }
@@ -1235,13 +1251,18 @@ fn host_call(host: *const clap_host, id: &[u8]) -> *const c_void {
 }
 
 fn notify_params_rescan(host: *const clap_host) {
+    notify_params_rescan_flags(host, CLAP_PARAM_RESCAN_VALUES);
+}
+
+/// `clap_host_params.rescan(flags)`. Main thread.
+fn notify_params_rescan_flags(host: *const clap_host, flags: u32) {
     let ext = host_call(host, EXT_PARAMS) as *const clap_host_params;
     if ext.is_null() {
         return;
     }
     unsafe {
         if let Some(rescan) = (*ext).rescan {
-            rescan(host, CLAP_PARAM_RESCAN_VALUES);
+            rescan(host, flags);
         }
     }
 }
@@ -1273,13 +1294,55 @@ fn notify_latency(instance: &mut Instance) {
     instance.reported_latency = now;
 }
 
+/// After every block (audio thread): a latency that moved asks the host for a restart, once
+/// until the next `activate` reports it; other pending changes ask for a main-thread
+/// callback, once until `on_main_thread` takes them. Nothing here allocates or locks;
+/// `request_restart` and `request_callback` are thread-safe in CLAP.
 fn watch_latency(instance: &mut Instance) {
-    if !instance.activated {
+    let now = instance.inner.latency().min(u32::MAX as usize) as u32;
+    // The comparison below is what an explicit `latency_changed` asks for.
+    instance.notifier.take_some(HostNotifier::LATENCY);
+    if instance.activated && now != instance.reported_latency {
+        ask_restart(instance.host, &instance.restart_requested);
+    }
+    if instance.notifier.pending() & HostNotifier::PARAM_INFO != 0 {
+        ask_callback(instance.host, &instance.callback_requested);
+    }
+}
+
+fn ask_restart(host: *const clap_host, requested: &AtomicBool) {
+    if !requested.swap(true, Ordering::AcqRel) {
+        request_restart(host);
+    }
+}
+
+fn ask_callback(host: *const clap_host, requested: &AtomicBool) {
+    if host.is_null() || requested.swap(true, Ordering::AcqRel) {
         return;
     }
-    let now = instance.inner.latency().min(u32::MAX as usize) as u32;
-    if now != instance.reported_latency {
-        request_restart(instance.host);
+    match unsafe { (*host).request_callback } {
+        Some(callback) => unsafe { callback(host) },
+        // No callback: the next main-thread call (activate, deactivate, a state load) tells.
+        None => requested.store(false, Ordering::Release),
+    }
+}
+
+/// Tell the host what the plugin said changed, on the main thread. A latency change while
+/// active asks for a restart (CLAP lets `latency.changed` run only inside `activate`, which
+/// reports it); while inactive the next `activate` reports it. Parameter info is rescanned
+/// now: names and flags (`INFO`), value text (`TEXT`) and values (`VALUES`), which CLAP
+/// lets change while active. Works through field pointers, like the state calls, so it
+/// never forms a reference to the instance the audio thread is using.
+unsafe fn main_thread_changes(raw: *mut Instance) {
+    let notifier = unsafe { &*std::ptr::addr_of!((*raw).notifier) };
+    let host = unsafe { (*raw).host };
+    let activated = unsafe { (*raw).activated };
+    let flags = notifier.take();
+    if flags & HostNotifier::LATENCY != 0 && activated {
+        ask_restart(host, unsafe { &*std::ptr::addr_of!((*raw).restart_requested) });
+    }
+    if flags & HostNotifier::PARAM_INFO != 0 {
+        notify_params_rescan_flags(host, CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT | CLAP_PARAM_RESCAN_INFO);
     }
 }
 
@@ -1714,6 +1777,7 @@ fn track_info_changed(plugin: *const clap_plugin) {
     if let Some(editor) = inst.gui.as_mut().and_then(|gui| gui.view.editor()) {
         editor.track_info(&info);
     }
+    unsafe { main_thread_changes(raw) };
 }
 
 unsafe extern "C" fn track_info_plugin_changed(plugin: *const clap_plugin) {
@@ -1748,7 +1812,14 @@ fn host_context_popup(host: *const clap_host, param: u32, x: i32, y: i32) -> boo
     unsafe { popup(host, &target, 0, x, y) }
 }
 
-unsafe extern "C" fn plugin_main_thread(_plugin: *const clap_plugin) {}
+/// The host's answer to `request_callback`: tell it what changed. Main thread.
+unsafe extern "C" fn plugin_main_thread(plugin: *const clap_plugin) {
+    guarded(std::ptr::null(), (), || {
+        let Some(raw) = (unsafe { state_target(plugin) }) else { return };
+        unsafe { &*std::ptr::addr_of!((*raw).callback_requested) }.store(false, Ordering::Release);
+        unsafe { main_thread_changes(raw) };
+    })
+}
 
 fn feature_labels(plugin: &dyn Plugin) -> Vec<&'static str> {
     let mut labels = Vec::with_capacity(4);
@@ -1776,7 +1847,9 @@ fn feature_labels(plugin: &dyn Plugin) -> Vec<&'static str> {
     labels
 }
 
-fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
+fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
+    let notifier = HostNotifier::new();
+    inner.set_host_notifier(notifier.clone());
     let info = inner.info();
     let labels = feature_labels(inner.as_ref());
     let reported_latency = inner.latency().min(u32::MAX as usize) as u32;
@@ -1856,6 +1929,9 @@ fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
         max_block: 0,
         host,
         reported_latency,
+        notifier,
+        restart_requested: AtomicBool::new(false),
+        callback_requested: AtomicBool::new(false),
         reported_tail,
         layout_index: 0,
         activated: false,

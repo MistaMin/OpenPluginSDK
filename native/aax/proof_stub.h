@@ -39,6 +39,11 @@ void op_stub_tag(uint32_t on);
 // OpShellInfo.category (default "Fx").
 void op_stub_set_category(const char* category);
 void op_stub_seen(void* instance, StubSeen* out);
+// ABI 6: give the engine a new latency (raises OP_CHANGE_LATENCY when it moves), raise any
+// OP_CHANGE_* bits, and count the op_shell_take_changes calls so far.
+void op_stub_set_latency(void* instance, uint32_t samples);
+void op_stub_raise_changes(void* instance, uint32_t flags);
+uint32_t op_stub_takes(void);
 uint32_t op_stub_param_count(void);
 #ifdef __cplusplus
 }

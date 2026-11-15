@@ -107,6 +107,8 @@ pub struct clap_host_params {
 }
 
 pub const CLAP_PARAM_RESCAN_VALUES: u32 = 1 << 0;
+pub const CLAP_PARAM_RESCAN_TEXT: u32 = 1 << 1;
+pub const CLAP_PARAM_RESCAN_INFO: u32 = 1 << 2;
 
 #[repr(C)]
 pub struct clap_event_header {

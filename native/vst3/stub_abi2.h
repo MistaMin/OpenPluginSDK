@@ -35,6 +35,10 @@ void op_shell_set_offline(void*, uint32_t) {}
 #ifndef OP_STUB_OWN_TRACK
 uint32_t op_shell_set_track_info(void*, const char*, uint32_t, uint32_t) { return 1; }
 #endif
+#ifndef OP_STUB_OWN_CHANGES
+// ABI 6: these stand-ins never change their latency or parameter info.
+uint32_t op_shell_take_changes(void*) { return 0; }
+#endif
 uint32_t op_shell_midi_out(void*, OpMidiEvent*, uint32_t) { return 0; }
 uint32_t op_shell_midi_dropped(const void*) { return 0; }
 uint32_t op_shell_process_events(void* instance, const OpProcess* args) {

@@ -16,6 +16,7 @@ pub mod editor;
 pub mod foreign_state;
 pub mod layout;
 pub mod midi;
+pub mod notify;
 pub mod plane;
 pub mod preset;
 pub mod ramp;
@@ -36,6 +37,7 @@ pub use editor::{
     Editor, EditorFactory, EditorHost, EditorState, Frame, Gesture, GestureQueue, ParamMenu,
     ParamMenuAction, ValueMirror,
 };
+pub use notify::HostNotifier;
 pub use plane::{ParamCursor, ParamPlane};
 pub use preset::{Preset, PresetBank};
 pub use ramp::SampleRamp;
@@ -620,6 +622,15 @@ pub trait Plugin: Send + 'static {
     /// ignores it. A plugin typically keeps the value for its editor or
     /// starts a return track with wet 100%.
     fn track_info_changed(&mut self, _info: &TrackInfo) {}
+
+    /// The handle through which the plugin tells its host that its latency or
+    /// its parameter info changed ([`notify`]). Called once on the message
+    /// thread right after the plugin is made, before any audio. The default
+    /// drops it: the format entries still compare [`Self::latency`] after
+    /// every block, so a plugin that only changes its latency inside
+    /// `process` need not keep it. Keep it to report a change made outside
+    /// `process`, or a change of parameter names or value text.
+    fn set_host_notifier(&mut self, _notifier: HostNotifier) {}
 
     /// What this engine shares with its editor ([`editor`]). Called once on
     /// the message thread right after the plugin is made, before any audio.

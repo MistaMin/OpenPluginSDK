@@ -41,8 +41,8 @@ use std::time::{Duration, Instant};
 
 use openplugin_core::{
     decode_session, encode_session, release_momentary, sample_rate_supported, BusMeters,
-    EditorState, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, PluginInfo, Seqlock,
-    Tail, Taper, Unit, MAX_AUDIO_CHANNELS,
+    EditorState, HostNotifier, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane,
+    PluginInfo, Seqlock, Tail, Taper, Unit, MAX_AUDIO_CHANNELS,
 };
 
 pub use openplugin_core::Plugin;
@@ -168,6 +168,12 @@ pub struct FfiInstance {
     meters: Seqlock<MeterFrame>,
     bus_meters: Seqlock<BusMeters>,
     latency: AtomicU32,
+    /// The latency [`FfiInstance::latency`] last returned: what the host knows.
+    told_latency: AtomicU32,
+    /// Set when a block, a reset or a state call saw [`Plugin::latency`] move.
+    latency_moved: AtomicBool,
+    /// The plugin's [`HostNotifier`] (a clone of the one it was given).
+    notifier: HostNotifier,
     offline: AtomicU32,
     preset: AtomicI32,
     info: &'static PluginInfo,
@@ -205,6 +211,8 @@ impl FfiInstance {
         max_block: usize,
         channels: usize,
     ) -> Self {
+        let notifier = HostNotifier::new();
+        plugin.set_host_notifier(notifier.clone());
         let info = plugin.info();
         let presets = collect_presets(plugin.as_ref());
         let editor_state = plugin.editor_state();
@@ -246,6 +254,9 @@ impl FfiInstance {
             meters: Seqlock::new(MeterFrame::SILENT),
             bus_meters: Seqlock::new(BusMeters::SILENT),
             latency: AtomicU32::new(latency),
+            told_latency: AtomicU32::new(latency),
+            latency_moved: AtomicBool::new(false),
+            notifier,
             offline: AtomicU32::new(0),
             preset: AtomicI32::new(-1),
             info,
@@ -363,8 +374,42 @@ impl FfiInstance {
         param.to_normalized(self.load_param(index))
     }
 
+    /// The latency as of the last block (or `prepare`, `reset`, a state
+    /// load). This is the host's read: the value is remembered as the one the
+    /// host knows, so [`FfiInstance::take_changes`] does not report it again.
+    /// Any thread; never blocks.
     pub fn latency(&self) -> u32 {
-        self.latency.load(Ordering::Acquire)
+        let now = self.latency.load(Ordering::Acquire);
+        self.told_latency.store(now, Ordering::Release);
+        now
+    }
+
+    /// What changed since the last call, as [`HostNotifier`] bits: the
+    /// plugin's own [`HostNotifier`] calls, plus [`HostNotifier::LATENCY`]
+    /// when a block saw [`Plugin::latency`] move. A latency equal to the one
+    /// the host last read through [`FfiInstance::latency`] is not reported,
+    /// so a new engine that comes up with the latency the host already
+    /// knows is quiet. Each change is reported once. Any thread (the shells
+    /// call it on their main thread); never blocks, never allocates.
+    pub fn take_changes(&self) -> u32 {
+        let mut flags = self.notifier.take();
+        if self.latency_moved.swap(false, Ordering::AcqRel) {
+            flags |= HostNotifier::LATENCY;
+        }
+        if flags & HostNotifier::LATENCY != 0
+            && self.latency.load(Ordering::Acquire) == self.told_latency.load(Ordering::Acquire)
+        {
+            flags &= !HostNotifier::LATENCY;
+        }
+        flags
+    }
+
+    /// Store the plugin's latency and note whether it moved. No allocation.
+    fn note_latency(&self, latency: usize) {
+        let latency = latency.min(u32::MAX as usize) as u32;
+        if self.latency.swap(latency, Ordering::AcqRel) != latency {
+            self.latency_moved.store(true, Ordering::Release);
+        }
     }
 
     pub fn meters(&self) -> MeterFrame {
@@ -401,7 +446,11 @@ impl FfiInstance {
     /// false when it gave up (nothing was delivered) or the plugin panicked.
     pub fn set_track_info(&self, info: &openplugin_core::TrackInfo) -> bool {
         catch_unwind(AssertUnwindSafe(|| {
-            self.with_exclusive(|audio| audio.inner.track_info_changed(info)).is_some()
+            self.with_exclusive(|audio| {
+                audio.inner.track_info_changed(info);
+                self.note_latency(audio.inner.latency());
+            })
+            .is_some()
         }))
         .unwrap_or(false)
     }
@@ -460,10 +509,14 @@ impl FfiInstance {
         match self.enter_audio() {
             Some(_gate) => {
                 let audio = unsafe { &mut *self.audio.get() };
+                // The values stored so far apply first, so the latency read
+                // after a reset is the one the next block will have.
+                audio.cursor.pull(&self.plane, audio.inner.as_mut());
                 audio.inner.reset();
                 for buffer in &mut audio.buffers {
                     buffer.fill(0.0);
                 }
+                self.note_latency(audio.inner.latency());
             }
             None => self.reset_pending.store(true, Ordering::Release),
         }
@@ -537,6 +590,7 @@ impl FfiInstance {
             }
             // The chunk may have moved plugin parameters; push the plane again.
             audio.cursor.invalidate();
+            self.note_latency(audio.inner.latency());
             true
         })
         .unwrap_or(false)
@@ -755,7 +809,7 @@ impl FfiInstance {
         );
         let tail = tail_seconds_of(audio.inner.tail(), audio.rate);
         self.tail.store(tail.to_bits(), Ordering::Release);
-        self.latency.store(latency as u32, Ordering::Release);
+        self.note_latency(latency);
         self.meters.publish(meters);
         self.bus_meters.publish(bus);
     }
