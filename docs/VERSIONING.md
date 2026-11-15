@@ -48,7 +48,7 @@ Not breaking: adding a new item, module, function, enum variant on a `#[non_exha
 
 ### 2. The C ABI
 
-The shell ABI is a separate contract between a plugin binary built with `export_shell!` and the native VST3, Audio Unit and AAX adapters (`native/include/op_shell.h`, `native/include/op_editor.h`). The adapters and the plugin may be built at different times, so the ABI is versioned on its own: `OP_SHELL_ABI` (`openplugin_ffi::shell::ABI`, currently 1). Adapters refuse a plugin whose `abi` differs.
+The shell ABI is a separate contract between a plugin binary built with `export_shell!` and the native VST3, Audio Unit and AAX adapters (`native/include/op_shell.h`, `native/include/op_editor.h`). The adapters and the plugin may be built at different times, so the ABI is versioned on its own: `OP_SHELL_ABI` (`openplugin_ffi::shell::ABI`, currently 3). Adapters refuse a plugin whose `abi` differs.
 
 - Breaking, and requires `OP_SHELL_ABI` to increase: changing the signature, meaning or return values of any `op_shell_*` or `op_editor_*` function; changing the layout or the order of `OpShellInfo`, `OpParamDesc` or `OpEditorHost`; changing a constant's value (`PARAM_*`, `STATE_*`, flag bits); changing the threading or allocation rules in [SHELL.md](SHELL.md).
 - Not breaking, and `OP_SHELL_ABI` stays: adding a new function (as `op_shell_save_state` and `op_shell_load_state` were added while the ABI stayed 1), provided a shell that does not call it behaves as before and the header declares it without a guard. Adding a field to a struct breaks the layout, so structs only grow at the end with a `size` the caller sets, or through a new function.
