@@ -336,6 +336,7 @@ bool ProcessState::prepareStems(double rate, AAX_EStemFormat inputStem, AAX_ESte
     out = nextOut;
     sidechain = nextSide;
     noteOnly = nextNoteOnly;
+    notePorts = op_shell_note_ports();
     channels = out.aax;
     sampleRate = static_cast<uint32_t>(rate);
     paramCount = info.param_count;
@@ -463,8 +464,13 @@ void AAX_CALLBACK process(Context* const begin[], const void* end) {
         }
         // Events for the whole AAX buffer. MIDI first: it has the room it needs.
         uint32_t events = 0;
-        if (context->midiIn) {
-            if (const AAX_CMidiStream* stream = context->midiIn->GetNodeBuffer(); stream && stream->mBuffer) {
+        // Fields Describe did not register hold undefined values in a real host, so each
+        // optional field is read only when this plugin registered it.
+        AAX_IMIDINode* const midiIn = (state.notePorts & OP_NOTE_PORT_INPUT) ? context->midiIn : nullptr;
+        AAX_IMIDINode* const midiOut = (state.notePorts & OP_NOTE_PORT_OUTPUT) ? context->midiOut : nullptr;
+        const int32_t* const sideChainIndex = state.sidechain ? context->sideChain : nullptr;
+        if (midiIn) {
+            if (const AAX_CMidiStream* stream = midiIn->GetNodeBuffer(); stream && stream->mBuffer) {
                 for (uint32_t i = 0; i < stream->mBufferSize && events < OP_MAX_EVENTS; ++i) {
                     if (midiToEvent(stream->mBuffer[i], frames, &state.events[events])) ++events;
                 }
@@ -491,8 +497,8 @@ void AAX_CALLBACK process(Context* const begin[], const void* end) {
         const bool haveTransport = context->transport && readTransport(context->transport, state.sampleRate, &transport);
         // The host's sidechain: the extra channel after the main inputs; an index of 0 means none.
         const float* sidechain[1] = {nullptr};
-        if (context->sideChain && context->input && *context->sideChain > 0 && *context->sideChain < 64) {
-            sidechain[0] = context->input[*context->sideChain];
+        if (sideChainIndex && context->input && *sideChainIndex > 0 && *sideChainIndex < 64) {
+            sidechain[0] = context->input[*sideChainIndex];
         }
         const float target = bypass ? 1.f : 0.f;
         if (state.mixPending) {
@@ -550,7 +556,7 @@ void AAX_CALLBACK process(Context* const begin[], const void* end) {
                         else if (in != context->output[c]) std::memmove(context->output[c] + offset, in + offset, count * sizeof(float));
                     }
                 }
-                if (context->midiOut) postMidi(state, context->midiOut, offset);
+                if (midiOut) postMidi(state, midiOut, offset);
             }
             applyBypass(state, context, offset, count, target);
             offset += count;

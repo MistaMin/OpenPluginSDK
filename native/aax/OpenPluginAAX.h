@@ -91,6 +91,9 @@ struct ProcessState {
     Bus in, out;
     bool sidechain = false;    // the selected layout has a sidechain bus
     bool noteOnly = false;     // the layout has no audio output: audio passes through, MIDI is the point
+    // The plugin's note ports (op_shell_note_ports), so process() reads the MIDI node fields only
+    // when Describe registered them: AAX leaves an unregistered context field undefined, not null.
+    uint32_t notePorts = 0;
     // Bypass: the input delayed by the reported latency, crossfaded with the
     // engine output. All of it is allocated in prepare(); process() only reads
     // and writes it.

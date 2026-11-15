@@ -1,3 +1,4 @@
+#include <cstdint>
 // SPDX-License-Identifier: MIT
 // Calls the AAX process callback directly over the SDK example shell. This is
 // not a Pro Tools host test. Expected parameter count, defaults, latency and
@@ -41,6 +42,14 @@ static Rendered render(openplugin_aax::ProcessState& state, openplugin_aax::Pack
     int32_t frames = kFrames;
     auto* statePtr = &state;
     openplugin_aax::Context context{input, output, &frames, packet.get(), &statePtr};
+    // Pro Tools leaves a context field that Describe did not register undefined, not null
+    // (found in Pro Tools 2025.10: a plugin without MIDI faulted on its MIDI input field).
+    // Fill each field this plugin does not register with an address that faults when read,
+    // so the shell is proven to leave them alone.
+    const uint32_t notePorts = op_shell_note_ports();
+    if (!(notePorts & OP_NOTE_PORT_INPUT)) context.midiIn = reinterpret_cast<AAX_IMIDINode*>(uintptr_t{0x8});
+    if (!(notePorts & OP_NOTE_PORT_OUTPUT)) context.midiOut = reinterpret_cast<AAX_IMIDINode*>(uintptr_t{0x18});
+    if (!state.sidechain) context.sideChain = reinterpret_cast<const int32_t*>(uintptr_t{0x28});
     openplugin_aax::Context* contexts[] = {&context};
     Rendered result;
     for (int block = 0; block < blocks; ++block) {
