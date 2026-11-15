@@ -93,6 +93,14 @@ struct Plug {
         CHECK(component->getControllerClassId(controllerId) == kResultOk);
         CHECK(factory->createInstance(controllerId, IEditController::iid, reinterpret_cast<void**>(&controller)) == kResultOk && controller);
         CHECK(controller->initialize(nullptr) == kResultOk);
+        // Parameter text is UTF-8 in the ABI and UTF-16 in VST3: the stub's text holds
+        // 2, 3 and 4 byte characters, and must arrive as the same characters.
+        String128 text{};
+        CHECK(controller->getParamStringByValue(0, 0.5, text) == kResultOk);
+        static const TChar expected[] = {'0', '.', '5', '0', ' ', 0x00E9, 0x2713, 0xD83D, 0xDE00, ' ', 's', 't', 'u', 'b', 0};
+        CHECK(std::memcmp(text, expected, sizeof(expected)) == 0);
+        double typed = -1.0;
+        CHECK(controller->getParamValueByString(0, text, typed) == kResultOk && typed == 0.5);
     }
     ~Plug() {
         if (active) stop();

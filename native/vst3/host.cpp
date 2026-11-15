@@ -110,6 +110,103 @@ static ParamID check_bypass_parameter(IEditController* controller) {
     CHECK(controller->getParamNormalized(id) == 0.0);
     return id;
 }
+
+// Parameter text: the host asks the controller for the text of a normalized
+// value and for the value of a typed text. The text is the plugin's own
+// (op_shell_param_format), not the normalized number; typed text is read as
+// the plugin reads it (op_shell_param_parse).
+static std::string text_of(IEditController* controller, ParamID id, double normalized) {
+    String128 text{};
+    CHECK(controller->getParamStringByValue(id, normalized, text) == kResultOk);
+    return ascii_of(text);
+}
+static bool value_of(IEditController* controller, ParamID id, const char* ascii, double& normalized) {
+    String128 text{};
+    UString(text, 128).fromAscii(ascii);
+    return controller->getParamValueByString(id, text, normalized) == kResultOk;
+}
+static std::string abi_text(uint32_t index, double plain) {
+    char buf[128];
+    const size_t length = op_shell_param_format(index, plain, buf, sizeof(buf));
+    CHECK(length < sizeof(buf));
+    return std::string(buf, length);
+}
+static void check_parameter_text(IEditController* controller, ParamID bypass, const char* label) {
+    OpShellInfo info{};
+    CHECK(op_shell_info(&info) != 0);
+    uint32_t discreteSeen = 0;
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        OpParamDesc desc{};
+        CHECK(op_shell_param(i, &desc) != 0);
+        // Every parameter: the controller shows the plugin's text for the plain
+        // value at the ends, the default and the middle, and reads it back.
+        for (double normalized : {0.0, desc.default_normalized, 0.5, 1.0}) {
+            const double plain = op_shell_to_plain(i, normalized);
+            const std::string shown = text_of(controller, i, normalized);
+            CHECK(shown == abi_text(i, plain));
+            CHECK(!shown.empty());
+            double back = -1.0;
+            CHECK(value_of(controller, i, shown.c_str(), back));
+            // The text is rounded for display, so a continuous parameter comes
+            // back within its display precision.
+            // A discrete parameter snaps to a step, so only its steps are compared (below).
+            if (desc.steps < 2) CHECK(std::fabs(back - normalized) <= 0.02);
+        }
+        if (desc.steps > 1) ++discreteSeen;
+    }
+    // The example's Gain (-24 to 24 dB, the first parameter): 0.625 is +6 dB.
+    OpParamDesc gain{};
+    CHECK(op_shell_param(0, &gain) != 0);
+    if (gain.min == -24.0 && gain.max == 24.0 && std::string(gain.unit) == "dB") {
+        const std::string shown = text_of(controller, 0, 0.625);
+        std::printf("VST3 %s Gain at normalized 0.625 shows \"%s\"\n", label, shown.c_str());
+        CHECK(shown == "6.0 dB");
+        CHECK(shown.find("0.6250") == std::string::npos);
+        double typed = -1.0;
+        CHECK(value_of(controller, 0, "6 dB", typed));
+        std::printf("VST3 %s \"6 dB\" reads as normalized %.6f\n", label, typed);
+        CHECK(std::fabs(typed - 0.625) < 1e-6);
+        CHECK(value_of(controller, 0, "-24", typed) && std::fabs(typed) < 1e-6);
+        CHECK(value_of(controller, 0, "+24 dB", typed) && std::fabs(typed - 1.0) < 1e-6);
+        CHECK(value_of(controller, 0, "99 dB", typed) && std::fabs(typed - 1.0) < 1e-6);  // clamped
+    }
+    // Text that is not a value is refused and leaves the value alone.
+    for (const char* bad : {"", "loud", "3 parsecs"}) {
+        double value = 0.123;
+        CHECK(!value_of(controller, 0, bad, value));
+        CHECK(value == 0.123);
+    }
+    // A toggle or choice round-trips its label.
+    for (uint32_t i = 0; i < info.param_count; ++i) {
+        OpParamDesc desc{};
+        CHECK(op_shell_param(i, &desc) != 0);
+        if (desc.steps < 2 || desc.steps > 64) continue;
+        for (uint32_t step = 0; step < desc.steps; ++step) {
+            const double normalized = static_cast<double>(step) / (desc.steps - 1);
+            const std::string label_text = text_of(controller, i, normalized);
+            double back = -1.0;
+            CHECK(value_of(controller, i, label_text.c_str(), back));
+            CHECK(std::fabs(back - normalized) < 1e-9);
+        }
+        if (std::string(desc.unit) != "dB" && desc.steps == 2) {
+            std::printf("VST3 %s %s: Off \"%s\", On \"%s\"\n", label, desc.name, text_of(controller, i, 0.0).c_str(), text_of(controller, i, 1.0).c_str());
+        }
+    }
+    CHECK(discreteSeen >= 1);
+    // Bypass reads as a switch.
+    CHECK(text_of(controller, bypass, 0.0) == "Off");
+    CHECK(text_of(controller, bypass, 1.0) == "On");
+    double value = -1.0;
+    CHECK(value_of(controller, bypass, "on", value) && value == 1.0);
+    CHECK(value_of(controller, bypass, " Off ", value) && value == 0.0);
+    CHECK(!value_of(controller, bypass, "maybe", value));
+    // Hostile calls reach no crash: an unknown id and a null string.
+    String128 sink{};
+    CHECK(controller->getParamStringByValue(0x7FFFFFF0u, 0.5, sink) != kResultOk);
+    double ignored = 0.0;
+    CHECK(controller->getParamValueByString(0x7FFFFFF0u, sink, ignored) != kResultOk);
+    std::printf("VST3 %s parameter text: plugin text shown and read back for %u parameters\n", label, info.param_count);
+}
 static std::vector<std::pair<ParamID, double>> normalized_values(const std::vector<float>& plain) {
     std::vector<std::pair<ParamID, double>> result;
     for (uint32_t i = 0; i < plain.size(); ++i)
@@ -544,6 +641,7 @@ int main(int argc, char** argv) {
         // the input delayed by the reported latency, and leaving bypass
         // restores the processed signal.
         const ParamID bypass = check_bypass_parameter(controller);
+        check_parameter_text(controller, bypass, label);
         const uint32_t latency = processor->getLatencySamples();
         CHECK(latency < 7 * 512);
         std::vector<float> delayed(512);
