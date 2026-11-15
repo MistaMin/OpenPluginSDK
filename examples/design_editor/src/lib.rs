@@ -97,6 +97,11 @@ impl Plugin for DesignDemo {
             let mut low = state.as_deref().copied().unwrap_or(0.0);
             for s in &mut channel[..frames] {
                 low += a * (*s * self.gain - low);
+                // A NaN or infinity in the state would stay for good, and a decaying
+                // state would pass through denormal numbers on its way to zero.
+                if !low.is_finite() || low.abs() < 1e-20 {
+                    low = 0.0;
+                }
                 let x = low * pre;
                 let y = match self.mode {
                     0 => x,
