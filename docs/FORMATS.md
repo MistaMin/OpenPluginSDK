@@ -19,6 +19,8 @@ OpenPluginSDK's target crates line up with the five formats:
 
 ## Validators in CI
 
+Real host sessions (REAPER and OpenGrid9, scripted) and their results are in [HOST_TESTS.md](HOST_TESTS.md).
+
 - **CLAP.** `clap-validator` 0.4.1 on the `examples/editor` bundle.
 - **LV2.** The `lv2-validate` job installs `lv2` and `lilv` with Homebrew, assembles `example_editor.lv2` from the `examples/editor` dylib and the files `lv2_ttl` writes, runs `lv2_validate` on `manifest.ttl` and `libexample_editor.ttl`, then renders a stereo sine through `lv2apply` with `Gain` at 6 dB and checks that the peak doubled.
 - **VST3 and AU.** The `shell-validators` job runs pluginval 1.0.4 at strictness 10 on the VST3 bundle and the installed Audio Unit, and `auval -v aufx ExGn OpGd` (also `-strict`) on the Audio Unit. See `docs/SHELL.md`.

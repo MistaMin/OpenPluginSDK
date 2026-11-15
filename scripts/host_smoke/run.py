@@ -272,7 +272,9 @@ def audio_checks(d, fmt):
 # ---------------------------------------------------------------- OpenGrid9
 
 OG9_TYPES = {"au": 0, "lv2": 2, "vst3": 7}
-PLUGIN_NAME = "Editor Gain"  # the name the plug-in reports (examples/editor); the bundles are "Example Gain"
+# The name each format reports to OpenGrid9. VST3 and LV2 carry the plug-in's own name
+# (examples/editor); the Audio Unit carries the product name given to build_plugin.sh.
+PLUGIN_NAMES = {"vst3": "Editor Gain", "lv2": "Editor Gain", "au": "Example Gain"}
 OG9_VST3_SCANNER = OG9_APP + "/Contents/lib/ardour-vst3-scanner"
 OG9_AU_SCANNER = OG9_APP + "/Contents/lib/ardour-au-scanner"
 
@@ -331,10 +333,10 @@ def og9_format(fmt, build, root, home):
     sdir = os.path.join(d, "session")
     cj, lj = os.path.join(d, "create.json"), os.path.join(d, "load.json")
     pat = os.path.join(d, "pattern.txt")
-    create = og9_run_phase(["create", sdir, "smoke", PLUGIN_NAME, str(OG9_TYPES[fmt]), cj, pat], env, cj, sdir=sdir)
+    create = og9_run_phase(["create", sdir, "smoke", PLUGIN_NAMES[fmt], str(OG9_TYPES[fmt]), cj, pat], env, cj, sdir=sdir)
     load = None
     if create.get("ok"):
-        load = og9_run_phase(["load", sdir, "smoke", PLUGIN_NAME, str(OG9_TYPES[fmt]), lj, pat], env, lj)
+        load = og9_run_phase(["load", sdir, "smoke", PLUGIN_NAMES[fmt], str(OG9_TYPES[fmt]), lj, pat], env, lj)
     return {"format": fmt, "create": create, "load": load}
 
 
@@ -390,10 +392,11 @@ def register_au():
 def auval(strict):
     cmd = ["/usr/bin/auval"] + (["-strict"] if strict else []) + ["-v", "aufx", "ExGn", "OpGd"]
     rc, out = run(cmd, timeout=600)
-    last = [ln for ln in out.splitlines() if ln.strip()][-3:]
+    verdict = [ln.strip() for ln in out.splitlines() if "AU VALIDATION" in ln or "FAILED" in ln]
     return {"name": "auval" + (" -strict" if strict else ""),
             "ok": rc == 0 and "AU VALIDATION SUCCEEDED" in out,
-            "detail": " / ".join(last), "full": out}
+            "detail": "%s (%d lines of output, exit %d)" % (" ".join(verdict) or "no verdict", len(out.splitlines()), rc),
+            "full": out}
 
 
 # ---------------------------------------------------------------- main
