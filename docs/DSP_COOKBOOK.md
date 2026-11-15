@@ -928,3 +928,100 @@ The kernel is a Kaiser-windowed sinc stored as a table of 256 to 2048 phases per
 | `Best` | 128 | 0.44 | 0.00002 dB | -118.9 dB |
 
 Folding test (a 0.30 cycles/sample tone read at ratio 1.7 would land above Nyquist): the residue is -60.4, -84.4, -101.3 and -132.3 dB for the four qualities, and a tone that stays in band keeps unit gain to within 0.14 % (`Low`) or better. `SincConfig` sets the taps, attenuation and phases by hand.
+
+## Multiband and dynamic EQ
+
+Five blocks built from the crossovers, the SVF, the envelope followers, the gain computer, the limiter and the linear-phase oversampler. All are allocation-free after construction, have `f64` filter state where they filter, treat non-finite input as `0.0`, ignore NaN settings, and are proven in `crates/openplugin-dsp/tests/multiband.rs`, `multiband_no_alloc.rs` and `multiband_conformance.rs`.
+
+### Multiband compressor
+
+```rust
+use openplugin_dsp::{DynamicsParams, LrOrder, MultibandCompressor};
+
+// prepare (allocates once): 3 bands, LR4, split at 200 Hz and 3 kHz
+let mut mb = MultibandCompressor::new(sample_rate, channels, 3, LrOrder::Lr4, &[200.0, 3000.0]);
+mb.set_band_params(0, DynamicsParams { threshold_db: -24.0, ratio: 3.0, ..Default::default() });
+mb.set_band_link(0.3);          // 0 independent .. 1 every band follows the deepest
+mb.set_band_solo(1, false);
+mb.set_band_bypass(2, false);
+mb.set_band_trim_db(2, -1.5);   // slewed over 5 ms, like solo changes
+// process (any block size):
+mb.process(&mut [&mut left, &mut right]);
+let gr0 = mb.gain_reduction_db(0); // for a meter
+```
+
+Each band is a `Dynamics` (compressor, expander or gate), so every parameter of `DynamicsParams` is per band. With every band bypassed, or at unity gain, the sum is flat: measured within 0.0025 dB (limit 0.01) from 20 Hz to 20 kHz for LR2, LR4 and LR8, 2, 3 and 4 bands, at 44.1, 48, 96 and 192 kHz. No latency. Neighbouring bands leak into each other (an LR4 band is only 42 dB down at 1.7 octaves), so a deep reduction in one band shifts what a tone near its edge measures; the static-curve test uses LR8 with the tone three octaves from either edge, and then agrees with the ideal `(1 - 1/ratio)` line within 0.01 dB.
+
+Measured per-band static curve (LR8, mid band of a 100 Hz / 8 kHz split, 1 kHz tone, threshold -26 dB, ratio 4, hard knee, linear-domain decoupled peak detector): gain 0.00, -7.49, -14.99, -19.49 dB at -26, -16, -6, 0 dB input (ideal 0, -7.5, -15, -19.5). Use `Domain::Linear` with `Topology::Decoupled` when the reading must be exact.
+
+### Dynamic EQ band
+
+```rust
+use openplugin_dsp::{DynEqKind, DynEqMode, DynamicEqBand, DynamicEqParams};
+
+let mut band = DynamicEqBand::new(sample_rate, channels);
+band.set_params(DynamicEqParams {
+    kind: DynEqKind::Bell, mode: DynEqMode::Above,
+    freq_hz: 3500.0, q: 2.0,
+    gain_db: 0.0,                 // resting gain
+    threshold_db: -24.0, ratio: 4.0, knee_db: 6.0,
+    range_db: -9.0,               // cut up to 9 dB; positive boosts
+    attack_ms: 8.0, release_ms: 120.0,
+    ..Default::default()
+});
+band.process(&mut [&mut left, &mut right]);                              // detector on the band's own signal
+band.process_sidechain(&mut [&mut left, &mut right], &[&key_l, &key_r]); // or an external key
+```
+
+Bell, low shelf and high shelf on the `Svf`. The detector is band-limited to the band (band-pass for a bell, low-pass for a low shelf, high-pass for a high shelf), RMS, calibrated so a sine reads its peak: the threshold is in dBFS of a sine. `Above` engages over the threshold, `Below` under it (upward processing). The engagement `min(|range|, (1 - 1/ratio) excess)` is smoothed in dB by `Ballistics`. The SVF coefficients are recomputed every 125 us (6 samples at 48 kHz) rather than every sample: a bell needs a `tan` and a `powf`, the engagement is smoothed at audio rate, and the TPT filter has no coefficient-change transient. A change below 0.001 dB is not applied. `DynamicEqParams::static_gain_db(level)` is the curve for drawing.
+
+Measured (1 kHz bell, Q 1, threshold -30 dB, ratio 4, range -12 dB): steady gain 0.00, -3.83, -7.58, -11.33, -12.00 dB at -30, -25, -20, -15, -10 dB, against the ideal 0, -3.75, -7.5, -11.25, -12. A step to -20 dB with attack 40 ms reached 63.2 % of its target at 41.0 ms; the release back to quiet left 36.8 % at 120.7 ms (set 120). A quiet external key leaves a tone alone and a loud key cuts it the full 12 dB. A high shelf with an infinite ratio and a 9 dB range cuts 8 kHz by 8.5 dB (the shelf's own gain there) and leaves 200 Hz.
+
+### Transient shaper
+
+```rust
+use openplugin_dsp::TransientShaper;
+
+let mut ts = TransientShaper::new(sample_rate);
+ts.set_attack(0.6);     // -1..1: soften .. emphasise onsets
+ts.set_sustain(-0.3);   // -1..1: shorten .. lift the tail
+ts.set_max_gain_db(12.0);
+ts.process(&mut [&mut left, &mut right]); // one linked gain
+```
+
+A fast and a slow envelope follower (defaults 1/20 ms and 25/150 ms, linear, decoupled peak; Zoelzer, "DAFX", 2nd ed., section 4.2 for the followers); their dB difference `d` is positive on onsets and negative in decays. The gain is `attack * d` on onsets and `-sustain * d` on tails, limited to +-12 dB, faded out below -70 dB so noise floors are not shaped, and smoothed over 0.3 ms. Keep the fast release a few periods of the lowest frequency, or the gain follows the waveform. Measured on a 1 kHz tone burst: attack +1 raised the first 5 ms by 12.0 dB (the limit), +0.5 by 11.7 dB, -0.5 and -1 lowered it by 4.7 and 4.8 dB, steady state unchanged (0.000 dB); on a 60 ms exponential decay sustain +1 lifted the tail by 11.5 dB and -1 lowered it by 11.5 dB with the onset unchanged. The effect is program dependent (the gain tracks the envelope difference in dB); lower `max_gain_db` for gentler shaping.
+
+### De-esser
+
+```rust
+use openplugin_dsp::{DeEssDetect, DeEssMode, DeEsser};
+
+let mut de = DeEsser::new(sample_rate, channels);
+de.set_frequency(6500.0);  de.set_q(1.5);
+de.set_threshold_db(-30.0); de.set_ratio(4.0); de.set_range_db(12.0);
+de.set_mode(DeEssMode::SplitBand);       // or WideBand
+de.set_detect(DeEssDetect::BandPass);    // or HighPass
+de.set_listen(false);                    // true: hear the detector
+de.process(&mut [&mut left, &mut right]);
+```
+
+Detection is a band-pass (or high-pass) of the input or of a key, into a `Dynamics` compressor. Wide-band multiplies everything by the gain. Split-band with a band-pass detector outputs `x + (g - 1) band`: exact at `g = 1` and exactly `g` at the band centre. With a high-pass detector it outputs `low + g high` of an LR4 split (only half the reduction at the corner itself, where both halves are -6 dB). Measured with a 0.3 amplitude tone, threshold -30 dB, ratio 6, range 15 dB: 7 kHz reduced by 15.0 dB in both modes (band-pass), 200 Hz untouched (0.00 dB); high-pass detection at 4 kHz reduced 7 kHz by 15.0 dB wide-band and 12.3 dB split-band. With a 200 Hz tone riding on the sibilant, split-band leaves it alone (0.00 dB) and wide-band ducks it 15 dB.
+
+### True-peak clipper
+
+```rust
+use openplugin_dsp::TruePeakClipper;
+
+// prepare (allocates): 4x, stereo, host blocks up to 512
+let mut clip = TruePeakClipper::prepare(sample_rate, 4, 2, 512).unwrap();
+clip.set_ceiling_db(-1.0);
+clip.set_drive_db(6.0);
+clip.set_knee_db(3.0);          // 0 = hard clip, else a tanh knee
+clip.set_guard_db(0.0);         // optional extra margin under the ceiling
+clip.process(&mut [&mut left, &mut right]);
+let latency = clip.latency_samples(); // return from Plugin::latency
+```
+
+The curve is linear up to `ceiling - knee`, then `x_k + w tanh((x - x_k)/w)` with `w` the knee width (C1, never reaching the ceiling), or a hard clamp for knee 0. It runs at 2x or 4x on `LinearPhaseOversampler`, then through the crate's lookahead true-peak `Limiter` (1 ms lookahead, 20 ms release) that removes what the decimation filter's ringing adds back, and a final sample clamp. `latency_samples()` is the oversampler's 64 plus the limiter's delay (121 at 48 kHz). Why the limiter: without it a hard-clipped 11 kHz sine at 4x measured 1.8 dB over the ceiling, and clamping samples to the ceiling is no cure (samples pinned at an fs/4 tone's 45-degree phase have an inter-sample peak 3 dB higher).
+
+True-peak result against an independent 16x Hann-windowed-sinc interpolator (ceilings -1 and -6 dBFS, knees 0 and 6 dB, 2x and 4x): the sample peak never exceeds the ceiling; the true-peak excess over the ceiling is held to a stated tolerance of **0.6 dB** for tones, sweeps and square waves (measured: 1 kHz sine -0.03 dB, fs/4 sine at 45 degrees 0.00, 11 kHz sine 0.00, 3 kHz square +0.10, a 20 Hz to 24 kHz sweep +0.50 at the -6 dB ceiling) and **1.7 dB** for full-band white noise driven hard into the clip (measured +1.48). The noise figure is the limiter's known open item (its detector under-reads full-band noise), not the clip. Below the ceiling the block is a delayed wire (error 1e-6).
