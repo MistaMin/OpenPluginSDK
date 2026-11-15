@@ -148,3 +148,37 @@ CI runs all of the above except AAX (its SDK is not redistributable) in the `uni
 Not covered by the universal checks: Intel hardware (Rosetta is not a real Intel CPU), a signed or notarised universal build, `auval` and `pluginval` on the x86_64 slice, and the editor proofs (they need a window server).
 
 Not covered: installing the package, a signed or notarised package (shown with `make_pkg.sh --dry-run` only), the standalone path (the example has no standalone binary), real Developer ID signing, notarisation and PACE signing (shown with `--dry-run` only), and Intel hardware.
+
+## Linux
+
+`scripts/build_plugin_linux.sh` builds a plugin crate into the formats that work on Linux today: CLAP and LV2. It is plain bash over `cargo` and binutils, takes the same option names and environment variables as `build_plugin.sh` where they mean the same thing (`--manifest-path`, `--package`, `--lib-name`, `--name`, `--version`, `--ttl-bin`, `--features`, `--formats`, `--out`, `--work-dir`, `--jobs`, `--dry-run`, `--no-verify`), and refuses `vst3`, `au`, `aax` and `standalone`, which are not built on Linux yet. The macOS-only options (`--bundle-id`, `--editor`, `--archs` and so on) are refused by name. It runs only on Linux and never installs anything.
+
+```bash
+scripts/build_plugin_linux.sh \
+  --manifest-path examples/editor/Cargo.toml --version 0.4.0 \
+  --name "Example Gain" --ttl-bin lv2_ttl \
+  --out dist --work-dir build/openplugin-linux
+```
+
+| Format | Layout |
+|---|---|
+| CLAP | `<out>/<Name>.clap`: the shared library itself, one ELF file, not a folder |
+| LV2 | `<out>/<Stem>.lv2/` with `<Stem>.so`, and `manifest.ttl` and `<Stem>.ttl` written by `<ttl-bin> <folder> <Stem>`. `<Stem>` is reduced as on macOS |
+
+The library is a release build of the host architecture, with the same `--remap-path-prefix` list as on macOS. `--strip` runs `strip --strip-all` on each copy; the dynamic symbols stay. Unless `--no-verify` is given, the script then checks each library and fails the run on any of these:
+
+- `strings -a` finds the build, workspace, its parent, plugin crate, SDK or home path.
+- `readelf -d` lists a `NEEDED` library other than glibc's (`libc`, `libm`, and `libdl`, `libpthread`, `librt` for older toolchains), `libgcc_s` and the loader. `--allow-lib SONAME` (or `OP_ALLOW_LIBS`) accepts another. `ldd` reports a library as not found.
+- An `RPATH` or `RUNPATH` points into the build tree, the workspace or the home folder.
+- `nm -D --defined-only` does not show `clap_entry` (CLAP) or `lv2_descriptor` (LV2).
+- The LV2 bundle lacks `manifest.ttl` or `<Stem>.ttl`, or `manifest.ttl` does not name `<Stem>.so` as `lv2:binary`.
+
+### Checks run on Linux
+
+On 15 November 2026, on Arch Linux (x86_64, Intel Core i7-2630QM, Rust 1.100), `examples/editor` was built with the command above, with and without `--strip`, once into a folder with a space in its name:
+
+- The script's checks passed. Both libraries need only `libgcc_s.so.1`, `libm.so.6`, `libc.so.6` and `ld-linux-x86-64.so.2`, have no run path, and contain no build or home path.
+- `lv2_validate manifest.ttl ExampleGain.ttl` in the bundle: `Found 0 errors among 84 files (checked 1972 restrictions)`. The one skipped file is `/usr/lib/lv2/core.lv2/lv2core.doap.ttl`, a specification file that Arch's `lv2` package names in `lv2_validate` but does not ship; no bundle file is skipped.
+- `clap-validator` 0.4.1, built with `cargo install` from commit `152b982` (the one the `universal` job builds), on `Example Gain.clap`: 44 tests run, 0 failed, 10 skipped, and 34 passed or 33 passed with 1 warning depending on timing (seven full runs: 34 passed in four, 33 passed and 1 warning in three). The skips are the ones seen on macOS: no preset discovery factory (3), no 64-bit audio (2), no note input port (3), no `audio-ports-activation` (1), no `configurable-audio-ports` (1). The warning is `process-audio-denormals`, which compares the time to process denormal input with normal input: 1.28 to 2.45 times longer in the full runs, and 4.6 to 5.6 times longer in 15 runs of that test alone (`--include process-audio-denormals`), each of which warned. No format entry sets flush-to-zero around `process` (`openplugin_dsp::utility::DenormalGuard` exists but is not used there). The machine was shared with other builds during these runs. On macOS (arm64, and x86_64 under Rosetta) the test passes.
+
+CI runs the same commands in the `linux-package` job on `ubuntu-latest`. Its `apt-get install lv2-dev sordi` step has not run on GitHub yet; everything after it was run on the Arch machine.
