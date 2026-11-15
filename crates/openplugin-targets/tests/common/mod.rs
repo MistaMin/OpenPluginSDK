@@ -203,6 +203,14 @@ impl OutSeq {
         Self { buf, capacity }
     }
 
+    /// What a host does before each `run`: the size field is the capacity again.
+    pub fn reset(&mut self) {
+        let capacity = self.capacity as u32;
+        let bytes = self.buf.bytes_mut();
+        bytes[0..4].copy_from_slice(&capacity.to_ne_bytes());
+        bytes[4..8].copy_from_slice(&0u32.to_ne_bytes());
+    }
+
     pub fn size(&self) -> u32 {
         u32::from_ne_bytes(self.buf.bytes()[0..4].try_into().unwrap())
     }
