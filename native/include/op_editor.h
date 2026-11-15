@@ -56,6 +56,27 @@ typedef uint32_t (*OpEditorRequestResize)(void* context, uint32_t width, uint32_
 void op_editor_set_request_resize(void* editor, void* context, OpEditorRequestResize request);
 #endif
 
+// The host's parameter menu and track. Optional: a shell defines OP_EDITOR_MENU
+// before including this header to use them, and a shell that does not still
+// builds (right-click then shows the SDK's own small menu, and the editor
+// hears nothing about the track).
+#ifdef OP_EDITOR_MENU
+// How an editor asks the host for its context menu on parameter `index`
+// (VST3 IComponentHandler3::createContextMenu then IContextMenu::popup;
+// automation, MIDI learn). `x`, `y` are points in the editor's view, origin
+// top left. Return non-zero if the host showed a menu. Return 0 when the host
+// has none or declines: the editor then shows the SDK's own menu ("Reset to
+// default", "Copy value", "Paste value", "Type value"). Called on the main
+// thread, inside the click. Null removes it. Replaces nothing in OpEditorHost.
+typedef uint32_t (*OpEditorContextMenu)(void* context, uint32_t index, int32_t x, int32_t y);
+void op_editor_set_context_menu(void* editor, void* context, OpEditorContextMenu show);
+// The host's track (see op_shell_set_track_info for the arguments; the
+// OP_TRACK_* flags are in op_shell.h). The editor hears it as
+// Editor::track_info. Call it when the editor opens, if the host has told by
+// then, and whenever the host changes it.
+void op_editor_set_track_info(void* editor, const char* name_utf8, uint32_t rgba, uint32_t flags);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 3,
+    OP_SHELL_ABI = 4,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -223,6 +223,27 @@ size_t op_shell_param_format(uint32_t index, double plain, char* buf, size_t cap
 // pointer, an unknown index, text that is not UTF-8 or is longer than 1024
 // bytes, or text that is not a value. Never crashes on hostile input.
 int op_shell_param_parse(uint32_t index, const char* text, double* out_plain);
+
+// ---- ABI 4: the host's track ---------------------------------------------
+// What the host says about the track the plugin sits on: its name, colour and
+// kind (VST3 Vst::ChannelContext::IInfoListener, CLAP track-info). Delivered
+// to Plugin::track_info_changed on the main thread, never on the audio thread.
+enum {
+    OP_TRACK_RETURN = 1,        // a return (send) track
+    OP_TRACK_BUS = 2,           // a bus (group) track
+    OP_TRACK_MASTER = 4,        // the master track
+    OP_TRACK_HAS_COLOUR = 0x100 // `rgba` is valid
+};
+// Main thread only; allocates. Call it again whenever the host says something
+// changed. `name_utf8` is NUL-terminated UTF-8, or NULL for no name (invalid
+// bytes are replaced, more than 255 characters are cut). `rgba` is 0xRRGGBBAA
+// and counts only with OP_TRACK_HAS_COLOUR in `flags`; bits of `flags` this
+// header does not define are ignored. The plugin object is taken between
+// blocks, like a state call: a block that starts meanwhile is passed through
+// dry, and the call waits at most 2 seconds for one already running. Returns 1
+// when delivered; 0 for a NULL instance, or when it gave up and delivered
+// nothing. Safe to call while the audio thread is inside op_shell_process.
+uint32_t op_shell_set_track_info(void* instance, const char* name_utf8, uint32_t rgba, uint32_t flags);
 
 #if OP_HAS_TAIL
 // Optional, with -DOP_TAIL=ON: how long the output rings after the input

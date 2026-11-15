@@ -14,7 +14,7 @@
 
 pub use openplugin_ffi::shell::{
     kind, layout_count, layout_selected, midi_dropped, midi_out, note_ports, process_events,
-    set_layout, set_offline, write_layout, OpLayout, OpMidiEvent, OpProcess,
+    set_layout, set_offline, set_track_info, track_info_from_abi, write_layout, OpLayout, OpMidiEvent, OpProcess,
     create, destroy, editor_state, get_normalized, get_plain, latency, load_state, param_format, param_parse, process,
     reset, save_state, set_normalized, set_plain, tail_seconds, to_normalized, to_plain, trace, write_info,
     write_param, OpParamDesc, OpShellInfo, ShellInstance, ABI, AAX_MAX_PARAMS, PARAM_AUTOMATABLE,
@@ -46,7 +46,13 @@ pub mod editor {
     pub struct Handle {
         view: EditorView,
         request: Rc<Cell<Option<(usize, RequestResize)>>>,
+        menu: Rc<Cell<Option<(usize, ContextMenu)>>>,
     }
+
+    /// `OpEditorContextMenu`: the editor wants the host's context menu for
+    /// parameter `index` at (`x`, `y`) points in the view, origin top left;
+    /// non-zero if the shell's host showed one.
+    pub type ContextMenu = unsafe extern "C" fn(context: *mut c_void, index: u32, x: i32, y: i32) -> u32;
 
     /// How the editor reports a gesture to the host (`OpEditorHost` in C).
     /// Plain values; main thread.
@@ -116,10 +122,16 @@ pub mod editor {
             Some((context, f)) => unsafe { f(context as *mut c_void, w, h) != 0 },
             None => false,
         });
+        let menu: Rc<Cell<Option<(usize, ContextMenu)>>> = Rc::new(Cell::new(None));
+        let shown = menu.clone();
+        let editor_host = editor_host.with_context_menu(move |index, x, y| match shown.get() {
+            Some((context, f)) => unsafe { f(context as *mut c_void, index, x, y) != 0 },
+            None => false,
+        });
         let Some(mut editor) = factory(editor_host) else { return std::ptr::null_mut() };
         editor.bind(None);
         match EditorView::new(editor, None) {
-            Some(view) => Box::into_raw(Box::new(Handle { view, request })) as *mut c_void,
+            Some(view) => Box::into_raw(Box::new(Handle { view, request, menu })) as *mut c_void,
             None => std::ptr::null_mut(),
         }
     }
@@ -213,6 +225,29 @@ pub mod editor {
     pub unsafe fn set_request_resize(editor: *mut c_void, context: *mut c_void, request: Option<RequestResize>) {
         if let Some(h) = unsafe { (editor as *mut Handle).as_mut() } {
             h.request.set(request.map(|f| (context as usize, f)));
+        }
+    }
+
+    /// `op_editor_set_context_menu`. A null `show` removes it.
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`]. `show` stays valid, with
+    /// `context`, until it is replaced or [`destroy`].
+    pub unsafe fn set_context_menu(editor: *mut c_void, context: *mut c_void, show: Option<ContextMenu>) {
+        if let Some(h) = unsafe { (editor as *mut Handle).as_mut() } {
+            h.menu.set(show.map(|f| (context as usize, f)));
+        }
+    }
+
+    /// `op_editor_set_track_info`: tell the editor about the host's track
+    /// ([`openplugin_core::Editor::track_info`]).
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`]; `name` is null or NUL-terminated.
+    pub unsafe fn set_track_info(editor: *mut c_void, name: *const std::ffi::c_char, rgba: u32, flags: u32) {
+        let info = unsafe { super::track_info_from_abi(name, rgba, flags) };
+        if let Some(e) = unsafe { view(editor) }.and_then(|v| v.editor()) {
+            e.track_info(&info);
         }
     }
 
@@ -359,6 +394,27 @@ macro_rules! export_shell {
 
         #[cfg(target_os = "macos")]
         #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_set_context_menu(
+            editor: *mut ::std::ffi::c_void,
+            context: *mut ::std::ffi::c_void,
+            show: ::std::option::Option<$crate::shell::editor::ContextMenu>,
+        ) {
+            unsafe { $crate::shell::editor::set_context_menu(editor, context, show) }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_set_track_info(
+            editor: *mut ::std::ffi::c_void,
+            name: *const ::std::ffi::c_char,
+            rgba: u32,
+            flags: u32,
+        ) {
+            unsafe { $crate::shell::editor::set_track_info(editor, name, rgba, flags) }
+        }
+
+        #[cfg(target_os = "macos")]
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_destroy(editor: *mut ::std::ffi::c_void) {
             $crate::shell::editor::destroy(editor)
         }
@@ -402,6 +458,16 @@ macro_rules! export_shell {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_set_offline(instance: *mut ::std::ffi::c_void, offline: u32) {
             unsafe { $crate::shell::set_offline(instance as *mut $crate::shell::ShellInstance, offline) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_set_track_info(
+            instance: *mut ::std::ffi::c_void,
+            name: *const ::std::ffi::c_char,
+            rgba: u32,
+            flags: u32,
+        ) -> u32 {
+            unsafe { $crate::shell::set_track_info(instance as *mut $crate::shell::ShellInstance, name, rgba, flags) }
         }
 
         #[unsafe(no_mangle)]

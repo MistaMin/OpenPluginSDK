@@ -13,6 +13,10 @@
 //     parameter while the old position hits nothing;
 //   - an editor-initiated size (double-click on the bare plate) reaches
 //     IPlugFrame::resizeView, and the view takes the size the frame grants;
+//   - a right click (and a Control-click) on a control asks the host's
+//     IComponentHandler3 for its context menu on that parameter and pops it up at the
+//     click; a click on the bare plate asks nothing; the controller takes
+//     IInfoListener::setChannelContextInfos with the editor open;
 //   - removed() takes the view out, and tearing down with the processor
 //     first, while a second view is open, does not crash.
 //
@@ -23,13 +27,18 @@
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
+#include "pluginterfaces/vst/ivstchannelcontextinfo.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
+#include "pluginterfaces/vst/ivstcontextmenu.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstmessage.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <map>
+#include <string>
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -42,9 +51,46 @@ using namespace Steinberg::Vst;
         }                                                              \
     } while (0)
 
+// The host's parameter menu: records the popup.
+struct Menu final : IContextMenu {
+    int popups = 0;
+    UCoord x = -1, y = -1;
+    int32 getItemCount() override { return 0; }
+    tresult PLUGIN_API getItem(int32, Item&, IContextMenuTarget**) override { return kResultFalse; }
+    tresult PLUGIN_API addItem(const Item&, IContextMenuTarget*) override { return kResultOk; }
+    tresult PLUGIN_API removeItem(const Item&, IContextMenuTarget*) override { return kResultOk; }
+    tresult PLUGIN_API popup(UCoord px, UCoord py) override {
+        ++popups;
+        x = px;
+        y = py;
+        return kResultOk;
+    }
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, IContextMenu::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = this;
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+};
+
 // The host side of parameter editing: records what the controller reports.
-struct Handler final : IComponentHandler {
+struct Handler final : IComponentHandler, IComponentHandler3 {
     int begins = 0, performs = 0, ends = 0;
+    // IComponentHandler3: which parameter and view a context menu was asked for.
+    int menus = 0;
+    ParamID menuParam = 0xffffffff;
+    IPlugView* menuView = nullptr;
+    Menu menu;
+    IContextMenu* PLUGIN_API createContextMenu(IPlugView* view, const ParamID* id) override {
+        ++menus;
+        menuView = view;
+        menuParam = id ? *id : 0xffffffff;
+        return &menu;
+    }
     ParamID last = 0xffffffff;
     ParamValue value = -1.0;
     tresult PLUGIN_API beginEdit(ParamID) override { ++begins; return kResultOk; }
@@ -58,6 +104,44 @@ struct Handler final : IComponentHandler {
     tresult PLUGIN_API restartComponent(int32) override { return kResultOk; }
     tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
         if (FUnknownPrivate::iidEqual(iid, IComponentHandler::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = static_cast<IComponentHandler*>(this);
+            return kResultOk;
+        }
+        if (FUnknownPrivate::iidEqual(iid, IComponentHandler3::iid)) {
+            *obj = static_cast<IComponentHandler3*>(this);
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+};
+
+// The channel context a host sends: a name and a colour.
+struct Attributes final : IAttributeList {
+    std::map<std::string, int64> ints;
+    std::map<std::string, std::u16string> strings;
+    tresult PLUGIN_API setInt(AttrID id, int64 v) override { ints[id] = v; return kResultOk; }
+    tresult PLUGIN_API getInt(AttrID id, int64& v) override {
+        auto it = ints.find(id);
+        if (it == ints.end()) return kResultFalse;
+        v = it->second;
+        return kResultOk;
+    }
+    tresult PLUGIN_API setFloat(AttrID, double) override { return kResultFalse; }
+    tresult PLUGIN_API getFloat(AttrID, double&) override { return kResultFalse; }
+    tresult PLUGIN_API setString(AttrID id, const TChar* s) override { strings[id] = reinterpret_cast<const char16_t*>(s); return kResultOk; }
+    tresult PLUGIN_API getString(AttrID id, TChar* s, uint32 bytes) override {
+        auto it = strings.find(id);
+        if (it == strings.end() || bytes < (it->second.size() + 1) * sizeof(TChar)) return kResultFalse;
+        std::memcpy(s, it->second.c_str(), (it->second.size() + 1) * sizeof(TChar));
+        return kResultOk;
+    }
+    tresult PLUGIN_API setBinary(AttrID, const void*, uint32) override { return kResultFalse; }
+    tresult PLUGIN_API getBinary(AttrID, const void*&, uint32&) override { return kResultFalse; }
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, IAttributeList::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
             *obj = this;
             return kResultOk;
         }
@@ -100,6 +184,16 @@ static void click(NSView* editor, NSWindow* window, double height, double x, dou
         if (type == NSEventTypeLeftMouseDown) [editor mouseDown:e];
         else [editor mouseUp:e];
     }
+}
+
+// A right click, or a Control-click, at a point (points from the top left).
+static void rightClick(NSView* editor, NSWindow* window, double height, double x, double y, bool control) {
+    NSPoint at = NSMakePoint(x, height - y);
+    NSEvent* down = control
+        ? [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:at modifierFlags:NSEventModifierFlagControl timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1]
+        : [NSEvent mouseEventWithType:NSEventTypeRightMouseDown location:at modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:1 pressure:1];
+    if (control) [editor mouseDown:down];
+    else [editor rightMouseDown:down];
 }
 
 static void spin(double seconds) { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false); }
@@ -177,6 +271,35 @@ int main(int argc, char** argv) {
         CHECK(component->setActive(true) == kResultOk);
         spin(0.1);
 
+        // The host's parameter menu. The control is the one the click and resize checks use.
+        const double mx = argc == 5 ? std::atof(argv[2]) : 135.0;
+        const double my = argc == 5 ? std::atof(argv[3]) : 68.0;
+        const ParamID mparam = argc == 5 ? static_cast<ParamID>(std::atoi(argv[4])) : 1;
+        {
+            const int begins = handler.begins;
+            rightClick(editor, window, frame.size.height, mx, my, false);
+            spin(0.05);
+            CHECK(handler.menus == 1 && handler.menuParam == mparam && handler.menuView == view);
+            CHECK(handler.menu.popups == 1 && handler.menu.x == static_cast<UCoord>(std::lround(mx)) && handler.menu.y == static_cast<UCoord>(std::lround(my)));
+            // Control-click is a right click on a Mac.
+            rightClick(editor, window, frame.size.height, mx, my, true);
+            spin(0.05);
+            CHECK(handler.menus == 2 && handler.menuParam == mparam && handler.menu.popups == 2);
+            // Neither is an edit, and the bare plate has no menu.
+            rightClick(editor, window, frame.size.height, 5, 5, false);
+            spin(0.05);
+            CHECK(handler.menus == 2 && handler.begins == begins);
+            std::printf("host menu: right click and Control-click open the host's menu for parameter %u at the click\n", handler.menuParam);
+            // The host tells the track while the editor is open.
+            Attributes info;
+            info.strings[ChannelContext::kChannelNameKey] = u"Lead \u266a";
+            info.ints[ChannelContext::kChannelColorKey] = 0xFF336699;
+            FUnknownPtr<ChannelContext::IInfoListener> listener(controller);
+            CHECK(listener && listener->setChannelContextInfos(&info) == kResultOk);
+            CHECK(listener->setChannelContextInfos(nullptr) == kInvalidArgument);
+            spin(0.05);
+        }
+
         if (argc == 5) {
             const double x = std::atof(argv[2]);
             const double y = std::atof(argv[3]);
@@ -208,9 +331,8 @@ int main(int argc, char** argv) {
         CHECK(std::abs(odd.getWidth() * big.getHeight() - odd.getHeight() * big.getWidth()) <= big.getWidth());
         // The click point scales with the view: examples/editor keeps its shape from the origin.
         const double factor = double(big.getWidth()) / rect.getWidth();
-        const double cx = argc == 5 ? std::atof(argv[2]) : 135.0;
-        const double cy = argc == 5 ? std::atof(argv[3]) : 68.0;
-        const ParamID cparam = argc == 5 ? static_cast<ParamID>(std::atoi(argv[4])) : 1;
+        const double cx = mx, cy = my;
+        const ParamID cparam = mparam;
         ViewRect to = big;
         CHECK(view->onSize(&to) == kResultOk);
         ViewRect now{};

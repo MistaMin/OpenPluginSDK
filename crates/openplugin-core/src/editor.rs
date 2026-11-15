@@ -45,17 +45,20 @@ pub enum Gesture {
     End(u32),
 }
 
+type ContextMenuFn = Rc<dyn Fn(u32, i32, i32) -> bool>;
+
 /// Where an editor sends its gestures. Created by the format bridge; cheap to
 /// clone, main thread only.
 #[derive(Clone)]
 pub struct EditorHost {
     sink: Rc<dyn Fn(Gesture)>,
     resize: Option<Rc<dyn Fn(u32, u32) -> bool>>,
+    context_menu: Option<ContextMenuFn>,
 }
 
 impl EditorHost {
     pub fn new(sink: impl Fn(Gesture) + 'static) -> Self {
-        Self { sink: Rc::new(sink), resize: None }
+        Self { sink: Rc::new(sink), resize: None, context_menu: None }
     }
 
     /// The same host, with a way to ask the format's host for a new editor
@@ -64,6 +67,29 @@ impl EditorHost {
     pub fn with_resize(mut self, request: impl Fn(u32, u32) -> bool + 'static) -> Self {
         self.resize = Some(Rc::new(request));
         self
+    }
+
+    /// The same host, with a way to ask the format's host for its context
+    /// menu on a parameter (automation, MIDI learn). The handler gets the
+    /// descriptor index and the position in editor points, origin top left,
+    /// and returns whether the host showed a menu.
+    pub fn with_context_menu(mut self, show: impl Fn(u32, i32, i32) -> bool + 'static) -> Self {
+        self.context_menu = Some(Rc::new(show));
+        self
+    }
+
+    /// Ask the host to show its context menu for parameter `param_index` at
+    /// (`x`, `y`) points in the editor. True when the host showed one; false
+    /// when the format or host has none (the editor then shows the SDK's own
+    /// small menu, see [`Editor::take_param_menu`]).
+    pub fn context_menu(&self, param_index: usize, x: f32, y: f32) -> bool {
+        if !x.is_finite() || !y.is_finite() || param_index > u32::MAX as usize {
+            return false;
+        }
+        match &self.context_menu {
+            Some(show) => show(param_index as u32, x.round() as i32, y.round() as i32),
+            None => false,
+        }
     }
 
     /// Ask the host to give the editor `width` x `height` points. The size is
@@ -447,6 +473,33 @@ pub struct FileDialog {
     pub multiple: bool,
 }
 
+/// What the user chose in the SDK's own parameter menu (see
+/// [`Editor::take_param_menu`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParamMenuAction {
+    /// Set the parameter to its default.
+    Reset,
+    /// Put the formatted value on the clipboard (the editor returns the text).
+    Copy,
+    /// Set the parameter from clipboard text, read with `ParamInfo::parse`.
+    Paste(String),
+    /// Open the text field over the control.
+    Type,
+}
+
+/// A request for the SDK's own parameter menu, made when the host has none
+/// (see [`Editor::take_param_menu`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ParamMenu {
+    /// The parameter's descriptor index.
+    pub param: u32,
+    /// Where the click was, in editor points, origin top left.
+    pub x: f32,
+    pub y: f32,
+    /// The parameter's name, for the menu's title.
+    pub label: String,
+}
+
 /// The plugin's editor. Main thread only; it is never sent to another thread.
 pub trait Editor {
     /// The current size in points (logical pixels). A fixed editor never
@@ -549,6 +602,37 @@ pub trait Editor {
     fn accessibility_focus(&mut self, _node: usize) -> bool {
         false
     }
+
+    /// The right button (or Control-click) went down at (`x`, `y`) points. An
+    /// editor with parameter controls asks the host for the parameter's
+    /// context menu through [`EditorHost::context_menu`], and when the host
+    /// shows none, queues its own for [`Self::take_param_menu`]. Return true
+    /// when the click was on a parameter control (the view then does not pass
+    /// it on to the host). The default does nothing and returns false.
+    fn right_mouse_down(&mut self, _x: f32, _y: f32) -> bool {
+        false
+    }
+
+    /// The editor wants the view to show the SDK's own parameter menu (items
+    /// "Reset to default", "Copy value", "Paste value", "Type value"). Called
+    /// after every input call and tick; return the request once. The choice
+    /// comes back through [`Self::param_menu_action`]. The default never asks.
+    fn take_param_menu(&mut self) -> Option<ParamMenu> {
+        None
+    }
+
+    /// The user chose an item of the menu for parameter `param`. The editor
+    /// does what the matching gesture would do and, for
+    /// [`ParamMenuAction::Copy`], returns the text for the clipboard. For
+    /// every other action the result is `None`. The default does nothing.
+    fn param_menu_action(&mut self, _param: u32, _action: ParamMenuAction) -> Option<String> {
+        None
+    }
+
+    /// The host told the plugin about its track (name, colour, kind). Called
+    /// when the editor is made, if the host has told by then, and whenever the
+    /// host changes it. Main thread. The default ignores it.
+    fn track_info(&mut self, _info: &crate::TrackInfo) {}
 
     /// The editor wants the view to open a native text field. Called after
     /// every input call and tick; return the request once and `None` after.
@@ -867,6 +951,30 @@ mod tests {
         assert!(probe.tooltips().is_empty() && !probe.wants_drops());
         assert!(!probe.accepts_drop(1.0, 1.0) && !probe.files_dropped(&[], 1.0, 1.0));
         assert!(probe.take_file_dialog().is_none());
+    }
+
+    #[test]
+    fn default_editor_has_no_menu_and_ignores_track_info() {
+        let mut probe = Probe(Vec::new());
+        assert!(!probe.right_mouse_down(1.0, 1.0) && probe.take_param_menu().is_none());
+        assert!(probe.param_menu_action(0, ParamMenuAction::Copy).is_none());
+        probe.track_info(&crate::TrackInfo::default());
+    }
+
+    #[test]
+    fn context_menu_needs_a_handler_and_finite_points() {
+        assert!(!EditorHost::detached().context_menu(0, 1.0, 1.0));
+        let seen = Rc::new(std::cell::Cell::new((0, 0, 0)));
+        let sink = seen.clone();
+        let host = EditorHost::detached().with_context_menu(move |p, x, y| {
+            sink.set((p, x, y));
+            true
+        });
+        assert!(host.context_menu(3, 10.4, 20.6));
+        assert_eq!(seen.get(), (3, 10, 21));
+        seen.set((0, 0, 0));
+        assert!(!host.context_menu(3, f32::NAN, 1.0));
+        assert_eq!(seen.get(), (0, 0, 0));
     }
 
     #[test]

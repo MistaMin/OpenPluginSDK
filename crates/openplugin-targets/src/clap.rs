@@ -27,7 +27,7 @@ use std::time::{Duration, Instant as Clock};
 use openplugin_core::{
     decode_params, encode_params, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Gesture, GestureQueue,
     IoConfig, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
-    Seqlock, SpeakerLayout, Tail, Transport, MAX_AUDIO_CHANNELS,
+    Seqlock, SpeakerLayout, Tail, TrackInfo, Transport, MAX_AUDIO_CHANNELS,
 };
 
 use crate::clap_abi::*;
@@ -193,6 +193,8 @@ struct Instance {
     /// What the engine shares with its editor, taken once at creation.
     editor_state: Option<EditorState>,
     host_params: *const clap_host_params,
+    /// What the host last said about the track (main thread), kept for an editor made later.
+    track_info: Option<TrackInfo>,
     #[cfg(target_os = "macos")]
     gui: Option<gui::Gui>,
     meters: Seqlock<MeterFrame>,
@@ -517,6 +519,8 @@ unsafe extern "C" fn plugin_init(plugin: *const clap_plugin) -> bool {
     guarded(std::ptr::null(), false, || {
         let Some(instance) = instance(plugin) else { return false };
         instance.host_params = host_call(instance.host, EXT_PARAMS) as *const clap_host_params;
+        // The host knows its track by now; a plugin that asks early starts with the right name.
+        track_info_changed(plugin);
         true
     })
 }
@@ -1373,10 +1377,34 @@ unsafe extern "C" fn tail_get(plugin: *const clap_plugin) -> u32 {
 
 static TAIL: clap_plugin_tail = clap_plugin_tail { get: Some(tail_get) };
 
+/// Whether CLAP can describe every bus of `layout`: a surround bus must use only the
+/// `CLAP_SURROUND_*` channel ids (`SpeakerLayout::clap_expressible`). The beds with top side
+/// or wide channels (5.1.2, 7.1.2, 9.1.6) cannot be, so the entry does not offer them.
+fn layout_expressible(layout: IoConfig) -> bool {
+    let ok = |bus: SpeakerLayout| bus.kind() != PortKind::Surround || bus.clap_expressible();
+    ok(layout.input) && ok(layout.output) && layout.sidechain.is_none_or(ok)
+}
+
+/// The layouts the entry offers, with their config ids (the index in `supported_layouts`).
+fn offered_layouts(plugin: &dyn Plugin) -> impl Iterator<Item = (u32, IoConfig)> + '_ {
+    plugin
+        .supported_layouts()
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, layout)| layout_expressible(*layout))
+        .map(|(index, layout)| (index as u32, layout))
+}
+
+/// The layout with config id `config_id`, if it exists and CLAP can express it.
+fn offered_layout(plugin: &dyn Plugin, config_id: u32) -> Option<IoConfig> {
+    offered_layouts(plugin).find(|(id, _)| *id == config_id).map(|(_, layout)| layout)
+}
+
 unsafe extern "C" fn config_count(plugin: *const clap_plugin) -> u32 {
     guarded(std::ptr::null(), 0, || {
         instance(plugin)
-            .map(|item| item.inner.supported_layouts().len() as u32)
+            .map(|item| offered_layouts(item.inner.as_ref()).count() as u32)
             .unwrap_or(0)
     })
 }
@@ -1384,7 +1412,7 @@ unsafe extern "C" fn config_count(plugin: *const clap_plugin) -> u32 {
 unsafe extern "C" fn config_get(plugin: *const clap_plugin, index: u32, config: *mut clap_audio_ports_config) -> bool {
     guarded(std::ptr::null(), false, || {
         let Some(instance) = instance(plugin) else { return false };
-        let Some(layout) = instance.inner.supported_layouts().get(index as usize).copied() else {
+        let Some((id, layout)) = offered_layouts(instance.inner.as_ref()).nth(index as usize) else {
             return false;
         };
         if config.is_null() {
@@ -1393,7 +1421,7 @@ unsafe extern "C" fn config_get(plugin: *const clap_plugin, index: u32, config: 
         unsafe {
             std::ptr::write_bytes(config, 0, 1);
             let config = &mut *config;
-            config.id = index;
+            config.id = id;
             copy_cstr(&mut config.name, &layout.name());
             config.input_port_count = if layout.input == SpeakerLayout::Absent { 0 } else { 1 }
                 + u32::from(layout.sidechain_channels() > 0);
@@ -1415,7 +1443,7 @@ unsafe extern "C" fn config_select(plugin: *const clap_plugin, config_id: u32) -
         if instance.activated {
             return false;
         }
-        let Some(layout) = instance.inner.supported_layouts().get(config_id as usize).copied() else {
+        let Some(layout) = offered_layout(instance.inner.as_ref(), config_id) else {
             return false;
         };
         if !instance.inner.set_layout(layout) {
@@ -1447,7 +1475,7 @@ unsafe extern "C" fn config_info_get(
 ) -> bool {
     guarded(std::ptr::null(), false, || {
         let Some(instance) = instance(plugin) else { return false };
-        let Some(layout) = instance.inner.supported_layouts().get(config_id as usize).copied() else {
+        let Some(layout) = offered_layout(instance.inner.as_ref(), config_id) else {
             return false;
         };
         if info.is_null() {
@@ -1493,7 +1521,7 @@ unsafe extern "C" fn surround_map(
         let Some((_, _, layout, _)) = layout_port(selected_layout(instance), is_input, port_index) else {
             return 0;
         };
-        let Some(map) = layout.surround_map() else { return 0 };
+        let Some(map) = layout.clap_map() else { return 0 };
         if channel_map.is_null() || (channel_map_capacity as usize) < map.len() {
             return 0;
         }
@@ -1585,6 +1613,12 @@ unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_c
         if id == EXT_PARAMS {
             return &PARAMS as *const clap_plugin_params as *const c_void;
         }
+        if id == EXT_TRACK_INFO || id == EXT_TRACK_INFO_COMPAT {
+            return &TRACK_INFO as *const clap_plugin_track_info as *const c_void;
+        }
+        if id == EXT_CONTEXT_MENU || id == EXT_CONTEXT_MENU_COMPAT {
+            return &CONTEXT_MENU as *const clap_plugin_context_menu as *const c_void;
+        }
         if id == EXT_STATE {
             return &STATE as *const clap_plugin_state as *const c_void;
         }
@@ -1616,6 +1650,102 @@ unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_c
         }
         std::ptr::null()
     })
+}
+
+// ---- Track info and the context menu -----------------------------------------
+
+/// The host's track info extension (the final id, then the draft id).
+fn host_track_info(host: *const clap_host) -> *const clap_host_track_info {
+    let ext = host_call(host, EXT_TRACK_INFO);
+    let ext = if ext.is_null() { host_call(host, EXT_TRACK_INFO_COMPAT) } else { ext };
+    ext as *const clap_host_track_info
+}
+
+/// Read the track from the host: name and colour only when the host flags them, kind bits
+/// from the return, bus and master flags. `None` when the host has no track info or says no.
+fn read_track_info(host: *const clap_host) -> Option<TrackInfo> {
+    let ext = unsafe { host_track_info(host).as_ref() }?;
+    let get = ext.get?;
+    let mut raw = clap_track_info { flags: 0, name: [0; NAME_SIZE], color: clap_color::default(), audio_channel_count: 0, audio_port_type: std::ptr::null() };
+    if !unsafe { get(host, &mut raw) } {
+        return None;
+    }
+    let name = (raw.flags & TRACK_INFO_HAS_TRACK_NAME != 0)
+        .then(|| {
+            // The host's array is fixed-size; never read past it if it forgot the NUL.
+            let bytes: Vec<u8> = raw.name.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
+            String::from_utf8_lossy(&bytes).into_owned()
+        })
+        .filter(|name| !name.is_empty());
+    let colour = (raw.flags & TRACK_INFO_HAS_TRACK_COLOR != 0)
+        .then(|| u32::from_be_bytes([raw.color.red, raw.color.green, raw.color.blue, raw.color.alpha]));
+    let mut kind = 0;
+    if raw.flags & TRACK_INFO_IS_FOR_RETURN_TRACK != 0 {
+        kind |= TrackInfo::IS_RETURN;
+    }
+    if raw.flags & TRACK_INFO_IS_FOR_BUS != 0 {
+        kind |= TrackInfo::IS_BUS;
+    }
+    if raw.flags & TRACK_INFO_IS_FOR_MASTER != 0 {
+        kind |= TrackInfo::IS_MASTER;
+    }
+    Some(TrackInfo { name, colour, kind })
+}
+
+/// Read the host's track info again and, when it differs from what the plugin last heard,
+/// give it to the plugin and the open editor. Main thread. The plugin object is taken the
+/// way a state call takes it: between blocks, never while `process` runs.
+fn track_info_changed(plugin: *const clap_plugin) {
+    let Some(raw) = (unsafe { state_target(plugin) }) else { return };
+    let Some(info) = read_track_info(unsafe { (*raw).host }) else { return };
+    let inst = unsafe { &mut *raw };
+    if inst.track_info.as_ref() == Some(&info) {
+        return;
+    }
+    inst.track_info = Some(info.clone());
+    {
+        let _serial = inst.state_lock.lock();
+        let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
+        if let Some(_held) = enter_state(gate) {
+            unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.track_info_changed(&info);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(editor) = inst.gui.as_mut().and_then(|gui| gui.view.editor()) {
+        editor.track_info(&info);
+    }
+}
+
+unsafe extern "C" fn track_info_plugin_changed(plugin: *const clap_plugin) {
+    guarded(std::ptr::null(), (), || track_info_changed(plugin))
+}
+
+static TRACK_INFO: clap_plugin_track_info = clap_plugin_track_info { changed: Some(track_info_plugin_changed) };
+
+/// The plugin adds no items of its own to the host's menus; the extension is offered so a
+/// host that asks every plugin for its items gets an answer (an empty one).
+unsafe extern "C" fn context_populate(_plugin: *const clap_plugin, _target: *const clap_context_menu_target, _builder: *const clap_context_menu_builder) -> bool {
+    true
+}
+
+unsafe extern "C" fn context_perform(_plugin: *const clap_plugin, _target: *const clap_context_menu_target, _action_id: u32) -> bool {
+    false
+}
+
+static CONTEXT_MENU: clap_plugin_context_menu = clap_plugin_context_menu { populate: Some(context_populate), perform: Some(context_perform) };
+
+/// Ask the host to pop up its context menu for parameter `param` at (`x`, `y`), relative to
+/// the plugin's window. False when the host has no such menu, cannot show one now, or declines.
+fn host_context_popup(host: *const clap_host, param: u32, x: i32, y: i32) -> bool {
+    let ext = host_call(host, EXT_CONTEXT_MENU);
+    let ext = if ext.is_null() { host_call(host, EXT_CONTEXT_MENU_COMPAT) } else { ext };
+    let Some(ext) = (unsafe { (ext as *const clap_host_context_menu).as_ref() }) else { return false };
+    let (Some(can_popup), Some(popup)) = (ext.can_popup, ext.popup) else { return false };
+    if !unsafe { can_popup(host) } {
+        return false;
+    }
+    let target = clap_context_menu_target { kind: CONTEXT_MENU_TARGET_KIND_PARAM, id: param };
+    unsafe { popup(host, &target, 0, x, y) }
 }
 
 unsafe extern "C" fn plugin_main_thread(_plugin: *const clap_plugin) {}
@@ -1713,6 +1843,7 @@ fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
         gestures: Arc::new(GestureQueue::new(GESTURE_CAPACITY)),
         editor_state,
         host_params: std::ptr::null(),
+        track_info: None,
         #[cfg(target_os = "macos")]
         gui: None,
         meters: Seqlock::new(MeterFrame::SILENT),
@@ -1763,6 +1894,21 @@ pub struct ClapAdapter<P: Plugin> {
 impl<P: Plugin + 'static> ClapAdapter<P> {
     pub fn new(inner: P) -> Self {
         let raw = spawn(Box::new(inner), std::ptr::null());
+        unsafe {
+            if let Some(init) = (*raw).init {
+                init(raw);
+            }
+        }
+        Self { raw, _plugin: PhantomData }
+    }
+
+    /// The same, with a host the plugin calls back (extensions, requests). The host
+    /// must outlive the adapter.
+    ///
+    /// # Safety
+    /// `host` is a valid `clap_host` for as long as the adapter lives.
+    pub unsafe fn with_host(inner: P, host: *const clap_host) -> Self {
+        let raw = spawn(Box::new(inner), host);
         unsafe {
             if let Some(init) = (*raw).init {
                 init(raw);
@@ -1886,6 +2032,9 @@ fn editor_host_for(instance: &Instance) -> openplugin_core::EditorHost {
     let link = Link(instance.host, instance.host_params);
     let plane = instance.plane.clone();
     let queue = instance.gestures.clone();
+    let host = instance.host;
+    // A right click on a control asks the host for its menu on that parameter.
+    let menu = move |param: u32, x: i32, y: i32| host_context_popup(host, param, x, y);
     openplugin_core::EditorHost::new(move |gesture| {
         let link = link;
         if let Gesture::Perform(id, value) = gesture {
@@ -1901,6 +2050,7 @@ fn editor_host_for(instance: &Instance) -> openplugin_core::EditorHost {
             }
         }
     })
+    .with_context_menu(menu)
 }
 
 #[cfg(target_os = "macos")]
@@ -1915,7 +2065,7 @@ mod gui {
     use openplugin_dri::cocoa::EditorView;
 
     pub(super) struct Gui {
-        view: EditorView,
+        pub(super) view: EditorView,
     }
 
     fn is_cocoa(api: *const c_char, floating: bool) -> bool {
@@ -1961,6 +2111,9 @@ mod gui {
             };
             let Some(mut editor) = factory(editor_host_for(instance).with_resize(request)) else { return false };
             editor.bind(instance.editor_state.clone());
+            if let Some(info) = instance.track_info.as_ref() {
+                editor.track_info(info);
+            }
             let plane = instance.plane.clone();
             let mut mirror = ValueMirror::new(plane.len());
             // The current values before the first frame, then whatever changes.
@@ -2443,6 +2596,380 @@ mod tests {
             assert!((*plugin).activate.unwrap()(plugin, 48_000.0, 1, 32));
             assert!(!(*configs).select.unwrap()(plugin, 0));
         }
+    }
+
+    static BED_LAYOUTS: &[openplugin_core::IoConfig] = &[
+        openplugin_core::IoConfig::STEREO,
+        // 5.1.2 uses top side channels CLAP has no ids for.
+        openplugin_core::IoConfig {
+            input: openplugin_core::SpeakerLayout::Surround512,
+            output: openplugin_core::SpeakerLayout::Surround512,
+            sidechain: None,
+        },
+        openplugin_core::IoConfig {
+            input: openplugin_core::SpeakerLayout::Surround714,
+            output: openplugin_core::SpeakerLayout::Surround714,
+            sidechain: None,
+        },
+        // An expressible main bus with a 9.1.6 sidechain is not expressible either.
+        openplugin_core::IoConfig {
+            input: openplugin_core::SpeakerLayout::Surround51,
+            output: openplugin_core::SpeakerLayout::Surround51,
+            sidechain: Some(openplugin_core::SpeakerLayout::Surround916),
+        },
+    ];
+
+    struct Beds;
+
+    impl Plugin for Beds {
+        fn info(&self) -> &'static PluginInfo { &INFO }
+        fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+        fn reset(&mut self) {}
+        fn set_param(&mut self, _: &str, _: f32) -> bool { false }
+        fn param(&self, _: &str) -> Option<f32> { None }
+        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn supported_layouts(&self) -> &'static [openplugin_core::IoConfig] { BED_LAYOUTS }
+    }
+
+    #[test]
+    fn layouts_clap_cannot_express_are_not_offered() {
+        let adapter = ClapAdapter::new(Beds);
+        let plugin = adapter.as_plugin();
+        unsafe {
+            let ext = |id: &CStr| (*plugin).get_extension.unwrap()(plugin, id.as_ptr());
+            let configs = ext(c"clap.audio-ports-config") as *const clap_plugin_audio_ports_config;
+            let info = ext(c"clap.audio-ports-config-info/1") as *const clap_plugin_audio_ports_config_info;
+            // Four layouts, two offered: stereo (id 0) and 7.1.4 (id 2).
+            assert_eq!((*configs).count.unwrap()(plugin), 2);
+            let mut ids = Vec::new();
+            for i in 0..2 {
+                let mut config = std::mem::zeroed::<clap_audio_ports_config>();
+                assert!((*configs).get.unwrap()(plugin, i, &mut config));
+                ids.push(config.id);
+                if i == 1 {
+                    assert_eq!(config.main_output_channel_count, 12);
+                }
+            }
+            assert_eq!(ids, [0, 2]);
+            let mut config = std::mem::zeroed::<clap_audio_ports_config>();
+            assert!(!(*configs).get.unwrap()(plugin, 2, &mut config));
+            // The hidden ones cannot be selected or described by id.
+            assert!(!(*configs).select.unwrap()(plugin, 1));
+            assert!(!(*configs).select.unwrap()(plugin, 3));
+            let mut port = std::mem::zeroed::<clap_audio_port_info>();
+            assert!(!(*info).get.unwrap()(plugin, 1, 0, true, &mut port));
+            assert!((*info).get.unwrap()(plugin, 2, 0, true, &mut port));
+            assert!((*configs).select.unwrap()(plugin, 2));
+            // The channel map is the CLAP one, in the SDK order.
+            let surround = ext(c"clap.surround/4") as *const clap_plugin_surround;
+            let mut map = [0u8; 16];
+            assert_eq!((*surround).get_channel_map.unwrap()(plugin, false, 0, map.as_mut_ptr(), 16), 12);
+            assert_eq!(Some(&map[..12]), openplugin_core::SpeakerLayout::Surround714.clap_map());
+        }
+        let bed = openplugin_core::SpeakerLayout::Surround512;
+        assert!(bed.clap_map().is_none() && !layout_expressible(BED_LAYOUTS[1]) && !layout_expressible(BED_LAYOUTS[3]));
+        assert!(layout_expressible(BED_LAYOUTS[0]) && layout_expressible(BED_LAYOUTS[2]));
+    }
+
+
+    // ---- A fake host with context-menu and track-info ----------------------
+
+    struct FakeTrack {
+        flags: u64,
+        name: &'static str,
+        colour: [u8; 4],
+    }
+
+    type Popup = (u32, u32, i32, i32, i32);
+
+    struct FakeHost {
+        track: Mutex<FakeTrack>,
+        track_gets: AtomicU32,
+        popups: Mutex<Vec<Popup>>,
+        can_popup: AtomicBool,
+        offer_menu: bool,
+        offer_track: bool,
+        draft_ids: bool,
+        popup_result: AtomicBool,
+    }
+
+    impl FakeHost {
+        fn new() -> Box<Self> {
+            Box::new(Self {
+                track: Mutex::new(FakeTrack { flags: 0, name: "", colour: [0; 4] }),
+                track_gets: AtomicU32::new(0),
+                popups: Mutex::new(Vec::new()),
+                can_popup: AtomicBool::new(true),
+                offer_menu: true,
+                offer_track: true,
+                draft_ids: false,
+                popup_result: AtomicBool::new(true),
+            })
+        }
+
+        fn set_track(&self, flags: u64, name: &'static str, colour: [u8; 4]) {
+            *self.track.lock().unwrap() = FakeTrack { flags, name, colour };
+        }
+
+        fn clap_host(&self) -> clap_host {
+            clap_host {
+                clap_version: CLAP_VERSION,
+                host_data: self as *const FakeHost as *mut c_void,
+                name: c"fake".as_ptr(),
+                vendor: c"fake".as_ptr(),
+                url: c"".as_ptr(),
+                version: c"1".as_ptr(),
+                get_extension: Some(fake_extension),
+                request_restart: None,
+                request_process: None,
+                request_callback: None,
+            }
+        }
+    }
+
+    fn fake<'a>(host: *const clap_host) -> &'a FakeHost {
+        unsafe { &*((*host).host_data as *const FakeHost) }
+    }
+
+    unsafe extern "C" fn fake_track_get(host: *const clap_host, info: *mut clap_track_info) -> bool {
+        let this = fake(host);
+        this.track_gets.fetch_add(1, Ordering::Relaxed);
+        let track = this.track.lock().unwrap();
+        if track.flags == u64::MAX {
+            return false;
+        }
+        let info = unsafe { &mut *info };
+        info.flags = track.flags;
+        copy_cstr(&mut info.name, track.name);
+        info.color = clap_color { red: track.colour[0], green: track.colour[1], blue: track.colour[2], alpha: track.colour[3] };
+        true
+    }
+
+    static FAKE_TRACK: clap_host_track_info = clap_host_track_info { get: Some(fake_track_get) };
+
+    unsafe extern "C" fn fake_can_popup(host: *const clap_host) -> bool {
+        fake(host).can_popup.load(Ordering::Relaxed)
+    }
+
+    unsafe extern "C" fn fake_popup(host: *const clap_host, target: *const clap_context_menu_target, screen: i32, x: i32, y: i32) -> bool {
+        let this = fake(host);
+        let target = unsafe { *target };
+        this.popups.lock().unwrap().push((target.kind, target.id, screen, x, y));
+        this.popup_result.load(Ordering::Relaxed)
+    }
+
+    static FAKE_MENU: clap_host_context_menu = clap_host_context_menu { populate: None, perform: None, can_popup: Some(fake_can_popup), popup: Some(fake_popup) };
+
+    unsafe extern "C" fn fake_extension(host: *const clap_host, id: *const c_char) -> *const c_void {
+        let this = fake(host);
+        let id = unsafe { CStr::from_ptr(id) }.to_bytes_with_nul();
+        let (menu, track) = if this.draft_ids { (EXT_CONTEXT_MENU_COMPAT, EXT_TRACK_INFO_COMPAT) } else { (EXT_CONTEXT_MENU, EXT_TRACK_INFO) };
+        if this.offer_menu && id == menu {
+            return &FAKE_MENU as *const clap_host_context_menu as *const c_void;
+        }
+        if this.offer_track && id == track {
+            return &FAKE_TRACK as *const clap_host_track_info as *const c_void;
+        }
+        std::ptr::null()
+    }
+
+    /// A plugin that records what `track_info_changed` heard, and whether it overlapped `process`.
+    struct Listener {
+        heard: Arc<Mutex<Vec<TrackInfo>>>,
+        in_process: Arc<AtomicBool>,
+        overlapped: Arc<AtomicBool>,
+    }
+
+    impl Plugin for Listener {
+        fn info(&self) -> &'static PluginInfo { &INFO }
+        fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+        fn reset(&mut self) {}
+        fn set_param(&mut self, _: &str, _: f32) -> bool { false }
+        fn param(&self, _: &str) -> Option<f32> { None }
+        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {
+            self.in_process.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_micros(200));
+            self.in_process.store(false, Ordering::SeqCst);
+        }
+        fn track_info_changed(&mut self, info: &TrackInfo) {
+            if self.in_process.load(Ordering::SeqCst) {
+                self.overlapped.store(true, Ordering::SeqCst);
+            }
+            self.heard.lock().unwrap().push(info.clone());
+        }
+    }
+
+    fn listener() -> (Listener, Arc<Mutex<Vec<TrackInfo>>>, Arc<AtomicBool>) {
+        let (heard, overlapped) = (Arc::new(Mutex::new(Vec::new())), Arc::new(AtomicBool::new(false)));
+        (Listener { heard: heard.clone(), in_process: Arc::new(AtomicBool::new(false)), overlapped: overlapped.clone() }, heard, overlapped)
+    }
+
+    unsafe fn call_changed(plugin: *const clap_plugin) {
+        unsafe {
+            let ext = (*plugin).get_extension.unwrap()(plugin, c"clap.track-info/1".as_ptr()) as *const clap_plugin_track_info;
+            assert!(!ext.is_null());
+            (*ext).changed.unwrap()(plugin);
+        }
+    }
+
+    #[test]
+    fn track_info_is_read_at_init_and_again_on_changed() {
+        let host = FakeHost::new();
+        host.set_track(TRACK_INFO_HAS_TRACK_NAME | TRACK_INFO_HAS_TRACK_COLOR | TRACK_INFO_IS_FOR_RETURN_TRACK, "Vox", [0x11, 0x22, 0x33, 0xff]);
+        let ch = host.clap_host();
+        let (plugin, heard, overlapped) = listener();
+        let adapter = unsafe { ClapAdapter::with_host(plugin, &ch) };
+        let p = adapter.as_plugin();
+        // Read at init: name, colour as 0xRRGGBBAA, kind from the return flag.
+        assert_eq!(*heard.lock().unwrap(), vec![TrackInfo { name: Some("Vox".into()), colour: Some(0x1122_33ff), kind: TrackInfo::IS_RETURN }]);
+        // The host renames the track and says so: read again and delivered.
+        host.set_track(TRACK_INFO_HAS_TRACK_NAME | TRACK_INFO_IS_FOR_BUS | TRACK_INFO_IS_FOR_MASTER, "Drums", [9, 9, 9, 9]);
+        unsafe { call_changed(p) };
+        let got = heard.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(got, TrackInfo { name: Some("Drums".into()), colour: None, kind: TrackInfo::IS_BUS | TrackInfo::IS_MASTER });
+        assert!(got.is_bus() && got.is_master() && !got.is_return());
+        // The same answer again is not delivered twice.
+        let before = heard.lock().unwrap().len();
+        unsafe { call_changed(p) };
+        assert_eq!(heard.lock().unwrap().len(), before);
+        assert!(host.track_gets.load(Ordering::Relaxed) >= 3, "changed re-reads the host");
+        // An empty name reads as no name; a host that refuses delivers nothing.
+        host.set_track(TRACK_INFO_HAS_TRACK_NAME, "", [0; 4]);
+        unsafe { call_changed(p) };
+        assert_eq!(heard.lock().unwrap().last().unwrap().name, None);
+        let count = heard.lock().unwrap().len();
+        host.set_track(u64::MAX, "", [0; 4]);
+        unsafe { call_changed(p) };
+        assert_eq!(heard.lock().unwrap().len(), count);
+        assert!(!overlapped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn track_info_accepts_the_draft_id_and_no_host_at_all() {
+        let mut host = FakeHost::new();
+        host.draft_ids = true;
+        host.set_track(TRACK_INFO_HAS_TRACK_NAME, "Draft", [0; 4]);
+        let ch = host.clap_host();
+        let (plugin, heard, _) = listener();
+        let _adapter = unsafe { ClapAdapter::with_host(plugin, &ch) };
+        assert_eq!(heard.lock().unwrap().len(), 1);
+        assert_eq!(heard.lock().unwrap()[0].name.as_deref(), Some("Draft"));
+        // A host without the extension, or none: nothing is delivered, nothing breaks.
+        let mut bare = FakeHost::new();
+        bare.offer_track = false;
+        let ch = bare.clap_host();
+        let (plugin, heard, _) = listener();
+        let adapter = unsafe { ClapAdapter::with_host(plugin, &ch) };
+        unsafe { call_changed(adapter.as_plugin()) };
+        assert!(heard.lock().unwrap().is_empty());
+        let (plugin, heard, _) = listener();
+        let adapter = ClapAdapter::new(plugin);
+        unsafe { call_changed(adapter.as_plugin()) };
+        assert!(heard.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn track_info_never_overlaps_process() {
+        let host = FakeHost::new();
+        host.set_track(TRACK_INFO_HAS_TRACK_NAME, "A", [0; 4]);
+        let ch = host.clap_host();
+        let (plugin, heard, overlapped) = listener();
+        let adapter = unsafe { ClapAdapter::with_host(plugin, &ch) };
+        let p = adapter.as_plugin() as usize;
+        unsafe {
+            assert!(((*adapter.as_plugin()).activate.unwrap())(adapter.as_plugin(), 48_000.0, 1, 64));
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let audio = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let plugin = p as *const clap_plugin;
+                let (mut l, mut r) = ([0.0f32; 16], [0.0f32; 16]);
+                let mut lp = [l.as_mut_ptr(), r.as_mut_ptr()];
+                let mut rp = [l.as_mut_ptr(), r.as_mut_ptr()];
+                let inputs = clap_audio_buffer { data32: lp.as_mut_ptr(), data64: std::ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
+                let mut outputs = clap_audio_buffer { data32: rp.as_mut_ptr(), data64: std::ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
+                let block = clap_process {
+                    steady_time: 0,
+                    frames_count: 16,
+                    transport: std::ptr::null(),
+                    audio_inputs: &inputs,
+                    audio_outputs: &mut outputs,
+                    audio_inputs_count: 1,
+                    audio_outputs_count: 1,
+                    in_events: std::ptr::null(),
+                    out_events: std::ptr::null(),
+                };
+                while !stop.load(Ordering::Relaxed) {
+                    unsafe { ((*plugin).process.unwrap())(plugin, &block) };
+                }
+            })
+        };
+        let names = ["B", "C", "D", "E", "F", "G", "H", "I", "J", "K"];
+        for name in names {
+            host.set_track(TRACK_INFO_HAS_TRACK_NAME, name, [0; 4]);
+            unsafe { call_changed(adapter.as_plugin()) };
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        stop.store(true, Ordering::Relaxed);
+        audio.join().unwrap();
+        assert!(!overlapped.load(Ordering::SeqCst), "track info reached the plugin while process ran");
+        assert_eq!(heard.lock().unwrap().len(), 1 + names.len());
+    }
+
+    #[test]
+    fn editor_right_click_opens_the_host_menu_for_the_parameter() {
+        let host = FakeHost::new();
+        let ch = host.clap_host();
+        let adapter = unsafe { ClapAdapter::with_host(Gain { db: 0.0, linear: 1.0 }, &ch) };
+        let editor = adapter.editor_host().expect("editor host");
+        // The host shows a menu: true, and it was asked for parameter 0 at the click.
+        assert!(editor.context_menu(0, 12.4, 30.6));
+        assert_eq!(*host.popups.lock().unwrap(), vec![(CONTEXT_MENU_TARGET_KIND_PARAM, 0, 0, 12, 31)]);
+        // The host cannot pop up now: not asked, and the editor falls back to its own menu.
+        host.can_popup.store(false, Ordering::Relaxed);
+        assert!(!editor.context_menu(0, 1.0, 1.0));
+        assert_eq!(host.popups.lock().unwrap().len(), 1);
+        // The host declines: false as well.
+        host.can_popup.store(true, Ordering::Relaxed);
+        host.popup_result.store(false, Ordering::Relaxed);
+        assert!(!editor.context_menu(0, 1.0, 1.0));
+        assert_eq!(host.popups.lock().unwrap().len(), 2);
+        // The plugin offers its side of the extension, with no items of its own.
+        unsafe {
+            let p = adapter.as_plugin();
+            let ext = (*p).get_extension.unwrap()(p, c"clap.context-menu/1".as_ptr()) as *const clap_plugin_context_menu;
+            assert!(!ext.is_null());
+            assert!((*ext).populate.unwrap()(p, std::ptr::null(), std::ptr::null()));
+            assert!(!(*ext).perform.unwrap()(p, std::ptr::null(), 0));
+        }
+        // The draft id works, and a host without the extension or with none is false.
+        let mut draft = FakeHost::new();
+        draft.draft_ids = true;
+        let ch = draft.clap_host();
+        let adapter = unsafe { ClapAdapter::with_host(Gain { db: 0.0, linear: 1.0 }, &ch) };
+        assert!(adapter.editor_host().unwrap().context_menu(0, 1.0, 2.0));
+        assert_eq!(draft.popups.lock().unwrap().len(), 1);
+        let mut none = FakeHost::new();
+        none.offer_menu = false;
+        let ch = none.clap_host();
+        let adapter = unsafe { ClapAdapter::with_host(Gain { db: 0.0, linear: 1.0 }, &ch) };
+        assert!(!adapter.editor_host().unwrap().context_menu(0, 1.0, 2.0));
+        assert!(!ClapAdapter::new(Gain { db: 0.0, linear: 1.0 }).editor_host().unwrap().context_menu(0, 1.0, 2.0));
+    }
+
+    #[test]
+    fn clap_context_menu_and_track_info_structs_match_the_host_abi() {
+        let ptr = std::mem::size_of::<usize>();
+        assert_eq!(std::mem::size_of::<clap_context_menu_target>(), 8);
+        assert_eq!(std::mem::size_of::<clap_host_context_menu>(), 4 * ptr);
+        assert_eq!(std::mem::size_of::<clap_plugin_context_menu>(), 2 * ptr);
+        assert_eq!(std::mem::size_of::<clap_context_menu_builder>(), 3 * ptr);
+        assert_eq!(std::mem::size_of::<clap_color>(), 4);
+        assert_eq!(std::mem::offset_of!(clap_track_info, name), 8);
+        assert_eq!(std::mem::offset_of!(clap_track_info, color), 8 + NAME_SIZE);
+        assert_eq!(std::mem::offset_of!(clap_track_info, audio_channel_count), 8 + NAME_SIZE + 4);
+        assert_eq!(std::mem::size_of::<clap_track_info>(), 8 + NAME_SIZE + 8 + ptr);
     }
 
     struct Captured {

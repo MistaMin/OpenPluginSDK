@@ -140,6 +140,34 @@ Three groups of optional `Editor` methods, all with defaults that change nothing
 
 The proofs are `cargo test -p example-editor --test typing` and `cargo test -p example-design-editor --test typing`, main-thread tests with no harness and a window that is never shown. They send `NSEvent`s (a double-click, Return, an arrow, Backspace) to the view, feed the field's delegate calls (`control:textView:doCommandBySelector:` with `insertNewline:` and `cancelOperation:`, `controlTextDidEndEditing:`), and compare the gestures at a recording `EditorHost`; they read the tooltip rectangles and the text the view answers for them through the same method AppKit calls; and they call the drag destination methods (`draggingEntered:`, `draggingUpdated:`, `prepareForDragOperation:`, `performDragOperation:`) with a stand-in dragging info whose pasteboard holds file URLs. The file dialog is tested three ways: a hook on the view (`EditorView::set_file_dialog_hook`) stands in for the panel and answers; `EditorView::open_panel_for` builds the real `NSOpenPanel` (never shown) and the test reads back its multiple-selection flag, message and allowed types; and `EditorView::simulate_panel_response` runs the real completion block on such a panel with a cancel. What they cannot show: the sheet or panel on screen and a user choosing a file, the tooltip bubble appearing after the pointer rests, the cursor during a real drag, and the field's look and caret. Those need a person at a display.
 
+## The host's parameter menu and the track
+
+Right-click on a parameter control (or Control-click, which is a right click on a Mac) asks the host for that parameter's context menu: automation, MIDI learn, whatever the host adds. All of it is additive and defaulted, so an editor written before it behaves as it did.
+
+- `EditorHost::context_menu(param_index, x, y) -> bool` asks the format's host. `x` and `y` are editor points, origin top left. True means the host showed a menu; false means it has none, cannot show one now, or declined. A host with no handler (a preview, a test, `EditorHost::detached()`) answers false. The format bridge installs the handler with `EditorHost::with_context_menu`.
+- `Editor::right_mouse_down(x, y) -> bool` is what the view calls for a right click. Return true when the click was on a parameter control (the view then does not pass it to the host), false otherwise. `ControlSet` implements it as `context_click`, so `DesignEditor` and `examples/editor` have it: on a control it asks the host, and when the host shows no menu it queues the SDK's own. A click on the bare plate, or while the pointer holds a control, returns false.
+- The SDK's own menu is `Editor::take_param_menu() -> Option<ParamMenu>` (polled after every input call, like the text field; `ParamMenu` has the parameter, the click point and the parameter's name) and `Editor::param_menu_action(param, ParamMenuAction) -> Option<String>`. The Cocoa view pops up an `NSMenu` with four items, `openplugin_dri::cocoa::PARAM_MENU_ITEMS`: **Reset to default** (one whole begin, perform, end gesture), **Copy value** (the formatted value, `ParamInfo::format`, to the general pasteboard), **Paste value** (the pasteboard text through `ParamInfo::parse`, clamped, one whole gesture; text that is not a value changes nothing) and **Type value** (opens the text field of the previous section over the control). Reset, paste and type are for interactive controls only.
+
+Per format:
+
+| Format | The host's menu |
+|---|---|
+| CLAP | `clap.context-menu/1` (and the draft id `clap.context-menu.draft/0`). The editor's host calls `clap_host_context_menu::can_popup` and then `popup` with a `CLAP_CONTEXT_MENU_TARGET_KIND_PARAM` target (the parameter id is its descriptor index), screen 0, and the point relative to the plugin's window. The plugin side of the extension is offered with no items of its own (`populate` succeeds, `perform` does nothing) |
+| VST3 | `IComponentHandler3::createContextMenu(view, &paramID)`, then `IContextMenu::popup(x, y)`, from the editor view. The shell reaches it through `op_editor_set_context_menu` (below); no items are added to the host's menu |
+| LV2, Audio Unit, AAX | The format has no such menu to ask (the Audio Unit and AAX shells do not set the callback, LV2 has no host call), so the SDK's own menu shows |
+
+The shell ABI addition is in `native/include/op_editor.h`, in an `OP_EDITOR_MENU` block (a shell that does not define it builds as before, and `OpEditorHost` is unchanged): `op_editor_set_context_menu(editor, context, callback)` with `uint32_t (*)(void* context, uint32_t index, int32_t x, int32_t y)` returning non-zero when the host showed a menu, and `op_editor_set_track_info(editor, name_utf8, rgba, flags)`.
+
+**Track name and colour.** The host's track reaches the plugin and the editor as a `TrackInfo { name: Option<String>, colour: Option<u32>, kind: u32 }` (`openplugin_core`). The name is `None` when the host gave none or an empty one; the colour is `0xRRGGBBAA`, `None` when unknown (`TrackInfo::rgb()` drops the alpha, giving the editor's `0x00RRGGBB` pixel format); `kind` holds `TrackInfo::IS_RETURN`, `IS_BUS` and `IS_MASTER` (CLAP reports them; VST3's channel context has no such flags, so it is 0). `Plugin::track_info_changed(&TrackInfo)` and `Editor::track_info(&TrackInfo)` are both defaulted to nothing and both run on the main thread, never on the audio thread: the bridges take the plugin object between blocks, as for a state call (a block that starts meanwhile is passed through dry, and a call that cannot get the plugin in time gives up and delivers nothing). They are called when the host first knows (the CLAP entry reads it in `init`, and again when the editor is made; the VST3 shell when an engine exists) and whenever the host changes it. A call that carries the same information as the last is not repeated.
+
+| Format | Where it comes from |
+|---|---|
+| CLAP | `clap.track-info/1` (or the draft id): the host's `get` is read at `init`, and again whenever the plugin's `changed` is called; name and colour only when the host flags them |
+| VST3 | `Vst::ChannelContext::IInfoListener::setChannelContextInfos` on the edit controller: `kChannelNameKey` (UTF-16, to UTF-8) and `kChannelColorKey` (ARGB, to `0xRRGGBBAA`). A call that lists only one of them keeps the other. The controller sends it to the processor as an `IMessage` (the engine lives there), which calls `op_shell_set_track_info` once an engine exists and again for each new engine, and to an open editor with `op_editor_set_track_info`; what a host says before it connects the two halves is sent when it does |
+| LV2, Audio Unit, AAX | Not delivered (no standard call is read) |
+
+The proofs: `cargo test -p openplugin-dri` (the control set's right click and the four items), `cargo test -p example-editor --test menu` (main thread; a right-click event and a Control-click event reach a host handler with the parameter and the point; with no host menu the SDK's menu request reaches a hook in place of the `NSMenu`, and the four items are run by calling the view's methods and its real `openpluginMenuItem:` action; the shell's editor ABI carries a menu callback and the track), the CLAP tests in `openplugin-targets` (a fake host with `context-menu` and `track-info`), `vst3_track_proof` (a fake host sending the channel context through `IInfoListener`) and `vst3_editor_proof` (a fake `IComponentHandler3`). What none of them show: the `NSMenu` on screen and a menu choice by a person, the pasteboard round trip (the tests pass the text in so the user's clipboard is never touched), and a real DAW's automation or MIDI-learn menu.
+
 ## Repaint
 
 The Cocoa view used to redraw the whole frame 30 times a second. One optional method now lets an editor say what changed:
@@ -163,6 +191,8 @@ The view calls `damage` after each tick and after each mouse or key call. It inv
 | CLAP | The value goes into the parameter plane at once. Begin, value and end events go to the host from the next `process` or `flush`, after `request_flush` | The view polls the plane on its timer | The instance's `editor_state` |
 | LV2 | Control port writes, with `ui:touch` grabs for begin and end | `port_event` | `instance-access`, checked against this binary's instances |
 | VST3, AU, AAX | `OpEditorHost` callbacks into the C++ shell, which calls the host | `op_editor_set_plain` from the shell | `op_editor_bind`, checked against the live-instance table |
+
+The host's parameter menu and the track have their own table above.
 
 ### Resizing per format
 
@@ -189,6 +219,7 @@ Everything those shells call is Rust: the audio contract (`op_shell_*`), the tai
 - `VST3EditorProof` (`native/vst3/editor_host.mm`, built with `-DOP_EDITOR=ON`): loads the VST3 bundle in process and opens the view. It re-creates the engine with the view open. If `OP_EDITOR_PROOF_CLICK` is `x;y;param`, it clicks there and checks the paired edits.
 
 - `cargo test -p example-editor --test a11y` and `cargo test -p example-design-editor --test a11y`: the accessibility tree and its actions, as in the Accessibility section.
+- `cargo test -p example-editor --test menu`: the parameter menu and the track, as in their section.
 - `cargo test -p example-editor --test typing` and `cargo test -p example-design-editor --test typing`: the text field, tooltips, dropped files and the file dialog, as in their section.
 
 None of these is a session in Logic, Cubase, Pro Tools, Bitwig or Reaper.

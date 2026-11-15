@@ -184,6 +184,31 @@ if(OP_BUILD_VST3)
     target_link_libraries(VST3StateProof PRIVATE sdk "-framework CoreFoundation")
     add_dependencies(VST3StateProof OpenPluginVST3State)
     add_test(NAME vst3_state_proof COMMAND VST3StateProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3State>")
+    # The host's track (Vst::ChannelContext::IInfoListener): the same shell over a stub plugin that
+    # records op_shell_set_track_info, because the example keeps no track to read back.
+    set(OP_PRODUCT_SAVED "${OP_PRODUCT}")
+    set(OP_PRODUCT "Track Stub")
+    configure_file(vst3/Info.plist.in "${CMAKE_BINARY_DIR}/vst3-track-Info.plist" @ONLY)
+    set(OP_PRODUCT "${OP_PRODUCT_SAVED}")
+    add_library(OpenPluginVST3Track MODULE
+      vst3/OpenPluginVST3.cpp
+      vst3/track_stub.cpp
+      "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
+    target_include_directories(OpenPluginVST3Track PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/vst3")
+    set_target_properties(OpenPluginVST3Track PROPERTIES
+      OUTPUT_NAME "Track Stub"
+      BUNDLE TRUE
+      BUNDLE_EXTENSION vst3
+      PREFIX ""
+      MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-track-Info.plist")
+    target_link_libraries(OpenPluginVST3Track PRIVATE sdk "-framework CoreFoundation")
+    add_executable(VST3TrackProof vst3/track.cpp
+      "${OP_VST3_SDK}/public.sdk/source/vst/hosting/hostclasses.cpp"
+      "${OP_VST3_SDK}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp")
+    target_include_directories(VST3TrackProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/vst3")
+    target_link_libraries(VST3TrackProof PRIVATE sdk "-framework CoreFoundation")
+    add_dependencies(VST3TrackProof OpenPluginVST3Track)
+    add_test(NAME vst3_track_proof COMMAND VST3TrackProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Track>")
     # ABI 2 events proof: the same shell over three stand-in plugins (native/vst3/events_stub.cpp):
     # an effect with a sidechain and surround layouts, an instrument, and a note effect with no
     # audio. The example has no notes, sidechain or surround layouts, so it cannot show those.
@@ -430,7 +455,7 @@ if(OP_BUILD_AU)
     # Shell ABI 2 parity (events, MIDI in and out, transport, sidechain, layouts, offline, the ABI
     # check) over au/probe_shell.cpp, a stand-in that implements all of ABI 2 and reports what it
     # received. Five components of the same shell source: an effect (aufx), an instrument (aumu), a
-    # music effect (aumf), and two effects whose library reports ABI 4 (newer than the shell, accepted) and ABI 2 (older than OP_SHELL_ABI 3, refused).
+    # music effect (aumf), and two effects whose library reports ABI 5 (newer than the shell, accepted) and ABI 2 (older than OP_SHELL_ABI 4, refused).
     function(op_au_probe_bundle target product subtype type kind abi)
       set(OP_PRODUCT "${product}")
       set(OP_BUNDLE_ID "com.opengrid.test.${subtype}")
@@ -453,10 +478,10 @@ if(OP_BUILD_AU)
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/${target}-Info.plist")
       target_link_libraries(${target} PRIVATE openplugin_au_sdk)
     endfunction()
-    op_au_probe_bundle(OpenPluginAUProbeFx "ProbeFx" "PrFx" aufx 0 3)
-    op_au_probe_bundle(OpenPluginAUProbeInst "ProbeInst" "PrIn" aumu 1 3)
-    op_au_probe_bundle(OpenPluginAUProbeMidiFx "ProbeMidiFx" "PrMf" aumf 2 3)
-    op_au_probe_bundle(OpenPluginAUProbeNewer "ProbeNewer" "PrNw" aufx 0 4)
+    op_au_probe_bundle(OpenPluginAUProbeFx "ProbeFx" "PrFx" aufx 0 4)
+    op_au_probe_bundle(OpenPluginAUProbeInst "ProbeInst" "PrIn" aumu 1 4)
+    op_au_probe_bundle(OpenPluginAUProbeMidiFx "ProbeMidiFx" "PrMf" aumf 2 4)
+    op_au_probe_bundle(OpenPluginAUProbeNewer "ProbeNewer" "PrNw" aufx 0 5)
     op_au_probe_bundle(OpenPluginAUProbeOlder "ProbeOlder" "PrOl" aufx 0 2)
     add_executable(AUEventsProof au/events_host.cpp)
     target_compile_features(AUEventsProof PRIVATE cxx_std_23)
