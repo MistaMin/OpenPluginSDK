@@ -222,21 +222,21 @@ impl Gain {
 
     /// Next linear gain.
     #[inline]
-    pub fn next(&mut self) -> f32 {
+    pub fn next_gain(&mut self) -> f32 {
         self.smoother.next(self.target)
     }
 
     /// Apply to a buffer in place.
     pub fn process(&mut self, buf: &mut [f32]) {
         for s in buf {
-            *s *= self.next();
+            *s *= self.next_gain();
         }
     }
 
     /// Apply the same gain curve to two buffers in place.
     pub fn process_stereo(&mut self, left: &mut [f32], right: &mut [f32]) {
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
-            let g = self.next();
+            let g = self.next_gain();
             *l *= g;
             *r *= g;
         }
@@ -554,7 +554,7 @@ mod tests {
         assert!(buf.windows(2).all(|w| w[1] <= w[0]), "monotone ramp");
         assert!((buf[4799] - 0.1).abs() < 0.01);
         g.jump_db(0.0);
-        assert_eq!(g.next(), 1.0);
+        assert_eq!(g.next_gain(), 1.0);
     }
 
     #[test]

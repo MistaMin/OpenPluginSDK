@@ -14,6 +14,8 @@
 //! - [`LoudnessMatch`]: automatic gain that holds the output at the input's K-weighted loudness.
 //! - [`Downmix`], [`Upmix`]: surround to stereo or mono by channel role (BS.775 / A/52), and the passive stereo upmix.
 //! - [`Dither`]: RPDF/TPDF dither to 8..=24 bits with noise shaping and auto-blank.
+//! - [`utility`]: mid/side, width, pan laws, balance, polarity, smoothed dB gain, [`DenormalGuard`].
+//! - [`TruePeak`], [`Ppm`] (EBU, DIN, Nordic, BBC), [`KMeter`], [`VuIec`], [`EbuMeter`], and the lock-free [`scope_feed`] for correlation and goniometer.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 
 pub mod adaa;
@@ -56,8 +58,16 @@ pub use downmix::{
 pub use dynamics::Compressor;
 pub use gain_comp::GainComp;
 pub use linear_phase::{LinearPhaseOversampler, OversampleError};
-pub use loudness::{KWeighting, Loudness, LoudnessMatch};
-pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuMeter};
+pub use kmeter::{KMeter, KScale, KZone};
+pub use loudness::{bs1770_weight, EbuMeter, EbuScale, KWeighting, Loudness, LoudnessMatch, Target};
+pub use ppm::{Ppm, PpmType};
+pub use scope::{scope_feed, ScopeFrame, ScopeReader, ScopeWriter, SCOPE_POINTS};
+pub use true_peak::TruePeak;
+pub use utility::{
+    balance_gains, db_to_gain, gain_to_db, ms_decode, ms_encode, polarity, stereo_width, DenormalGuard, Gain,
+    PanLaw, Panner,
+};
+pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuIec, VuMeter};
 pub use musical::{
     ms_from_samples, ms_per_beat, samples_from_ms, samples_from_ticks, samples_per_beat,
 };
