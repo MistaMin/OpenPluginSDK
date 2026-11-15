@@ -99,6 +99,13 @@ fn reverbs_do_not_allocate() {
         plate.set_modulation(0.7, 1.3);
         plate.set_predelay_ms(10.0 * round as f32);
         plate.set_width(1.5);
+        if round == 1 {
+            plate.set_paper_defaults();
+            plate.set_decay(0.6);
+            plate.set_damping(0.1);
+            plate.set_bandwidth(0.9);
+        }
+        let _ = (plate.geometry(), plate.decay(), plate.rt60());
         plate.set_freeze(round == 2);
         let _ = plate.tail_samples();
         plate.process(&mut l, &mut r);

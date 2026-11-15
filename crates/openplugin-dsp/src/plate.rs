@@ -1,39 +1,80 @@
 //! Plate reverberator after Dattorro.
 //!
 //! Source: Jon Dattorro, "Effect Design, Part 1: Reverberator and Other
-//! Filters", Journal of the Audio Engineering Society 45(9), 660-684, 1997.
-//! The topology below is the "plate" of section 3 / figure 1 of that paper,
-//! written from the paper's description, not from any implementation.
+//! Filters", J. Audio Eng. Soc., vol. 45, no. 9, pp. 660-684, September 1997:
+//! figure 1 ("Simplified plate-class reverberation topology in the style of
+//! Griesinger"), table 1 (default parameters) and table 2 (output taps). The
+//! code was checked against the paper line by line and is written from it,
+//! not from any implementation.
 //!
 //! ```text
-//!  in L+R -> pre-delay -> bandwidth one-pole -> 4 input allpasses
-//!      (0.75: 142, 107 | 0.625: 379, 277)
+//!  (xL + xR) / 2 -> pre-delay -> bandwidth one-pole
+//!     -> input diffusers 142, 107 (input diffusion 1 = 0.75)
+//!                        379, 277 (input diffusion 2 = 0.625)
 //!                         |
 //!       +-----------------+-----------------+
 //!       v                                   v
-//!   +-> sum <- decay * right tank end   sum <- decay * left tank end <-+
-//!   |   mod-allpass 672 (g = -0.7)        mod-allpass 908 (g = -0.7)   |
-//!   |   delay 4453                        delay 4217                   |
-//!   |   damping one-pole * decay          damping one-pole * decay     |
-//!   |   allpass 1800 (g = decay + 0.15)   allpass 2656                 |
-//!   +-- delay 3720 (left tank end)        delay 3163 (right tank end) -+
+//!   +-> sum <- decay * node 63            sum <- decay * node 39 <-----+
+//!   |   diffuser 672 +- excursion         diffuser 908 +- excursion    |
+//!   |     (decay diffusion 1 = 0.70, sign reversed, modulated tap)     |
+//!   |   delay 4453   (node24_30)          delay 4217   (node48_54)     |
+//!   |   damping one-pole, then * decay    damping one-pole, then * decay
+//!   |   diffuser 1800 (node31_33)         diffuser 2656 (node55_59)    |
+//!   |     (decay diffusion 2 = decay + 0.15, held in 0.25..=0.50)      |
+//!   +-- delay 3720   (node33_39) -> 39    delay 3163   (node59_63) -> 63
 //! ```
 //!
-//! The two halves form a figure-eight loop. Each output channel is the sum of
-//! seven taps into the *other* half and the same half (the paper's table of
-//! output taps, with the signs given there). All lengths are the paper's
-//! integer delays at 29 761 Hz; they are rescaled to the real sample rate by
-//! `fs / 29761` and rounded, so the sound (delay times in seconds) is the same
-//! at 44.1, 48, 96 kHz.
+//! What matches the paper exactly:
 //!
-//! Differences from the paper, all deliberate: the input one-pole and the
-//! damping one-pole are set by a corner frequency in hertz (so they do not
-//! drift with the sample rate; the paper's coefficient `c` corresponds to
-//! `fc = -ln(c) fs / 2 pi`), the decay is set as a reverberation time (the
-//! loop passes through four `decay` multiplications and `T` seconds of delay,
-//! so `decay = 10^(-3 T / (4 RT60))`), the allpass uses the standard Schroeder
-//! form `w = x + g z; y = z - g w`, and the two modulated allpasses are read
-//! with first-order allpass interpolation.
+//! - The order of the stages and the figure-eight cross feed (the end of each
+//!   half, times `decay`, enters the other half's sum together with the
+//!   diffused input).
+//! - Every delay length of figure 1 at the paper's 29 761 Hz, and every tap
+//!   position and sign of table 2 with its gain of 0.6 ([`PlateGeometry`]).
+//! - The lattice of figure 1 and its signs: an input or "decay diffusion 2"
+//!   diffuser with coefficient `g` computes `w = x - g z`, `y = z + g w`
+//!   (transfer function `(g + z^-N) / (1 + g z^-N)`); the two "decay diffusion
+//!   1" diffusers have the sign reversed ("note sign" in the figure),
+//!   `w = x + g z`, `y = z - g w`.
+//! - The one-poles: `y = bandwidth x + (1 - bandwidth) y[-1]` on the input and
+//!   `y = (1 - damping) x + damping y[-1]` in each half of the tank, the latter
+//!   followed by the multiplication by `decay`.
+//! - Table 1's coefficients: input diffusion 0.750 and 0.625, decay diffusion 1
+//!   0.70, decay diffusion 2 = `decay + 0.15` with floor 0.25 and ceiling 0.50,
+//!   EXCURSION = 16 samples as the largest peak excursion.
+//! - The modulation of section 1.3.7: the taps at nodes 24 and 48 (the two
+//!   "decay diffusion 1" lines) move sinusoidally, the two oscillators in
+//!   quadrature, read by allpass interpolation; the default is the footnote's
+//!   "on the order of 1 Hz, peak excursion of about 8 samples".
+//!
+//! Other sample rates: every length and tap position is the paper's number
+//! times `fs / 29761`, rounded to the nearest sample, so the delay times in
+//! seconds are those of the paper at any rate. The excursion is scaled the same
+//! way and is not rounded (the modulated taps are interpolated).
+//!
+//! Deliberate deviations, and why:
+//!
+//! - **Parameters in hertz and seconds.** [`PlateReverb::new`] starts from a
+//!   2 s decay, a 16 kHz bandwidth and 9 kHz damping instead of table 1's
+//!   coefficients, because a coefficient means a different sound at each sample
+//!   rate. The mappings are `bandwidth = 1 - exp(-2 pi fc / fs)`,
+//!   `damping = exp(-2 pi fc / fs)` (a corner at or above `0.45 fs` turns the
+//!   filter off) and `decay = 10^(-3 k T / (4 RT60))`, where `T` is the total
+//!   delay of the figure-eight (21 589 samples, 0.7254 s) which the signal
+//!   crosses with four multiplications by `decay`, and `k` is a measured
+//!   correction (see [`PLATE_DECAY_CALIBRATION`]). The paper's own coefficients
+//!   are available as [`PlateReverb::set_decay`], [`PlateReverb::set_bandwidth`],
+//!   [`PlateReverb::set_damping`] and [`PlateReverb::set_paper_defaults`].
+//! - **Modulation shape.** The paper asks for a sinusoid, in quadrature for the
+//!   pair, and that is what runs; the depth setting scales the peak excursion
+//!   from 0 to the paper's maximum of 16 samples. The interpolator is the
+//!   first-order allpass the paper recommends (its Part 2, section 5) in
+//!   Thiran's form with the fraction kept in `[0.5, 1.5)`.
+//! - **Floating point.** The paper's magnitude truncation (section 1.3.4)
+//!   answers limit cycles of fixed-point lattices; here every value written
+//!   into a recursive path is flushed to zero below 1e-20 instead.
+//! - **Additions outside the paper:** freeze, stereo width of the wet signal,
+//!   a gliding pre-delay of at most 500 ms and non-finite input handling.
 //!
 //! Allocation happens in [`PlateReverb::new`] only.
 
@@ -46,33 +87,117 @@ pub const PLATE_PAPER_RATE: f32 = 29_761.0;
 pub const PLATE_RT60_RANGE: (f32, f32) = (0.1, 120.0);
 /// Longest pre-delay, milliseconds.
 pub const PLATE_MAX_PREDELAY_MS: f32 = 500.0;
+/// Largest `decay` coefficient outside freeze.
+pub const PLATE_MAX_DECAY: f32 = 0.9995;
+/// Table 1: "EXCURSION = 16, maximum peak sample excursion of delay
+/// modulation", in samples at 29 761 Hz.
+pub const PLATE_EXCURSION: f32 = 16.0;
+/// Measured correction `k` of the decay rule `T60 = -3 k T / (4 log10 decay)`
+/// that [`PlateReverb::set_rt60`] uses.
+///
+/// With `k = 1` the rule assumes every diffuser delays by its nominal length.
+/// A diffuser is allpass only on the unit circle: the resonances that sit where
+/// its group delay is long decay more slowly, and they are what is left in the
+/// late tail. Measured (Schroeder, -5 to -35 dB, `tests/plate_paper.rs`), the
+/// decay is 1.10 times the `k = 1` estimate with the modulation off and 1.00
+/// to 1.07 times at the default modulation, which moves the resonances about;
+/// 1.07 keeps both within 8 % of the setting.
+pub const PLATE_DECAY_CALIBRATION: f32 = 1.07;
 
-/// Paper delay lengths (samples at 29 761 Hz).
+/// Figure 1, input diffusers in signal order: delay length at 29 761 Hz and
+/// coefficient (input diffusion 1 twice, then input diffusion 2 twice).
 const INPUT_AP: [(usize, f32); 4] = [(142, 0.75), (107, 0.75), (379, 0.625), (277, 0.625)];
-const L_AP1: usize = 672;
-const L_D1: usize = 4453;
-const L_AP2: usize = 1800;
-const L_D2: usize = 3720;
-const R_AP1: usize = 908;
-const R_D1: usize = 4217;
-const R_AP2: usize = 2656;
-const R_D2: usize = 3163;
-/// Peak LFO excursion of the two modulated allpasses, paper samples.
-const MOD_EXCURSION: f32 = 16.0;
+/// Figure 1, one half of the tank in signal order: modulated diffuser, delay,
+/// diffuser, delay.
+const LEFT: [usize; 4] = [672, 4453, 1800, 3720];
+const RIGHT: [usize; 4] = [908, 4217, 2656, 3163];
+/// Table 1, "decay diffusion 1".
+const DECAY_DIFFUSION_1: f32 = 0.70;
+/// Table 1, "decay diffusion 2 = decay + 0.15, floor = 0.25, ceiling = 0.50".
+const DECAY_DIFFUSION_2: (f32, f32, f32) = (0.15, 0.25, 0.50);
 /// Decay gain while frozen: loop gain 0.9998^4 per ~0.73 s, bounded and
 /// effectively infinite.
 const FREEZE_DECAY: f32 = 0.9998;
+/// Table 2: every tap is weighted 0.6.
 const OUT_GAIN: f32 = 0.6;
-/// Empirical correction of the decay rule `decay = 10^(-3 T / (4 RT60))`: the
-/// measured (Schroeder, -5 to -35 dB) decay of this topology runs 4 to 9 %
-/// slower than the ideal loop-time estimate, so the loop time is taken 7 %
-/// longer. Measured result in `tests/reverb_proof.rs`.
-const LOOP_CAL: f32 = 1.07;
 
-fn scaled(n: usize, sc: f32) -> usize {
-    ((n as f32 * sc).round() as usize).max(4)
+/// A delay line of the tank that table 2 taps, with the paper's node name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlateLine {
+    /// `node24_30`: the 4453 delay of the left half.
+    LeftDelay1,
+    /// `node31_33`: the 1800 line inside the left half's second diffuser.
+    LeftDiffuser2,
+    /// `node33_39`: the 3720 delay of the left half.
+    LeftDelay2,
+    /// `node48_54`: the 4217 delay of the right half.
+    RightDelay1,
+    /// `node55_59`: the 2656 line inside the right half's second diffuser.
+    RightDiffuser2,
+    /// `node59_63`: the 3163 delay of the right half.
+    RightDelay2,
 }
 
+/// One output tap: `sign * 0.6 * line[offset]`, the offset counted in samples
+/// from the line's input.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlateTap {
+    pub line: PlateLine,
+    pub offset: usize,
+    pub sign: f32,
+}
+
+const fn tap(line: PlateLine, offset: usize, sign: f32) -> PlateTap {
+    PlateTap { line, offset, sign }
+}
+
+/// Table 2, left output, in the table's order.
+const TAPS_L: [PlateTap; 7] = [
+    tap(PlateLine::RightDelay1, 266, 1.0),
+    tap(PlateLine::RightDelay1, 2974, 1.0),
+    tap(PlateLine::RightDiffuser2, 1913, -1.0),
+    tap(PlateLine::RightDelay2, 1996, 1.0),
+    tap(PlateLine::LeftDelay1, 1990, -1.0),
+    tap(PlateLine::LeftDiffuser2, 187, -1.0),
+    tap(PlateLine::LeftDelay2, 1066, -1.0),
+];
+/// Table 2, right output, in the table's order.
+const TAPS_R: [PlateTap; 7] = [
+    tap(PlateLine::LeftDelay1, 353, 1.0),
+    tap(PlateLine::LeftDelay1, 3627, 1.0),
+    tap(PlateLine::LeftDiffuser2, 1228, -1.0),
+    tap(PlateLine::LeftDelay2, 2673, 1.0),
+    tap(PlateLine::RightDelay1, 2111, -1.0),
+    tap(PlateLine::RightDiffuser2, 335, -1.0),
+    tap(PlateLine::RightDelay2, 121, -1.0),
+];
+
+/// The delay lengths and taps a [`PlateReverb`] runs with, in samples at its
+/// real sample rate. At 29 761 Hz these are the numbers printed in the paper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlateGeometry {
+    /// The four input diffusers in signal order (142, 107, 379, 277).
+    pub input_diffusers: [usize; 4],
+    /// Left half in signal order: modulated diffuser, delay, diffuser, delay
+    /// (672, 4453, 1800, 3720).
+    pub left: [usize; 4],
+    /// Right half in signal order (908, 4217, 2656, 3163).
+    pub right: [usize; 4],
+    /// Largest peak excursion of the two modulated taps (16), not rounded.
+    pub excursion: f32,
+    /// Table 2, left output.
+    pub taps_left: [PlateTap; 7],
+    /// Table 2, right output.
+    pub taps_right: [PlateTap; 7],
+}
+
+/// A paper length (samples at 29 761 Hz) at `fs`: `n fs / 29761`, rounded to
+/// the nearest sample. Never below 4 samples, which matters only under 2 kHz.
+fn scaled(n: usize, fs: f32) -> usize {
+    ((n as f64 * f64::from(fs) / f64::from(PLATE_PAPER_RATE)).round() as usize).max(4)
+}
+
+/// The lattice of figure 1.
 #[derive(Clone, Debug)]
 struct Allpass {
     ring: Ring,
@@ -85,21 +210,24 @@ impl Allpass {
         Self { ring: Ring::new(len + extra), len, interp: 0.0 }
     }
 
+    /// `w = x - g z`, `y = z + g w`: the figure's lattice with the minus sign
+    /// at the input sum. A negative `g` gives the "note sign" form.
     #[inline]
     fn tick(&mut self, x: f32, g: f32) -> f32 {
         let z = self.ring.at(self.len);
-        let w = x + g * z;
+        let w = x - g * z;
         self.ring.push(flush(w));
-        z - g * w
+        z + g * w
     }
 
-    /// Delay `len + shift` samples (allpass-interpolated).
+    /// As [`Allpass::tick`] with the tap at `len + shift` samples
+    /// (allpass-interpolated; exact when `shift` is zero).
     #[inline]
     fn tick_mod(&mut self, x: f32, g: f32, shift: f32) -> f32 {
         let z = self.ring.at_allpass(self.len as f32 + shift, &mut self.interp);
-        let w = x + g * z;
+        let w = x - g * z;
         self.ring.push(flush(w));
-        z - g * w
+        z + g * w
     }
 }
 
@@ -112,23 +240,25 @@ struct Tank {
     d2: Ring,
     d2_len: usize,
     damp: f32,
-    lfo: f32,
 }
 
 impl Tank {
-    fn new(ap1: usize, d1: usize, ap2: usize, d2: usize, sc: f32, phase: f32) -> Self {
-        let exc = (MOD_EXCURSION * sc).ceil() as usize + 2;
-        let (d1_len, d2_len) = (scaled(d1, sc), scaled(d2, sc));
+    fn new(lengths: &[usize; 4], fs: f32) -> Self {
+        let exc = (PLATE_EXCURSION * fs / PLATE_PAPER_RATE).ceil() as usize + 2;
+        let (d1_len, d2_len) = (scaled(lengths[1], fs), scaled(lengths[3], fs));
         Self {
-            ap1: Allpass::new(scaled(ap1, sc), exc + 4),
+            ap1: Allpass::new(scaled(lengths[0], fs), exc + 4),
             d1: Ring::new(d1_len),
             d1_len,
-            ap2: Allpass::new(scaled(ap2, sc), 4),
+            ap2: Allpass::new(scaled(lengths[2], fs), 4),
             d2: Ring::new(d2_len),
             d2_len,
             damp: 0.0,
-            lfo: phase,
         }
+    }
+
+    fn lengths(&self) -> [usize; 4] {
+        [self.ap1.len, self.d1_len, self.ap2.len, self.d2_len]
     }
 
     fn clear(&mut self) {
@@ -145,109 +275,96 @@ impl Tank {
 #[derive(Clone, Debug)]
 pub struct PlateReverb {
     sample_rate: f32,
-    scale: f32,
     pre: PreDelay,
     bw_state: f32,
-    bw_pole: f32,
     input_ap: [Allpass; 4],
     left: Tank,
     right: Tank,
     // taps (scaled), left output then right output
-    taps_l: [(usize, u8, f32); 7],
-    taps_r: [(usize, u8, f32); 7],
+    taps_l: [PlateTap; 7],
+    taps_r: [PlateTap; 7],
     ring_time_s: f32,
-    // settings
-    rt60: f32,
+    // The paper's coefficients as set (freeze overrides `decay` and `damping`).
+    in_diff: [f32; 4],
+    dd1: f32,
+    decay_set: f32,
+    damp_set: f32,
+    bw_pole: f32,
+    // In use.
     decay: f32,
     dd2: f32,
-    damp_hz: f32,
     damp_pole: f32,
-    bw_hz: f32,
+    rt60: f32,
+    excursion: f32,
     mod_depth: f32,
     mod_rate: f32,
     mod_inc: f32,
+    lfo: f32,
     width: f32,
     frozen: bool,
     in_gain: f32,
     in_coef: f32,
 }
 
-// Tap source ids: 0 left d1, 1 left ap2, 2 left d2, 3 right d1, 4 right ap2, 5 right d2.
-const TAPS_L: [(usize, u8, f32); 7] = [
-    (266, 3, 1.0),
-    (2974, 3, 1.0),
-    (1913, 4, -1.0),
-    (1996, 5, 1.0),
-    (1990, 0, -1.0),
-    (187, 1, -1.0),
-    (1066, 2, -1.0),
-];
-const TAPS_R: [(usize, u8, f32); 7] = [
-    (353, 0, 1.0),
-    (3627, 0, 1.0),
-    (1228, 1, -1.0),
-    (2673, 2, 1.0),
-    (2111, 3, -1.0),
-    (335, 4, -1.0),
-    (121, 5, -1.0),
-];
-
 impl PlateReverb {
     /// Builds the plate for `sample_rate` (clamped to the SDK's range). Defaults:
-    /// decay 2 s, bandwidth 16 kHz, damping 9 kHz, modulation depth 0.5 at 1 Hz,
-    /// width 1, pre-delay 0. Allocates.
+    /// decay 2 s, bandwidth 16 kHz, damping 9 kHz, modulation depth 0.5 (a peak
+    /// excursion of 8 paper samples) at 1 Hz, width 1, pre-delay 0. Allocates.
     pub fn new(sample_rate: f32) -> Self {
         let fs = effective_rate(sample_rate);
-        let sc = fs / PLATE_PAPER_RATE;
-        let left = Tank::new(L_AP1, L_D1, L_AP2, L_D2, sc, 0.0);
-        let right = Tank::new(R_AP1, R_D1, R_AP2, R_D2, sc, 1.5);
-        let ring_time_s = (left.ap1.len + left.d1_len + left.ap2.len + left.d2_len
-            + right.ap1.len + right.d1_len + right.ap2.len + right.d2_len) as f32
-            / fs;
-        let mk = |t: &[(usize, u8, f32); 7]| {
+        let left = Tank::new(&LEFT, fs);
+        let right = Tank::new(&RIGHT, fs);
+        let ring_time_s =
+            (left.lengths().iter().sum::<usize>() + right.lengths().iter().sum::<usize>()) as f32 / fs;
+        let mk = |t: &[PlateTap; 7]| {
             let mut out = *t;
             for e in &mut out {
-                let cap = match e.1 {
-                    0 => left.d1_len,
-                    1 => left.ap2.len,
-                    2 => left.d2_len,
-                    3 => right.d1_len,
-                    4 => right.ap2.len,
-                    _ => right.d2_len,
+                let cap = match e.line {
+                    PlateLine::LeftDelay1 => left.d1_len,
+                    PlateLine::LeftDiffuser2 => left.ap2.len,
+                    PlateLine::LeftDelay2 => left.d2_len,
+                    PlateLine::RightDelay1 => right.d1_len,
+                    PlateLine::RightDiffuser2 => right.ap2.len,
+                    PlateLine::RightDelay2 => right.d2_len,
                 };
-                e.0 = scaled(e.0, sc).min(cap);
+                e.offset = scaled(e.offset, fs).min(cap);
             }
             out
         };
         let (taps_l, taps_r) = (mk(&TAPS_L), mk(&TAPS_R));
-        let input_ap = INPUT_AP.map(|(n, _)| Allpass::new(scaled(n, sc), 4));
+        let input_ap = INPUT_AP.map(|(n, _)| Allpass::new(scaled(n, fs), 4));
         let mut s = Self {
             sample_rate: fs,
-            scale: sc,
             pre: PreDelay::new(fs, PLATE_MAX_PREDELAY_MS, 0.0),
             bw_state: 0.0,
-            bw_pole: 0.0,
             input_ap,
             left,
             right,
             taps_l,
             taps_r,
             ring_time_s,
-            rt60: 2.0,
+            in_diff: INPUT_AP.map(|(_, g)| g),
+            dd1: DECAY_DIFFUSION_1,
+            decay_set: 0.5,
+            damp_set: 0.0,
+            bw_pole: 0.0,
             decay: 0.5,
             dd2: 0.5,
-            damp_hz: 9_000.0,
             damp_pole: 0.0,
-            bw_hz: 16_000.0,
+            rt60: 2.0,
+            excursion: PLATE_EXCURSION * fs / PLATE_PAPER_RATE,
             mod_depth: 0.5,
             mod_rate: 1.0,
             mod_inc: 0.0,
+            lfo: 0.0,
             width: 1.0,
             frozen: false,
             in_gain: 1.0,
             in_coef: 1.0 - (-1.0 / (0.01 * fs)).exp(),
         };
-        s.refresh();
+        s.set_rt60(2.0);
+        s.set_bandwidth_hz(16_000.0);
+        s.set_damping_hz(9_000.0);
         s
     }
 
@@ -260,14 +377,10 @@ impl PlateReverb {
     }
 
     fn refresh(&mut self) {
-        self.bw_pole = self.pole_for(self.bw_hz);
-        self.damp_pole = if self.frozen { 0.0 } else { self.pole_for(self.damp_hz) };
-        self.decay = if self.frozen {
-            FREEZE_DECAY
-        } else {
-            10f32.powf(-3.0 * LOOP_CAL * self.ring_time_s / (4.0 * self.rt60)).min(0.9995)
-        };
-        self.dd2 = (self.decay + 0.15).clamp(0.25, 0.5);
+        self.damp_pole = if self.frozen { 0.0 } else { self.damp_set };
+        self.decay = if self.frozen { FREEZE_DECAY } else { self.decay_set };
+        let (add, floor, ceiling) = DECAY_DIFFUSION_2;
+        self.dd2 = (self.decay + add).clamp(floor, ceiling);
         self.mod_inc = std::f32::consts::TAU * self.mod_rate / self.sample_rate;
     }
 
@@ -276,34 +389,126 @@ impl PlateReverb {
         self.sample_rate
     }
 
-    /// Total delay around the figure-eight loop, seconds (about 0.72 s at any rate).
+    /// Total delay around the figure-eight loop, seconds (21 589 samples at
+    /// 29 761 Hz, about 0.725 s at any rate).
     pub fn loop_time_s(&self) -> f32 {
         self.ring_time_s
     }
 
+    /// The delay lengths and output taps in use, in samples at the real rate.
+    pub fn geometry(&self) -> PlateGeometry {
+        PlateGeometry {
+            input_diffusers: [
+                self.input_ap[0].len,
+                self.input_ap[1].len,
+                self.input_ap[2].len,
+                self.input_ap[3].len,
+            ],
+            left: self.left.lengths(),
+            right: self.right.lengths(),
+            excursion: self.excursion,
+            taps_left: self.taps_l,
+            taps_right: self.taps_r,
+        }
+    }
+
     /// Decay time (-60 dB) of the tank in seconds, `0.1..=120`. NaN is ignored.
+    /// Sets the paper's `decay` to `10^(-3 k T / (4 RT60))` (module docs).
     pub fn set_rt60(&mut self, seconds: f32) {
         if seconds.is_finite() {
             self.rt60 = seconds.clamp(PLATE_RT60_RANGE.0, PLATE_RT60_RANGE.1);
+            self.decay_set = 10f32
+                .powf(-3.0 * PLATE_DECAY_CALIBRATION * self.ring_time_s / (4.0 * self.rt60))
+                .min(PLATE_MAX_DECAY);
             self.refresh();
         }
+    }
+
+    /// The decay time the current `decay` coefficient stands for, seconds.
+    pub fn rt60(&self) -> f32 {
+        self.rt60
+    }
+
+    /// The paper's `decay` coefficient ("rate of decay", table 1: 0.50),
+    /// `0..=0.9995`; "decay diffusion 2" follows it as the paper prescribes.
+    /// The alternative to [`PlateReverb::set_rt60`]: the last call wins.
+    pub fn set_decay(&mut self, decay: f32) {
+        if decay.is_finite() {
+            self.decay_set = decay.clamp(0.0, PLATE_MAX_DECAY);
+            self.rt60 = if self.decay_set > 0.0 {
+                (-3.0 * PLATE_DECAY_CALIBRATION * self.ring_time_s / (4.0 * self.decay_set.log10()))
+                    .clamp(0.0, PLATE_RT60_RANGE.1)
+            } else {
+                0.0
+            };
+            self.refresh();
+        }
+    }
+
+    /// The `decay` coefficient in use (0.9998 while frozen).
+    pub fn decay(&self) -> f32 {
+        self.decay
+    }
+
+    /// "Decay diffusion 2" in use: `decay + 0.15` held in `0.25..=0.50`.
+    pub fn decay_diffusion_2(&self) -> f32 {
+        self.dd2
     }
 
     /// Corner of the one-pole low-pass in the tank (high-frequency damping), Hz.
-    /// `>= 0.45 fs` disables it.
+    /// `>= 0.45 fs` disables it. Sets the paper's `damping` to
+    /// `exp(-2 pi hz / fs)`.
     pub fn set_damping_hz(&mut self, hz: f32) {
         if hz.is_finite() {
-            self.damp_hz = hz.clamp(20.0, 1.0e6);
+            self.damp_set = self.pole_for(hz.clamp(20.0, 1.0e6));
             self.refresh();
         }
     }
 
-    /// Corner of the input band-limiting one-pole, Hz.
-    pub fn set_bandwidth_hz(&mut self, hz: f32) {
-        if hz.is_finite() {
-            self.bw_hz = hz.clamp(20.0, 1.0e6);
+    /// The paper's `damping` coefficient (table 1: 0.0005; 0 is no damping),
+    /// `0..=0.9999999`. The alternative to [`PlateReverb::set_damping_hz`].
+    pub fn set_damping(&mut self, damping: f32) {
+        if damping.is_finite() {
+            self.damp_set = damping.clamp(0.0, 0.999_999_9);
             self.refresh();
         }
+    }
+
+    /// The `damping` coefficient as set (freeze runs with 0).
+    pub fn damping(&self) -> f32 {
+        self.damp_set
+    }
+
+    /// Corner of the input band-limiting one-pole, Hz. `>= 0.45 fs` disables
+    /// it. Sets the paper's `bandwidth` to `1 - exp(-2 pi hz / fs)`.
+    pub fn set_bandwidth_hz(&mut self, hz: f32) {
+        if hz.is_finite() {
+            self.bw_pole = self.pole_for(hz.clamp(20.0, 1.0e6));
+        }
+    }
+
+    /// The paper's `bandwidth` coefficient (table 1: 0.9995; 0.9999999 is full
+    /// bandwidth), `0.0000001..=1`. The alternative to
+    /// [`PlateReverb::set_bandwidth_hz`].
+    pub fn set_bandwidth(&mut self, bandwidth: f32) {
+        if bandwidth.is_finite() {
+            self.bw_pole = 1.0 - bandwidth.clamp(1.0e-7, 1.0);
+        }
+    }
+
+    /// The `bandwidth` coefficient in use.
+    pub fn bandwidth(&self) -> f32 {
+        1.0 - self.bw_pole
+    }
+
+    /// Table 1 as printed: decay 0.50, bandwidth 0.9995, damping 0.0005, and
+    /// the modulation of the paper's footnote 14 (1 Hz, peak excursion 8 of the
+    /// 16 samples). The diffusion coefficients are always the table's.
+    pub fn set_paper_defaults(&mut self) {
+        self.set_decay(0.5);
+        self.set_bandwidth(0.9995);
+        self.set_damping(0.0005);
+        self.set_modulation(0.5, 1.0);
     }
 
     /// Modulation depth `0..=1` (peak excursion 16 paper samples, i.e. 0.54 ms,
@@ -360,15 +565,16 @@ impl PlateReverb {
     }
 
     #[inline]
-    fn tap(&self, src: u8, offset: usize) -> f32 {
-        match src {
-            0 => self.left.d1.at(offset),
-            1 => self.left.ap2.ring.at(offset),
-            2 => self.left.d2.at(offset),
-            3 => self.right.d1.at(offset),
-            4 => self.right.ap2.ring.at(offset),
-            _ => self.right.d2.at(offset),
-        }
+    fn tap(&self, t: &PlateTap) -> f32 {
+        let line = match t.line {
+            PlateLine::LeftDelay1 => &self.left.d1,
+            PlateLine::LeftDiffuser2 => &self.left.ap2.ring,
+            PlateLine::LeftDelay2 => &self.left.d2,
+            PlateLine::RightDelay1 => &self.right.d1,
+            PlateLine::RightDiffuser2 => &self.right.ap2.ring,
+            PlateLine::RightDelay2 => &self.right.d2,
+        };
+        t.sign * line.at(t.offset)
     }
 
     /// One stereo frame in, the wet frame out.
@@ -381,53 +587,55 @@ impl PlateReverb {
         // Input bandwidth and diffusion.
         self.bw_state = flush((1.0 - self.bw_pole) * mono + self.bw_pole * self.bw_state);
         let mut x = self.bw_state;
-        for (ap, (_, g)) in self.input_ap.iter_mut().zip(INPUT_AP.iter()) {
+        for (ap, g) in self.input_ap.iter_mut().zip(self.in_diff.iter()) {
             x = ap.tick(x, *g);
         }
 
-        // Read everything before any push: tank ends and output taps.
+        // Read everything before any push: tank ends (nodes 39 and 63) and
+        // the output taps of table 2.
         let l_end = self.left.d2.at(self.left.d2_len);
         let r_end = self.right.d2.at(self.right.d2_len);
         let mut yl = 0.0;
         let mut yr = 0.0;
-        for &(off, src, sign) in &self.taps_l {
-            yl += sign * self.tap(src, off);
+        for t in &self.taps_l {
+            yl += self.tap(t);
         }
-        for &(off, src, sign) in &self.taps_r {
-            yr += sign * self.tap(src, off);
+        for t in &self.taps_r {
+            yr += self.tap(t);
         }
 
-        let excursion = self.mod_depth * MOD_EXCURSION * self.scale;
+        let excursion = self.mod_depth * self.excursion;
         let decay = self.decay;
+        let dd1 = self.dd1;
         let dd2 = self.dd2;
         let dp = self.damp_pole;
+        // Quadrature pair (section 1.3.7).
+        let (sin, cos) = self.lfo.sin_cos();
 
-        // Left half, fed by the right half's end.
+        // Left half, fed by the right half's end (node 63).
         let max_shift = |len: usize| (len as f32 - 3.0).max(0.0);
-        let shift_l = self.left.lfo.sin() * excursion.min(max_shift(self.left.ap1.len));
+        let shift_l = sin * excursion.min(max_shift(self.left.ap1.len));
         let s = x + decay * r_end;
-        let a = self.left.ap1.tick_mod(s, -0.7, shift_l);
+        let a = self.left.ap1.tick_mod(s, -dd1, shift_l);
         let d1o = self.left.d1.at(self.left.d1_len);
         self.left.d1.push(flush(a));
         self.left.damp = flush((1.0 - dp) * d1o + dp * self.left.damp);
         let b = self.left.ap2.tick(self.left.damp * decay, dd2);
         self.left.d2.push(flush(b));
 
-        // Right half, fed by the left half's end.
-        let shift_r = self.right.lfo.sin() * excursion.min(max_shift(self.right.ap1.len));
+        // Right half, fed by the left half's end (node 39).
+        let shift_r = cos * excursion.min(max_shift(self.right.ap1.len));
         let s = x + decay * l_end;
-        let a = self.right.ap1.tick_mod(s, -0.7, shift_r);
+        let a = self.right.ap1.tick_mod(s, -dd1, shift_r);
         let d1o = self.right.d1.at(self.right.d1_len);
         self.right.d1.push(flush(a));
         self.right.damp = flush((1.0 - dp) * d1o + dp * self.right.damp);
         let b = self.right.ap2.tick(self.right.damp * decay, dd2);
         self.right.d2.push(flush(b));
 
-        for lfo in [&mut self.left.lfo, &mut self.right.lfo] {
-            *lfo += self.mod_inc;
-            if *lfo > std::f32::consts::TAU {
-                *lfo -= std::f32::consts::TAU;
-            }
+        self.lfo += self.mod_inc;
+        if self.lfo > std::f32::consts::TAU {
+            self.lfo -= std::f32::consts::TAU;
         }
 
         let (ol, or) = (yl * OUT_GAIN, yr * OUT_GAIN);
@@ -457,11 +665,133 @@ mod tests {
         let a = PlateReverb::new(PLATE_PAPER_RATE);
         assert_eq!(a.left.d1_len, 4453);
         assert_eq!(a.right.d2_len, 3163);
-        assert_eq!(a.taps_l[1].0, 2974);
+        assert_eq!(a.taps_l[1].offset, 2974);
         let b = PlateReverb::new(48_000.0);
-        let want = (4453.0f32 * 48_000.0 / PLATE_PAPER_RATE).round() as usize;
+        let want = (4453.0f64 * 48_000.0 / 29_761.0).round() as usize;
         assert_eq!(b.left.d1_len, want);
         assert!((a.loop_time_s() - b.loop_time_s()).abs() < 1e-3);
+        assert!((a.loop_time_s() - 21_589.0 / 29_761.0).abs() < 1e-6);
+    }
+
+    /// With every diffusion coefficient at zero the network is delays only, so
+    /// an impulse shows each tap of table 2 alone: at the time its place in
+    /// figure 1 implies, with the table's sign, 0.6 and one `decay` per damping
+    /// stage passed. This pins the stage order, the lengths, the tap lines,
+    /// offsets and signs together.
+    #[test]
+    fn with_no_diffusion_each_tap_of_table_2_appears_alone_at_its_time() {
+        let mut p = PlateReverb::new(PLATE_PAPER_RATE);
+        p.set_decay(0.5);
+        p.set_bandwidth(1.0);
+        p.set_damping(0.0);
+        p.set_modulation(0.0, 1.0);
+        p.in_diff = [0.0; 4];
+        p.dd1 = 0.0;
+        p.dd2 = 0.0;
+        let input = 142 + 107 + 379 + 277;
+        // Time from the input to the entry of each line, and decay stages passed.
+        let entry = |line: PlateLine| match line {
+            PlateLine::LeftDelay1 => (input + 672, 0),
+            PlateLine::LeftDiffuser2 => (input + 672 + 4453, 1),
+            PlateLine::LeftDelay2 => (input + 672 + 4453 + 1800, 1),
+            PlateLine::RightDelay1 => (input + 908, 0),
+            PlateLine::RightDiffuser2 => (input + 908 + 4217, 1),
+            PlateLine::RightDelay2 => (input + 908 + 4217 + 2656, 1),
+        };
+        // The first recirculated sample reaches a tap after this.
+        let first_pass = input + 672 + 4453 + 1800 + 3720;
+        let expect = |taps: &[(PlateLine, usize, f32); 7]| {
+            let mut v = vec![0.0f32; first_pass];
+            for &(line, offset, sign) in taps {
+                let (t, stages) = entry(line);
+                v[t + offset] += sign * 0.6 * 0.5f32.powi(stages);
+            }
+            v
+        };
+        use PlateLine::*;
+        let want_l = expect(&[
+            (RightDelay1, 266, 1.0),
+            (RightDelay1, 2974, 1.0),
+            (RightDiffuser2, 1913, -1.0),
+            (RightDelay2, 1996, 1.0),
+            (LeftDelay1, 1990, -1.0),
+            (LeftDiffuser2, 187, -1.0),
+            (LeftDelay2, 1066, -1.0),
+        ]);
+        let want_r = expect(&[
+            (LeftDelay1, 353, 1.0),
+            (LeftDelay1, 3627, 1.0),
+            (LeftDiffuser2, 1228, -1.0),
+            (LeftDelay2, 2673, 1.0),
+            (RightDelay1, 2111, -1.0),
+            (RightDiffuser2, 335, -1.0),
+            (RightDelay2, 121, -1.0),
+        ]);
+        assert_eq!(want_l.iter().filter(|v| **v != 0.0).count(), 7);
+        assert_eq!(want_r.iter().filter(|v| **v != 0.0).count(), 7);
+        for n in 0..first_pass {
+            let (l, r) = p.process_frame(f32::from(u8::from(n == 0)), f32::from(u8::from(n == 0)));
+            assert!((l - want_l[n]).abs() < 1e-6, "left at {n}: {l} vs {}", want_l[n]);
+            assert!((r - want_r[n]).abs() < 1e-6, "right at {n}: {r} vs {}", want_r[n]);
+        }
+    }
+
+    /// The lattice signs of figure 1: the first sample out of a diffuser is
+    /// `+g` times its input for the input and "decay diffusion 2" diffusers and
+    /// `-g` for "decay diffusion 1" ("note sign"), and the delayed sample has
+    /// the weight `1 - g^2`.
+    #[test]
+    fn lattice_signs_follow_figure_1() {
+        let mut a = Allpass::new(10, 4);
+        let first = a.tick(1.0, 0.75);
+        let mut later = [0.0f32; 21];
+        for v in &mut later {
+            *v = a.tick(0.0, 0.75);
+        }
+        assert_eq!(first, 0.75);
+        assert!((later[9] - (1.0 - 0.75 * 0.75)).abs() < 1e-6);
+        assert!((later[19] + 0.75 * (1.0 - 0.75 * 0.75)).abs() < 1e-6);
+
+        let mut a = Allpass::new(10, 24);
+        let first = a.tick_mod(1.0, -DECAY_DIFFUSION_1, 0.0);
+        let mut later = [0.0f32; 21];
+        for v in &mut later {
+            *v = a.tick_mod(0.0, -DECAY_DIFFUSION_1, 0.0);
+        }
+        assert_eq!(first, -0.7);
+        assert!((later[9] - (1.0 - 0.49)).abs() < 1e-6);
+        assert!((later[19] - 0.7 * (1.0 - 0.49)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn paper_coefficients_and_their_mappings() {
+        let mut p = PlateReverb::new(48_000.0);
+        p.set_paper_defaults();
+        assert_eq!(p.decay(), 0.5);
+        assert_eq!(p.decay_diffusion_2(), 0.5);
+        assert!((p.bandwidth() - 0.9995).abs() < 1e-6);
+        assert!((p.damping() - 0.0005).abs() < 1e-9);
+        // Decay diffusion 2 = decay + 0.15, floor 0.25, ceiling 0.50.
+        for (decay, want) in [(0.0f32, 0.25f32), (0.05, 0.25), (0.2, 0.35), (0.35, 0.5), (0.9, 0.5)] {
+            p.set_decay(decay);
+            assert!((p.decay_diffusion_2() - want).abs() < 1e-6, "{decay}");
+        }
+        // Seconds to coefficient and back.
+        p.set_rt60(3.0);
+        let d = p.decay();
+        p.set_decay(d);
+        assert!((p.rt60() - 3.0).abs() < 1e-3);
+        // Hertz to coefficient.
+        p.set_bandwidth_hz(4_000.0);
+        p.set_damping_hz(4_000.0);
+        let pole = (-std::f32::consts::TAU * 4_000.0 / 48_000.0).exp();
+        assert!((p.bandwidth() - (1.0 - pole)).abs() < 1e-6);
+        assert!((p.damping() - pole).abs() < 1e-6);
+        // Non-finite settings are ignored.
+        p.set_decay(f32::NAN);
+        p.set_damping(f32::INFINITY);
+        p.set_bandwidth(f32::NAN);
+        assert_eq!(p.decay(), d);
     }
 
     #[test]
