@@ -63,7 +63,26 @@ impl Rig {
     fn stats(&self) -> lv2::WorkerStats {
         lv2::worker_stats(self.instance).expect("live instance")
     }
+
+    /// Run blocks until the output differs from `old`, for a loader on its own
+    /// thread: when its job lands depends on the scheduler, so the test waits
+    /// for it (with a deadline far above any real delay) instead of assuming
+    /// it has or has not happened by a given block.
+    fn run_until_changed(&self, old: f32, what: &str) -> f32 {
+        let start = Instant::now();
+        loop {
+            let out = self.run();
+            if out != old {
+                return out;
+            }
+            assert!(start.elapsed() < LANDING_DEADLINE, "{what}: the loader's own thread never delivered");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 }
+
+/// How long a test waits for a loader thread's job to land.
+const LANDING_DEADLINE: Duration = Duration::from_secs(30);
 
 impl Drop for Rig {
     fn drop(&mut self) {
@@ -163,16 +182,8 @@ fn without_the_feature_the_loader_keeps_its_own_thread() {
     assert!(!(rig.desc.extension_data)(c"http://lv2plug.in/ns/ext/worker#interface".as_ptr()).is_null());
     assert_eq!(rig.run(), 1.0);
     rig.level.set(0.9);
-    let start = Instant::now();
-    let expected = loop {
-        let out = rig.run();
-        if out != 1.0 {
-            break out;
-        }
-        assert!(start.elapsed() < Duration::from_secs(10), "the loader's own thread never delivered");
-        std::thread::sleep(Duration::from_millis(1));
-    };
-    assert_eq!(expected, NEXT.load(Ordering::SeqCst) as f32);
+    let landed = rig.run_until_changed(1.0, "without the feature");
+    assert_eq!(landed, NEXT.load(Ordering::SeqCst) as f32);
     let ran = job_threads();
     assert_eq!(ran.len(), 1);
     assert_eq!(ran[0].1, "openplugin-worker");
@@ -189,9 +200,19 @@ fn a_host_with_no_urid_map_or_no_feature_array_still_works() {
     rig.level.set(0.7);
     rig.run();
     assert_eq!(fw.requests(), 1);
+    // No feature array: the loader runs on its own thread. Its job may land
+    // before the block that queued it polls (a busy machine can preempt the
+    // test thread right after the submit), so the first block may already
+    // have the new value; either way the value lands, which is what counts.
     let none = Rig::new(std::ptr::null());
+    JOB_RAN.lock().unwrap().clear();
     none.level.set(0.7);
-    assert_eq!(none.run(), 1.0);
+    let landed = none.run_until_changed(1.0, "no feature array");
+    assert_eq!(landed, NEXT.load(Ordering::SeqCst) as f32);
+    let ran = job_threads();
+    assert_eq!(ran.len(), 1);
+    assert_eq!(ran[0].1, "openplugin-worker");
+    assert_eq!(none.run(), landed, "the landed value stays");
 }
 
 #[test]

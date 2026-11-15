@@ -2,36 +2,45 @@
 //! A probe first proves the counter sees an allocation.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use openplugin_dsp::neural::Model;
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    // Armed per thread: the test harness's own threads (output capture, the
+    // "running for over 60 seconds" notice) never add to the count. `const`
+    // initialisation, so reading it inside the allocator never allocates.
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn armed() -> bool {
+    ARMED.try_with(|a| a.get()).unwrap_or(false)
+}
 static COUNT: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             COUNT.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc(l) }
     }
     unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             COUNT.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc_zeroed(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             COUNT.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             COUNT.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.realloc(p, l, n) }
@@ -43,9 +52,9 @@ static GLOBAL: Counting = Counting;
 
 fn count(f: impl FnOnce()) -> usize {
     COUNT.store(0, Ordering::SeqCst);
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     f();
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     COUNT.load(Ordering::SeqCst)
 }
 

@@ -1,7 +1,7 @@
 //! Configuring and running every filter in the filter library must not allocate.
 //!
-//! A counting `#[global_allocator]` forwards to `System` and only counts while
-//! `ARMED` is set (the same instrument as `openplugin-targets/tests/*_no_alloc.rs`).
+//! A counting `#[global_allocator]` forwards to `System` and only counts on
+//! the thread that armed it (the harness's own threads are not counted).
 //! All filters are built before the measured section; the measured section calls
 //! `configure`/`set` and `process_sample` every sample, including with NaN and
 //! infinite parameters and input. The probe proves the allocator sees an
@@ -11,9 +11,18 @@
 
 use openplugin_dsp::*;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    // Armed per thread: the test harness's own threads (output capture, the
+    // "running for over 60 seconds" notice) never add to the count. `const`
+    // initialisation, so reading it inside the allocator never allocates.
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn armed() -> bool {
+    ARMED.try_with(|a| a.get()).unwrap_or(false)
+}
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -21,28 +30,28 @@ struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             DEALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -59,10 +68,10 @@ fn reset_counts() {
 
 fn assert_allocator_counts() {
     reset_counts();
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     let probe = std::hint::black_box(Box::new([0u8; 64]));
     drop(std::hint::black_box(probe));
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     assert!(ALLOCATIONS.load(Ordering::SeqCst) >= 1, "allocator did not see the probe allocation");
     assert!(DEALLOCATIONS.load(Ordering::SeqCst) >= 1, "allocator did not see the probe deallocation");
     reset_counts();
@@ -85,7 +94,7 @@ fn filters_do_not_allocate() {
     let mut sink = 0.0f32;
 
     reset_counts();
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     for n in 0..20_000usize {
         let t = n as f32;
         let x = match n % 997 {
@@ -142,7 +151,7 @@ fn filters_do_not_allocate() {
         xo3.set_frequencies(48_000.0, &[f, f * 3.0]);
         sink += xo3.process_sample(x).iter().sum::<f32>();
     }
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     std::hint::black_box(sink);
 
     assert!(sink.is_finite());

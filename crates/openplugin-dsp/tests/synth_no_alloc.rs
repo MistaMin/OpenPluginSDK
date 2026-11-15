@@ -1,12 +1,12 @@
 //! The synthesis blocks must not allocate, deallocate or reallocate once built.
 //!
-//! A counting `#[global_allocator]` forwards to `System` and counts only while
-//! `ARMED` is set. A probe first proves the counter sees an allocation, so the
+//! A counting `#[global_allocator]` forwards to `System` and counts only on the
+//! thread that armed it. A probe first proves the counter sees an allocation, so the
 //! test cannot pass vacuously. Construction (tables, kernels) happens before
 //! arming: it is allowed to allocate, which is why it is done off the audio thread.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use openplugin_dsp::{
     Adsr, BandlimitedOsc, BlWave, BlepOrder, Curve, Gate, GlideMode, PinkNoise, Quality,
@@ -14,7 +14,16 @@ use openplugin_dsp::{
     WavetableSet, WhiteNoise,
 };
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    // Armed per thread: the test harness's own threads (output capture, the
+    // "running for over 60 seconds" notice) never add to the count. `const`
+    // initialisation, so reading it inside the allocator never allocates.
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn armed() -> bool {
+    ARMED.try_with(|a| a.get()).unwrap_or(false)
+}
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -22,28 +31,28 @@ struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             DEALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -56,11 +65,11 @@ static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 fn arm() {
     ALLOCATIONS.store(0, Ordering::SeqCst);
     DEALLOCATIONS.store(0, Ordering::SeqCst);
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
 }
 
 fn disarm() -> (usize, usize) {
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     (ALLOCATIONS.load(Ordering::SeqCst), DEALLOCATIONS.load(Ordering::SeqCst))
 }
 

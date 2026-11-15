@@ -1,20 +1,29 @@
 //! The dynamics blocks must not allocate while processing.
 //!
 //! Same method as `crates/openplugin-targets/tests/clap_no_alloc.rs`: a
-//! counting `#[global_allocator]` forwards to `System` and counts only while
-//! `ARMED`. Everything that may allocate (construction, `prepare`) happens
+//! counting `#[global_allocator]` forwards to `System` and counts only on the
+//! thread that armed it. Everything that may allocate (construction, `prepare`) happens
 //! before arming. A probe first proves the allocator really sees an allocation
 //! and a deallocation in this binary, so the test cannot pass vacuously.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use openplugin_dsp::{
     Detection, Domain, Dynamics, DynamicsMode, DynamicsParams, EnvelopeFollower, Limiter, Link, Smoothing, Topology,
     TruePeak,
 };
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    // Armed per thread: the test harness's own threads (output capture, the
+    // "running for over 60 seconds" notice) never add to the count. `const`
+    // initialisation, so reading it inside the allocator never allocates.
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn armed() -> bool {
+    ARMED.try_with(|a| a.get()).unwrap_or(false)
+}
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -22,25 +31,25 @@ struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.realloc(ptr, layout, new_size) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             DEALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.dealloc(ptr, layout) }
@@ -53,9 +62,9 @@ static GLOBAL: CountingAllocator = CountingAllocator;
 fn counts<R>(f: impl FnOnce() -> R) -> (usize, usize, R) {
     ALLOCATIONS.store(0, Ordering::SeqCst);
     DEALLOCATIONS.store(0, Ordering::SeqCst);
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     let r = f();
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     (ALLOCATIONS.load(Ordering::SeqCst), DEALLOCATIONS.load(Ordering::SeqCst), r)
 }
 
