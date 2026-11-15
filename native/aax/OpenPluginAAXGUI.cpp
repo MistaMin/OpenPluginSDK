@@ -44,14 +44,18 @@ protected:
                 engine = nullptr;
         }
         op_editor_bind(editor_, engine);
+        // The AAX host fixes the view at GetViewSize and never resizes it by
+        // itself; the editor can only ask, through the view container.
+        op_editor_get_size(editor_, &width_, &height_);
+        op_editor_set_request_resize(editor_, this, requestResize);
         if (!op_editor_attach(editor_, parent)) close();
     }
     void DeleteViewContainer() override { close(); }
     AAX_Result GetViewSize(AAX_Point* size) const override {
         if (!size) return AAX_ERROR_NULL_OBJECT;
-        uint32_t width = 0;
-        uint32_t height = 0;
-        op_editor_size(&width, &height);
+        uint32_t width = width_;
+        uint32_t height = height_;
+        if (!editor_) op_editor_size(&width, &height);
         size->horz = static_cast<float>(width);
         size->vert = static_cast<float>(height);
         return AAX_SUCCESS;
@@ -84,13 +88,36 @@ private:
     static void endEdit(void* context, uint32_t index) {
         if (AAX_IParameter* parameter = static_cast<Gui*>(context)->find(index)) parameter->Release();
     }
+    // The editor asks for a size: the host decides through SetViewSize, then the
+    // editor takes it. The size GetViewSize reports changes first, so a host that
+    // asks for it inside SetViewSize gets the new one.
+    static uint32_t requestResize(void* context, uint32_t width, uint32_t height) {
+        auto* self = static_cast<Gui*>(context);
+        AAX_IViewContainer* container = self->GetViewContainer();
+        if (!self->editor_ || !container) return 0;
+        const uint32_t oldWidth = self->width_;
+        const uint32_t oldHeight = self->height_;
+        self->width_ = width;
+        self->height_ = height;
+        AAX_Point point{static_cast<float>(height), static_cast<float>(width)};
+        if (container->SetViewSize(point) != AAX_SUCCESS) {
+            self->width_ = oldWidth;
+            self->height_ = oldHeight;
+            return 0;
+        }
+        op_editor_resize(self->editor_, width, height);
+        return 1;
+    }
     void close() {
         if (editor_) {
+            op_editor_set_request_resize(editor_, nullptr, nullptr);
             op_editor_destroy(editor_);
             editor_ = nullptr;
         }
     }
     void* editor_ = nullptr;
+    uint32_t width_ = 0;
+    uint32_t height_ = 0;
     std::vector<std::string> ids_;
 };
 #else
