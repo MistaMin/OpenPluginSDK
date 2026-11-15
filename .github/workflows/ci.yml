@@ -52,6 +52,48 @@ jobs:
         working-directory: OpenPluginSDK
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  # The core and DSP crates are platform-independent Rust. GitHub's Linux and
+  # Windows runners are x86_64 servers, so this job also runs the SSE2 and
+  # AVX+FMA kernels in openplugin_dsp::simd on real x86 hardware, which no Mac
+  # here can (Rosetta reports no AVX). It is the first step of the Windows and
+  # Linux roadmap (W1: build and test the Rust side everywhere).
+  x86-core-dsp:
+    name: Core and DSP tests on x86_64 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Report the CPU's vector features
+        shell: bash
+        run: |
+          if [ -r /proc/cpuinfo ]; then
+            grep -m1 "model name" /proc/cpuinfo
+            grep -o -w 'sse2\|avx\|avx2\|fma' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          else
+            powershell -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"
+          fi
+      - name: Core and DSP tests
+        working-directory: OpenPluginSDK
+        run: cargo test -p openplugin-core -p openplugin-dsp
+      - name: SIMD kernels in release, with the speed-up report
+        working-directory: OpenPluginSDK
+        run: cargo test -p openplugin-dsp --release --lib simd -- --include-ignored --nocapture
+
   msrv:
     name: MSRV check (Rust 1.85.0)
     runs-on: macos-latest
