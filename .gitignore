@@ -12,3 +12,4 @@
 *.aaxplugin
 .DS_Store
 Thumbs.db
+/build-format-parity/

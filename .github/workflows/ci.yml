@@ -248,6 +248,51 @@ jobs:
         working-directory: OpenPluginSDK
         run: ctest --test-dir build-shell -R '^au_' --output-on-failure
 
+  # One sound in every format (docs/FORMAT_PARITY.md): the example rendered
+  # through CLAP, LV2, VST3 and the Audio Unit must equal the Rust plugin
+  # called directly, sample for sample, and the deliberately altered shells
+  # must fail. AAX is not here: its SDK is not redistributable, so it runs
+  # locally with AAX_SDK set. Nothing is installed; bundles load by path.
+  format-parity:
+    name: Format parity (CLAP, LV2, VST3, Audio Unit)
+    runs-on: macos-latest
+    timeout-minutes: 50
+    env:
+      # VST3 SDK v3.8.0_build_66, as in the vst3-shell job.
+      VST3_SDK_REF: v3.8.0_build_66
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Check out the public VST3 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: steinbergmedia/vst3sdk
+          ref: ${{ env.VST3_SDK_REF }}
+          submodules: recursive
+          path: vst3sdk
+      - name: Check out AudioUnitSDK
+        uses: actions/checkout@v4
+        with:
+          repository: apple/AudioUnitSDK
+          ref: ${{ env.AUDIOUNITSDK_REF }}
+          path: AudioUnitSDK
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run the format parity test
+        working-directory: OpenPluginSDK
+        env:
+          VST3_SDK: ${{ github.workspace }}/vst3sdk
+          AU_SDK: ${{ github.workspace }}/AudioUnitSDK
+        run: scripts/format_parity/run.sh --work "$RUNNER_TEMP/format-parity"
+
   # Third-party validators against the example. The Audio Unit is installed
   # into the runner's own Components folder, which only a CI runner may do.
   shell-validators:

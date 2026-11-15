@@ -1,0 +1,13 @@
+# Host side of the format parity test (docs/FORMAT_PARITY.md). Its own
+# workspace, so `cargo test --workspace` and the published crates never see it.
+[package]
+name = "parity-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+openplugin = { path = "../../../crates/openplugin" }
+example-editor = { path = "../../../examples/editor" }
