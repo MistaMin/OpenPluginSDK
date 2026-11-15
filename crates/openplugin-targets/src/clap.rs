@@ -19,7 +19,8 @@
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::marker::PhantomData;
-use std::sync::atomic::{fence, AtomicU32, Ordering};
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{fence, AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant as Clock};
 
@@ -207,6 +208,8 @@ struct Instance {
     reported_tail: Option<u32>,
     layout_index: u32,
     activated: bool,
+    /// Set when a callback into the plugin panicked; see [`guarded`]. Cleared by `activate`.
+    poisoned: AtomicBool,
 }
 
 fn instance<'a>(plugin: *const clap_plugin) -> Option<&'a mut Instance> {
@@ -219,6 +222,65 @@ fn instance<'a>(plugin: *const clap_plugin) -> Option<&'a mut Instance> {
             None
         } else {
             Some(&mut *(data as *mut Instance))
+        }
+    }
+}
+
+/// Runs one `extern "C"` entry so a panic never unwinds into the host.
+///
+/// `catch_unwind` costs nothing and allocates nothing unless a panic happens. On a panic the
+/// call returns `fail` (the format's failure value). When `plugin` is not null (only
+/// `process`, `params.flush`, `reset` and `activate` pass it) the instance is also marked
+/// poisoned: `process` then outputs silence and reports an error until the host activates the
+/// plugin again. State, port and query calls fail without poisoning. The default
+/// panic hook still prints the message to stderr; install your own hook if that matters on the
+/// audio thread.
+fn guarded<R>(plugin: *const clap_plugin, fail: R, body: impl FnOnce() -> R) -> R {
+    match catch_unwind(AssertUnwindSafe(body)) {
+        Ok(value) => value,
+        Err(_) => {
+            poison(plugin);
+            fail
+        }
+    }
+}
+
+fn poison(plugin: *const clap_plugin) {
+    if plugin.is_null() {
+        return;
+    }
+    let data = unsafe { (*plugin).plugin_data } as *mut Instance;
+    if !data.is_null() {
+        unsafe { &*std::ptr::addr_of!((*data).poisoned) }.store(true, Ordering::Release);
+    }
+}
+
+fn is_poisoned(plugin: *const clap_plugin) -> bool {
+    let data = unsafe { (*plugin).plugin_data } as *mut Instance;
+    !data.is_null() && unsafe { &*std::ptr::addr_of!((*data).poisoned) }.load(Ordering::Acquire)
+}
+
+/// Writes silence to every output buffer the host handed to `process`.
+fn silence_outputs(process: &clap_process) {
+    if process.audio_outputs.is_null() {
+        return;
+    }
+    let frames = process.frames_count as usize;
+    for port in 0..process.audio_outputs_count as usize {
+        let buffer = unsafe { &*process.audio_outputs.add(port) };
+        for channel in 0..buffer.channel_count as usize {
+            if !buffer.data32.is_null() {
+                let row = unsafe { *buffer.data32.add(channel) };
+                if !row.is_null() {
+                    unsafe { std::ptr::write_bytes(row, 0, frames) };
+                }
+            }
+            if !buffer.data64.is_null() {
+                let row = unsafe { *buffer.data64.add(channel) };
+                if !row.is_null() {
+                    unsafe { std::ptr::write_bytes(row, 0, frames) };
+                }
+            }
         }
     }
 }
@@ -452,57 +514,66 @@ fn render_block(
 }
 
 unsafe extern "C" fn plugin_init(plugin: *const clap_plugin) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    instance.host_params = host_call(instance.host, EXT_PARAMS) as *const clap_host_params;
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        instance.host_params = host_call(instance.host, EXT_PARAMS) as *const clap_host_params;
+        true
+    })
 }
 
 unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
-    if plugin.is_null() {
-        return;
-    }
-    let data = unsafe { (*plugin).plugin_data };
-    if !data.is_null() {
-        let mut instance = unsafe { Box::from_raw(data as *mut Instance) };
-        // The view goes before the engine whose state it shows.
-        #[cfg(target_os = "macos")]
-        {
-            instance.gui = None;
+    guarded(std::ptr::null(), (), || {
+        if plugin.is_null() {
+            return;
         }
-        drop(instance);
-    }
+        let data = unsafe { (*plugin).plugin_data };
+        if !data.is_null() {
+            let mut instance = unsafe { Box::from_raw(data as *mut Instance) };
+            // The view goes before the engine whose state it shows.
+            #[cfg(target_os = "macos")]
+            {
+                instance.gui = None;
+            }
+            drop(instance);
+        }
+    })
 }
 
 unsafe extern "C" fn plugin_activate(plugin: *const clap_plugin, sample_rate: f64, _min_frames: u32, max_frames: u32) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    if !sample_rate_supported(sample_rate) {
-        return false;
-    }
-    let rate = sample_rate as f32;
-    if !instance.inner.accepts_sample_rate(rate) {
-        return false;
-    }
-    let max_block = max_frames.max(1) as usize;
-    let layout = selected_layout(instance);
-    let main = layout.main_channels().clamp(1, MAX_AUDIO_CHANNELS);
-    let side = layout.sidechain_channels().min(MAX_AUDIO_CHANNELS);
-    instance.sample_rate = rate;
-    instance.max_block = max_block;
-    instance.buffers = vec![vec![0.0; max_block]; main];
-    instance.sidechain = vec![vec![0.0; max_block]; side];
-    instance.inner.prepare_layout(rate, max_block, layout);
-    instance.cursor.invalidate();
-    instance.cursor.pull(&instance.plane, instance.inner.as_mut());
-    sync_bypass(instance);
-    notify_latency(instance);
-    instance.activated = true;
-    true
+    guarded(plugin, false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        if !sample_rate_supported(sample_rate) {
+            return false;
+        }
+        let rate = sample_rate as f32;
+        if !instance.inner.accepts_sample_rate(rate) {
+            return false;
+        }
+        let max_block = max_frames.max(1) as usize;
+        let layout = selected_layout(instance);
+        let main = layout.main_channels().clamp(1, MAX_AUDIO_CHANNELS);
+        let side = layout.sidechain_channels().min(MAX_AUDIO_CHANNELS);
+        instance.sample_rate = rate;
+        instance.max_block = max_block;
+        instance.buffers = vec![vec![0.0; max_block]; main];
+        instance.sidechain = vec![vec![0.0; max_block]; side];
+        instance.inner.prepare_layout(rate, max_block, layout);
+        instance.cursor.invalidate();
+        instance.cursor.pull(&instance.plane, instance.inner.as_mut());
+        sync_bypass(instance);
+        notify_latency(instance);
+        instance.poisoned.store(false, Ordering::Release);
+        instance.activated = true;
+        true
+    })
 }
 
 unsafe extern "C" fn plugin_deactivate(plugin: *const clap_plugin) {
-    if let Some(instance) = instance(plugin) {
-        instance.activated = false;
-    }
+    guarded(std::ptr::null(), (), || {
+        if let Some(instance) = instance(plugin) {
+            instance.activated = false;
+        }
+    })
 }
 
 unsafe extern "C" fn plugin_start(_plugin: *const clap_plugin) -> bool {
@@ -512,9 +583,11 @@ unsafe extern "C" fn plugin_start(_plugin: *const clap_plugin) -> bool {
 unsafe extern "C" fn plugin_stop(_plugin: *const clap_plugin) {}
 
 unsafe extern "C" fn plugin_reset(plugin: *const clap_plugin) {
-    if let Some(instance) = instance(plugin) {
-        instance.inner.reset();
-    }
+    guarded(plugin, (), || {
+        if let Some(instance) = instance(plugin) {
+            instance.inner.reset();
+        }
+    })
 }
 
 const GATE_AUDIO: u32 = 1;
@@ -650,6 +723,11 @@ unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const 
     if raw.is_null() {
         return PROCESS_ERROR;
     }
+    // A poisoned instance never calls into the plugin again until it is activated anew.
+    if is_poisoned(plugin) {
+        silence_outputs(unsafe { &*process });
+        return PROCESS_ERROR;
+    }
     // Only the gate is touched before the block owns the instance: a state call may
     // be inside the plugin object, and it never touches the rest.
     let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
@@ -658,7 +736,11 @@ unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const 
         return unsafe { skipped_block(plane, &*process) };
     }
     let _held = AudioGate(gate);
-    process_block(unsafe { &mut *raw }, process)
+    let result = guarded(plugin, PROCESS_ERROR, || process_block(unsafe { &mut *raw }, process));
+    if result == PROCESS_ERROR && is_poisoned(plugin) {
+        silence_outputs(unsafe { &*process });
+    }
+    result
 }
 
 fn process_block(instance: &mut Instance, process: *const clap_process) -> i32 {
@@ -770,32 +852,36 @@ fn layout_port(layout: IoConfig, is_input: bool, index: u32) -> Option<(u32, &'s
 }
 
 unsafe extern "C" fn audio_ports_count(plugin: *const clap_plugin, is_input: bool) -> u32 {
-    let Some(instance) = instance(plugin) else { return 0 };
-    let layout = selected_layout(instance);
-    if is_input {
-        let main = if layout.input == SpeakerLayout::Absent { 0 } else { 1 };
-        let side = if layout.sidechain_channels() > 0 { 1 } else { 0 };
-        main + side
-    } else if layout.output == SpeakerLayout::Absent {
-        0
-    } else {
-        1
-    }
+    guarded(std::ptr::null(), 0, || {
+        let Some(instance) = instance(plugin) else { return 0 };
+        let layout = selected_layout(instance);
+        if is_input {
+            let main = if layout.input == SpeakerLayout::Absent { 0 } else { 1 };
+            let side = if layout.sidechain_channels() > 0 { 1 } else { 0 };
+            main + side
+        } else if layout.output == SpeakerLayout::Absent {
+            0
+        } else {
+            1
+        }
+    })
 }
 
 unsafe extern "C" fn audio_ports_get(plugin: *const clap_plugin, index: u32, is_input: bool, info: *mut clap_audio_port_info) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    if info.is_null() {
-        return false;
-    }
-    let Some((id, name, layout, main)) = layout_port(selected_layout(instance), is_input, index) else {
-        return false;
-    };
-    unsafe {
-        std::ptr::write_bytes(info, 0, 1);
-        write_audio_port(&mut *info, id, name, layout, main);
-    }
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        if info.is_null() {
+            return false;
+        }
+        let Some((id, name, layout, main)) = layout_port(selected_layout(instance), is_input, index) else {
+            return false;
+        };
+        unsafe {
+            std::ptr::write_bytes(info, 0, 1);
+            write_audio_port(&mut *info, id, name, layout, main);
+        }
+        true
+    })
 }
 
 static AUDIO_PORTS: clap_plugin_audio_ports = clap_plugin_audio_ports {
@@ -804,24 +890,28 @@ static AUDIO_PORTS: clap_plugin_audio_ports = clap_plugin_audio_ports {
 };
 
 unsafe extern "C" fn note_ports_count(plugin: *const clap_plugin, is_input: bool) -> u32 {
-    let Some(instance) = instance(plugin) else { return 0 };
-    let ports = instance.inner.note_ports();
-    u32::from(if is_input { ports.input } else { ports.output })
+    guarded(std::ptr::null(), 0, || {
+        let Some(instance) = instance(plugin) else { return 0 };
+        let ports = instance.inner.note_ports();
+        u32::from(if is_input { ports.input } else { ports.output })
+    })
 }
 
 unsafe extern "C" fn note_ports_get(_plugin: *const clap_plugin, index: u32, is_input: bool, info: *mut clap_note_port_info) -> bool {
-    if !is_input || index != 0 || info.is_null() {
-        return false;
-    }
-    unsafe {
-        std::ptr::write_bytes(info, 0, 1);
-        let info = &mut *info;
-        info.id = 0;
-        info.supported_dialects = NOTE_DIALECT_CLAP | NOTE_DIALECT_MIDI;
-        info.preferred_dialect = NOTE_DIALECT_MIDI;
-        copy_cstr(&mut info.name, "MIDI In");
-    }
-    true
+    guarded(std::ptr::null(), false, || {
+        if !is_input || index != 0 || info.is_null() {
+            return false;
+        }
+        unsafe {
+            std::ptr::write_bytes(info, 0, 1);
+            let info = &mut *info;
+            info.id = 0;
+            info.supported_dialects = NOTE_DIALECT_CLAP | NOTE_DIALECT_MIDI;
+            info.preferred_dialect = NOTE_DIALECT_MIDI;
+            copy_cstr(&mut info.name, "MIDI In");
+        }
+        true
+    })
 }
 
 static NOTE_PORTS: clap_plugin_note_ports = clap_plugin_note_ports {
@@ -830,66 +920,78 @@ static NOTE_PORTS: clap_plugin_note_ports = clap_plugin_note_ports {
 };
 
 unsafe extern "C" fn latency_get(plugin: *const clap_plugin) -> u32 {
-    instance(plugin).map(|instance| instance.inner.latency() as u32).unwrap_or(0)
+    guarded(std::ptr::null(), 0, || {
+        instance(plugin).map(|instance| instance.inner.latency() as u32).unwrap_or(0)
+    })
 }
 
 static LATENCY: clap_plugin_latency = clap_plugin_latency { get: Some(latency_get) };
 
 unsafe extern "C" fn params_count(plugin: *const clap_plugin) -> u32 {
-    instance(plugin).map(|instance| instance.inner.info().params.len() as u32).unwrap_or(0)
+    guarded(std::ptr::null(), 0, || {
+        instance(plugin).map(|instance| instance.inner.info().params.len() as u32).unwrap_or(0)
+    })
 }
 
 unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, info: *mut clap_param_info) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    let Some(param) = instance.inner.info().params.get(index as usize) else { return false };
-    if info.is_null() {
-        return false;
-    }
-    unsafe {
-        std::ptr::write_bytes(info, 0, 1);
-        let info = &mut *info;
-        info.id = index;
-        info.flags = clap_param_flags(param);
-        copy_cstr(&mut info.name, param.name);
-        info.min_value = param.min as f64;
-        info.max_value = param.max as f64;
-        info.default_value = param.default as f64;
-    }
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        let Some(param) = instance.inner.info().params.get(index as usize) else { return false };
+        if info.is_null() {
+            return false;
+        }
+        unsafe {
+            std::ptr::write_bytes(info, 0, 1);
+            let info = &mut *info;
+            info.id = index;
+            info.flags = clap_param_flags(param);
+            copy_cstr(&mut info.name, param.name);
+            info.min_value = param.min as f64;
+            info.max_value = param.max as f64;
+            info.default_value = param.default as f64;
+        }
+        true
+    })
 }
 
 unsafe extern "C" fn params_get_value(plugin: *const clap_plugin, param_id: u32, out_value: *mut f64) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    let Some(value) = instance.plane.load(param_id as usize) else { return false };
-    if out_value.is_null() {
-        return false;
-    }
-    unsafe { *out_value = value as f64 };
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        let Some(value) = instance.plane.load(param_id as usize) else { return false };
+        if out_value.is_null() {
+            return false;
+        }
+        unsafe { *out_value = value as f64 };
+        true
+    })
 }
 
 unsafe extern "C" fn params_value_to_text(plugin: *const clap_plugin, param_id: u32, value: f64, out_buffer: *mut c_char, capacity: u32) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
-    if out_buffer.is_null() || capacity == 0 {
-        return false;
-    }
-    let text = param.format(value as f32);
-    let dst = unsafe { std::slice::from_raw_parts_mut(out_buffer, capacity as usize) };
-    copy_cstr(dst, &text);
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
+        if out_buffer.is_null() || capacity == 0 {
+            return false;
+        }
+        let text = param.format(value as f32);
+        let dst = unsafe { std::slice::from_raw_parts_mut(out_buffer, capacity as usize) };
+        copy_cstr(dst, &text);
+        true
+    })
 }
 
 unsafe extern "C" fn params_text_to_value(plugin: *const clap_plugin, param_id: u32, text: *const c_char, out_value: *mut f64) -> bool {
-    if text.is_null() || out_value.is_null() {
-        return false;
-    }
-    let Some(instance) = instance(plugin) else { return false };
-    let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
-    let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
-    let Some(value) = param.parse(&text) else { return false };
-    unsafe { *out_value = value as f64 };
-    true
+    guarded(std::ptr::null(), false, || {
+        if text.is_null() || out_value.is_null() {
+            return false;
+        }
+        let Some(instance) = instance(plugin) else { return false };
+        let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
+        let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+        let Some(value) = param.parse(&text) else { return false };
+        unsafe { *out_value = value as f64 };
+        true
+    })
 }
 
 fn event_header(kind: u16, size: usize) -> clap_event_header {
@@ -937,14 +1039,19 @@ fn report_gestures(instance: &Instance, out: *const clap_output_events) {
 }
 
 unsafe extern "C" fn params_flush(plugin: *const clap_plugin, input: *const clap_input_events, output: *const clap_output_events) {
-    if let Some(instance) = instance(plugin) {
-        collect_events(instance, input);
-        report_gestures(instance, output);
-        if instance.sched_count > 0 {
-            let count = instance.sched_count;
-            apply_group(instance, 0, count);
+    guarded(plugin, (), || {
+        if !plugin.is_null() && is_poisoned(plugin) {
+            return;
         }
-    }
+        if let Some(instance) = instance(plugin) {
+            collect_events(instance, input);
+            report_gestures(instance, output);
+            if instance.sched_count > 0 {
+                let count = instance.sched_count;
+                apply_group(instance, 0, count);
+            }
+        }
+    })
 }
 
 static PARAMS: clap_plugin_params = clap_plugin_params {
@@ -973,92 +1080,96 @@ fn params_snapshot(plane: &ParamPlane, info: &'static PluginInfo) -> Vec<u8> {
 }
 
 unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_ostream) -> bool {
-    let Some(raw) = (unsafe { state_target(plugin) }) else { return false };
-    if stream.is_null() {
-        return false;
-    }
-    let stream = unsafe { &*stream };
-    let Some(write) = stream.write else { return false };
-    let (plane, info, has_chunk) = unsafe { (&*std::ptr::addr_of!((*raw).plane), (*raw).info, (*raw).has_chunk) };
-    let _serial = unsafe { &*std::ptr::addr_of!((*raw).state_lock) }.lock();
-    let custom = if has_chunk {
-        // The plugin owns state beyond its parameters: take it between blocks.
-        let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
-        let Some(_held) = enter_state(gate) else { return false };
-        unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.save_state()
-    } else {
-        None
-    };
-    let bytes = custom.unwrap_or_else(|| params_snapshot(plane, info));
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let remaining = &bytes[offset..];
-        let wrote = unsafe { write(stream, remaining.as_ptr() as *const c_void, remaining.len() as u64) };
-        if wrote <= 0 {
+    guarded(std::ptr::null(), false, || {
+        let Some(raw) = (unsafe { state_target(plugin) }) else { return false };
+        if stream.is_null() {
             return false;
         }
-        offset = offset.saturating_add(wrote as usize);
-    }
-    true
+        let stream = unsafe { &*stream };
+        let Some(write) = stream.write else { return false };
+        let (plane, info, has_chunk) = unsafe { (&*std::ptr::addr_of!((*raw).plane), (*raw).info, (*raw).has_chunk) };
+        let _serial = unsafe { &*std::ptr::addr_of!((*raw).state_lock) }.lock();
+        let custom = if has_chunk {
+            // The plugin owns state beyond its parameters: take it between blocks.
+            let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
+            let Some(_held) = enter_state(gate) else { return false };
+            unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.save_state()
+        } else {
+            None
+        };
+        let bytes = custom.unwrap_or_else(|| params_snapshot(plane, info));
+        let mut offset = 0usize;
+        while offset < bytes.len() {
+            let remaining = &bytes[offset..];
+            let wrote = unsafe { write(stream, remaining.as_ptr() as *const c_void, remaining.len() as u64) };
+            if wrote <= 0 {
+                return false;
+            }
+            offset = offset.saturating_add(wrote as usize);
+        }
+        true
+    })
 }
 
 unsafe extern "C" fn state_load(plugin: *const clap_plugin, stream: *const clap_istream) -> bool {
-    let Some(raw) = (unsafe { state_target(plugin) }) else { return false };
-    if stream.is_null() {
-        return false;
-    }
-    let stream = unsafe { &*stream };
-    let Some(read) = stream.read else { return false };
-    let mut bytes = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let n = unsafe { read(stream, chunk.as_mut_ptr() as *mut c_void, chunk.len() as u64) };
-        if n <= 0 {
-            break;
+    guarded(std::ptr::null(), false, || {
+        let Some(raw) = (unsafe { state_target(plugin) }) else { return false };
+        if stream.is_null() {
+            return false;
         }
-        bytes.extend_from_slice(&chunk[..n as usize]);
-    }
-    if bytes.is_empty() {
-        return false;
-    }
-    let (plane, epoch, info, has_chunk, host) = unsafe {
-        (
-            &*std::ptr::addr_of!((*raw).plane),
-            &*std::ptr::addr_of!((*raw).plane_epoch),
-            (*raw).info,
-            (*raw).has_chunk,
-            (*raw).host,
-        )
-    };
-    let _serial = unsafe { &*std::ptr::addr_of!((*raw).state_lock) }.lock();
-    if has_chunk {
-        let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
-        let Some(held) = enter_state(gate) else { return false };
-        let inner = unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) };
-        if inner.load_state(&bytes) {
-            // The host reads parameters from the plane. A state chunk changes the plugin
-            // directly, so republish the loaded values or the host would keep the old ones.
-            plane_write(epoch, || plane.seed_from(inner.as_ref()));
-            unsafe { &mut *std::ptr::addr_of_mut!((*raw).cursor) }.invalidate();
-            drop(held);
-            notify_params_rescan(host);
-            return true;
+        let stream = unsafe { &*stream };
+        let Some(read) = stream.read else { return false };
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = unsafe { read(stream, chunk.as_mut_ptr() as *mut c_void, chunk.len() as u64) };
+            if n <= 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..n as usize]);
         }
-    }
-    // The parameter snapshot `save` writes for a plugin without a state chunk. It goes
-    // to the plane only, and the engine pulls it before the next block. Everything is
-    // checked before the first slot is written.
-    let Some(values) = decode_params(info, &bytes) else { return false };
-    if values.len() != plane.len() || values.iter().any(|v| !v.is_finite()) {
-        return false;
-    }
-    plane_write(epoch, || {
-        for (index, value) in values.iter().enumerate() {
-            plane.store(index, *value);
+        if bytes.is_empty() {
+            return false;
         }
-    });
-    notify_params_rescan(host);
-    true
+        let (plane, epoch, info, has_chunk, host) = unsafe {
+            (
+                &*std::ptr::addr_of!((*raw).plane),
+                &*std::ptr::addr_of!((*raw).plane_epoch),
+                (*raw).info,
+                (*raw).has_chunk,
+                (*raw).host,
+            )
+        };
+        let _serial = unsafe { &*std::ptr::addr_of!((*raw).state_lock) }.lock();
+        if has_chunk {
+            let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
+            let Some(held) = enter_state(gate) else { return false };
+            let inner = unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) };
+            if inner.load_state(&bytes) {
+                // The host reads parameters from the plane. A state chunk changes the plugin
+                // directly, so republish the loaded values or the host would keep the old ones.
+                plane_write(epoch, || plane.seed_from(inner.as_ref()));
+                unsafe { &mut *std::ptr::addr_of_mut!((*raw).cursor) }.invalidate();
+                drop(held);
+                notify_params_rescan(host);
+                return true;
+            }
+        }
+        // The parameter snapshot `save` writes for a plugin without a state chunk. It goes
+        // to the plane only, and the engine pulls it before the next block. Everything is
+        // checked before the first slot is written.
+        let Some(values) = decode_params(info, &bytes) else { return false };
+        if values.len() != plane.len() || values.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        plane_write(epoch, || {
+            for (index, value) in values.iter().enumerate() {
+                plane.store(index, *value);
+            }
+        });
+        notify_params_rescan(host);
+        true
+    })
 }
 
 static STATE: clap_plugin_state = clap_plugin_state {
@@ -1253,58 +1364,66 @@ fn release_offline_momentary(instance: &mut Instance, offline: bool) {
 }
 
 unsafe extern "C" fn tail_get(plugin: *const clap_plugin) -> u32 {
-    instance(plugin)
-        .and_then(|item| item.inner.tail().clap_samples())
-        .unwrap_or(0)
+    guarded(std::ptr::null(), 0, || {
+        instance(plugin)
+            .and_then(|item| item.inner.tail().clap_samples())
+            .unwrap_or(0)
+    })
 }
 
 static TAIL: clap_plugin_tail = clap_plugin_tail { get: Some(tail_get) };
 
 unsafe extern "C" fn config_count(plugin: *const clap_plugin) -> u32 {
-    instance(plugin)
-        .map(|item| item.inner.supported_layouts().len() as u32)
-        .unwrap_or(0)
+    guarded(std::ptr::null(), 0, || {
+        instance(plugin)
+            .map(|item| item.inner.supported_layouts().len() as u32)
+            .unwrap_or(0)
+    })
 }
 
 unsafe extern "C" fn config_get(plugin: *const clap_plugin, index: u32, config: *mut clap_audio_ports_config) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    let Some(layout) = instance.inner.supported_layouts().get(index as usize).copied() else {
-        return false;
-    };
-    if config.is_null() {
-        return false;
-    }
-    unsafe {
-        std::ptr::write_bytes(config, 0, 1);
-        let config = &mut *config;
-        config.id = index;
-        copy_cstr(&mut config.name, &layout.name());
-        config.input_port_count = if layout.input == SpeakerLayout::Absent { 0 } else { 1 }
-            + u32::from(layout.sidechain_channels() > 0);
-        config.output_port_count = u32::from(layout.output != SpeakerLayout::Absent);
-        config.has_main_input = layout.input != SpeakerLayout::Absent;
-        config.main_input_channel_count = layout.input_channels() as u32;
-        config.main_input_port_type = port_type_ptr(layout.input);
-        config.has_main_output = layout.output != SpeakerLayout::Absent;
-        config.main_output_channel_count = layout.output_channels() as u32;
-        config.main_output_port_type = port_type_ptr(layout.output);
-    }
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        let Some(layout) = instance.inner.supported_layouts().get(index as usize).copied() else {
+            return false;
+        };
+        if config.is_null() {
+            return false;
+        }
+        unsafe {
+            std::ptr::write_bytes(config, 0, 1);
+            let config = &mut *config;
+            config.id = index;
+            copy_cstr(&mut config.name, &layout.name());
+            config.input_port_count = if layout.input == SpeakerLayout::Absent { 0 } else { 1 }
+                + u32::from(layout.sidechain_channels() > 0);
+            config.output_port_count = u32::from(layout.output != SpeakerLayout::Absent);
+            config.has_main_input = layout.input != SpeakerLayout::Absent;
+            config.main_input_channel_count = layout.input_channels() as u32;
+            config.main_input_port_type = port_type_ptr(layout.input);
+            config.has_main_output = layout.output != SpeakerLayout::Absent;
+            config.main_output_channel_count = layout.output_channels() as u32;
+            config.main_output_port_type = port_type_ptr(layout.output);
+        }
+        true
+    })
 }
 
 unsafe extern "C" fn config_select(plugin: *const clap_plugin, config_id: u32) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    if instance.activated {
-        return false;
-    }
-    let Some(layout) = instance.inner.supported_layouts().get(config_id as usize).copied() else {
-        return false;
-    };
-    if !instance.inner.set_layout(layout) {
-        return false;
-    }
-    instance.layout_index = config_id;
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        if instance.activated {
+            return false;
+        }
+        let Some(layout) = instance.inner.supported_layouts().get(config_id as usize).copied() else {
+            return false;
+        };
+        if !instance.inner.set_layout(layout) {
+            return false;
+        }
+        instance.layout_index = config_id;
+        true
+    })
 }
 
 static AUDIO_PORTS_CONFIG: clap_plugin_audio_ports_config = clap_plugin_audio_ports_config {
@@ -1314,7 +1433,9 @@ static AUDIO_PORTS_CONFIG: clap_plugin_audio_ports_config = clap_plugin_audio_po
 };
 
 unsafe extern "C" fn config_current(plugin: *const clap_plugin) -> u32 {
-    instance(plugin).map(|item| item.layout_index).unwrap_or(CLAP_INVALID_ID)
+    guarded(std::ptr::null(), 0, || {
+        instance(plugin).map(|item| item.layout_index).unwrap_or(CLAP_INVALID_ID)
+    })
 }
 
 unsafe extern "C" fn config_info_get(
@@ -1324,21 +1445,23 @@ unsafe extern "C" fn config_info_get(
     is_input: bool,
     info: *mut clap_audio_port_info,
 ) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    let Some(layout) = instance.inner.supported_layouts().get(config_id as usize).copied() else {
-        return false;
-    };
-    if info.is_null() {
-        return false;
-    }
-    let Some((id, name, speakers, main)) = layout_port(layout, is_input, port_index) else {
-        return false;
-    };
-    unsafe {
-        std::ptr::write_bytes(info, 0, 1);
-        write_audio_port(&mut *info, id, name, speakers, main);
-    }
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        let Some(layout) = instance.inner.supported_layouts().get(config_id as usize).copied() else {
+            return false;
+        };
+        if info.is_null() {
+            return false;
+        }
+        let Some((id, name, speakers, main)) = layout_port(layout, is_input, port_index) else {
+            return false;
+        };
+        unsafe {
+            std::ptr::write_bytes(info, 0, 1);
+            write_audio_port(&mut *info, id, name, speakers, main);
+        }
+        true
+    })
 }
 
 static AUDIO_PORTS_CONFIG_INFO: clap_plugin_audio_ports_config_info = clap_plugin_audio_ports_config_info {
@@ -1353,7 +1476,9 @@ fn mask_supported(instance: &Instance, channel_mask: u64) -> bool {
 }
 
 unsafe extern "C" fn surround_supported(plugin: *const clap_plugin, channel_mask: u64) -> bool {
-    instance(plugin).map(|item| mask_supported(item, channel_mask)).unwrap_or(false)
+    guarded(std::ptr::null(), false, || {
+        instance(plugin).map(|item| mask_supported(item, channel_mask)).unwrap_or(false)
+    })
 }
 
 unsafe extern "C" fn surround_map(
@@ -1363,18 +1488,20 @@ unsafe extern "C" fn surround_map(
     channel_map: *mut u8,
     channel_map_capacity: u32,
 ) -> u32 {
-    let Some(instance) = instance(plugin) else { return 0 };
-    let Some((_, _, layout, _)) = layout_port(selected_layout(instance), is_input, port_index) else {
-        return 0;
-    };
-    let Some(map) = layout.surround_map() else { return 0 };
-    if channel_map.is_null() || (channel_map_capacity as usize) < map.len() {
-        return 0;
-    }
-    unsafe {
-        std::ptr::copy_nonoverlapping(map.as_ptr(), channel_map, map.len());
-    }
-    map.len() as u32
+    guarded(std::ptr::null(), 0, || {
+        let Some(instance) = instance(plugin) else { return 0 };
+        let Some((_, _, layout, _)) = layout_port(selected_layout(instance), is_input, port_index) else {
+            return 0;
+        };
+        let Some(map) = layout.surround_map() else { return 0 };
+        if channel_map.is_null() || (channel_map_capacity as usize) < map.len() {
+            return 0;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(map.as_ptr(), channel_map, map.len());
+        }
+        map.len() as u32
+    })
 }
 
 static SURROUND: clap_plugin_surround = clap_plugin_surround {
@@ -1383,11 +1510,13 @@ static SURROUND: clap_plugin_surround = clap_plugin_surround {
 };
 
 unsafe extern "C" fn ambisonic_supported(_plugin: *const clap_plugin, config: *const clap_ambisonic_config) -> bool {
-    if config.is_null() {
-        return false;
-    }
-    let config = unsafe { &*config };
-    config.ordering == AMBISONIC_ORDERING_ACN && config.normalization == AMBISONIC_NORMALIZATION_SN3D
+    guarded(std::ptr::null(), false, || {
+        if config.is_null() {
+            return false;
+        }
+        let config = unsafe { &*config };
+        config.ordering == AMBISONIC_ORDERING_ACN && config.normalization == AMBISONIC_NORMALIZATION_SN3D
+    })
 }
 
 unsafe extern "C" fn ambisonic_get(
@@ -1396,20 +1525,22 @@ unsafe extern "C" fn ambisonic_get(
     port_index: u32,
     config: *mut clap_ambisonic_config,
 ) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    let Some((_, _, layout, _)) = layout_port(selected_layout(instance), is_input, port_index) else {
-        return false;
-    };
-    if layout.kind() != PortKind::Ambisonic || config.is_null() {
-        return false;
-    }
-    unsafe {
-        *config = clap_ambisonic_config {
-            ordering: AMBISONIC_ORDERING_ACN,
-            normalization: AMBISONIC_NORMALIZATION_SN3D,
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        let Some((_, _, layout, _)) = layout_port(selected_layout(instance), is_input, port_index) else {
+            return false;
         };
-    }
-    true
+        if layout.kind() != PortKind::Ambisonic || config.is_null() {
+            return false;
+        }
+        unsafe {
+            *config = clap_ambisonic_config {
+                ordering: AMBISONIC_ORDERING_ACN,
+                normalization: AMBISONIC_NORMALIZATION_SN3D,
+            };
+        }
+        true
+    })
 }
 
 static AMBISONIC: clap_plugin_ambisonic = clap_plugin_ambisonic {
@@ -1422,11 +1553,13 @@ unsafe extern "C" fn render_hard(_plugin: *const clap_plugin) -> bool {
 }
 
 unsafe extern "C" fn render_set(plugin: *const clap_plugin, mode: u32) -> bool {
-    let Some(instance) = instance(plugin) else { return false };
-    let offline = mode == RENDER_OFFLINE;
-    instance.inner.set_offline(offline);
-    release_offline_momentary(instance, offline);
-    true
+    guarded(std::ptr::null(), false, || {
+        let Some(instance) = instance(plugin) else { return false };
+        let offline = mode == RENDER_OFFLINE;
+        instance.inner.set_offline(offline);
+        release_offline_momentary(instance, offline);
+        true
+    })
 }
 
 static RENDER: clap_plugin_render = clap_plugin_render {
@@ -1435,52 +1568,54 @@ static RENDER: clap_plugin_render = clap_plugin_render {
 };
 
 unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_char) -> *const c_void {
-    if id.is_null() {
-        return std::ptr::null();
-    }
-    let id = unsafe { CStr::from_ptr(id) }.to_bytes_with_nul();
-    if id == EXT_AUDIO_PORTS {
-        return &AUDIO_PORTS as *const clap_plugin_audio_ports as *const c_void;
-    }
-    if id == EXT_NOTE_PORTS {
-        return &NOTE_PORTS as *const clap_plugin_note_ports as *const c_void;
-    }
-    if id == EXT_LATENCY {
-        return &LATENCY as *const clap_plugin_latency as *const c_void;
-    }
-    if id == EXT_PARAMS {
-        return &PARAMS as *const clap_plugin_params as *const c_void;
-    }
-    if id == EXT_STATE {
-        return &STATE as *const clap_plugin_state as *const c_void;
-    }
-    if id == EXT_RENDER {
-        return &RENDER as *const clap_plugin_render as *const c_void;
-    }
-    if id == EXT_TAIL {
-        let unknown = instance(plugin).map(|item| item.inner.tail() == Tail::Unknown).unwrap_or(true);
-        if unknown {
+    guarded(std::ptr::null(), std::ptr::null(), || {
+        if id.is_null() {
             return std::ptr::null();
         }
-        return &TAIL as *const clap_plugin_tail as *const c_void;
-    }
-    if id == EXT_AUDIO_PORTS_CONFIG {
-        return &AUDIO_PORTS_CONFIG as *const clap_plugin_audio_ports_config as *const c_void;
-    }
-    if id == EXT_AUDIO_PORTS_CONFIG_INFO {
-        return &AUDIO_PORTS_CONFIG_INFO as *const clap_plugin_audio_ports_config_info as *const c_void;
-    }
-    if id == EXT_SURROUND || id == EXT_SURROUND_COMPAT {
-        return &SURROUND as *const clap_plugin_surround as *const c_void;
-    }
-    if id == EXT_AMBISONIC || id == EXT_AMBISONIC_COMPAT {
-        return &AMBISONIC as *const clap_plugin_ambisonic as *const c_void;
-    }
-    #[cfg(target_os = "macos")]
-    if id == EXT_GUI && editor_factory().is_some() {
-        return &gui::GUI as *const clap_plugin_gui as *const c_void;
-    }
-    std::ptr::null()
+        let id = unsafe { CStr::from_ptr(id) }.to_bytes_with_nul();
+        if id == EXT_AUDIO_PORTS {
+            return &AUDIO_PORTS as *const clap_plugin_audio_ports as *const c_void;
+        }
+        if id == EXT_NOTE_PORTS {
+            return &NOTE_PORTS as *const clap_plugin_note_ports as *const c_void;
+        }
+        if id == EXT_LATENCY {
+            return &LATENCY as *const clap_plugin_latency as *const c_void;
+        }
+        if id == EXT_PARAMS {
+            return &PARAMS as *const clap_plugin_params as *const c_void;
+        }
+        if id == EXT_STATE {
+            return &STATE as *const clap_plugin_state as *const c_void;
+        }
+        if id == EXT_RENDER {
+            return &RENDER as *const clap_plugin_render as *const c_void;
+        }
+        if id == EXT_TAIL {
+            let unknown = instance(plugin).map(|item| item.inner.tail() == Tail::Unknown).unwrap_or(true);
+            if unknown {
+                return std::ptr::null();
+            }
+            return &TAIL as *const clap_plugin_tail as *const c_void;
+        }
+        if id == EXT_AUDIO_PORTS_CONFIG {
+            return &AUDIO_PORTS_CONFIG as *const clap_plugin_audio_ports_config as *const c_void;
+        }
+        if id == EXT_AUDIO_PORTS_CONFIG_INFO {
+            return &AUDIO_PORTS_CONFIG_INFO as *const clap_plugin_audio_ports_config_info as *const c_void;
+        }
+        if id == EXT_SURROUND || id == EXT_SURROUND_COMPAT {
+            return &SURROUND as *const clap_plugin_surround as *const c_void;
+        }
+        if id == EXT_AMBISONIC || id == EXT_AMBISONIC_COMPAT {
+            return &AMBISONIC as *const clap_plugin_ambisonic as *const c_void;
+        }
+        #[cfg(target_os = "macos")]
+        if id == EXT_GUI && editor_factory().is_some() {
+            return &gui::GUI as *const clap_plugin_gui as *const c_void;
+        }
+        std::ptr::null()
+    })
 }
 
 unsafe extern "C" fn plugin_main_thread(_plugin: *const clap_plugin) {}
@@ -1593,6 +1728,7 @@ fn spawn(inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plugin {
         reported_tail,
         layout_index: 0,
         activated: false,
+        poisoned: AtomicBool::new(false),
     });
     let raw = Box::into_raw(instance);
     unsafe {
@@ -1690,24 +1826,28 @@ unsafe extern "C" fn factory_count(_factory: *const clap_plugin_factory) -> u32 
 }
 
 unsafe extern "C" fn factory_descriptor(_factory: *const clap_plugin_factory, index: u32) -> *const clap_plugin_descriptor {
-    if index != 0 {
-        return std::ptr::null();
-    }
-    publish().map(|published| &published.desc as *const clap_plugin_descriptor).unwrap_or(std::ptr::null())
+    guarded(std::ptr::null(), std::ptr::null(), || {
+        if index != 0 {
+            return std::ptr::null();
+        }
+        publish().map(|published| &published.desc as *const clap_plugin_descriptor).unwrap_or(std::ptr::null())
+    })
 }
 
 unsafe extern "C" fn factory_create(_factory: *const clap_plugin_factory, host: *const clap_host, plugin_id: *const c_char) -> *const clap_plugin {
-    let Some(create) = creator() else { return std::ptr::null() };
-    let Some(published) = publish() else { return std::ptr::null() };
-    if plugin_id.is_null() {
-        return std::ptr::null();
-    }
-    let requested = unsafe { CStr::from_ptr(plugin_id) };
-    let published_id = unsafe { CStr::from_ptr(published.desc.id) };
-    if requested != published_id {
-        return std::ptr::null();
-    }
-    spawn(create(), host)
+    guarded(std::ptr::null(), std::ptr::null(), || {
+        let Some(create) = creator() else { return std::ptr::null() };
+        let Some(published) = publish() else { return std::ptr::null() };
+        if plugin_id.is_null() {
+            return std::ptr::null();
+        }
+        let requested = unsafe { CStr::from_ptr(plugin_id) };
+        let published_id = unsafe { CStr::from_ptr(published.desc.id) };
+        if requested != published_id {
+            return std::ptr::null();
+        }
+        spawn(create(), host)
+    })
 }
 
 static FACTORY: clap_plugin_factory = clap_plugin_factory {
@@ -1783,62 +1923,72 @@ mod gui {
     }
 
     unsafe extern "C" fn is_api_supported(_plugin: *const clap_plugin, api: *const c_char, floating: bool) -> bool {
-        is_cocoa(api, floating)
+        guarded(std::ptr::null(), false, || {
+            is_cocoa(api, floating)
+        })
     }
 
     unsafe extern "C" fn get_preferred_api(_plugin: *const clap_plugin, api: *mut *const c_char, floating: *mut bool) -> bool {
-        if api.is_null() || floating.is_null() {
-            return false;
-        }
-        unsafe {
-            *api = WINDOW_API_COCOA.as_ptr() as *const c_char;
-            *floating = false;
-        }
-        true
+        guarded(std::ptr::null(), false, || {
+            if api.is_null() || floating.is_null() {
+                return false;
+            }
+            unsafe {
+                *api = WINDOW_API_COCOA.as_ptr() as *const c_char;
+                *floating = false;
+            }
+            true
+        })
     }
 
     unsafe extern "C" fn create(plugin: *const clap_plugin, api: *const c_char, floating: bool) -> bool {
-        if !is_cocoa(api, floating) {
-            return false;
-        }
-        let Some(instance) = instance(plugin) else { return false };
-        let Some(factory) = editor_factory() else { return false };
-        instance.gui = None;
-        // The host's gui extension, if any: how the editor asks for a size.
-        let host = instance.host;
-        let host_gui = host_call(host, EXT_GUI) as *const clap_host_gui;
-        let request = move |w: u32, h: u32| -> bool {
-            let Some(gui) = (unsafe { host_gui.as_ref() }) else { return false };
-            match gui.request_resize {
-                Some(f) => unsafe { f(host, w, h) },
+        guarded(std::ptr::null(), false, || {
+            if !is_cocoa(api, floating) {
+                return false;
+            }
+            let Some(instance) = instance(plugin) else { return false };
+            let Some(factory) = editor_factory() else { return false };
+            instance.gui = None;
+            // The host's gui extension, if any: how the editor asks for a size.
+            let host = instance.host;
+            let host_gui = host_call(host, EXT_GUI) as *const clap_host_gui;
+            let request = move |w: u32, h: u32| -> bool {
+                let Some(gui) = (unsafe { host_gui.as_ref() }) else { return false };
+                match gui.request_resize {
+                    Some(f) => unsafe { f(host, w, h) },
+                    None => false,
+                }
+            };
+            let Some(mut editor) = factory(editor_host_for(instance).with_resize(request)) else { return false };
+            editor.bind(instance.editor_state.clone());
+            let plane = instance.plane.clone();
+            let mut mirror = ValueMirror::new(plane.len());
+            // The current values before the first frame, then whatever changes.
+            mirror.update(editor.as_mut(), |i| plane.load(i));
+            let poll = Box::new(move |editor: &mut dyn Editor| mirror.update(editor, |i| plane.load(i)));
+            match EditorView::new(editor, Some(poll)) {
+                Some(view) => {
+                    instance.gui = Some(Gui { view });
+                    true
+                }
                 None => false,
             }
-        };
-        let Some(mut editor) = factory(editor_host_for(instance).with_resize(request)) else { return false };
-        editor.bind(instance.editor_state.clone());
-        let plane = instance.plane.clone();
-        let mut mirror = ValueMirror::new(plane.len());
-        // The current values before the first frame, then whatever changes.
-        mirror.update(editor.as_mut(), |i| plane.load(i));
-        let poll = Box::new(move |editor: &mut dyn Editor| mirror.update(editor, |i| plane.load(i)));
-        match EditorView::new(editor, Some(poll)) {
-            Some(view) => {
-                instance.gui = Some(Gui { view });
-                true
-            }
-            None => false,
-        }
+        })
     }
 
     unsafe extern "C" fn destroy(plugin: *const clap_plugin) {
-        if let Some(instance) = instance(plugin) {
-            instance.gui = None;
-        }
+        guarded(std::ptr::null(), (), || {
+            if let Some(instance) = instance(plugin) {
+                instance.gui = None;
+            }
+        })
     }
 
     unsafe extern "C" fn set_scale(_plugin: *const clap_plugin, _scale: f64) -> bool {
-        // Cocoa works in points; the view reads the backing scale itself.
-        false
+        guarded(std::ptr::null(), false, || {
+            // Cocoa works in points; the view reads the backing scale itself.
+            false
+        })
     }
 
     fn size(plugin: *const clap_plugin) -> Option<(u32, u32)> {
@@ -1846,15 +1996,17 @@ mod gui {
     }
 
     unsafe extern "C" fn get_size(plugin: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool {
-        let Some((w, h)) = size(plugin) else { return false };
-        if width.is_null() || height.is_null() {
-            return false;
-        }
-        unsafe {
-            *width = w;
-            *height = h;
-        }
-        true
+        guarded(std::ptr::null(), false, || {
+            let Some((w, h)) = size(plugin) else { return false };
+            if width.is_null() || height.is_null() {
+                return false;
+            }
+            unsafe {
+                *width = w;
+                *height = h;
+            }
+            true
+        })
     }
 
     fn range(plugin: *const clap_plugin) -> Option<SizeRange> {
@@ -1862,60 +2014,70 @@ mod gui {
     }
 
     unsafe extern "C" fn can_resize(plugin: *const clap_plugin) -> bool {
-        range(plugin).is_some_and(|r| !r.is_fixed())
+        guarded(std::ptr::null(), false, || {
+            range(plugin).is_some_and(|r| !r.is_fixed())
+        })
     }
 
     unsafe extern "C" fn get_resize_hints(plugin: *const clap_plugin, hints: *mut clap_gui_resize_hints) -> bool {
-        let Some(r) = range(plugin) else { return false };
-        if hints.is_null() || r.is_fixed() {
-            return false;
-        }
-        let (aw, ah) = r.aspect_ratio().unwrap_or((0, 0));
-        unsafe {
-            *hints = clap_gui_resize_hints {
-                can_resize_horizontally: r.can_resize_horizontally(),
-                can_resize_vertically: r.can_resize_vertically(),
-                preserve_aspect_ratio: aw > 0,
-                aspect_ratio_width: aw,
-                aspect_ratio_height: ah,
-            };
-        }
-        true
+        guarded(std::ptr::null(), false, || {
+            let Some(r) = range(plugin) else { return false };
+            if hints.is_null() || r.is_fixed() {
+                return false;
+            }
+            let (aw, ah) = r.aspect_ratio().unwrap_or((0, 0));
+            unsafe {
+                *hints = clap_gui_resize_hints {
+                    can_resize_horizontally: r.can_resize_horizontally(),
+                    can_resize_vertically: r.can_resize_vertically(),
+                    preserve_aspect_ratio: aw > 0,
+                    aspect_ratio_width: aw,
+                    aspect_ratio_height: ah,
+                };
+            }
+            true
+        })
     }
 
     /// The size nearest to the one proposed that the editor takes.
     unsafe extern "C" fn adjust_size(plugin: *const clap_plugin, width: *mut u32, height: *mut u32) -> bool {
-        let Some(r) = range(plugin) else { return false };
-        if width.is_null() || height.is_null() {
-            return false;
-        }
-        unsafe {
-            let (w, h) = r.clamp(*width, *height);
-            *width = w;
-            *height = h;
-        }
-        true
+        guarded(std::ptr::null(), false, || {
+            let Some(r) = range(plugin) else { return false };
+            if width.is_null() || height.is_null() {
+                return false;
+            }
+            unsafe {
+                let (w, h) = r.clamp(*width, *height);
+                *width = w;
+                *height = h;
+            }
+            true
+        })
     }
 
     /// Take a size inside the editor's bounds. A fixed editor takes its own
     /// size only. The aspect is a hint (`adjust_size` gives sizes that keep
     /// it), so a size inside the bounds with another shape is taken too.
     unsafe extern "C" fn set_size(plugin: *const clap_plugin, width: u32, height: u32) -> bool {
-        let Some(inst) = instance(plugin) else { return false };
-        let Some(gui) = inst.gui.as_ref() else { return false };
-        if !gui.view.size_range().contains(width, height) {
-            return false;
-        }
-        gui.view.resize(width, height);
-        true
+        guarded(std::ptr::null(), false, || {
+            let Some(inst) = instance(plugin) else { return false };
+            let Some(gui) = inst.gui.as_ref() else { return false };
+            if !gui.view.size_range().contains(width, height) {
+                return false;
+            }
+            gui.view.resize(width, height);
+            true
+        })
     }
 
     unsafe extern "C" fn set_parent(plugin: *const clap_plugin, window: *const clap_window) -> bool {
-        let Some(gui) = instance(plugin).and_then(|inst| inst.gui.as_ref()) else { return false };
-        if window.is_null() {
-            return false;
-        }
-        unsafe { gui.view.attach((*window).ptr) }
+        guarded(std::ptr::null(), false, || {
+            let Some(gui) = instance(plugin).and_then(|inst| inst.gui.as_ref()) else { return false };
+            if window.is_null() {
+                return false;
+            }
+            unsafe { gui.view.attach((*window).ptr) }
+        })
     }
 
     unsafe extern "C" fn set_transient(_plugin: *const clap_plugin, _window: *const clap_window) -> bool {
@@ -1925,23 +2087,27 @@ mod gui {
     unsafe extern "C" fn suggest_title(_plugin: *const clap_plugin, _title: *const c_char) {}
 
     unsafe extern "C" fn show(plugin: *const clap_plugin) -> bool {
-        match instance(plugin).and_then(|inst| inst.gui.as_ref()) {
-            Some(gui) => {
-                gui.view.set_hidden(false);
-                true
+        guarded(std::ptr::null(), false, || {
+            match instance(plugin).and_then(|inst| inst.gui.as_ref()) {
+                Some(gui) => {
+                    gui.view.set_hidden(false);
+                    true
+                }
+                None => false,
             }
-            None => false,
-        }
+        })
     }
 
     unsafe extern "C" fn hide(plugin: *const clap_plugin) -> bool {
-        match instance(plugin).and_then(|inst| inst.gui.as_ref()) {
-            Some(gui) => {
-                gui.view.set_hidden(true);
-                true
+        guarded(std::ptr::null(), false, || {
+            match instance(plugin).and_then(|inst| inst.gui.as_ref()) {
+                Some(gui) => {
+                    gui.view.set_hidden(true);
+                    true
+                }
+                None => false,
             }
-            None => false,
-        }
+        })
     }
 
     pub(super) static GUI: clap_plugin_gui = clap_plugin_gui {
@@ -1976,9 +2142,12 @@ macro_rules! export_clap {
         }
 
         unsafe extern "C" fn __openplugin_clap_init(_path: *const ::std::ffi::c_char) -> bool {
-            $crate::clap::set_creator(__openplugin_clap_create);
-            $crate::clap::set_editor($editor);
-            true
+            ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                $crate::clap::set_creator(__openplugin_clap_create);
+                $crate::clap::set_editor($editor);
+                true
+            }))
+            .unwrap_or(false)
         }
 
         #[unsafe(no_mangle)]
@@ -1995,8 +2164,11 @@ macro_rules! export_clap {
         }
 
         unsafe extern "C" fn __openplugin_clap_init(_path: *const ::std::ffi::c_char) -> bool {
-            $crate::clap::set_creator(__openplugin_clap_create);
-            true
+            ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                $crate::clap::set_creator(__openplugin_clap_create);
+                true
+            }))
+            .unwrap_or(false)
         }
 
         #[unsafe(no_mangle)]
