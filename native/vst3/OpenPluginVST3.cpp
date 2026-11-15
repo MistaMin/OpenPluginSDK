@@ -557,7 +557,7 @@ public:
         return result;
     }
     // Called by the view.
-    void* openEditor(void* parent) {
+    void* openEditor(void* parent, void* frameContext, OpEditorRequestResize request) {
         closeEditor();
         OpEditorHost host{this, hostBegin, hostPerform, hostEnd};
         editor_ = op_editor_create(&host);
@@ -567,9 +567,11 @@ public:
             op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, getParamNormalized(tag))));
         }
         op_editor_bind(editor_, engine_);
+        op_editor_set_request_resize(editor_, frameContext, request);
         if (!op_editor_attach(editor_, parent)) closeEditor();
         return editor_;
     }
+    void* editor() const { return editor_; }
     void closeEditor() {
         if (editor_) {
             op_editor_destroy(editor_);
@@ -606,6 +608,10 @@ public:
         uint32_t height = 0;
         op_editor_size(&width, &height);
         rect = ViewRect(0, 0, static_cast<int32>(width), static_cast<int32>(height));
+        if (!op_editor_size_range(&minW_, &minH_, &maxW_, &maxH_, &aspectW_, &aspectH_)) {
+            minW_ = maxW_ = width;
+            minH_ = maxH_ = height;
+        }
     }
     ~EditorView() override {
         if (open_ && controller_) controller_->closeEditor();
@@ -615,8 +621,10 @@ public:
     }
     tresult PLUGIN_API attached(void* parent, FIDString type) SMTG_OVERRIDE {
         if (!parent || isPlatformTypeSupported(type) != kResultTrue || !controller_) return kResultFalse;
-        if (!controller_->openEditor(parent)) return kResultFalse;
+        if (!controller_->openEditor(parent, this, requestResize)) return kResultFalse;
         open_ = true;
+        // The editor opens at its own size; bring it to the size the host last set.
+        resizeEditor(static_cast<uint32_t>(rect.getWidth()), static_cast<uint32_t>(rect.getHeight()));
         return CPluginView::attached(parent, type);
     }
     tresult PLUGIN_API removed() SMTG_OVERRIDE {
@@ -624,17 +632,61 @@ public:
         open_ = false;
         return CPluginView::removed();
     }
-    tresult PLUGIN_API onSize(ViewRect*) SMTG_OVERRIDE { return kResultOk; }
+    tresult PLUGIN_API canResize() SMTG_OVERRIDE { return minW_ == maxW_ && minH_ == maxH_ ? kResultFalse : kResultTrue; }
+    tresult PLUGIN_API getSize(ViewRect* size) SMTG_OVERRIDE {
+        if (!size) return kInvalidArgument;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        if (open_ && controller_ && controller_->editor() && op_editor_get_size(controller_->editor(), &width, &height)) {
+            rect = ViewRect(rect.left, rect.top, rect.left + static_cast<int32>(width), rect.top + static_cast<int32>(height));
+        }
+        *size = rect;
+        return kResultOk;
+    }
+    tresult PLUGIN_API onSize(ViewRect* newSize) SMTG_OVERRIDE {
+        if (!newSize) return kInvalidArgument;
+        uint32_t width = static_cast<uint32_t>(newSize->getWidth() > 0 ? newSize->getWidth() : 1);
+        uint32_t height = static_cast<uint32_t>(newSize->getHeight() > 0 ? newSize->getHeight() : 1);
+        adjust(width, height);
+        // Without an editor yet, attached() applies this size.
+        rect = ViewRect(newSize->left, newSize->top, newSize->left + static_cast<int32>(width), newSize->top + static_cast<int32>(height));
+        resizeEditor(width, height);
+        return kResultOk;
+    }
     tresult PLUGIN_API checkSizeConstraint(ViewRect* size) SMTG_OVERRIDE {
         if (!size) return kInvalidArgument;
-        size->right = size->left + rect.getWidth();
-        size->bottom = size->top + rect.getHeight();
+        uint32_t width = static_cast<uint32_t>(size->getWidth() > 0 ? size->getWidth() : 1);
+        uint32_t height = static_cast<uint32_t>(size->getHeight() > 0 ? size->getHeight() : 1);
+        adjust(width, height);
+        size->right = size->left + static_cast<int32>(width);
+        size->bottom = size->top + static_cast<int32>(height);
         return kResultOk;
     }
 
 private:
+    // The editor's own adjustment when it is open. Before that only the
+    // bounds are known, so the aspect is not applied until the editor opens.
+    void adjust(uint32_t& width, uint32_t& height) const {
+        if (open_ && controller_ && controller_->editor() && op_editor_adjust_size(controller_->editor(), &width, &height)) return;
+        width = width < minW_ ? minW_ : (width > maxW_ ? maxW_ : width);
+        height = height < minH_ ? minH_ : (height > maxH_ ? maxH_ : height);
+    }
+    void resizeEditor(uint32_t width, uint32_t height) {
+        if (open_ && controller_ && controller_->editor()) op_editor_resize(controller_->editor(), width, height);
+    }
+    // The editor asks for a size: the frame decides, then the editor takes it.
+    static uint32_t requestResize(void* context, uint32_t width, uint32_t height) {
+        auto* self = static_cast<EditorView*>(context);
+        if (!self->plugFrame) return 0;
+        ViewRect asked(self->rect.left, self->rect.top, self->rect.left + static_cast<int32>(width), self->rect.top + static_cast<int32>(height));
+        if (self->plugFrame->resizeView(self, &asked) != kResultTrue) return 0;
+        self->rect = asked;
+        self->resizeEditor(width, height);
+        return 1;
+    }
     IPtr<Controller> controller_;
     bool open_ = false;
+    uint32_t minW_ = 0, minH_ = 0, maxW_ = 0, maxH_ = 0, aspectW_ = 0, aspectH_ = 0;
 };
 
 IPlugView* PLUGIN_API Controller::createView(FIDString name) {

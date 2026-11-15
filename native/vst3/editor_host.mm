@@ -7,6 +7,12 @@
 //     open (the shell re-binds the editor to the new engine);
 //   - optionally, a click at a point produces paired begin/perform/end edits
 //     on one parameter, and the controller then holds the value it reported;
+//   - the view resizes as a host resizes it: canResize, checkSizeConstraint
+//     (clamped to the editor's range and shape), onSize, getSize, the NSView's
+//     frame, and a click at the scaled position of the Warm toggle edits the
+//     parameter while the old position hits nothing;
+//   - an editor-initiated size (double-click on the bare plate) reaches
+//     IPlugFrame::resizeView, and the view takes the size the frame grants;
 //   - removed() takes the view out, and tearing down with the processor
 //     first, while a second view is open, does not crash.
 //
@@ -62,6 +68,40 @@ struct Handler final : IComponentHandler {
     uint32 PLUGIN_API release() override { return 1; }
 };
 
+// The host's frame: records the request and grants it, as hosts do by calling onSize.
+struct Frame final : IPlugFrame {
+    IPlugView* view = nullptr;
+    int requests = 0;
+    int32 width = 0, height = 0;
+    bool grant = true;
+    tresult PLUGIN_API resizeView(IPlugView* v, ViewRect* newSize) override {
+        ++requests;
+        width = newSize->getWidth();
+        height = newSize->getHeight();
+        if (!grant) return kResultFalse;
+        return v->onSize(newSize);
+    }
+    tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
+        if (FUnknownPrivate::iidEqual(iid, IPlugFrame::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
+            *obj = this;
+            return kResultOk;
+        }
+        *obj = nullptr;
+        return kNoInterface;
+    }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+};
+
+static void click(NSView* editor, NSWindow* window, double height, double x, double y, int count) {
+    NSPoint at = NSMakePoint(x, height - y);
+    for (NSEventType type : {NSEventTypeLeftMouseDown, NSEventTypeLeftMouseUp}) {
+        NSEvent* e = [NSEvent mouseEventWithType:type location:at modifierFlags:0 timestamp:0 windowNumber:window.windowNumber context:nil eventNumber:0 clickCount:count pressure:1];
+        if (type == NSEventTypeLeftMouseDown) [editor mouseDown:e];
+        else [editor mouseUp:e];
+    }
+}
+
 static void spin(double seconds) { CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false); }
 
 int main(int argc, char** argv) {
@@ -100,6 +140,7 @@ int main(int argc, char** argv) {
         CHECK(factory->createInstance(controllerId, IEditController::iid, reinterpret_cast<void**>(&controller)) == kResultOk && controller);
         CHECK(controller->initialize(nullptr) == kResultOk);
         Handler handler;
+        Frame plugFrame;
         CHECK(controller->setComponentHandler(&handler) == kResultOk);
 
         // Connect the two halves, as a host does; the editor finds its engine through this.
@@ -152,6 +193,64 @@ int main(int argc, char** argv) {
             CHECK(handler.last == param);
             CHECK(controller->getParamNormalized(param) == handler.value);
         }
+
+        // Resizing, as a host does. The range comes from the view itself.
+        CHECK(view->canResize() == kResultTrue);
+        ViewRect big(0, 0, 100000, 100000);
+        CHECK(view->checkSizeConstraint(&big) == kResultOk);
+        ViewRect small(0, 0, 1, 1);
+        CHECK(view->checkSizeConstraint(&small) == kResultOk);
+        std::printf("range %dx%d to %dx%d\n", small.getWidth(), small.getHeight(), big.getWidth(), big.getHeight());
+        CHECK(big.getWidth() > rect.getWidth() && small.getWidth() < rect.getWidth());
+        // A size off the shape is brought to the shape.
+        ViewRect odd(0, 0, big.getWidth(), small.getHeight() + (big.getHeight() - small.getHeight()) / 2);
+        CHECK(view->checkSizeConstraint(&odd) == kResultOk);
+        CHECK(std::abs(odd.getWidth() * big.getHeight() - odd.getHeight() * big.getWidth()) <= big.getWidth());
+        // The click point scales with the view: examples/editor keeps its shape from the origin.
+        const double factor = double(big.getWidth()) / rect.getWidth();
+        const double cx = argc == 5 ? std::atof(argv[2]) : 135.0;
+        const double cy = argc == 5 ? std::atof(argv[3]) : 68.0;
+        const ParamID cparam = argc == 5 ? static_cast<ParamID>(std::atoi(argv[4])) : 1;
+        ViewRect to = big;
+        CHECK(view->onSize(&to) == kResultOk);
+        ViewRect now{};
+        CHECK(view->getSize(&now) == kResultOk && now.getWidth() == big.getWidth() && now.getHeight() == big.getHeight());
+        spin(0.05);
+        CHECK(editor.frame.size.width == big.getWidth() && editor.frame.size.height == big.getHeight());
+        std::printf("resized to %dx%d\n", now.getWidth(), now.getHeight());
+        // The old position of the control hits nothing at this size...
+        const int before = handler.begins;
+        click(editor, window, big.getHeight(), cx, cy, 1);
+        spin(0.05);
+        CHECK(handler.begins == before);
+        // ...and the scaled one hits it.
+        click(editor, window, big.getHeight(), cx * factor, cy * factor, 1);
+        spin(0.05);
+        std::printf("scaled click: %d begin / %d end, parameter %u\n", handler.begins, handler.ends, handler.last);
+        CHECK(handler.begins == before + 1 && handler.ends == handler.begins && handler.last == cparam);
+        // Smaller than the range: the view stays at the smallest size.
+        ViewRect tiny(0, 0, 10, 10);
+        CHECK(view->onSize(&tiny) == kResultOk);
+        CHECK(view->getSize(&now) == kResultOk && now.getWidth() == small.getWidth() && now.getHeight() == small.getHeight());
+        // The editor asks for a size: a double-click on the bare plate.
+        ViewRect open(0, 0, rect.getWidth(), rect.getHeight());
+        CHECK(view->onSize(&open) == kResultOk);
+        CHECK(view->setFrame(&plugFrame) == kResultOk);
+        click(editor, window, rect.getHeight(), 5, 5, 2);
+        spin(0.05);
+        CHECK(plugFrame.requests == 1);
+        CHECK(view->getSize(&now) == kResultOk && now.getWidth() == plugFrame.width && now.getHeight() == plugFrame.height);
+        CHECK(plugFrame.width > rect.getWidth());
+        CHECK(editor.frame.size.width == plugFrame.width && editor.frame.size.height == plugFrame.height);
+        std::printf("editor asked for %dx%d, view is %dx%d\n", plugFrame.width, plugFrame.height, now.getWidth(), now.getHeight());
+        // A frame that refuses leaves the size alone.
+        plugFrame.grant = false;
+        click(editor, window, now.getHeight(), 5, 5, 2);
+        spin(0.05);
+        CHECK(plugFrame.requests == 2);
+        ViewRect after{};
+        CHECK(view->getSize(&after) == kResultOk && after.getWidth() == now.getWidth() && after.getHeight() == now.getHeight());
+        CHECK(view->setFrame(nullptr) == kResultOk);
 
         CHECK(view->removed() == kResultOk);
         CHECK(parent.subviews.count == 0);

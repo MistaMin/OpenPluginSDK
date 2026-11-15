@@ -44,6 +44,15 @@ void endEdit(void* context, uint32_t index) {
 }
 }
 
+// The editor asks for a size. The container takes it as its own frame, which a
+// host that follows the view's frame (as AU hosts do) turns into a window size.
+// The editor follows through setFrameSize:.
+static uint32_t requestResize(void* context, uint32_t width, uint32_t height) {
+    NSView* view = static_cast<NSView*>(context);
+    [view setFrameSize:NSMakeSize(width, height)];
+    return 1;
+}
+
 @implementation OP_AU_CONTAINER_CLASS
 - (instancetype)initWithAudioUnit:(AudioUnit)unit {
     uint32_t width = 0;
@@ -62,8 +71,18 @@ void endEdit(void* context, uint32_t index) {
         return nil;
     }
     [self sync];
+    op_editor_set_request_resize(editor_, self, requestResize);
     op_editor_attach(editor_, self);
     return self;
+}
+// The host sizes the view: the editor takes the nearest size it accepts. The
+// container keeps the frame the host gave it.
+- (void)setFrameSize:(NSSize)size {
+    [super setFrameSize:size];
+    if (!editor_ || size.width < 1 || size.height < 1) return;
+    uint32_t width = static_cast<uint32_t>(size.width + 0.5);
+    uint32_t height = static_cast<uint32_t>(size.height + 0.5);
+    if (op_editor_adjust_size(editor_, &width, &height)) op_editor_resize(editor_, width, height);
 }
 - (BOOL)isFlipped {
     return YES;
@@ -99,7 +118,10 @@ void endEdit(void* context, uint32_t index) {
 }
 - (void)dealloc {
     [timer_ invalidate];
-    if (editor_) op_editor_destroy(editor_);
+    if (editor_) {
+        op_editor_set_request_resize(editor_, nullptr, nullptr);
+        op_editor_destroy(editor_);
+    }
     [super dealloc];
 }
 @end
