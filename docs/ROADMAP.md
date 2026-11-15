@@ -64,7 +64,7 @@ Still open, carried into 0.4:
 
 ### Status
 
-Tasks 1 to 5 are done: plugin state reaches VST3 (a versioned trailer), the Audio Unit (its own class-info key) and AAX (chunk version 2); parameter-only plugins skip the gate; CLAP state is synchronised with `process`. Task 6 is running.
+Tasks 1 to 5 are done: plugin state reaches VST3 (a versioned trailer), the Audio Unit (its own class-info key) and AAX (chunk version 2); parameter-only plugins skip the gate; CLAP state is synchronised with `process`. Task 6 is done: `scripts/host_smoke` runs the example in REAPER 7.80 (CLAP, VST3, Audio Unit) and OpenGrid9 (VST3, Audio Unit, LV2), 105 of 106 checks pass, and `auval -strict` passes ([HOST_TESTS.md](HOST_TESTS.md)). The one failure is a real bug: VST3 shows parameter text as the normalized value instead of the plugin's own text; it is being fixed with the VST3 parity task, and 0.4.0 is tagged after that.
 
 ### Tasks
 
