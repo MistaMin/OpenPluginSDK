@@ -25,6 +25,19 @@ pub fn f32_to_i32(sample: f32) -> i32 {
     scaled.clamp(i32::MIN as f32, (i32::MAX as f32) - 1.0) as i32
 }
 
+const I24_SCALE: f32 = 8_388_608.0;
+
+/// A 24-bit sample held in the low 24 bits of an `i32` (sign-extended).
+pub fn i24_to_f32(sample: i32) -> f32 {
+    sample.clamp(-8_388_608, 8_388_607) as f32 / I24_SCALE
+}
+
+/// Round-toward-zero to a 24-bit integer, clamped to -8388608..=8388607.
+pub fn f32_to_i24(sample: f32) -> i32 {
+    let scaled = finite(sample) * I24_SCALE;
+    scaled.clamp(-8_388_608.0, 8_388_607.0) as i32
+}
+
 /// `previous + (next - previous) * position`. `position` outside 0..1 is clamped.
 pub fn lerp(previous: f32, next: f32, position: f32) -> f32 {
     let t = if position.is_finite() {
