@@ -190,6 +190,7 @@ dependencies = [
  "openplugin-core",
  "openplugin-testing",
  "rustfft",
+ "serde_json",
 ]
 
 [[package]]

@@ -928,3 +928,70 @@ The kernel is a Kaiser-windowed sinc stored as a table of 256 to 2048 phases per
 | `Best` | 128 | 0.44 | 0.00002 dB | -118.9 dB |
 
 Folding test (a 0.30 cycles/sample tone read at ratio 1.7 would land above Nyquist): the residue is -60.4, -84.4, -101.3 and -132.3 dB for the four qualities, and a tone that stays in band keeps unit gain to within 0.14 % (`Low`) or better. `SincConfig` sets the taps, attenuation and phases by hand.
+
+## Neural models
+
+`openplugin_dsp::neural` runs small neural networks for amp and pedal models, one sample at a time: `Dense` (identity, tanh, ReLU, sigmoid), `Gru`, `Lstm` and a causal dilated `Conv1d`, chained by a `Model` with input size 1 (audio) or 2 (audio and a conditioning value such as a gain knob) and output size 1, with an optional residual (`output + input`). The equations are written from the papers: Cho et al. 2014 (GRU, reset gate before the recurrent matrix; frameworks that apply it after, as cuDNN does, compute a different function), Hochreiter and Schmidhuber 1997 with the forget gate of Gers, Schmidhuber and Cummins 2000 (LSTM, no peepholes), van den Oord et al. 2016 (dilated causal convolution; the gated activation inside a WaveNet block is not modelled). It is a separate implementation, not a port of any existing amp-model runtime. The exact formulas, the limits and the JSON format are in the module docs.
+
+### Load off the audio thread, run on it
+
+```rust
+use openplugin_core::worker::loader;
+use openplugin_dsp::neural::Model;
+
+// constructor: the audio side starts with no model
+let (mut loader, mut slot) = loader::<Option<Model>>(None, 2);
+// UI thread, when the user picks a file (parse + allocate happen on the worker):
+let text = std::fs::read_to_string(path)?;
+loader.submit(move || Model::from_json(&text).ok())?;
+// audio thread, top of process:
+slot.poll();
+if let Some(model) = slot.get_mut() {
+    for s in buf.iter_mut() { *s = model.process_sample(*s, drive); }
+}
+```
+
+`Model::from_json` returns a `ModelError` that names the field (`layers[0].w_h has 26 values, expected 27`). Call `model.reset()` on transport stop or a parameter jump. `process_sample` and `process_block` do not allocate (a counting allocator test proves it) and treat NaN or infinite input as 0.
+
+### JSON (version 1)
+
+```json
+{ "version": 1, "sample_rate": 48000, "input_size": 1, "residual": true,
+  "layers": [
+    { "type": "gru",   "in": 1, "hidden": 2, "w_x": [6 numbers], "w_h": [12], "b": [6] },
+    { "type": "dense", "in": 2, "out": 1, "activation": "identity", "weights": [2], "bias": [1] } ] }
+```
+
+Matrices are flat, row-major, one row per output unit. GRU row blocks are z, r, n; LSTM blocks are i, f, g, o; a `conv1d` weight is `out x kernel x in`, tap 0 (the current sample) first. Unknown or missing fields, NaN or infinite numbers, wrong lengths, sizes over 512 (kernel 64, dilation 4096, 4 million weights, 64 MiB of text) and layers that do not chain are errors. A complete example is `crates/openplugin-dsp/tests/data/tiny_model.json`.
+
+### Sample rate
+
+A model is trained at one rate (`Model::sample_rate()`), and its memory is counted in samples. `rate_ratio(host)` is `host / trained`. When it is not 1, resample to the trained rate (`LinearPhaseOversampler` for integer ratios, `SincKernel` otherwise), run the model, and resample back; the model never resamples, and the resampler's latency is yours to report. Running a 48 kHz model at 96 kHz unchanged halves every time constant and shifts the sound up.
+
+### Silence and DC
+
+A model with non-zero biases outputs a small DC level for silent input, like the trained amp. A plugin that must be silent for silence (the conformance kit's reset check demands it) should train without biases or high-pass the output. Recurrent states and the output are flushed to zero below 1e-30, so decay never reaches denormals.
+
+### Proof and cost
+
+* Output against an independent plain-`f64` reference of the same equations, written in the test from the JSON alone: ten stacks (Dense with all four activations, GRU, LSTM, Conv1d with dilation, hidden sizes 1 to 64, two-input conditioning, residual), 10 000 samples each, worst absolute error 1.4e-7 (tolerance 1e-5).
+* Single-unit GRU and LSTM with chosen weights, three steps against hand-computed values, and a convolution whose impulse response is its kernel at the dilated taps.
+* Hostile files: wrong sizes, mismatched lengths, NaN and infinity spellings, `1e999`, sizes of 2^40, kernel and dilation over the limits, 100 000-deep nesting, all refused with an error and without allocating the declared size.
+* `openplugin-testing` conformance kit on an LSTM amp with random weights loaded through `worker::loader`.
+
+The matrix-vector product stores the weights transposed at load, so each product is `out[0..rows] += column * x[c]` over contiguous slices: pure vertical multiply-adds that the compiler vectorises (NEON here), with no horizontal sum per row. A first version that took one dot product per row (eight accumulators, then a horizontal reduction) was 1.8 times slower on LSTM 64 (1945 us per block against 1098 us).
+
+CPU per 512-sample block at 48 kHz, one hidden layer plus a one-output dense layer, `--release`, best of 30 timings, Apple Silicon (`cargo test --release -p openplugin-dsp --test neural -- --ignored --nocapture`). Real-time fraction is time per block divided by the 10.67 ms the block lasts:
+
+| layer | us / block | real-time fraction |
+| --- | --- | --- |
+| LSTM 16 | 176 | 0.017 |
+| LSTM 32 | 407 | 0.038 |
+| LSTM 64 | 1098 | 0.103 |
+| GRU 16 | 155 | 0.015 |
+| GRU 32 | 368 | 0.035 |
+| GRU 64 | 817 | 0.077 |
+
+So one LSTM 64 voice uses about a tenth of a core; a stereo plugin running two of them needs a fifth. `set_fast_activations(true)` swaps `tanh` for a [7/6] rational (error about 1e-4 at its clamp) and the logistic function built on it; on this machine it saves 0 to 9 percent (LSTM 64 1085 us, GRU 64 743 us), so the matrix products, not the activations, dominate and it is off by default. In the reference test its error is below 2e-3, but the activations in that test are small, where the rational is most accurate; do not read the 1e-7 it prints as its bound.
+
+Not covered: peephole LSTMs, bidirectional or multi-layer cuDNN weight packing (export each layer separately), the gated blocks and skip sums inside WaveNet, batch norm, and f64 or quantised weights.

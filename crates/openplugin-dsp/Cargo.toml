@@ -16,6 +16,7 @@ categories.workspace = true
 [dependencies]
 openplugin-core = { workspace = true }
 rustfft = { workspace = true }
+serde_json = "1"
 
 [dev-dependencies]
 openplugin-testing = { workspace = true }
