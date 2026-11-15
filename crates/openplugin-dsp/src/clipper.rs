@@ -30,11 +30,13 @@
 //! ceiling `C`, 1 ms lookahead, 20 ms release), which only has the residual
 //! ringing to remove and so acts for a few samples at a time. The limiter's
 //! delay adds to the clipper's; [`TruePeakClipper::latency_samples`] is the sum.
-//! The remaining excess over `C` is the limiter's own (its ceiling check is on
-//! a 4x/8x estimate); the tolerance is measured against an independent 16x
-//! interpolator in `tests/multiband.rs` and stated in the cookbook.
-//! [`TruePeakClipper::set_guard_db`] lowers the clip level (not the limiter's
-//! ceiling) to take more of the work off the limiter.
+//! The limiter holds the true peak at or below `C` for full-band material too
+//! (see its module docs: it aims 4.5 dB / lookahead frames below the ceiling,
+//! 0.09 dB at 48 kHz, so a signal clipped flat at `C` comes out that much
+//! lower). `tests/true_peak_ceiling.rs` measures it with an independent 16x
+//! interpolator and with [`crate::TruePeakMeter`] at 44.1 to 192 kHz; the
+//! cookbook has the numbers. [`TruePeakClipper::set_guard_db`] lowers the clip
+//! level (not the limiter's ceiling) to take more of the work off the limiter.
 //!
 //! `prepare` allocates; `process` does not, treats non-finite input as silence,
 //! and never panics.

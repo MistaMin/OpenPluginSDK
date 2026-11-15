@@ -5,7 +5,7 @@
 //! - [`Svf`], [`MatchedBiquad`], [`Butterworth`], [`Crossover`] (Linkwitz-Riley), [`OnePoleFilter`], [`DcBlocker`], [`Allpass1`], [`Allpass2`]: TPT, analog-matched and classic filters (see `docs/DSP_COOKBOOK.md`).
 //! - [`Compressor`]: Log-domain dynamics processor with soft knee.
 //! - [`Dynamics`], [`GainComputer`], [`EnvelopeFollower`], [`Ballistics`]: linked compressor / expander / gate with soft knee, hysteresis, range, hold, a sidechain hook (Giannoulis, Massberg, Reiss 2012).
-//! - [`Limiter`], [`TruePeak`]: lookahead brickwall limiter with a 4x/8x true-peak ceiling (ITU-R BS.1770-4 Annex 2) and a reported latency.
+//! - [`Limiter`], [`TruePeak`]: lookahead brickwall limiter with a true-peak ceiling (ITU-R BS.1770-4 Annex 2) held for full-band material too, and a reported latency; a 4x/8x true-peak detector.
 //! - [`VuMeter`]: ANSI standard 300 ms ballistic level detector.
 //! - [`MeterBank`]: stereo peak, RMS, PPM, and VU, plus envelope gain reduction.
 //! - [`LinearPhaseOversampler`]: 1x/2x/4x linear-phase resampling, 64 host samples at 2x and 4x.
@@ -62,6 +62,7 @@ pub mod fir_phase;
 pub mod flanger;
 pub mod halfband_min;
 pub mod interp;
+mod intersample;
 pub mod early;
 pub mod fdn;
 pub mod gain_comp;

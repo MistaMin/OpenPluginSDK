@@ -19,11 +19,14 @@
 //!   0.5 fs, as the Annex itself notes).
 //! - [`TruePeak::precise`] uses 8 branches of 16 taps (128 multiplies per
 //!   sample, delay 9) and a parabolic estimate of the crest between grid
-//!   points; the same sweep reads between 0.03 dB low and 0.02 dB high. The
-//!   limiter uses it, because a limiter must not under-read.
+//!   points; the same sweep reads between 0.03 dB low and 0.02 dB high.
 //!
-//! The limiter's tests additionally check the ceiling against an independent
-//! 16x interpolator.
+//! Both are accurate for sines up to 0.4 fs and read low above that: with 12
+//! or 16 taps per phase the transition band is wide, so on full-band white
+//! noise [`TruePeak::precise`] reads up to 2.6 dB below a 96-tap interpolator.
+//! The [`crate::Limiter`] therefore no longer uses it; its detector
+//! (`intersample.rs`) evaluates a 96-tap filter together with the filter of
+//! [`crate::TruePeakMeter`] and the taps of [`TruePeak::new`].
 
 const MAX_PHASES: usize = 8;
 const MAX_TAPS: usize = 16;
@@ -74,6 +77,12 @@ fn design(phases: usize, taps: usize, beta: f64) -> [[f32; MAX_TAPS]; MAX_PHASES
     out
 }
 
+/// The taps of [`TruePeak::new`], for the limiter's detector
+/// ([`crate::intersample`]): `[p][k]` multiplies `x[n - k]`, 12 taps a phase.
+pub(crate) fn standard_taps() -> [[f32; MAX_TAPS]; MAX_PHASES] {
+    design(4, STANDARD_TAPS, STANDARD_BETA)
+}
+
 /// One channel's 4x true-peak detector.
 #[derive(Debug, Clone)]
 pub struct TruePeak {
@@ -100,7 +109,7 @@ impl TruePeak {
     }
 
     /// 8 phases of 16 taps with crest refinement: about 2.7 times the cost and
-    /// 3 more samples of delay for much better accuracy. The limiter uses this.
+    /// 3 more samples of delay for much better accuracy below 0.4 fs.
     pub fn precise() -> Self {
         Self { taps: design(PRECISE_PHASES, PRECISE_TAPS, PRECISE_BETA), phases: PRECISE_PHASES, refine: true, tail: [0.0; 2], n: PRECISE_TAPS, hist: [0.0; MAX_TAPS] }
     }
