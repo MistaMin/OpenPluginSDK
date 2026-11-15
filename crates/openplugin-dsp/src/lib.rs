@@ -14,6 +14,7 @@
 //! - [`LoudnessMatch`]: automatic gain that holds the output at the input's K-weighted loudness.
 //! - [`Downmix`], [`Upmix`]: surround to stereo or mono by channel role (BS.775 / A/52), and the passive stereo upmix.
 //! - [`Dither`]: RPDF/TPDF dither to 8..=24 bits with noise shaping and auto-blank.
+//! - [`Stft`], [`SpectrumAnalyzer`], [`WindowKind`]: STFT frames with overlap-add, windows with ENBW, and a lock-free spectrum feed to editors.
 //! - [`saturate_sample`]: Analog tape/tube non-linear saturation models.
 
 pub mod adaa;
@@ -37,7 +38,10 @@ pub mod pitch;
 pub mod rate;
 pub mod saturation;
 pub mod voice;
+pub mod spectrum;
+pub mod stft;
 pub mod window;
+pub mod windows;
 
 pub use adaa::{Adaa2Taylor, ResidualAdaa1};
 pub use biquad::{Biquad, FilterType};
@@ -65,3 +69,12 @@ pub use rate::{effective_rate, is_studio_rate, plan_rate, RateError, RatePlan, S
 pub use saturation::{saturate_sample, SaturationMode};
 pub use voice::{Polyphony, SampleVoice};
 pub use window::{hann, WindowRms};
+pub use spectrum::{
+    bin_frequency, log_frequency_bins, spectrum_feed, SpectrumAnalyzer, SpectrumConfig,
+    SpectrumReader, SpectrumWriter,
+};
+pub use stft::{
+    check_ola, check_ola_windows, Complex, Identity, OlaReport, SpectralProcessor, Stft,
+    StftConfig, StftError,
+};
+pub use windows::{bessel_i0, coherent_gain, enbw_bins, WindowKind};
