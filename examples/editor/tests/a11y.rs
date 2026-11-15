@@ -9,7 +9,10 @@
 //! keyboard focus and resizes the editor and checks the tree follows.
 
 #[cfg(not(target_os = "macos"))]
-fn main() {}
+fn main() {
+    // Native view tests need AppKit; there is no Linux (X11/Wayland) editor view yet.
+    println!("editor a11y: skipped: macOS only (0 tests run)");
+}
 
 #[cfg(target_os = "macos")]
 mod a11y_support;
