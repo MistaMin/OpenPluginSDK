@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
 // C ABI exported by openplugin_targets::export_shell!.
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 2,
+    OP_SHELL_ABI = 3,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -203,6 +204,25 @@ uint32_t op_shell_layout_selected(void* instance);
 
 // Offline (bounce) rendering; takes effect at the next block.
 void op_shell_set_offline(void* instance, uint32_t offline);
+
+// ---- ABI 3: the plugin's own parameter text ------------------------------
+// Main thread only; both calls may allocate. Never call them from the audio thread.
+//
+// Writes the plugin's text for the plain value `plain` of parameter `index`
+// (what its own display shows, e.g. "6.0 dB", "Hall", "On") to `buf` as UTF-8
+// with a NUL (room for `cap` bytes). Returns the length of the whole text in
+// bytes, not counting the NUL; the text was cut when that is >= `cap`. A cut
+// falls on a UTF-8 boundary and the NUL is always written when `buf` is set
+// and `cap` > 0. `buf` NULL writes nothing: with `cap` 0 it asks for the
+// length. An unknown `index` returns 0 and writes an empty string. A
+// non-finite `plain` shows the default.
+size_t op_shell_param_format(uint32_t index, double plain, char* buf, size_t cap);
+// Reads `text` (NUL-terminated UTF-8; units, choice labels, on/off; clamped to
+// the range) as a value of parameter `index` and stores the plain value in
+// *out_plain. Returns 1, or 0 and leaves *out_plain untouched for a NULL
+// pointer, an unknown index, text that is not UTF-8 or is longer than 1024
+// bytes, or text that is not a value. Never crashes on hostile input.
+int op_shell_param_parse(uint32_t index, const char* text, double* out_plain);
 
 #if OP_HAS_TAIL
 // Optional, with -DOP_TAIL=ON: how long the output rings after the input

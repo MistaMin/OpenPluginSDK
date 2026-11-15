@@ -15,7 +15,7 @@ use openplugin_core::{
 use crate::{FfiInstance, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
-pub const ABI: u32 = 2;
+pub const ABI: u32 = 3;
 pub use crate::block::{
     OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
     EVENT_PARAM_NORMALIZED, EVENT_PARAM_PLAIN, MAX_EVENTS, MAX_MIDI_OUT, TRANSPORT_HAS_BEATS,
@@ -509,6 +509,76 @@ pub fn to_normalized<P: Plugin + Default>(index: u32, plain: f64) -> f64 {
     f64::from(param.to_normalized(value))
 }
 
+/// Longest text [`param_parse`] reads, in bytes. Longer input is refused.
+pub const PARSE_MAX: usize = 1024;
+
+fn display_value(param: &ParamInfo, plain: f64) -> f32 {
+    if plain.is_finite() { plain as f32 } else { param.default }
+}
+
+/// The plugin's own text for the plain value `plain` of parameter `index`
+/// (`ParamInfo::format`), as UTF-8 plus a NUL in `buf` (room for `cap` bytes).
+/// Returns the length of the whole text in bytes, not counting the NUL; the
+/// text was cut when that is `cap` or more. A cut falls on a UTF-8 boundary
+/// and the NUL is always written when `buf` is set and `cap > 0`. Returns 0
+/// for an unknown `index` or a panic (and writes an empty string); `buf` NULL
+/// writes nothing, so `buf` NULL with `cap` 0 asks for the length. A
+/// non-finite `plain` shows the default. Main thread: it allocates.
+///
+/// # Safety
+/// `buf` is null or points to `cap` writable bytes.
+pub unsafe fn param_format<P: Plugin + Default>(index: u32, plain: f64, buf: *mut u8, cap: usize) -> usize {
+    let text = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        plugin_info::<P>().params.get(index as usize).map(|param| param.format(display_value(param, plain)))
+    }))
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    if !buf.is_null() && cap > 0 {
+        let mut count = text.len().min(cap - 1);
+        while !text.is_char_boundary(count) {
+            count -= 1;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(text.as_ptr(), buf, count);
+            *buf.add(count) = 0;
+        }
+    }
+    text.len()
+}
+
+/// Reads `text` (NUL-terminated UTF-8) as a value of parameter `index`
+/// (`ParamInfo::parse`: units, choice labels, on/off, clamped) and stores the
+/// plain value in `*out_plain`. Returns 1, or 0 and leaves `*out_plain`
+/// alone for a NULL pointer, an unknown `index`, text that is not UTF-8 or is
+/// longer than [`PARSE_MAX`] bytes, text that is not a value, or a panic.
+/// Main thread.
+///
+/// # Safety
+/// `text` is null or a NUL-terminated string; `out_plain` is null or writable.
+pub unsafe fn param_parse<P: Plugin + Default>(index: u32, text: *const std::ffi::c_char, out_plain: *mut f64) -> i32 {
+    if text.is_null() || out_plain.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { std::ffi::CStr::from_ptr(text) }.to_bytes();
+    if bytes.len() > PARSE_MAX {
+        return 0;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    let parsed = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        plugin_info::<P>().params.get(index as usize).and_then(|param| param.parse(text))
+    }));
+    match parsed {
+        Ok(Some(value)) if value.is_finite() => {
+            unsafe { *out_plain = f64::from(value) };
+            1
+        }
+        _ => 0,
+    }
+}
+
 pub fn create<P: Plugin + Default>(rate: f64, max_block: u32, channels: u32) -> *mut ShellInstance {
     let created = std::panic::catch_unwind(AssertUnwindSafe(|| {
         if !sample_rate_supported(rate) {
@@ -857,9 +927,12 @@ mod tests {
         db: f32,
     }
 
-    static PARAMS: [ParamInfo; 2] = [
+    static CHOICES: [&str; 3] = ["Raum", "Größe ✓", "Plate"];
+    static PARAMS: [ParamInfo; 4] = [
         ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),
         ParamInfo::new("freq", "Freq", 20.0, 20_000.0, 1_000.0, Unit::Hz).with_taper(Taper::Log),
+        ParamInfo::new("mode", "Mode", 0.0, 2.0, 0.0, Unit::Choice).with_choices(&CHOICES),
+        ParamInfo::new("warm", "Warm", 0.0, 1.0, 0.0, Unit::Toggle),
     ];
 
     static INFO: PluginInfo = PluginInfo {
@@ -917,7 +990,7 @@ mod tests {
         let mut info = unsafe { std::mem::zeroed::<OpShellInfo>() };
         assert_eq!(unsafe { write_info::<Gain>(&mut info) }, 1);
         assert_eq!(info.abi, ABI);
-        assert_eq!(info.param_count, 2);
+        assert_eq!(info.param_count, 4);
         assert_ne!(info.processor_cid, [0; 16]);
         assert_ne!(info.processor_cid, info.controller_cid);
         assert_ne!(info.plugin_id_mono, info.plugin_id_stereo);
@@ -968,6 +1041,104 @@ mod tests {
             let db = 20.0 * ratio.log10();
             assert!((db - 6.0).abs() < 0.02, "{db}");
             destroy(instance);
+        }
+    }
+
+    fn format_text<P: Plugin + Default>(index: u32, plain: f64) -> String {
+        let mut buf = [0xAAu8; 128];
+        let need = unsafe { param_format::<P>(index, plain, buf.as_mut_ptr(), buf.len()) };
+        assert!(need < buf.len());
+        assert_eq!(buf[need], 0);
+        String::from_utf8(buf[..need].to_vec()).unwrap()
+    }
+
+    fn parse_text<P: Plugin + Default>(index: u32, text: &str) -> Option<f64> {
+        let c = std::ffi::CString::new(text).unwrap();
+        let mut out = -777.0;
+        match unsafe { param_parse::<P>(index, c.as_ptr(), &mut out) } {
+            1 => Some(out),
+            _ => {
+                assert_eq!(out, -777.0, "a refused parse must not write");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn param_text_matches_param_info_and_round_trips() {
+        assert_eq!(format_text::<Gain>(0, 6.0), "6.0 dB");
+        assert_eq!(format_text::<Gain>(1, 1_500.0), "1.50 kHz");
+        let n = to_normalized::<Gain>(0, 6.0);
+        assert!((n - 0.625).abs() < 1e-6);
+        assert_eq!(parse_text::<Gain>(0, "6 dB"), Some(6.0));
+        assert_eq!(parse_text::<Gain>(1, "1.5 kHz"), Some(1_500.0));
+        assert_eq!(parse_text::<Gain>(0, "99 dB"), Some(24.0), "parse clamps");
+        for (index, value) in [(2u32, 0.0), (2, 1.0), (2, 2.0), (3, 0.0), (3, 1.0)] {
+            let text = format_text::<Gain>(index, value);
+            assert_eq!(parse_text::<Gain>(index, &text), Some(value), "{text}");
+        }
+        assert_eq!(format_text::<Gain>(2, 1.0), "Größe ✓");
+        assert_eq!(format_text::<Gain>(3, 1.0), "On");
+        assert_eq!(parse_text::<Gain>(2, "plate"), Some(2.0));
+    }
+
+    #[test]
+    fn param_format_truncates_on_a_utf8_boundary_and_reports_the_length() {
+        let full = "Größe ✓";
+        assert_eq!(full.len(), 11);
+        let mut buf = [0xAAu8; 32];
+        unsafe {
+            assert_eq!(param_format::<Gain>(2, 1.0, std::ptr::null_mut(), 0), 11);
+            assert_eq!(param_format::<Gain>(2, 1.0, std::ptr::null_mut(), 8), 11);
+            assert_eq!(param_format::<Gain>(2, 1.0, buf.as_mut_ptr(), 0), 11);
+            assert_eq!(buf[0], 0xAA);
+            for cap in 1..=14usize {
+                buf.fill(0xAA);
+                assert_eq!(param_format::<Gain>(2, 1.0, buf.as_mut_ptr(), cap), 11, "cap {cap}");
+                let nul = buf.iter().position(|b| *b == 0).expect("NUL");
+                assert!(nul < cap, "cap {cap}");
+                let shown = std::str::from_utf8(&buf[..nul]).expect("valid UTF-8");
+                assert!(full.starts_with(shown), "cap {cap}: {shown:?}");
+                if cap >= 12 {
+                    assert_eq!(shown, full);
+                }
+                assert!(buf[cap..].iter().all(|b| *b == 0xAA), "wrote past cap {cap}");
+            }
+            // "Gr" then a two-byte letter: three text bytes would split it.
+            buf.fill(0xAA);
+            param_format::<Gain>(2, 1.0, buf.as_mut_ptr(), 4);
+            assert_eq!(&buf[..4], &[b'G', b'r', 0, 0xAA]);
+        }
+    }
+
+    #[test]
+    fn param_text_refuses_hostile_input_without_panicking() {
+        let mut buf = [0xAAu8; 8];
+        unsafe {
+            assert_eq!(param_format::<Gain>(9, 0.0, buf.as_mut_ptr(), buf.len()), 0);
+            assert_eq!(buf[0], 0);
+            assert_eq!(param_format::<Gain>(u32::MAX, 0.0, std::ptr::null_mut(), 0), 0);
+        }
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e300, -1e300] {
+            let _ = format_text::<Gain>(0, v);
+        }
+        assert_eq!(format_text::<Gain>(0, f64::NAN), "0.0 dB");
+        let mut out = -777.0;
+        let ok = std::ffi::CString::new("6 dB").unwrap();
+        unsafe {
+            assert_eq!(param_parse::<Gain>(0, std::ptr::null(), &mut out), 0);
+            assert_eq!(param_parse::<Gain>(0, ok.as_ptr(), std::ptr::null_mut()), 0);
+            assert_eq!(param_parse::<Gain>(7, ok.as_ptr(), &mut out), 0);
+            assert_eq!(param_parse::<Gain>(u32::MAX, ok.as_ptr(), &mut out), 0);
+            let bad = [0xFFu8, 0xFE, 0xC3, 0x28, 0];
+            assert_eq!(param_parse::<Gain>(0, bad.as_ptr().cast(), &mut out), 0);
+            let long = std::ffi::CString::new("9".repeat(PARSE_MAX + 1)).unwrap();
+            assert_eq!(param_parse::<Gain>(0, long.as_ptr(), &mut out), 0);
+        }
+        assert_eq!(out, -777.0);
+        for text in ["", "   ", "loud", "NaN", "inf", "1e999", "--3", "3 parsecs", "\u{1F4A5}", "\t\n"] {
+            let got = parse_text::<Gain>(0, text);
+            assert!(got.is_none_or(|v| v.is_finite() && (-24.0..=24.0).contains(&v)), "{text:?} {got:?}");
         }
     }
 }
