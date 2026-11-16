@@ -227,12 +227,15 @@ On 16 November 2026, on Arch Linux (x86_64, GCC 16.2.1, Clang 23.1.3, CMake 4.4.
 
 CI runs all of this in the `vst3-shell-linux` job on `ubuntu-latest`: the build, the twelve proofs, the validator on the three modules, the editor build with `vst3_editor_proof` under Xvfb, and the packaged bundle through the validator's extensive tests. That job has not run on GitHub yet; its steps were run on the Arch machine, with the desktop's display in place of Xvfb.
 
-In two hosts on the same machine, with the packaged example copied to `~/.vst3`, `~/.clap` and `~/.lv2` (`build_plugin_linux.sh --formats clap,lv2,vst3 --editor --tail --strip`), both driven without their windows:
+In hosts on the same machine, with the packaged example copied to `~/.vst3`, `~/.clap` and `~/.lv2` (`build_plugin_linux.sh --formats clap,lv2,vst3 --editor --tail --strip`):
 
-- SoundCraft 0.20.1 (`soundcraft-cli`): its scans list the VST3 and the CLAP. On a soloed track of its demo session, a 4 second bounce peaks at -9.227 dB without the plug-in and with the VST3 at 0 dB (the same loudness too), and at -3.227 dB with the VST3 or the CLAP at Gain +6 dB: 6.000 dB more. A session saved with the VST3 at -12 dB and Warm on reopens and bounces to the same bytes as the session it was saved from.
-- Ardour 9.10 (a source build; `ardour-vst3-scanner` and a Lua session on the dummy backend): the scanner finds the VST3; the VST3 and the LV2 are listed, instantiated and added to the master bus; the VST3 shows Gain, Warm and Bypass, and Gain set to 6 reads back 6; the saved session reopens with Gain at 6 in both. No audio was rendered in Ardour.
+- pluginval 1.0.4, `--strictness-level 10 --validate-in-process`, on the VST3 with the desktop's display, so with its editor tests: `SUCCESS`.
+- Ardour 9.10 (a source build). `ardour-vst3-scanner` finds the VST3. In a Lua session on the dummy backend the VST3 and the LV2 are listed, instantiated and added to the master bus; the VST3 shows Gain, Warm and Bypass, and Gain set to 6 reads back 6; the saved session reopens with Gain at 6 in both. In Ardour's own window (the session opened with both plug-in windows marked open): the VST3 editor and the LV2 editor each appear inside Ardour's plug-in window, drawn with the knob at the saved 6.0 dB, and a click on the Warm switch flips it in each. No audio was rendered in Ardour.
+- SoundCraft 0.20.1 (`soundcraft-cli`, and the app through its control channel): its scans list the VST3 and the CLAP. On a soloed track of its demo session, a 4 second bounce peaks at -9.227 dB without the plug-in and with the VST3 at 0 dB (the same loudness too), and at -3.227 dB with the VST3 or the CLAP at Gain +6 dB: 6.000 dB more. A session saved with the VST3 at -12 dB and Warm on reopens and bounces to the same bytes as the session it was saved from. In the app the insert shows SoundCraft's own panel with Gain and Warm; its "Open Plugin Editor" button is disabled, because SoundCraft on Linux does not host embedded plug-in editors.
 
-Not covered: the plug-in's editor inside a host's window (both hosts were run without their windows), pluginval (not on the machine), a display with a scale other than 1 for the VST3 view, aarch64, and a C library other than glibc.
+Seen in Ardour and not fixed: Ardour makes the plug-in's place as wide as its own toolbar (374 pixels for a 240 x 160 editor) and the editor's picture is stretched to it, instead of keeping its 3:2 shape.
+
+Not covered: a display with a scale other than 1 for the VST3 view, aarch64, and a C library other than glibc.
 
 ## Windows: CLAP
 
