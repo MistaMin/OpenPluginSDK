@@ -22,8 +22,10 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef OP_STUB_PARAMS
@@ -381,6 +383,39 @@ void op_stub_seen(void* instance, StubSeen* out) {
     if (instance && out) *out = static_cast<Stub*>(instance)->seen;
 }
 uint32_t op_stub_param_count(void) { return kParams; }
+// ---- ABI 4: the host's track. Every call is kept, with the thread it ran on. ----
+namespace {
+struct TrackCall {
+    StubTrack told;
+    std::thread::id thread;
+};
+std::mutex gTrackLock;
+std::vector<TrackCall> gTrackCalls;
+}
+uint32_t op_shell_set_track_info(void* instance, const char* name, uint32_t rgba, uint32_t flags) {
+    if (!instance) return 0;
+    TrackCall call{};
+    call.told.instance = instance;
+    call.told.hasName = name != nullptr;
+    if (name) std::strncpy(call.told.name, name, sizeof call.told.name - 1);
+    call.told.rgba = rgba;
+    call.told.flags = flags;
+    call.thread = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(gTrackLock);
+    gTrackCalls.push_back(call);
+    return 1;
+}
+uint32_t op_stub_track_count(void) {
+    std::lock_guard<std::mutex> lock(gTrackLock);
+    return static_cast<uint32_t>(gTrackCalls.size());
+}
+uint32_t op_stub_track_call(uint32_t n, StubTrack* out) {
+    std::lock_guard<std::mutex> lock(gTrackLock);
+    if (n >= gTrackCalls.size() || !out) return 0;
+    *out = gTrackCalls[n].told;
+    out->onThisThread = gTrackCalls[n].thread == std::this_thread::get_id();
+    return 1;
+}
 // ---- ABI 3: parameter text. Plain text "%.1f" except in the text proof (see op_shell_param above). ----
 size_t op_shell_param_format(uint32_t index, double plain, char* buf, size_t cap) {
     if (index >= kParams) {

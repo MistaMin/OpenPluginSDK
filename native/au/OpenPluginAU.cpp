@@ -11,6 +11,8 @@
 //   - transport: from HostCallbackInfo;
 //   - sidechain: the input element after the main one.
 // and the plugin's MIDI output goes to kAudioUnitProperty_MIDIOutputCallback.
+// The host's name for the track (kAudioUnitProperty_ContextName) goes to
+// op_shell_set_track_info on the main thread, and to the view.
 #include "op_shell.h"
 #include "OpenPluginAUBridge.h"
 #include "au_layout.h"
@@ -26,6 +28,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <pthread.h>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -86,6 +89,17 @@ std::vector<std::string> choiceLabels(uint32_t index, const OpParamDesc& desc) {
     }
     if (allNumbers) labels.clear();
     return labels;
+}
+// A CFString as UTF-8. Only the first 1024 UTF-16 units are read: the ABI keeps 255
+// characters of a track name. Not for the render thread; it allocates.
+std::string utf8FromCF(CFStringRef text) {
+    if (!text) return {};
+    const CFIndex length = std::min<CFIndex>(CFStringGetLength(text), 1024);
+    std::string out(static_cast<size_t>(CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8)) + 1, '\0');
+    CFIndex used = 0;
+    CFStringGetBytes(text, CFRangeMake(0, length), kCFStringEncodingUTF8, '?', false, reinterpret_cast<UInt8*>(out.data()), static_cast<CFIndex>(out.size()), &used);
+    out.resize(static_cast<size_t>(used));
+    return out;
 }
 // The shell's own key in the kAudioUnitProperty_ClassInfo dictionary. The value is the
 // opaque blob of op_shell_save_state, as CFData. The base class's keys stay as they are.
@@ -381,7 +395,31 @@ public:
     void* engine() const { return engine_; }
     uint32_t paramCount() const { return static_cast<uint32_t>(params_.size()); }
     float paramValue(uint32_t index) { return this->Globals()->GetParameter(ids_[index]); }
+    // What the host last said about the track, for the view: the name as UTF-8 (empty for
+    // none) and a count that moves with every change. False until the host has said anything.
+    bool track(char* name, uint32_t capacity, uint32_t* serial) {
+        std::lock_guard<std::mutex> lock(trackLock_);
+        if (!track_.valid) return false;
+        if (name && capacity) {
+            size_t n = std::min<size_t>(track_.name.size(), capacity - 1);
+            while (n > 0 && n < track_.name.size() && (static_cast<unsigned char>(track_.name[n]) & 0xC0) == 0x80) --n;
+            std::memcpy(name, track_.name.data(), n);
+            name[n] = '\0';
+        }
+        if (serial) *serial = track_.serial;
+        return true;
+    }
 #endif
+    // ---- the host's track ----------------------------------------------------------------
+    // An Audio Unit host names the track in kAudioUnitProperty_ContextName (a CFString on the
+    // global scope; Logic and GarageBand set it). The base class stores it and calls this.
+    // The Audio Unit API has no property for a track's colour or kind, so the plugin hears a
+    // name only. The name is read here, on the thread that set the property; the plugin is
+    // told on the main thread: at once when this is it, else from the main run loop's timer.
+    void PropertyChanged(AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement element) override {
+        if (id == kAudioUnitProperty_ContextName && scope == kAudioUnitScope_Global) noteTrack(utf8FromCF(this->GetContextName()));
+        Base::PropertyChanged(id, scope, element);
+    }
 
     // ---- buses and channels ------------------------------------------------------------
     // Formats change only while uninitialized (AUEffectBase says the same; MusicDeviceBase leaves it to us).
@@ -501,6 +539,12 @@ public:
             op_shell_load_state(engine_, pending_.data(), static_cast<uint32_t>(pending_.size()));
             pending_.clear();
         }
+        // A new engine has not heard about the track.
+        {
+            std::lock_guard<std::mutex> lock(trackLock_);
+            if (track_.valid) trackPending_.store(true, std::memory_order_release);
+        }
+        if (pthread_main_np()) deliverTrack();
         // Everything the render thread uses is sized here, on the message thread, so it never allocates.
         latency_ = op_shell_latency(engine_);
         delayPos_ = 0;
@@ -1177,7 +1221,11 @@ private:
     // host reads the new value at once). New parameter info: kAudioUnitProperty_ParameterList
     // on the global scope, then kAudioUnitProperty_ParameterInfo for each parameter.
     static constexpr CFTimeInterval kChangesPollSeconds = 0.030;
-    static void onTimer(CFRunLoopTimerRef, void* info) { static_cast<OpenPluginAUImpl*>(info)->pollChanges(); }
+    static void onTimer(CFRunLoopTimerRef, void* info) {
+        auto* self = static_cast<OpenPluginAUImpl*>(info);
+        self->pollTrack();
+        self->pollChanges();
+    }
     void startPolling() {
         CFRunLoopTimerContext context{};
         context.info = this;
@@ -1202,6 +1250,49 @@ private:
         }
         return flags;
     }
+    // ---- the host's track (see PropertyChanged) ------------------------------------------
+    struct TrackState {
+        bool valid = false;   // the host has said something
+        std::string name;     // UTF-8; empty for none
+        uint32_t serial = 0;  // moves with every change
+    };
+    // Any thread but the render thread. A name equal to the last one changes nothing.
+    void noteTrack(std::string name) {
+        {
+            std::lock_guard<std::mutex> lock(trackLock_);
+            if (track_.valid && track_.name == name) return;
+            track_.valid = true;
+            track_.name = std::move(name);
+            ++track_.serial;
+            trackPending_.store(true, std::memory_order_release);
+        }
+        if (pthread_main_np()) deliverTrack();
+    }
+    // Main thread. Tells the engine what the host last said, once.
+    void deliverTrack() {
+        if (!engine_ || !trackPending_.exchange(false, std::memory_order_acq_rel)) return;
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lock(trackLock_);
+            name = track_.name;
+        }
+        op_shell_set_track_info(engine_, name.empty() ? nullptr : name.c_str(), 0, 0);
+    }
+    // Main thread, from the timer. A host that removes the property (the base class then
+    // drops the name without a notification) is seen here, and a name set from another
+    // thread, or before there was an engine, is delivered here.
+    void pollTrack() {
+        bool removed = false;
+        if (!this->GetContextName()) {
+            std::lock_guard<std::mutex> lock(trackLock_);
+            removed = track_.valid && !track_.name.empty();
+        }
+        if (removed) noteTrack(std::string());
+        deliverTrack();
+    }
+    std::mutex trackLock_;
+    TrackState track_;
+    std::atomic<bool> trackPending_{false};
     CFRunLoopTimerRef timer_ = nullptr;
     void* engine_ = nullptr;
     bool abiOk_ = false;
@@ -1331,6 +1422,11 @@ uint32_t op_au_param_id(uint32_t index) {
         return list;
     }();
     return index < ids.size() ? ids[index] : index;
+}
+uint32_t op_au_track(void* instance, char* name, uint32_t capacity, uint32_t* serial) {
+    std::lock_guard<std::mutex> lock(gLiveLock);
+    OpenPluginAU* unit = live(instance);
+    return unit && unit->track(name, capacity, serial) ? 1 : 0;
 }
 uint32_t op_au_param(void* instance, uint32_t index, float* value) {
     std::lock_guard<std::mutex> lock(gLiveLock);

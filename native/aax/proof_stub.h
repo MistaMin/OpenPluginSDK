@@ -45,6 +45,16 @@ void op_stub_set_latency(void* instance, uint32_t samples);
 void op_stub_raise_changes(void* instance, uint32_t flags);
 uint32_t op_stub_takes(void);
 uint32_t op_stub_param_count(void);
+// ABI 4: what op_shell_set_track_info was told, call by call (0 is the first).
+typedef struct StubTrack {
+    void* instance;
+    uint32_t hasName;        // 0: the name was NULL
+    char name[300];
+    uint32_t rgba, flags;
+    uint32_t onThisThread;   // the call ran on the thread that is asking
+} StubTrack;
+uint32_t op_stub_track_count(void);
+uint32_t op_stub_track_call(uint32_t n, StubTrack* out);
 #ifdef __cplusplus
 }
 #endif

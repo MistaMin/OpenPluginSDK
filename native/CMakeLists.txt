@@ -886,6 +886,49 @@ if(OP_BUILD_AU)
       add_test(NAME au_mpe_proof COMMAND AUMpeProof "$<TARGET_BUNDLE_DIR:OpenPluginAUExpression>" 1)
     endif()
   endif()
+  # The host's track (kAudioUnitProperty_ContextName): the shell over the stand-in that records
+  # op_shell_set_track_info (vst3/track_stub.cpp, shared with the VST3 proof), because the example
+  # keeps no track to read back. Built with the editor off and on: with OP_EDITOR the component
+  # also has the shell's Cocoa view over a recording editor (include/stub_editor.h), so the proof
+  # reads back what the editor was told too.
+  function(op_au_track_plist)
+    set(OP_PRODUCT "TrackTest")
+    set(OP_BUNDLE_ID "com.opengrid.test.track")
+    set(OP_VERSION "1")
+    set(OP_MANUFACTURER "OpenPlugin")
+    set(OP_AU_SUBTYPE "TkTs")
+    set(OP_AU_MANUFACTURER "OpTs")
+    set(OP_AU_TYPE "aufx")
+    configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-track-Info.plist" @ONLY)
+  endfunction()
+  op_au_track_plist()
+  add_library(OpenPluginAUTrack MODULE au/OpenPluginAU.cpp vst3/track_stub.cpp)
+  op_au_set_type(OpenPluginAUTrack aufx)
+  target_compile_features(OpenPluginAUTrack PRIVATE cxx_std_23)
+  target_include_directories(OpenPluginAUTrack PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+  set_target_properties(OpenPluginAUTrack PROPERTIES
+    OUTPUT_NAME "TrackTest"
+    BUNDLE TRUE
+    BUNDLE_EXTENSION component
+    PREFIX ""
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-track-Info.plist")
+  target_link_libraries(OpenPluginAUTrack PRIVATE openplugin_au_sdk)
+  add_executable(AUTrackProof au/track_host.mm)
+  set_source_files_properties(au/track_host.mm PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
+  target_include_directories(AUTrackProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(AUTrackProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+  if(OP_EDITOR)
+    target_sources(OpenPluginAUTrack PRIVATE au/OpenPluginAUView.mm au/track_editor_stub.cpp)
+    target_compile_definitions(OpenPluginAUTrack PRIVATE
+      "OP_AU_BUNDLE_ID=\"com.opengrid.test.track.au\""
+      "OP_AU_VIEW_CLASS=OpenPluginAUViewFactory_TrackTest"
+      "OP_AU_VIEW_CLASS_NAME=\"OpenPluginAUViewFactory_TrackTest\""
+      "OP_AU_CONTAINER_CLASS=OpenPluginAUView_TrackTest")
+    target_link_libraries(OpenPluginAUTrack PRIVATE "-framework Cocoa" "-framework AudioUnit")
+    target_link_libraries(AUTrackProof PRIVATE "-framework Cocoa" "-framework AudioUnit")
+  endif()
+  add_dependencies(AUTrackProof OpenPluginAUTrack)
+  add_test(NAME au_track_proof COMMAND AUTrackProof "$<TARGET_BUNDLE_DIR:OpenPluginAUTrack>")
 endif()
 
 if(OP_BUILD_AAX)
@@ -1037,6 +1080,18 @@ if(OP_BUILD_AAX)
   target_include_directories(AAXChangesProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
   target_compile_definitions(AAXChangesProof PRIVATE OP_STUB_PARAMS=3 OP_STUB_LATENCY=0)
   target_link_libraries(AAXChangesProof PRIVATE openplugin_aax_sdk)
+  # AAXTrackProof: the host's track (AAX_eNotificationEvent_TrackNameChanged) through the real data
+  # model over the stand-in, which records op_shell_set_track_info. With OP_EDITOR the shell's real
+  # AAX_CEffectGUI runs over a recording editor (include/stub_editor.h), so the proof reads back what
+  # the editor was told too.
+  add_executable(AAXTrackProof aax/host_track.cpp aax/OpenPluginAAXParameters.cpp aax/OpenPluginAAXState.cpp
+    aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXTrackProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXTrackProof PRIVATE OP_STUB_PARAMS=1 OP_STUB_LATENCY=0)
+  target_link_libraries(AAXTrackProof PRIVATE openplugin_aax_sdk "-framework CoreFoundation")
+  if(OP_EDITOR)
+    target_sources(AAXTrackProof PRIVATE aax/OpenPluginAAXGUI.cpp)
+  endif()
   add_executable(AAXBundleProof aax/host_bundle.cpp)
   target_link_libraries(AAXBundleProof PRIVATE "-framework CoreFoundation")
   add_dependencies(AAXBundleProof OpenPluginAAX)
@@ -1085,6 +1140,7 @@ if(OP_BUILD_AAX)
   add_test(NAME aax_events_proof COMMAND AAXEventsProof)
   add_test(NAME aax_describe_proof COMMAND AAXDescribeProof)
   add_test(NAME aax_changes_proof COMMAND AAXChangesProof)
+  add_test(NAME aax_track_proof COMMAND AAXTrackProof)
   add_test(NAME aax_bundle_proof COMMAND AAXBundleProof "$<TARGET_BUNDLE_DIR:OpenPluginAAX>")
 endif()
 

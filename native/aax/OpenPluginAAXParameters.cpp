@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "OpenPluginAAX.h"
 #include "OpenPluginAAXState.h"
+#include "main_thread.h"
 #include "AAX_CBinaryDisplayDelegate.h"
 #include "AAX_CBinaryTaperDelegate.h"
 #include "AAX_CEffectParameters.h"
@@ -8,6 +9,7 @@
 #include "AAX_CLogTaperDelegate.h"
 #include "AAX_CString.h"
 #include "AAX_IDisplayDelegate.h"
+#include "AAX_IString.h"
 #include <algorithm>
 #include <cmath>
 #include "AAX_CParameter.h"
@@ -15,6 +17,7 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -112,7 +115,66 @@ class Parameters final : public AAX_CEffectParameters {
     mutable PacketBuffer posted_;
     bool dirty_ = true;
     std::atomic<bool> offline_{false};
+    // The host's track: Pro Tools names it (AAX_eNotificationEvent_TrackNameChanged) and
+    // says nothing else; AAX has no notification or call for a track's colour or kind.
+    // The notification may come on any thread. The name is kept at once (trackLock_), for
+    // the view to read, and the plugin is told on the main thread: at once when the
+    // notification came there, else from the main queue (main_thread.h).
+    mutable std::mutex trackLock_;
+    std::string trackName_;                  // UTF-8; empty for none
+    uint32_t trackSerial_ = 0;               // 0: the host has said nothing
+    std::atomic<bool> trackPending_{false};  // the engine has not heard the current name
+    std::mutex trackTelling_;                // one delivery at a time, so the last name told is the last one given
+    // What a block of work waiting on the main queue holds: this object, or null once it
+    // is gone. The lock is held while the work runs, so the destructor waits for it.
+    struct MainThreadLink {
+        std::mutex lock;
+        Parameters* owner;
+    };
+    std::shared_ptr<MainThreadLink> link_ = std::make_shared<MainThreadLink>();
+    // Any thread but the algorithm's. A name equal to the last one changes nothing.
+    void noteTrack(const char* text) {
+        std::string name(text ? text : "");
+        {
+            std::lock_guard<std::mutex> lock(trackLock_);
+            if (trackSerial_ != 0 && trackName_ == name) return;
+            trackName_ = std::move(name);
+            if (++trackSerial_ == 0) trackSerial_ = 1;
+            trackPending_.store(true, std::memory_order_release);
+        }
+        tellTrack();
+    }
+    // Tells the engine on the main thread: now, or from the main queue.
+    void tellTrack() {
+        if (!trackPending_.load(std::memory_order_acquire)) return;
+        if (onMainThread()) {
+            deliverTrack();
+            return;
+        }
+        postToMainThread(new std::shared_ptr<MainThreadLink>(link_), [](void* context) {
+            const std::unique_ptr<std::shared_ptr<MainThreadLink>> link(static_cast<std::shared_ptr<MainThreadLink>*>(context));
+            std::lock_guard<std::mutex> lock((*link)->lock);
+            if ((*link)->owner) (*link)->owner->deliverTrack();
+        });
+    }
+    // Main thread. Tells the engine what the host last said, once.
+    void deliverTrack() {
+        std::lock_guard<std::mutex> telling(trackTelling_);
+        if (!state_.engine || !trackPending_.exchange(false, std::memory_order_acq_rel)) return;
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lock(trackLock_);
+            name = trackName_;
+        }
+        op_shell_set_track_info(state_.engine, name.empty() ? nullptr : name.c_str(), 0, 0);
+    }
 public:
+    Parameters() { link_->owner = this; }
+    ~Parameters() override {
+        // Work still waiting on the main queue finds no one.
+        std::lock_guard<std::mutex> lock(link_->lock);
+        link_->owner = nullptr;
+    }
     static AAX_CEffectParameters* AAX_CALLBACK create() { return new Parameters; }
     AAX_Result EffectInit() override {
         if (!Controller()) return AAX_ERROR_NOT_INITIALIZED;
@@ -142,6 +204,12 @@ public:
         AAX_Result result = AAX_SUCCESS;
         if (!state_.prepareStems(rate, input, output)) return AAX_ERROR_INVALID_ARGUMENT;
         op_shell_set_offline(state_.engine, offline_ ? 1u : 0u);
+        {
+            // A track named before there was an engine.
+            std::lock_guard<std::mutex> lock(trackLock_);
+            if (trackSerial_ != 0) trackPending_.store(true, std::memory_order_release);
+        }
+        tellTrack();
         ids_.assign(info.param_count, std::string());
         posted_ = PacketBuffer(info.param_count);
         for (uint32_t i = 0; i < info.param_count; ++i) {
@@ -327,6 +395,14 @@ public:
             if (state_.engine) op_shell_set_offline(state_.engine, offline_ ? 1u : 0u);
             return AAX_SUCCESS;
         }
+        // The track's name (Pro Tools 11.2 and later; Media Composer does not send it). The
+        // payload is a const AAX_IString. The plugin hears it on the main thread (noteTrack);
+        // the view reads it from GetCustomData on the main thread.
+        if (type == AAX_eNotificationEvent_TrackNameChanged) {
+            if (!data) return AAX_ERROR_NULL_ARGUMENT;
+            noteTrack(static_cast<const AAX_IString*>(data)->Get());
+            return AAX_SUCCESS;
+        }
         return AAX_CEffectParameters::NotificationReceived(type, data, size);
     }
     void* engine() const { return state_.engine; }
@@ -368,6 +444,18 @@ public:
         return AAX_CEffectParameters::ResetFieldData(field, destination, size);
     }
     AAX_Result GetCustomData(AAX_CTypeID id, uint32_t size, void* data, uint32_t* written) const override {
+        if (id == kTrackData) {
+            if (!data || !written || size != sizeof(TrackData)) return AAX_ERROR_INVALID_ARGUMENT;
+            auto* out = static_cast<TrackData*>(data);
+            std::lock_guard<std::mutex> lock(trackLock_);
+            out->serial = trackSerial_;
+            size_t n = std::min(trackName_.size(), sizeof(out->name) - 1);
+            while (n > 0 && n < trackName_.size() && (static_cast<unsigned char>(trackName_[n]) & 0xC0) == 0x80) --n;  // never inside a sequence
+            std::memcpy(out->name, trackName_.data(), n);
+            out->name[n] = '\0';
+            *written = sizeof(TrackData);
+            return AAX_SUCCESS;
+        }
         if (id != kEngineData) return AAX_CEffectParameters::GetCustomData(id, size, data, written);
         if (!data || !written || size != sizeof(void*)) return AAX_ERROR_INVALID_ARGUMENT;
         *static_cast<void**>(data) = state_.engine;
@@ -470,6 +558,7 @@ AAX_CEffectParameters* AAX_CALLBACK createParameters() { return Parameters::crea
 bool proofInit(AAX_CEffectParameters* p, double rate, uint32_t channels) { return static_cast<Parameters*>(p)->build(rate, channels) == AAX_SUCCESS; }
 bool proofInitStems(AAX_CEffectParameters* p, double rate, AAX_EStemFormat input, AAX_EStemFormat output) { return static_cast<Parameters*>(p)->buildStems(rate, input, output) == AAX_SUCCESS; }
 bool proofNotify(AAX_CEffectParameters* p, AAX_CTypeID event) { return static_cast<Parameters*>(p)->NotificationReceived(event, nullptr, 0) == AAX_SUCCESS; }
+AAX_Result proofNotifyData(AAX_CEffectParameters* p, AAX_CTypeID event, const void* data, uint32_t size) { return static_cast<Parameters*>(p)->NotificationReceived(event, data, size); }
 void* proofEngine(AAX_CEffectParameters* p) { return static_cast<Parameters*>(p)->engine(); }
 bool proofSetPlain(AAX_CEffectParameters* p, uint32_t index, float value) { return static_cast<Parameters*>(p)->proofSetPlain(index, value); }
 bool proofSetBypass(AAX_CEffectParameters* p, bool on) { return static_cast<Parameters*>(p)->proofSetBypass(on); }
