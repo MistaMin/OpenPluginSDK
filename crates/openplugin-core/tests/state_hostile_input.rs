@@ -99,18 +99,16 @@ static PARAMS: [ParamInfo; 4] = [
 
 const DEFAULT_VALUES: [f32; PARAM_COUNT] = [0.0, 1_000.0, 50.0, 0.0];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.state_hostile_input",
-    name: "State Hostile Input",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "test@example.com",
-    version: "1.0.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.state_hostile_input",
+    "State Hostile Input",
+    "Test",
+    "1.0.0",
+    Category::Utility,
+    &PARAMS,
+)
+    .with_url("https://example.com")
+    .with_email("test@example.com");
 
 fn valid_values() -> [f32; PARAM_COUNT] {
     [-6.5, 440.0, 25.0, 2.0]
@@ -236,7 +234,7 @@ impl Plugin for TestPlugin {
             .map(|index| self.values[index])
     }
 
-    fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {}
+    fn process(&mut self, _io: &mut [&mut [f32]], _frames: usize) {}
 
     fn save_state(&mut self) -> Option<Vec<u8>> {
         Some(encode_chunk(&self.values))

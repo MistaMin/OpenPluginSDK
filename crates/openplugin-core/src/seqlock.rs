@@ -1,6 +1,6 @@
 //! Single-writer seqlock for a `Copy` snapshot.
 //!
-//! Water Channel publishes meter and telemetry words under a monotonic sequence
+//! The audio thread publishes meter and telemetry words under a monotonic sequence
 //! so a GUI read is either the previous frame or the next one, never a mix, and
 //! so `reset` cannot rewind the sequence into an ABA window. One audio thread
 //! publishes. Any number of editor threads may read.
@@ -9,6 +9,8 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{fence, AtomicU64, Ordering};
 
+/// Bridge plumbing, not part of the frozen API.
+#[doc(hidden)]
 pub struct Seqlock<T> {
     seq: AtomicU64,
     slot: UnsafeCell<T>,

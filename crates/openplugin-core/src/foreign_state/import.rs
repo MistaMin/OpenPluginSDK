@@ -48,6 +48,7 @@ use crate::ParamInfo;
 
 /// How the old plugin names a parameter in its saved state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ForeignId {
     /// A numeric id (the scanner manifest's `params[].id`).
     Index(u32),
@@ -69,6 +70,7 @@ impl From<&str> for ForeignId {
 
 /// What a stored value means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ValueKind {
     /// In the old plugin's own units.
     Plain,

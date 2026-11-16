@@ -1,10 +1,10 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 fn rolling_write_at_3072() -> AutomationLane {
     let mut lane = AutomationLane::new(0.0, 1.0, 0.2);
     lane.insert_point(0, 0.20);
     lane.insert_point(48_000, 0.80);
-    lane.set_mode(LaneMode::Write);
+    lane.set_mode(AutomationMode::Write);
     lane.set_rolling(true);
     lane.set_playhead(3072);
     lane

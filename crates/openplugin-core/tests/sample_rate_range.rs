@@ -7,18 +7,14 @@ use openplugin_core::{
 
 static PARAMS: [ParamInfo; 0] = [];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.sample-rate",
-    name: "Sample Rate Probe",
-    vendor: "OpenGrid",
-    url: "",
-    email: "",
-    version: "0.0.1",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.sample-rate",
+    "Sample Rate Probe",
+    "OpenGrid",
+    "0.0.1",
+    Category::Utility,
+    &PARAMS,
+);
 
 struct Probe;
 
@@ -34,7 +30,7 @@ impl Plugin for Probe {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
 }
 
 struct Narrow;
@@ -51,7 +47,7 @@ impl Plugin for Narrow {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     fn accepts_sample_rate(&self, sample_rate: f32) -> bool {
         sample_rate == 48_000.0
     }

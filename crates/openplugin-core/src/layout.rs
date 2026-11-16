@@ -184,6 +184,7 @@ const MAP_916: [u8; 16] = [
 
 /// How a host should label one bus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PortKind {
     Empty,
     Mono,
@@ -196,6 +197,7 @@ pub enum PortKind {
 /// One bus. `Ambisonic(order)` uses `(order + 1)²` channels, orders 1 through 7.
 /// `Discrete(n)` is an unnamed bus of `n` channels, from 1 to [`MAX_AUDIO_CHANNELS`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum SpeakerLayout {
     Absent,
     Mono,
@@ -496,6 +498,7 @@ impl IoConfig {
 
 /// Decay after the input stops. This is not the delay-compensation latency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Tail {
     /// The plugin reports zero samples of tail.
     None,
@@ -507,9 +510,18 @@ pub enum Tail {
 }
 
 impl Tail {
+    /// A sample count as a tail: zero is `None`, anything else `Finite`.
+    pub const fn from_samples(samples: usize) -> Self {
+        match samples {
+            0 => Self::None,
+            n if n > u32::MAX as usize => Self::Finite(u32::MAX),
+            n => Self::Finite(n as u32),
+        }
+    }
+
     /// CLAP sample count. `Unknown` has no count. Infinite is `u32::MAX`,
     /// which CLAP treats as infinite because it is at least `i32::MAX`.
-    pub const fn clap_samples(self) -> Option<u32> {
+    pub const fn to_clap_samples(self) -> Option<u32> {
         match self {
             Self::None => Some(0),
             Self::Finite(n) => Some(n),
@@ -536,6 +548,11 @@ impl Default for NotePorts {
 }
 
 /// Flags on a [`crate::ParamInfo`]. Existing parameters stay automatable.
+/// The bit of each flag is part of the API ([`ParamFlags::bits`] is
+/// serialised and crosses the shell ABI) and never changes: `AUTOMATABLE` 1,
+/// `STEPPED` 2, `HIDDEN` 4, `READ_ONLY` 8, `BYPASS` 16, `MOMENTARY` 32,
+/// `PRESET_EXCLUDE` 64, `NOT_REALTIME` 128, `MODULATABLE` 256,
+/// `POLY_MODULATION` 256 + 512.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct ParamFlags(u32);
 

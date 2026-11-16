@@ -1,4 +1,4 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 #[test]
 fn touch_release_while_rolling_hears_curve_and_stays_touch() {
@@ -6,7 +6,7 @@ fn touch_release_while_rolling_hears_curve_and_stays_touch() {
     lane.insert_point(0, 0.20);
     lane.insert_point(48_000, 0.20);
 
-    lane.set_mode(LaneMode::Touch);
+    lane.set_mode(AutomationMode::Touch);
     lane.touch(true);
     lane.set_rolling(true);
     lane.set_playhead(2048);
@@ -23,6 +23,6 @@ fn touch_release_while_rolling_hears_curve_and_stays_touch() {
     assert!((lane.heard() - 0.20).abs() < 1e-4);
 
     lane.set_rolling(false);
-    assert_eq!(lane.mode(), LaneMode::Touch);
+    assert_eq!(lane.mode(), AutomationMode::Touch);
     assert!(!lane.is_rolling());
 }

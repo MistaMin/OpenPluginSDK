@@ -1,4 +1,4 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 fn flat_lane() -> AutomationLane {
     let mut lane = AutomationLane::new(0.0, 1.0, 0.2);
@@ -17,7 +17,7 @@ fn punch_three(lane: &mut AutomationLane) {
 #[test]
 fn write_touch_stays_up_and_curve_at_3000_stays_flat() {
     let mut lane = flat_lane();
-    lane.set_mode(LaneMode::Write);
+    lane.set_mode(AutomationMode::Write);
     assert!(!lane.touching());
     lane.set_rolling(true);
     punch_three(&mut lane);
@@ -28,7 +28,7 @@ fn write_touch_stays_up_and_curve_at_3000_stays_flat() {
 #[test]
 fn touch_stays_held_for_three_gestures_and_curve_at_3000_stays_flat() {
     let mut lane = flat_lane();
-    lane.set_mode(LaneMode::Touch);
+    lane.set_mode(AutomationMode::Touch);
     lane.touch(true);
     assert!(lane.touching());
     lane.set_rolling(true);
@@ -44,7 +44,7 @@ fn touch_stays_held_for_three_gestures_and_curve_at_3000_stays_flat() {
 #[test]
 fn latch_touch_stays_up_and_curve_at_3000_stays_flat() {
     let mut lane = flat_lane();
-    lane.set_mode(LaneMode::Latch);
+    lane.set_mode(AutomationMode::Latch);
     assert!(!lane.touching());
     lane.set_rolling(true);
     punch_three(&mut lane);

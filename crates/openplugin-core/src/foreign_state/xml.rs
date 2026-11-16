@@ -25,6 +25,7 @@
 use super::{ErrorKind, ForeignError, Limits, Result};
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Node {
     Element(Element),
     Text(String),

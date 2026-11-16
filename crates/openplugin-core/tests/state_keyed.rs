@@ -15,18 +15,7 @@ const MODE: ParamInfo = ParamInfo::new("mode", "Mode", 0.0, 3.0, 1.0, Unit::None
 const TONE: ParamInfo = ParamInfo::new("tone", "Tone", 20.0, 20_000.0, 1_000.0, Unit::Hz);
 
 const fn info(params: &'static [ParamInfo]) -> PluginInfo {
-    PluginInfo {
-        id: "com.example.keyed",
-        name: "Keyed",
-        vendor: "Test",
-        url: "",
-        email: "",
-        version: "1",
-        category: Category::Utility,
-        params,
-        is_instrument: false,
-        has_editor: false,
-    }
+    PluginInfo::new("com.example.keyed", "Keyed", "Test", "1", Category::Utility, params)
 }
 
 /// The release before pins: three parameters, ids are positions.

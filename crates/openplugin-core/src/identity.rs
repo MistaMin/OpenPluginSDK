@@ -65,6 +65,7 @@ impl ParamPins {
 
 /// The formats whose hosts store a number per parameter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PinFormat {
     Clap,
     Vst3,
@@ -105,6 +106,7 @@ pub const AAX_BYPASS_PARAM_ID: &str = "MasterBypassID";
 /// Why a set of pins cannot be used. The index is the parameter's position in
 /// the table.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PinError {
     /// Two parameters have one numeric id in `format`.
     Duplicate { format: PinFormat, first: usize, second: usize, id: u32 },

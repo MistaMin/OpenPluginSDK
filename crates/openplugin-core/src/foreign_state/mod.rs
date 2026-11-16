@@ -87,6 +87,7 @@ impl Limits {
 
 /// Why a reader refused its input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// The data ends before a field does.
     Truncated,

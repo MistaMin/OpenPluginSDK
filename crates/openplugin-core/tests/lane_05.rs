@@ -1,11 +1,11 @@
-use openplugin_core::{AutomationLane, CurveInterpolation};
+use openplugin_core::{AutomationLane, AutomationInterpolation};
 
 #[test]
 fn single_point_holds_for_linear_and_discrete() {
     let mut lane = AutomationLane::new(0.0, 1.0, 0.0);
     lane.insert_point(1000, 0.80);
 
-    for interpolation in [CurveInterpolation::Linear, CurveInterpolation::Discrete] {
+    for interpolation in [AutomationInterpolation::Linear, AutomationInterpolation::Discrete] {
         lane.set_interpolation(interpolation);
         for sample in [0_u64, 500, 1000, 2000] {
             let got = lane.curve(sample);

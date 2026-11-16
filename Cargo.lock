@@ -438,6 +438,7 @@ dependencies = [
 name = "openplugin-core"
 version = "1.0.0-beta"
 dependencies = [
+ "openplugin-core",
  "serde",
  "serde_json",
 ]

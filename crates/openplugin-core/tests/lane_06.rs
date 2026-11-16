@@ -1,9 +1,9 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 #[test]
 fn manual_roll_keeps_heard_and_points() {
     let mut lane = AutomationLane::new(0.0, 1.0, 0.0);
-    assert_eq!(lane.mode(), LaneMode::Manual);
+    assert_eq!(lane.mode(), AutomationMode::Manual);
 
     lane.insert_point(0, 0.20);
     lane.insert_point(1000, 0.80);
@@ -14,7 +14,7 @@ fn manual_roll_keeps_heard_and_points() {
 
     lane.set_rolling(true);
 
-    assert_eq!(lane.mode(), LaneMode::Manual);
+    assert_eq!(lane.mode(), AutomationMode::Manual);
     assert!(
         (lane.heard() - 0.33).abs() < 1e-4,
         "heard {} is not within 1e-4 of 0.33",

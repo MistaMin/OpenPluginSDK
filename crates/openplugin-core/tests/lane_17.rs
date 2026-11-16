@@ -1,4 +1,4 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 fn point_at(lane: &AutomationLane, sample: u64) -> Option<f32> {
     lane.points()
@@ -12,7 +12,7 @@ fn stopped_touch_replaces_the_point_under_the_playhead() {
     let mut lane = AutomationLane::new(0.0, 1.0, 0.2);
     lane.insert_point(0, 0.20);
     lane.insert_point(1000, 0.80);
-    lane.set_mode(LaneMode::Touch);
+    lane.set_mode(AutomationMode::Touch);
     lane.touch(true);
     assert_eq!(lane.playhead(), 0);
     lane.set_hand(0.30);

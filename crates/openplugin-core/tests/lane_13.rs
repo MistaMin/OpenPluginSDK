@@ -1,11 +1,11 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 #[test]
 fn touch_up_while_rolling_hears_curve_not_hand() {
     let mut lane = AutomationLane::new(0.0, 1.0, 0.0);
     lane.insert_point(0, 0.20);
     lane.insert_point(1000, 0.80);
-    lane.set_mode(LaneMode::Touch);
+    lane.set_mode(AutomationMode::Touch);
     lane.set_rolling(true);
     lane.set_playhead(500);
     let curve = lane.curve(500);

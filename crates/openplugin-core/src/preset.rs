@@ -157,18 +157,7 @@ mod tests {
         ParamInfo::new("high_cut", "High Cut", 1_000.0, 20_000.0, 12_000.0, Unit::Hz),
         ParamInfo::new("freeze", "Freeze", 0.0, 1.0, 0.0, Unit::Toggle),
     ];
-    static INFO: PluginInfo = PluginInfo {
-        id: "test.verb",
-        name: "Verb",
-        vendor: "Test",
-        url: "",
-        email: "",
-        version: "1.0.0",
-        category: Category::Reverb,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    };
+    static INFO: PluginInfo = PluginInfo::new("test.verb", "Verb", "Test", "1.0.0", Category::Reverb, &PARAMS);
 
     #[test]
     fn keys_match_ids_and_names_loosely() {

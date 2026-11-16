@@ -1,4 +1,4 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 #[test]
 fn play_roll_ignores_gesture_and_stays_play() {
@@ -8,7 +8,7 @@ fn play_roll_ignores_gesture_and_stays_play() {
     let points = [(0_u64, 0.20_f32), (48_000, 0.80)];
     assert_eq!(lane.points(), &points);
 
-    lane.set_mode(LaneMode::Play);
+    lane.set_mode(AutomationMode::Play);
     lane.set_rolling(true);
     lane.set_playhead(6144);
 
@@ -22,6 +22,6 @@ fn play_roll_ignores_gesture_and_stays_play() {
     assert_eq!(lane.points(), &points);
 
     lane.set_rolling(false);
-    assert_eq!(lane.mode(), LaneMode::Play);
+    assert_eq!(lane.mode(), AutomationMode::Play);
     assert_eq!(lane.points(), &points);
 }

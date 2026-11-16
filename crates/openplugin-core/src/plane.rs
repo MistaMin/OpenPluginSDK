@@ -1,9 +1,10 @@
 //! Lock-free parameter plane.
 //!
-//! OpenGridder's native insert keeps one `AtomicU32` per parameter. The editor
-//! and the host write bits; the audio thread calls [`ParamCursor::pull`] and
-//! only then touches the plugin, and only for slots that changed. Water Channel
-//! uses the same rule: the audio thread does not take a mutex to read a knob.
+//! One `AtomicU32` per parameter. The editor and the host write bits; the
+//! audio thread calls [`ParamCursor::pull`] and only then touches the plugin,
+//! and only for slots that changed: it never takes a mutex to read a knob.
+//! [`ParamPlane::store`] and [`ParamPlane::load`] address a parameter by
+//! index, the `_id` forms by [`ParamInfo::id`].
 //!
 //! Storage is allocated in [`ParamPlane::new`]. `store` and `load` do not allocate.
 
@@ -178,18 +179,16 @@ mod tests {
         ParamInfo::new("drive", "Drive", 1.0, 10.0, 1.0, Unit::None).with_taper(Taper::Log),
     ];
 
-    static INFO: PluginInfo = PluginInfo {
-        id: "com.example.plane",
-        name: "Plane",
-        vendor: "Test",
-        url: "https://example.com",
-        email: "a@b.c",
-        version: "0",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    };
+    static INFO: PluginInfo = PluginInfo::new(
+        "com.example.plane",
+        "Plane",
+        "Test",
+        "0",
+        Category::Utility,
+        &PARAMS,
+    )
+        .with_url("https://example.com")
+        .with_email("a@b.c");
 
     struct Gain {
         values: [f32; 2],
@@ -216,7 +215,7 @@ mod tests {
                 .position(|param| param.id == id)
                 .map(|index| self.values[index])
         }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     }
 
     #[test]
