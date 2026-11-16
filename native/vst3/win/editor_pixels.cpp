@@ -40,7 +40,10 @@ Link* linkOf(void* editor, bool make) {
     return link;
 }
 
+double gHostScale = 0.0;
+// The scale to expect before an editor has a window: the host's, else the system's.
 double systemScale() {
+    if (gHostScale > 0.0) return gHostScale;
     const UINT dpi = GetDpiForSystem();
     return dpi ? static_cast<double>(dpi) / 96.0 : 1.0;
 }
@@ -126,6 +129,13 @@ void editor_set_context_menu(void* editor, void* context, OpEditorContextMenu sh
     link->menuContext = context;
     link->menu = show;
     op_editor_set_context_menu(editor, link, show ? showMenu : nullptr);
+}
+
+void editor_set_host_scale(double scale) { gHostScale = scale > 0.0 ? scale : 0.0; }
+
+uint32_t editor_attach(void* editor, void* parent) {
+    if (editor && gHostScale > 0.0) op_editor_set_scale(editor, gHostScale);
+    return op_editor_attach(editor, parent);
 }
 
 void editor_destroy(void* editor) {

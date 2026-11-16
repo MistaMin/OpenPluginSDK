@@ -25,8 +25,9 @@
 #include "op_editor_win.h"
 
 namespace openplugin_vst_win {
-// op_editor_size and op_editor_size_range in pixels at the system's scale: no
-// editor exists yet, so its window's scale is not known. Once the editor is open
+// op_editor_size and op_editor_size_range in pixels at the host's scale, or the
+// system's when the host gave none: no editor exists yet, so its window's scale is
+// not known. Once the editor is open
 // the view asks editor_get_size and editor_adjust_size, which use the real one.
 uint32_t editor_size(uint32_t* width, uint32_t* height);
 uint32_t editor_size_range(uint32_t* min_width, uint32_t* min_height, uint32_t* max_width, uint32_t* max_height,
@@ -43,4 +44,11 @@ void editor_set_request_resize(void* editor, void* context, OpEditorRequestResiz
 void editor_set_context_menu(void* editor, void* context, OpEditorContextMenu show);
 // op_editor_destroy, and forgets what the two calls above kept for this editor.
 void editor_destroy(void* editor);
+// The scale the host gave (IPlugViewContentScaleSupport::setContentScaleFactor), for
+// the sizes asked before an editor exists and for the editors opened from now on.
+// A host gives every view of its windows the same kind of scale, so one value serves;
+// an open editor keeps its own (op_editor_set_scale). 0 forgets it.
+void editor_set_host_scale(double scale);
+// op_editor_attach, giving the editor the host's scale first when there is one.
+uint32_t editor_attach(void* editor, void* parent);
 }

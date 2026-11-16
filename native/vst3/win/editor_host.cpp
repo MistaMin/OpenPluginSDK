@@ -18,6 +18,10 @@
 //     menu on that parameter and pops it up at the click; a click on the bare plate
 //     asks nothing; the controller takes IInfoListener::setChannelContextInfos with
 //     the editor open;
+//   - the host's scale (IPlugViewContentScaleSupport): given before the view is
+//     attached, the view opens at points x scale pixels; given while it is open, the
+//     window takes the new size at once, the frame is asked for it, and a click at
+//     the scaled position still finds the control; a scale of 0 is refused;
 //   - removed() takes the child window out, and tearing down with the processor
 //     first, while a second view is open, does not crash.
 //
@@ -36,6 +40,7 @@
 #include <windows.h>
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/gui/iplugview.h"
+#include "pluginterfaces/gui/iplugviewcontentscalesupport.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstchannelcontextinfo.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
@@ -470,6 +475,53 @@ int main(int argc, char** argv) {
         CHECK(childCount(secondParent) == 0);
         second->release();
         DestroyWindow(secondParent);
+    }
+    // The host's scale. 2.0 before the view is attached, then 1.5 while it is open.
+    {
+        const int pointsW = static_cast<int>(std::lround(rect.getWidth() / scale));
+        const int pointsH = static_cast<int>(std::lround(rect.getHeight() / scale));
+        const double pointX = mx / scale, pointY = my / scale;
+        IPlugView* scaled = controller->createView(ViewType::kEditor);
+        CHECK(scaled);
+        FUnknownPtr<IPlugViewContentScaleSupport> support(scaled);
+        CHECK(support);
+        CHECK(support->setContentScaleFactor(0.0f) != kResultTrue);
+        CHECK(support->setContentScaleFactor(2.0f) == kResultTrue);
+        ViewRect size{};
+        CHECK(scaled->getSize(&size) == kResultOk && size.getWidth() == pointsW * 2 && size.getHeight() == pointsH * 2);
+        HWND scaledParent = makeParent(size.getWidth(), size.getHeight());
+        CHECK(scaledParent);
+        CHECK(scaled->attached(scaledParent, kPlatformTypeHWND) == kResultOk);
+        HWND child = GetWindow(scaledParent, GW_CHILD);
+        CHECK(child && clientIs(child, pointsW * 2, pointsH * 2));
+        CHECK(scaled->getSize(&size) == kResultOk && size.getWidth() == pointsW * 2 && size.getHeight() == pointsH * 2);
+        spin(0.05);
+        int begins = handler.begins;
+        click(child, pointX * 2.0, pointY * 2.0, 1);
+        spin(0.05);
+        CHECK(handler.begins == begins + 1 && handler.last == mparam);
+        std::printf("scale 2.0 before attach: %dx%d points open as %dx%d pixels\n", pointsW, pointsH, size.getWidth(), size.getHeight());
+        // The scale changes with the view open: the frame hears the new size.
+        Frame scaleFrame;
+        CHECK(scaled->setFrame(&scaleFrame) == kResultOk);
+        CHECK(support->setContentScaleFactor(1.5f) == kResultTrue);
+        spin(0.05);
+        const int w15 = static_cast<int>(std::lround(pointsW * 1.5)), h15 = static_cast<int>(std::lround(pointsH * 1.5));
+        CHECK(scaleFrame.requests == 1 && scaleFrame.width == w15 && scaleFrame.height == h15);
+        CHECK(scaled->getSize(&size) == kResultOk && size.getWidth() == w15 && size.getHeight() == h15);
+        CHECK(clientIs(child, w15, h15));
+        begins = handler.begins;
+        click(child, pointX * 1.5, pointY * 1.5, 1);
+        spin(0.05);
+        CHECK(handler.begins == begins + 1 && handler.last == mparam);
+        // The same scale again changes nothing and asks nothing.
+        CHECK(support->setContentScaleFactor(1.5f) == kResultTrue);
+        CHECK(scaleFrame.requests == 1);
+        std::printf("scale 1.5 while open: the frame was asked for %dx%d, the window is %dx%d\n", scaleFrame.width, scaleFrame.height, size.getWidth(), size.getHeight());
+        CHECK(scaled->setFrame(nullptr) == kResultOk);
+        CHECK(scaled->removed() == kResultOk);
+        scaled->release();
+        DestroyWindow(scaledParent);
     }
     // Open once more, then tear down with the processor going first.
     view = controller->createView(ViewType::kEditor);
