@@ -41,7 +41,7 @@ set(OP_PRODUCT "Plugin" CACHE STRING "Module file and display name")
 set(OP_BUNDLE_ID "com.example.openplugin" CACHE STRING "Bundle identifier prefix (not used on Windows)")
 set(OP_VERSION "0.1.0" CACHE STRING "Version")
 set(OP_MANUFACTURER "OpenPlugin" CACHE STRING "Manufacturer display name")
-set(OP_RUST_NATIVE_LIBS "user32;gdi32;kernel32;ntdll;userenv;ws2_32;dbghelp;synchronization;bcrypt;advapi32"
+set(OP_RUST_NATIVE_LIBS "user32;gdi32;kernel32;ntdll;userenv;ws2_32;dbghelp;synchronization;bcrypt;advapi32;shell32;comdlg32;comctl32"
   CACHE STRING "System libraries the Rust static library needs (rustc --print native-static-libs)")
 option(OP_BUILD_AAX "Build the unsigned AAX shell" ON)
 option(OP_EDITOR "The plugin exports op_editor_* (include/op_editor.h); host its view" OFF)

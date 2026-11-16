@@ -44,3 +44,22 @@ Both stopped every test on the machine used for the result below, and both are i
 ## Result on this machine
 
 14 November 2026, macOS arm64, AAX Plug-In Validator 2024.6.0 (DigiShell v24.9.0x14), AAX SDK 2.8.1, example "Example Gain" built from `examples/editor` with the editor view and page table: 14 results, 13 passed, 0 failed, 1 skipped (`test.cycle_counts`, needs HDX and the DAE dish). `info.productids` reported manufacturer 1332758372, product 1164199790. The shell needed no change.
+
+## On Windows
+
+`scripts\windows\aax_validate.ps1` is the same run for Windows (PowerShell; the AAX shell there is built by `native/cmake/windows.cmake` and `native/aax/win/aax.cmake`):
+
+```powershell
+$env:AAX_VALIDATOR_DIR = 'C:\path\to\DigiShell'      # holds dsh.exe
+$env:AAX_SDK = 'C:\path\to\aax-sdk-2-8-1'            # holds Interfaces\AAX.h
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\aax_validate.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\aax_validate.ps1 -Bundle "C:\path\to\Some Plugin.aaxplugin"
+```
+
+The variables, the files under the output folder and the exit codes are those of the macOS script, with `-Bundle` and `-Out` for `--bundle` and `--out`. `OP_EDITOR` is `OFF` unless set, and the timeout is 3600 seconds (the validator's ReadMe says tests take longer on Windows). It runs over SSH; no desktop session is needed. What differs from macOS, all of it in Avid's tool:
+
+- **`dsh.exe` does not read commands from a file or a pipe.** Started plainly, it prints its prompt and waits on the console forever. The script starts it as `dsh -a` (application mode, what Avid's DTT scripts use): a command is its name on one line, then its parameters as a YAML document ending in `...`.
+- **Spaces in the bundle path.** The tests that run through `DTT\run_test.bat` (`info.productids` and others) get the path unquoted and fail with "Could NOT find specified bundle". A bundle whose path has a space is validated as a copy without one under the output folder (`validate\ExampleGain.aaxplugin`, the same binary renamed with its folder). The output folder and `AAX_VALIDATOR_DIR` must have no space.
+- `test.cycle_counts` ends `E_ABORTED` without HDX (`acquiredeck` fails) and is reported as skipped, as on macOS.
+
+Result on Windows: 16 November 2026, Windows 11 x64, DigiShell v24.9.0x15, AAX SDK 2.8.1, MSVC 14.51, "Example Gain" from `examples/editor` with the page table and without the editor view: 14 results, 13 passed, 0 failed, 1 skipped (`test.cycle_counts`). `info.productids` reported manufacturer 1332758372, product 1164199790, as on macOS. `test.describe_validation` passes with the warning "Algorithm context contains gaps between registered fields". This is not a Pro Tools test: Pro Tools loads the plug-in only after PACE signing.
