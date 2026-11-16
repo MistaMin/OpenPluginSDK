@@ -29,6 +29,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `SupportsTail`, `GetTailTime` | `tailTime` | `Plugin::tail_samples`, or `Plugin::tail` | Samples. Build the shell with `--tail` |
 | `kAudioUnitProperty_BypassEffect` | `shouldBypassEffect` | `Plugin::set_host_bypass` | The shell owns bypass: the input delayed by the reported latency, crossfaded over 10 ms |
 | `kAudioUnitProperty_OfflineRender` | `renderingOffline` | `Plugin::set_offline` | |
+| `kAudioUnitProperty_ContextName` | `contextName` | `Plugin::track_info_changed`, `Editor::track_info` | The track's name; an Audio Unit host gives no colour or kind |
 | `HostCallbackInfo`: `beatAndTempoProc`, `transportStateProc2`, `musicalTimeLocationProc` | `musicalContextBlock`, `transportStateBlock` | `Plugin::set_transport(&Transport)` | Called before each block; keep the fields you use |
 
 ### Parameters
