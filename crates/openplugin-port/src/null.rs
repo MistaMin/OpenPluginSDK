@@ -466,9 +466,9 @@ pub fn run_null(opts: &NullOptions) -> Result<NullReport, String> {
 /// A new folder only this user can open. One that already exists in the shared temp folder may be
 /// another user's, who could swap the job file under the child, so it is refused.
 fn private_dir(path: &Path) -> Result<(), String> {
-    let mut builder = std::fs::DirBuilder::new();
+    let builder = &mut std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    std::os::unix::fs::DirBuilderExt::mode(builder, 0o700);
     builder.create(path).map_err(|e| format!("cannot create {}: {e}", path.display()))
 }
 
