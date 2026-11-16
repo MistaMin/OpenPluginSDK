@@ -3,19 +3,25 @@
 # own project() when the build machine is Windows and then stops; nothing of the macOS
 # configuration there is used (docs/PLATFORMS.md). This file holds what every Windows
 # shell needs (the options, the Rust library and how to link it); each format has a
-# file of its own next to its Windows sources (aax/win/aax.cmake).
+# file of its own next to its Windows sources (vst3/win/vst3.cmake, aax/win/aax.cmake).
+# There is no Audio Unit on Windows.
 #
 # From the repository root, in PowerShell (the SDK stays outside this tree):
 #
 #   cargo build --release --lib -p example-editor -p example-role-tags
 #   cmake -S native -B build-shell -A x64 `
 #     -DOP_RUST_LIB="$PWD\target\release\example_editor.lib" `
+#     -DOP_VST3_SDK=C:\path\to\vst3sdk `
 #     -DOP_AAX_SDK=C:\path\to\aax-sdk `
 #     -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example `
-#     -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid `
+#     "-DOP_VERSION=0.3.1" -DOP_MANUFACTURER=OpenGrid `
 #     -DOP_TAIL=ON -DOP_EDITOR=OFF
 #   cmake --build build-shell --config Release -j 2
 #   ctest --test-dir build-shell -C Release --output-on-failure
+#
+# (PowerShell splits an unquoted -DOP_VERSION=0.3.1 at the first dot; quote it.)
+# -DOP_BUILD_VST3=OFF or -DOP_BUILD_AAX=OFF leaves a format out, and its SDK is then
+# not needed.
 #
 # The Rust library is `<name>.lib`, built for the MSVC target against the release C
 # runtime, so build the shells as Release (or RelWithDebInfo). OP_RUST_NATIVE_LIBS
@@ -36,6 +42,7 @@ endif()
 set(OP_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(OP_RUST_LIB "" CACHE FILEPATH "Rust static library exporting op_shell_*")
+set(OP_VST3_SDK "" CACHE PATH "Existing VST3 SDK checkout")
 set(OP_AAX_SDK "" CACHE PATH "Existing AAX SDK checkout")
 set(OP_PRODUCT "Plugin" CACHE STRING "Module file and display name")
 set(OP_BUNDLE_ID "com.example.openplugin" CACHE STRING "Bundle identifier prefix (not used on Windows)")
@@ -43,6 +50,7 @@ set(OP_VERSION "0.1.0" CACHE STRING "Version")
 set(OP_MANUFACTURER "OpenPlugin" CACHE STRING "Manufacturer display name")
 set(OP_RUST_NATIVE_LIBS "user32;gdi32;kernel32;ntdll;userenv;ws2_32;dbghelp;synchronization;bcrypt;advapi32;shell32;comdlg32;comctl32"
   CACHE STRING "System libraries the Rust static library needs (rustc --print native-static-libs)")
+option(OP_BUILD_VST3 "Build the VST3 shell" ON)
 option(OP_BUILD_AAX "Build the unsigned AAX shell" ON)
 option(OP_EDITOR "The plugin exports op_editor_* (include/op_editor.h); host its view" OFF)
 option(OP_TAIL "The plugin exports op_shell_tail_seconds; report its tail to the host" OFF)
@@ -79,6 +87,9 @@ endfunction()
 
 enable_testing()
 
+if(OP_BUILD_VST3)
+  include("${OP_NATIVE_DIR}/vst3/win/vst3.cmake")
+endif()
 if(OP_BUILD_AAX)
   include("${OP_NATIVE_DIR}/aax/win/aax.cmake")
 endif()
