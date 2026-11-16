@@ -66,7 +66,7 @@
 //!   [`ControlSet::take_changed`] lists the controls whose look changed since
 //!   the last call, so an editor repaints only those ([`openplugin_core::Editor::damage`]).
 
-use openplugin_core::editor::{AccessAction, AccessNode, AccessRole, DamageRect, ParamMenu, ParamMenuAction, TextEdit, Tooltip};
+use openplugin_core::editor::{AccessAction, AccessNode, AccessRange, AccessRole, DamageRect, ParamMenu, ParamMenuAction, TextEdit, Tooltip};
 use openplugin_core::{EditorHost, ParamFlags, ParamInfo, Unit};
 
 pub use openplugin_core::editor::{Key, Modifiers};
@@ -790,6 +790,34 @@ impl ControlSet {
                 self.access_send(id, new)
             }
         }
+    }
+
+    /// The range, plain value and step of control `id`, for a screen reader
+    /// that reads numbers. None for a toggle or a button. The step is one
+    /// position of a stepped control, else [`ACCESS_STEP`] of the range.
+    /// [`openplugin_core::Editor::accessibility_range`] forwards here.
+    pub fn accessibility_range(&self, id: ControlId) -> Option<AccessRange> {
+        let c = self.controls.get(id)?;
+        if matches!(c.kind, ControlKind::Toggle | ControlKind::Button) {
+            return None;
+        }
+        let (min, max) = (f64::from(c.info.min), f64::from(c.info.max));
+        let step = if c.is_stepped() { f64::from(c.plain_step()) } else { (max - min) * f64::from(ACCESS_STEP) };
+        Some(AccessRange { min, max, value: f64::from(c.value), step })
+    }
+
+    /// A screen reader sets control `id` to a plain value: brought into the
+    /// range and sent as one whole gesture. True when the value changed.
+    /// Nothing happens for a toggle, a button, a read-only control, a value
+    /// that is not a number, or while the mouse or a key holds a control.
+    /// [`openplugin_core::Editor::accessibility_set_value`] forwards here.
+    pub fn accessibility_set_value(&mut self, id: ControlId, value: f64) -> bool {
+        let Some(c) = self.controls.get(id) else { return false };
+        if !value.is_finite() || !c.interactive() || self.grab.is_some() || self.hold.is_some() || matches!(c.kind, ControlKind::Toggle | ControlKind::Button) {
+            return false;
+        }
+        let new = c.info.clamp(value as f32);
+        self.access_send(id, new)
     }
 
     fn access_send(&mut self, id: ControlId, new: f32) -> bool {
@@ -1775,6 +1803,32 @@ mod tests {
         assert!(set.accessibility_nodes()[1].focused);
         set.param_changed(1, 1.0);
         assert!(set.accessibility_nodes()[1].on && set.accessibility_nodes()[1].value == "On");
+    }
+
+    #[test]
+    fn accessibility_range_reads_and_sets_plain_values() {
+        let (mut set, log) = key_rig();
+        let r = set.accessibility_range(0).expect("a knob has a range");
+        assert_eq!(r.max - r.min, 48.0);
+        assert_eq!(r.value, 0.0);
+        assert!((r.step - 2.4).abs() < 1e-6, "5% of the range: {}", r.step);
+        assert!(set.accessibility_range(1).is_none(), "a toggle has no range");
+        assert!(set.accessibility_range(5).is_none(), "a button has no range");
+        assert!(set.accessibility_range(99).is_none());
+        // A value is one whole gesture, brought into the range.
+        assert!(set.accessibility_set_value(0, 6.0));
+        let g = take(&log);
+        assert_eq!((g.len(), g[0], g[2]), (3, Begin(0), End(0)));
+        near(g[1], 0, 6.0);
+        assert_eq!(set.accessibility_range(0).unwrap().value, 6.0);
+        assert!(set.accessibility_set_value(0, 1000.0));
+        near(take(&log)[1], 0, r.max as f32);
+        assert!(!set.accessibility_set_value(0, 1000.0), "already at the end");
+        assert!(!set.accessibility_set_value(0, f64::NAN));
+        assert!(!set.accessibility_set_value(1, 1.0), "a toggle is pressed, not set");
+        assert!(!set.accessibility_set_value(2, 0.0), "read-only");
+        assert!(!set.accessibility_set_value(99, 0.0));
+        assert!(take(&log).is_empty());
     }
 
     #[test]

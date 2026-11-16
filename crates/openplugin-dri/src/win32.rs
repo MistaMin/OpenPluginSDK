@@ -40,8 +40,9 @@
 //! tick; an editor that [`Editor::wants_drops`] takes files dropped from
 //! Explorer.
 //!
-//! Not here yet: accessibility (UI Automation providers for
-//! [`Editor::accessibility_nodes`]).
+//! Accessibility: the view answers `WM_GETOBJECT` with UI Automation providers
+//! for itself and for each node of [`Editor::accessibility_nodes`] (see
+//! `win32_uia.rs`).
 //!
 //! One thread only: the thread that made the view runs its messages.
 
@@ -54,6 +55,9 @@ use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::time::Instant;
+
+#[path = "win32_uia.rs"]
+mod uia;
 
 /// A window handle (`HWND`).
 pub type Hwnd = *mut c_void;
@@ -354,6 +358,7 @@ unsafe extern "system" {
     fn GlobalUnlock(mem: Handle) -> i32;
     fn GlobalFree(mem: Handle) -> Handle;
     fn GetCurrentProcessId() -> u32;
+    fn GetCurrentThreadId() -> u32;
 }
 
 #[link(name = "shell32")]
@@ -384,6 +389,7 @@ const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETMINMAXINFO: u32 = 0x0024;
 const WM_SETFONT: u32 = 0x0030;
 const WM_NOTIFY: u32 = 0x004E;
+const WM_GETOBJECT: u32 = 0x003D;
 const WM_NCDESTROY: u32 = 0x0082;
 const WM_GETDLGCODE: u32 = 0x0087;
 const WM_KEYDOWN: u32 = 0x0100;
@@ -574,6 +580,8 @@ struct State {
     menu_hook: Option<MenuHook>,
     /// A [`TopWindow`] that keeps its client area the size of the view.
     top: Hwnd,
+    /// What the accessibility nodes looked like when events were last raised.
+    uia_seen: Vec<uia::Seen>,
 }
 
 unsafe fn state_of(hwnd: Hwnd) -> *mut State {
@@ -905,6 +913,7 @@ unsafe fn invalidate(sp: *mut State) {
             return;
         }
         sync_tooltips(sp);
+        uia::sync(sp);
         let mut damage = None;
         let mut size = (0, 0);
         if !guarded(sp, |st| {
@@ -1466,8 +1475,10 @@ unsafe fn view_message(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> isize {
             WM_NCDESTROY => {
                 // The host destroyed the parent: the window is gone, the editor stays
                 // until the view is dropped.
+                uia::disconnect(hwnd);
                 let st = &mut *sp;
                 st.hwnd = null_mut();
+                st.uia_seen.clear();
                 st.tip = null_mut();
                 st.tip_key.clear();
                 st.text_field = None;
@@ -1480,6 +1491,10 @@ unsafe fn view_message(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> isize {
                 DefWindowProcW(hwnd, msg, w, l)
             }
             WM_ERASEBKGND => 1,
+            WM_GETOBJECT => match uia::get_object(hwnd, w, l) {
+                Some(result) => result,
+                None => DefWindowProcW(hwnd, msg, w, l),
+            },
             WM_PAINT => {
                 paint(sp, null_mut());
                 0
@@ -1680,6 +1695,7 @@ impl EditorView {
             menu_param: 0,
             menu_hook: None,
             top: null_mut(),
+            uia_seen: Vec::new(),
         }));
         Some(EditorView { state })
     }
@@ -1910,6 +1926,8 @@ impl Drop for EditorView {
                     st.down = false;
                     ReleaseCapture();
                 }
+                // Providers a screen reader still holds are cut off from the window.
+                uia::disconnect(hwnd);
                 // Detach the state first: nothing the window still hears reaches the editor.
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 // The field and the tooltip control are the window's own and go with it.
