@@ -443,6 +443,52 @@ fn layout_name(channels: u32) -> Option<&'static str> {
     })
 }
 
+/// The `Some(AaxIds { .. })` expression for `Plugin::aax_ids`, when the scan
+/// found a manufacturer, a product and at least two plug-in types of four
+/// characters each (the first two are taken as mono and stereo).
+pub fn aax_ids_expr(p: &Plugin) -> Option<String> {
+    let aax = p.ids.aax.as_ref()?;
+    let four = |x: &str| x.len() == 4 && x.bytes().all(|b| b.is_ascii_graphic() || b == b' ');
+    if aax.plugin_ids.len() >= 2 && four(&aax.manufacturer) && four(&aax.product) && aax.plugin_ids.iter().take(2).all(|x| four(x)) {
+        Some(format!("Some(AaxIds {{ manufacturer: *b{:?}, product: *b{:?}, mono: *b{:?}, stereo: *b{:?} }})", aax.manufacturer, aax.product, aax.plugin_ids[0], aax.plugin_ids[1]))
+    } else {
+        None
+    }
+}
+
+/// What the scan says about `Plugin::supported_layouts`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Layouts {
+    /// The `&[IoConfig { .. }]` expression for plain mono or stereo buses.
+    Config(String),
+    /// Buses the snippet cannot express: why, for a `TODO` line.
+    ByHand(String),
+    /// The scan found no buses.
+    NoBuses,
+}
+
+pub fn layouts(p: &Plugin) -> Layouts {
+    let main_in = p.buses.iter().find(|b| b.direction == "input" && b.kind == "main");
+    let main_out = p.buses.iter().find(|b| b.direction == "output" && b.kind == "main");
+    let side = p.buses.iter().find(|b| b.direction == "input" && b.kind == "aux");
+    let in_ch = main_in.map_or(0, |b| b.channels);
+    let out_ch = main_out.map_or(0, |b| b.channels);
+    if let (Some(i), Some(o)) = (layout_name(in_ch), layout_name(out_ch)) {
+        let sc = match side.map(|b| b.channels) {
+            Some(c) => layout_name(c).map(|l| format!("Some({l})")),
+            None => Some("None".to_string()),
+        };
+        match sc {
+            Some(sc) => Layouts::Config(format!("&[IoConfig {{ input: {i}, output: {o}, sidechain: {sc} }}]")),
+            None => Layouts::ByHand("the sidechain has an unusual width; write supported_layouts by hand.".into()),
+        }
+    } else if !p.buses.is_empty() {
+        Layouts::ByHand(format!("the main buses are {in_ch} in and {out_ch} out; write supported_layouts by hand (see crates/openplugin-core/src/layout.rs)."))
+    } else {
+        Layouts::NoBuses
+    }
+}
+
 /// The Rust text for a manifest. `file_note` names the source in the header.
 pub fn render(m: &Manifest) -> String {
     let p = &m.plugin;
@@ -578,10 +624,10 @@ pub fn render(m: &Manifest) -> String {
     if let Some(aax) = &ids.aax {
         let plug: Vec<String> = aax.plugin_ids.iter().map(|x| format!("{x:?}")).collect();
         let _ = writeln!(s, "// AAX ids (found in the {}): manufacturer {:?}, product {:?}, plug-in types [{}]", aax.found_in, aax.manufacturer, aax.product, plug.join(", "));
-        if aax.plugin_ids.len() >= 2 && aax.manufacturer.len() == 4 && aax.product.len() == 4 && aax.plugin_ids.iter().take(2).all(|x| x.len() == 4) {
+        if let Some(expr) = aax_ids_expr(p) {
             let _ = writeln!(s, "// In the Plugin impl:");
             let _ = writeln!(s, "//   fn aax_ids(&self) -> Option<AaxIds> {{");
-            let _ = writeln!(s, "//       Some(AaxIds {{ manufacturer: *b{:?}, product: *b{:?}, mono: *b{:?}, stereo: *b{:?} }})", aax.manufacturer, aax.product, aax.plugin_ids[0], aax.plugin_ids[1]);
+            let _ = writeln!(s, "//       {expr}");
             let _ = writeln!(s, "//   }}");
             let _ = writeln!(s, "// (the first two plug-in types are taken as mono and stereo; check the page table)");
         }
@@ -627,35 +673,23 @@ pub fn render(m: &Manifest) -> String {
     // ----- audio and timing -----
     let _ = writeln!(s);
     let _ = writeln!(s, "// ---- audio ----");
-    let main_in = p.buses.iter().find(|b| b.direction == "input" && b.kind == "main");
-    let main_out = p.buses.iter().find(|b| b.direction == "output" && b.kind == "main");
-    let side = p.buses.iter().find(|b| b.direction == "input" && b.kind == "aux");
     for b in &p.buses {
         let _ = writeln!(s, "// bus: {} {} \"{}\", {} channels{}", b.direction, b.kind, b.name, b.channels, b.arrangement.as_ref().map(|a| format!(", arrangement {a}")).unwrap_or_default());
     }
     for l in &p.channel_layouts {
         let _ = writeln!(s, "// supported channel layout: {} in, {} out", l.inputs, l.outputs);
     }
-    let in_ch = main_in.map_or(0, |b| b.channels);
-    let out_ch = main_out.map_or(0, |b| b.channels);
-    if let (Some(i), Some(o)) = (layout_name(in_ch), layout_name(out_ch)) {
-        let sc = match side.map(|b| b.channels) {
-            Some(c) => layout_name(c).map(|l| format!("Some({l})")),
-            None => Some("None".to_string()),
-        };
-        match sc {
-            Some(sc) => {
-                let _ = writeln!(s, "// In the Plugin impl:");
-                let _ = writeln!(s, "//   fn supported_layouts(&self) -> &'static [IoConfig] {{");
-                let _ = writeln!(s, "//       &[IoConfig {{ input: {i}, output: {o}, sidechain: {sc} }}]");
-                let _ = writeln!(s, "//   }}");
-            }
-            None => {
-                let _ = writeln!(s, "// TODO(porting): the sidechain has an unusual width; write supported_layouts by hand.");
-            }
+    match layouts(p) {
+        Layouts::Config(expr) => {
+            let _ = writeln!(s, "// In the Plugin impl:");
+            let _ = writeln!(s, "//   fn supported_layouts(&self) -> &'static [IoConfig] {{");
+            let _ = writeln!(s, "//       {expr}");
+            let _ = writeln!(s, "//   }}");
         }
-    } else if !p.buses.is_empty() {
-        let _ = writeln!(s, "// TODO(porting): the main buses are {in_ch} in and {out_ch} out; write supported_layouts by hand (see crates/openplugin-core/src/layout.rs).");
+        Layouts::ByHand(why) => {
+            let _ = writeln!(s, "// TODO(porting): {why}");
+        }
+        Layouts::NoBuses => {}
     }
     match p.latency_samples {
         Some(n) => {

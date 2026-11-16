@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use openplugin_port::capture::{self, CaptureOptions};
 use openplugin_port::null::{self, NullOptions};
+use openplugin_port::scaffold::{self, NewOptions, SdkSource};
 use openplugin_port::{ScanOptions, probe, render, scan, write_outputs};
 
 const HELP: &str = "\
@@ -48,11 +49,26 @@ Usage:
               plugin could not be rendered (crash, hang, load failure).
   --input     sweep, noise, impulses, burst or silence, optionally ':seconds'
               (default sweep:2), or a 16/24/32-bit int or float WAV file
+  --format    the original's format when the extension does not say; also the
+              port's unless --port-format is given
   --automation  'frame:param=value' entries separated by commas; a time may end
               in s or ms; param is the original's id or name; '@file' reads a file
   --save DIR  write input, original, port and difference as WAV files
   param-map   write the original-to-port parameter id map the scanner manifests
               give (same name, else same id)
+
+  openplugin-port new --from <name>.<format>.manifest.json [--out DIR] [--name CRATE]
+                      [--sdk PATH | --sdk-version VERSION]
+
+  new         write a plugin crate from a scan's manifest: the parameter table and
+              PluginInfo, the identity the SDK can pin (the rest as TODO lines),
+              a stub that reads the original's saved state, and a null test
+              against the original that `cargo test` runs. Its audio passes the
+              input through until the DSP is written.
+  --out DIR   the crate's folder; must not exist or be empty (default: ./<name>)
+  --name      the Cargo package name (default: made from the plugin's name)
+  --sdk PATH  depend on an OpenPluginSDK checkout by path; --sdk-version on a
+              crates.io release (default: this tool's version)
 
 Each plugin is loaded in a child process, so a crash or a hang in the plugin
 fails that one scan and nothing else. The exit code is 0 when every plugin scanned.
@@ -68,6 +84,7 @@ fn main() -> ExitCode {
         Some("scan") => run_scan(&args[1..]),
         Some("null") => run_null(&args[1..]),
         Some("param-map") => run_param_map(&args[1..]),
+        Some("new") => run_new(&args[1..]),
         Some("-h") | Some("--help") | Some("help") | None => {
             print!("{HELP}");
             ExitCode::SUCCESS
@@ -245,7 +262,9 @@ fn run_null(args: &[String]) -> ExitCode {
     }
     o.original = paths[0].clone();
     o.port = paths[1].clone();
-    o.port_format = o.original_format.clone();
+    if o.port_format.is_none() {
+        o.port_format = o.original_format.clone();
+    }
     match null::run_null(&o) {
         Ok(report) => {
             print!("{}", report.to_text());
@@ -314,6 +333,61 @@ fn run_param_map(args: &[String]) -> ExitCode {
         eprintln!("no port parameter for the original's {u}: add it by hand");
     }
     if unmatched.is_empty() { ExitCode::SUCCESS } else { ExitCode::from(1) }
+}
+
+fn run_new(args: &[String]) -> ExitCode {
+    let mut from: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut name: Option<String> = None;
+    let mut sdk = SdkSource::Version(env!("CARGO_PKG_VERSION").to_string());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let r: Result<(), String> = (|| {
+            let mut value = |what: &str| it.next().cloned().ok_or_else(|| format!("{a} needs {what}"));
+            match a.as_str() {
+                "--from" => from = Some(PathBuf::from(value("a manifest")?)),
+                "--out" => out = Some(PathBuf::from(value("a folder")?)),
+                "--name" => name = Some(value("a crate name")?),
+                "--sdk" => sdk = SdkSource::Path(std::path::absolute(value("a folder")?).map_err(|e| e.to_string())?),
+                "--sdk-version" => sdk = SdkSource::Version(value("a version")?),
+                other => return Err(format!("unknown option {other}")),
+            }
+            Ok(())
+        })();
+        if let Err(e) = r {
+            return usage(&e);
+        }
+    }
+    let Some(from) = from else {
+        return usage("new needs --from <manifest>");
+    };
+    let tool = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("openplugin-port: cannot find myself to name in the null test: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = scaffold::read_manifest(&from).and_then(|m| {
+        let opts = NewOptions { sdk, crate_name: name, tool };
+        let files = scaffold::generate(&m, &opts)?;
+        let dir = out.unwrap_or_else(|| PathBuf::from(opts.crate_name.clone().unwrap_or_else(|| scaffold::crate_name(&m))));
+        scaffold::write(&files, &dir).map(|w| (m, dir, w))
+    });
+    match result {
+        Ok((m, dir, written)) => {
+            println!("ok    {} {:?}: {} parameters, crate in {}", m.source.format, m.plugin.name, m.plugin.params.len(), dir.display());
+            for f in written {
+                println!("      wrote {}", f.display());
+            }
+            println!("      next: cargo test --manifest-path {:?}, then the TODO(porting lines", dir.join("Cargo.toml"));
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            println!("FAIL  {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn usage(why: &str) -> ExitCode {
