@@ -8,7 +8,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 
 - Both are Rust and both have a `Plugin` trait, so the DSP usually moves over unchanged. What changes is who owns the parameters and how the block reaches you.
 - nih-plug parameters are objects in a `Params` struct shared through an `Arc`; the plugin reads them. Here the parameter table is `static` data and the plugin owns the current values as plain fields, written by `set_param`.
-- There is no `Buffer` type and no process context. `process` gets `&mut [Vec<f32>]` and a frame count. Transport, notes and parameter changes arrive as calls before or between the pieces of a block.
+- There is no `Buffer` type and no process context. `process` gets `&mut [&mut [f32]]` (one slice per channel) and a frame count. Transport, notes and parameter changes arrive as calls before or between the pieces of a block.
 - Smoothing is not part of a parameter. The plugin owns a smoother where it wants one.
 - The formats are CLAP and LV2 directly, and VST3, Audio Unit and AAX through the native shells of [SHELL.md](../SHELL.md).
 
@@ -26,9 +26,9 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `initialize(audio_io_layout, buffer_config, context) -> bool` | `prepare(sample_rate, max_block, channels)`, or `prepare_layout(sample_rate, max_block, layout)` | It cannot fail. Refuse a rate with `accepts_sample_rate` and a layout with `set_layout`. Allocate here |
 | `BufferConfig::process_mode`, `ProcessMode::Offline` | `Plugin::set_offline` | |
 | `reset()` | `reset()` | Must not allocate |
-| `process(buffer, aux, context) -> ProcessStatus` | `process(io: &mut [Vec<f32>], frames)`, or `process_buses(io, sidechain, frames)` | In place, planar: `io[channel][..frames]` |
+| `process(buffer, aux, context) -> ProcessStatus` | `process(io: &mut [&mut [f32]], frames)`, or `process_buses(io, sidechain, frames)` | In place, planar: `io[channel][..frames]` |
 | `buffer.iter_samples()`, `buffer.as_slice()` | Plain loops over `io` | A channel `Vec` can be longer than `frames`; use only `..frames` |
-| `ProcessStatus::Tail(n)`, `ProcessStatus::KeepAlive` | `Plugin::tail_samples`, or `Plugin::tail` returning `Tail::Finite(n)` or `Tail::Infinite` | A property the host reads, not a return value |
+| `ProcessStatus::Tail(n)`, `ProcessStatus::KeepAlive` | `Plugin::tail` returning `Tail::Finite(n)` or `Tail::Infinite` (`Tail::from_samples(n)` for a count) | A property the host reads, not a return value |
 | `ProcessStatus::Error` | Not available | `process` cannot fail; a plugin handles its own faults and stays silent |
 | `context.set_latency_samples(n)` | `Plugin::latency` | The entries read it after every block. `HostNotifier::latency_changed` reports a change made outside `process` |
 | `context.transport()` | `Plugin::set_transport(&Transport)` | Called before each block; keep the fields you use |
@@ -50,9 +50,9 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `.with_smoother(SmoothingStyle::...)`, `param.smoothed.next()` | `OnePole`, `SampleRamp`, `openplugin::dsp::Gain`, `openplugin::dsp::Ballistics` | Owned by the plugin and reset in `reset` |
 | `param.value()` inside `process` | A field of the plugin, written in `set_param` | Plain units, clamped by `ParamInfo::clamp` |
 | `.with_callback(...)` | `set_param(id, value)` | Compute coefficients here. Override `set_param_index` to skip the string match |
-| `.non_automatable()`, `.hide()`, `.make_bypass()` | `.flag(ParamFlags::NOT_REALTIME)`, `.flag(ParamFlags::HIDDEN)`, `.flag(ParamFlags::BYPASS)` | The host's own bypass also arrives through `Plugin::set_host_bypass` |
+| `.non_automatable()`, `.hide()`, `.make_bypass()` | `.with_flag(ParamFlags::NOT_REALTIME)`, `.with_flag(ParamFlags::HIDDEN)`, `.with_flag(ParamFlags::BYPASS)` | The host's own bypass also arrives through `Plugin::set_host_bypass` |
 | `#[nested(group = "Filter")]` | `.with_group("Filter")` | A path: `"Filter/Envelope"` nests |
-| `.with_poly_modulation_id(..)`, `NoteEvent::PolyModulation` | `.flag(ParamFlags::POLY_MODULATION)`, `Plugin::param_modulation` | See [EXPRESSION.md](../EXPRESSION.md) |
+| `.with_poly_modulation_id(..)`, `NoteEvent::PolyModulation` | `.with_flag(ParamFlags::POLY_MODULATION)`, `Plugin::param_modulation` | See [EXPRESSION.md](../EXPRESSION.md) |
 
 A gain parameter in nih-plug is often stored as linear gain with a skewed range and printed in decibels by a formatter. A port has two choices. Keep the plain value linear, and old automation and CLAP state keep their meaning, but hosts show a gain factor. Or declare it in decibels with `Unit::Db`, which reads better and is what the worked port below does for a new parameter; old values then need converting in `load_state`.
 
@@ -128,18 +128,15 @@ static PARAMS: [ParamInfo; 3] = [
     ParamInfo::new("release", "Release", 20.0, 2_000.0, 250.0, Unit::Ms).with_taper(Taper::Log),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.ported-ducker",
-    name: "Ported Ducker",
-    vendor: "Example Audio",
-    url: "https://example.com",
-    email: "",
-    version: "2.0.0",
-    category: Category::Dynamics,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.ported-ducker",
+    "Ported Ducker",
+    "Example Audio",
+    "2.0.0",
+    Category::Dynamics,
+    &PARAMS,
+)
+.with_url("https://example.com");
 
 // `AUDIO_IO_LAYOUTS`: with the sidechain first, so it is the default.
 static LAYOUTS: [IoConfig; 2] = [
@@ -211,12 +208,12 @@ impl Plugin for PortedDucker {
     }
 
     // A host that gives no sidechain calls this: nothing to duck to.
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         self.process_buses(io, None, frames);
     }
 
     // `process` with `aux.inputs[0]`.
-    fn process_buses(&mut self, io: &mut [Vec<f32>], sidechain: Option<&[Vec<f32>]>, frames: usize) {
+    fn process_buses(&mut self, io: &mut [&mut [f32]], sidechain: Option<&[&[f32]]>, frames: usize) {
         for i in 0..frames {
             let mut key = 0.0f32;
             for channel in sidechain.unwrap_or(&[]) {
@@ -232,8 +229,10 @@ impl Plugin for PortedDucker {
         }
     }
 
-    fn gain_reduction_db(&self) -> f32 {
-        self.reduction.value()
+    fn meters(&self) -> MeterFrame {
+        let mut frame = MeterFrame::SILENT;
+        frame.reduction_db = self.reduction.value();
+        frame
     }
 
     fn note_ports(&self) -> NotePorts {
@@ -262,9 +261,9 @@ fn run(plugin: &mut PortedDucker, key_level: Option<f32>) -> f32 {
         match key_level {
             Some(level) => {
                 let key = vec![vec![level; 480]; 2];
-                plugin.process_buses(&mut io, Some(&key), 480);
+                plugin.process_buses(&mut ChannelsMut::new(&mut io), Some(&Channels::new(&key)), 480);
             }
-            None => plugin.process(&mut io, 480),
+            None => plugin.process(&mut ChannelsMut::new(&mut io), 480),
         }
     }
     io[0][479]
@@ -277,7 +276,7 @@ fn main() {
     // A full-scale key is 24 dB over the threshold; the amount caps it at 12 dB.
     let ducked = run(&mut plugin, Some(1.0));
     assert!((ducked - 0.5 * db_to_amp(-12.0)).abs() < 1e-3, "{ducked}");
-    assert!((plugin.gain_reduction_db() - 12.0).abs() < 0.01);
+    assert!((plugin.meters().reduction_db - 12.0).abs() < 0.01);
 
     // A quiet key, or no sidechain at all, lets the signal back up.
     plugin.set_param("release", 20.0);

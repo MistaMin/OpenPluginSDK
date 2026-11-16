@@ -19,15 +19,15 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | iPlug2 | OpenPluginSDK | Notes |
 |---|---|---|
 | A class derived from `Plugin`, constructed with `MakeConfig(kNumParams, kNumPresets)` | A `struct` with `impl Plugin` and `impl Default` | `Default::default()` is the constructor the format entries call |
-| `config.h`: `PLUG_NAME`, `PLUG_MFR`, `PLUG_VERSION_STR`, `PLUG_URL_STR`, `PLUG_EMAIL_STR` | `PluginInfo { name, vendor, version, url, email, .. }` | Returned by `Plugin::info` |
+| `config.h`: `PLUG_NAME`, `PLUG_MFR`, `PLUG_VERSION_STR`, `PLUG_URL_STR`, `PLUG_EMAIL_STR` | `PluginInfo::new(..)`, `with_url`, `with_email` | Returned by `Plugin::info` |
 | `PLUG_UNIQUE_ID`, `PLUG_MFR_ID`, `BUNDLE_NAME`, `BUNDLE_MFR`, `BUNDLE_DOMAIN` | `PluginInfo::id`, and `--au-subtype`, `--au-manufacturer`, `--bundle-id` of `scripts/build_plugin.sh` | See [BUILD.md](../BUILD.md) |
 | `AAX_TYPE_IDS`, `AAX_PLUG_MFR_STR` | `Plugin::aax_ids` | Four-character codes |
 | `PLUG_TYPE` (effect, instrument, MIDI effect) | `PluginInfo::is_instrument`, `Plugin::note_ports`, `PluginInfo::category` | |
 | `OnReset()` | `prepare(sample_rate, max_block, channels)` and `reset()` | Allocate in `prepare`. `reset` clears filter and delay history and must not allocate |
 | `GetSampleRate()`, `GetBlockSize()` | The arguments of `prepare` | Keep what you need in fields |
-| `ProcessBlock(sample** inputs, sample** outputs, int nFrames)` | `process(io: &mut [Vec<f32>], frames)` | In place: `io[channel][..frames]` holds the input and receives the output |
+| `ProcessBlock(sample** inputs, sample** outputs, int nFrames)` | `process(io: &mut [&mut [f32]], frames)` | In place: `io[channel][..frames]` holds the input and receives the output |
 | `SetLatency(n)`, `PLUG_LATENCY` | `Plugin::latency` | The entries read it after every block. `HostNotifier::latency_changed` reports a change made outside `process` |
-| `SetTailSize(n)` | `Plugin::tail_samples` or `Plugin::tail` | `Tail::Infinite` and `Tail::Unknown` exist too |
+| `SetTailSize(n)` | `Plugin::tail` | `Tail::from_samples(n)`; `Tail::Infinite` and `Tail::Unknown` exist too |
 | `GetBypassed()` | `Plugin::set_host_bypass` | The host's bypass, separate from a power parameter of your own |
 | `GetRenderingOffline()` | `Plugin::set_offline` | Called before the blocks it applies to |
 | `GetTempo()`, `GetSamplePos()`, `GetTransportIsRunning()`, `GetTimeInfo()` | `Plugin::set_transport(&Transport)` | Called before each block; keep the fields you use |
@@ -43,7 +43,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `InitEnum` with a list of names | `.with_choices(&[...])` | The value is the index |
 | `InitInt`, a non-zero step | `.with_steps(n)` | `n` positions including both ends |
 | `IParam::ShapePowCurve`, `IParam::ShapeExp` | `.with_taper(Taper::Log)` | Only linear and logarithmic travel exist; see the list at the end |
-| `IParam::kFlagCannotAutomate`, `kFlagStepped` | `.flag(ParamFlags::NOT_REALTIME)`, `.flag(ParamFlags::STEPPED)` | |
+| `IParam::kFlagCannotAutomate`, `kFlagStepped` | `.with_flag(ParamFlags::NOT_REALTIME)`, `.with_flag(ParamFlags::STEPPED)` | |
 | The parameter group string | `.with_group("Filter/Envelope")` | A path, outermost name first |
 | `GetParam(kGain)->Value()` inside `ProcessBlock` | A field of the plugin, written in `set_param` | Plain units, already clamped by `ParamInfo::clamp` |
 | `OnParamChange(paramIdx)` | `set_param(id, value)` | Compute coefficients here. Override `set_param_index` to skip the string match |
@@ -91,7 +91,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `ProcessMidiMsg(const IMidiMsg&)` with an `IMidiQueue` drained in `ProcessBlock` | `note_on(offset, note, velocity)`, `note_off(offset, note)`, `midi(offset, [u8; 3])` | The entries split the block at each event, so no queue is needed |
 | `SendMidiMsg` | `pull_midi() -> Option<(u32, [u8; 3])>` | The entry drains it after each block |
 | `PLUG_DOES_MPE` | `mpe_input() -> Option<MpeZones>` | See [EXPRESSION.md](../EXPRESSION.md) |
-| `MidiSynth`, `VoiceAllocator` | `openplugin::dsp::voice_alloc`, `Polyphony` | |
+| `MidiSynth`, `VoiceAllocator` | `openplugin::dsp::voice_alloc` | |
 | `ProcessSysEx`, `SendSysEx` | Not available | See the list at the end |
 
 ### Threading
@@ -115,6 +115,7 @@ The port keeps the parameter's range and unit, so automation written for the old
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+use openplugin::core::OnePole;
 use openplugin::prelude::*;
 use openplugin_testing::{conformance, Options};
 
@@ -122,18 +123,16 @@ use openplugin_testing::{conformance, Options};
 static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 100.0, 100.0, Unit::Percent)];
 
 // What `config.h` declared.
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.ported-gain",
-    name: "Ported Gain",
-    vendor: "Example Audio",
-    url: "https://example.com",
-    email: "support@example.com",
-    version: "2.0.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.ported-gain",
+    "Ported Gain",
+    "Example Audio",
+    "2.0.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("support@example.com");
 
 // `PLUG_CHANNEL_IO "1-1 2-2"`. The first layout is the default.
 static LAYOUTS: [IoConfig; 2] = [
@@ -207,12 +206,12 @@ impl Plugin for PortedGain {
     }
 
     // `ProcessBlock`, in place.
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let target = self.percent / 100.0;
         let channels = self.channels.min(io.len());
         let mut peak = 0.0f32;
         for i in 0..frames {
-            let gain = self.smooth.next(target);
+            let gain = self.smooth.next_value(target);
             for channel in io.iter_mut().take(channels) {
                 channel[i] *= gain;
                 if channel[i].is_finite() {
@@ -259,7 +258,7 @@ fn main() {
     for _ in 0..200 {
         io[0].fill(1.0);
         io[1].fill(-1.0);
-        plugin.process(&mut io, 64);
+        plugin.process(&mut ChannelsMut::new(&mut io), 64);
     }
     // 50 percent is half the level, once the smoother has settled.
     assert!((io[0][63] - 0.5).abs() < 1e-4 && (io[1][63] + 0.5).abs() < 1e-4);
@@ -383,7 +382,7 @@ impl Editor for GainEditor {
                 };
             }
         }
-        Frame { pixels: &self.pixels, width, height }
+        Frame::new(&self.pixels, width, height)
     }
 }
 
@@ -427,7 +426,7 @@ The differences that matter in a port:
 
 ## What has no counterpart yet
 
-- **Factory presets in the host's menu.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`, and the plugin's own editor can offer them, but no format entry publishes a program list to the host yet.
+- **Factory presets in the host's menu.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`, and the plugin's own editor can offer them, but no format entry publishes a program list to the host yet.
 - **Power-curve and custom parameter shapes.** `Taper` is linear or logarithmic. A parameter shaped with `ShapePowCurve` keeps its range and plain values, but a host knob travels differently from the old plugin's.
 - **Custom display text.** A parameter prints by its `Unit` and its choice names. A `SetDisplayFunc` that prints something else (note names, a ratio table) has no equivalent.
 - **More than one output bus, or more than one sidechain.** An `IoConfig` is one main input, one main output and one optional sidechain.

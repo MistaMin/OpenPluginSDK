@@ -176,7 +176,7 @@ The library is a release build of the host architecture, with the same `--remap-
 - The LV2 bundle lacks `manifest.ttl` or `<Stem>.ttl`, or `manifest.ttl` does not name `<Stem>.so` as `lv2:binary`.
 - The standalone file is not an ELF executable (it gets the same path, library and run path checks, and no export check), its desktop entry is missing, or `desktop-file-validate` (when installed) rejects the entry.
 
-A standalone bin is the plugin's own: a `main` that builds the editor and calls `openplugin::dri::x11::run_window(title, editor, None)`, which on macOS is `openplugin::dri::cocoa::run_window`. It opens no audio device on either platform (`StandaloneRunner` does no audio, see `API_REVIEW.md` F2). The window is an X11 one, so in a Wayland session it runs through Xwayland.
+A standalone bin is the plugin's own: a `main` that builds the editor and calls `openplugin::dri::x11::run_window(title, editor, None)`, which on macOS is `openplugin::dri::cocoa::run_window`. It opens no audio device on either platform. The window is an X11 one, so in a Wayland session it runs through Xwayland.
 
 ### Checks run on Linux
 

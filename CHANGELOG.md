@@ -8,6 +8,56 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
 
 ## [Unreleased]
 
+### The 1.0 API freeze
+
+The public API was reviewed item by item ([docs/API_REVIEW.md](docs/API_REVIEW.md)) and every recommendation applied. What is frozen from 1.0 is stated in [docs/VERSIONING.md](docs/VERSIONING.md#the-frozen-surface). Each entry below is **Breaking** unless it says otherwise, and gives the change a plugin makes.
+
+**Every plugin**
+
+- **Breaking:** `Plugin::process` takes channel slices: `fn process(&mut self, io: &mut [&mut [f32]], frames: usize)`, and `process_buses` takes `sidechain: Option<&[&[f32]]>`. A plugin can no longer resize the host's buffers. Change the two signatures; a body that indexes or iterates (`io[ch][i]`, `for ch in io.iter_mut()`) compiles as it is, and `io.iter().map(Vec::len)` becomes `.map(|c| c.len())`. A test or host that keeps `Vec<Vec<f32>>` calls `plugin.process(&mut ChannelsMut::new(&mut io), frames)` and passes a sidechain as `Some(&Channels::new(&key))`; both are new in `openplugin_core` and in the prelude, and neither allocates.
+- **Breaking:** `PluginInfo` is `#[non_exhaustive]` and built by `const` methods, so a field can be added later. Replace the struct literal with `PluginInfo::new(id, name, vendor, version, category, &PARAMS)` followed by `.with_url(..)`, `.with_email(..)`, `.with_instrument(true)` and `.with_editor(true)` where the literal set them. It still goes in a `static`. A second descriptor made with `..INFO` becomes a `const fn` that takes what differs.
+- **Breaking:** `openplugin::prelude` holds twenty names and the three export macros: `Category`, `Channels`, `ChannelsMut`, `Editor`, `EditorFactory`, `EditorHost`, `EditorState`, `Frame`, `IoConfig`, `MeterFrame`, `NotePorts`, `ParamFlags`, `ParamInfo`, `Plugin`, `PluginInfo`, `SpeakerLayout`, `Tail`, `Taper`, `Transport`, `Unit`. Import the rest by path: DSP blocks from `openplugin::dsp`, drawing from `openplugin::dri`, and `OnePole`, `SampleRamp`, `PresetBank`, `ParamPlane`, `AaxIds`, the state functions and the other core items from `openplugin::core`.
+- **Breaking:** `Plugin::gain_reduction_db` is removed; no format entry read it. Report the reduction in `MeterFrame::reduction_db` from `Plugin::meters`.
+- **Breaking:** types that will grow are `#[non_exhaustive]`: `Transport`, `TrackInfo`, `MeterFrame`, `ParamInfo`, `Frame`, and the enums listed in [docs/VERSIONING.md](docs/VERSIONING.md#the-frozen-surface) (among them `Category`, `Unit`, `Taper`, `Tail`, `SpeakerLayout`, `Gesture`, `Key`, `midi::Message`, and every public enum of `openplugin-dsp`). A `match` on one needs a `_` arm. A struct literal becomes `let mut m = MeterFrame::SILENT; m.reduction_db = x;` (`Transport::default()`, `TrackInfo::default()`), and `Frame { pixels, width, height }` becomes `Frame::new(pixels, width, height)`.
+- **Breaking:** renamed: `ParamInfo::flag` is `with_flag`; `SampleRamp::next` and `OnePole::next` are `next_value`; `Tail::clap_samples` is `to_clap_samples`.
+- Deprecated, not breaking: `Plugin::tail_samples`. Override `tail` and return `Tail::from_samples(n)` (new: zero is `Tail::None`). The default `tail` still reads `tail_samples`.
+
+**Hosts written in Rust**
+
+- **Breaking:** the crate `openplugin-ffi` is `openplugin-host` (`openplugin_host`, `openplugin::host`); the old name is not kept. `FfiInstance` is `HostSession`.
+- **Breaking:** `HostSession::new` returns `Result<HostSession, UnsupportedRate>`: a sample rate out of range, or one the plugin refuses, is an error where it used to become 48 kHz. `ParamSpec`, `spec_from` and `param_spec` are removed: `param_info(index)` returns the plugin's own `&ParamInfo`. `set_offline_flag` is `set_offline`. `save_bytes` returns `Option<Vec<u8>>` (what `try_save_bytes` returned) and `try_save_bytes` is gone. `process_io` (raw pointers) is removed: use `process_planar`.
+
+**Editors and drawing**
+
+- **Breaking:** the knob and faceplate style enums are removed; the GoodLookin DRI style codes are the one system. `draw_knob_code` is `draw_knob` and `draw_faceplate_code` is `draw_faceplate`. For the old enum forms pass the code: `KnobStyle::Brit` `"Brit"`, `N` `"N"`, `A` `"A"`, `Bakelite` `"Bk"`, `Metal` `"Mtl"`, `Chrome` `"Chr"`, `Wood` `"Wd"`, `Neon` `"Neo"`, `Digital` `"Seg"`; `FaceplateStyle::BrushedAluminum` `"Silver"`, `DarkAnodized` `"Stealth"`, `BritishConsole` `"Navy"`, `AmericanConsole` `"Slate"`, `Cyberpunk` `"Cyber"`, `WoodChassis` `"Walnut"`. `Color::BRIT_BLUE`, `BRIT_RED` and `BRIT_GREEN` are `Color::BLUE`, `RED` and `GREEN`.
+- **Breaking:** `DrawList`'s fields are private. Read `commands()` and `scene()`, and set the knob tier with `set_knob_tier(tier)` (`knob_tier()` reads it).
+- **Breaking:** removed from `openplugin-dri`: `DriView`, `DriHostWindow` and the `window` module (stubs that drew nothing), the `goodlookindri_shell` re-export, and the `raw-window-handle` dependency. `window::on_main_thread` is `cocoa::on_main_thread` (macOS). `cocoa::Id` is `cocoa::NSViewPtr`.
+- The editor views' test hooks (`set_menu_hook`, `choose_menu_item`, `set_file_dialog_hook`, `text_field`, `tooltip_rects` and the like, and `win32::testing`) are hidden from the documentation and outside the API promise. They still work.
+
+**Formats**
+
+- **Breaking:** removed from `openplugin-targets`: the modules `vst3`, `au`, `aax` and `standalone` (`Vst3Adapter`, `AuAdapter`, `AaxAdapter`, `StandaloneRunner` and the C layouts beside them), the alias `PluginForExport`, and the Cargo features `clap`, `vst3`, `au`, `aax` and `standalone`. None of them loaded in a host or opened an audio device; the VST3, Audio Unit and AAX shells are in `native/`, and a standalone build is the plugin's own binary calling `run_window`. A manifest that names one of the features drops it.
+- `export_clap!`, `export_lv2!` and `export_shell!` are unchanged and are the supported way in. What they expand to is hidden and outside the API promise: the modules `clap`, `clap_abi` and `shell` of `openplugin-targets`, `ClapAdapter`, `Lv2Harness` and the LV2 descriptor structs, and `shell` and `block` of `openplugin-host`. The contracts there are the CLAP and LV2 specifications and `native/include/op_shell.h` and `op_editor.h` (shell ABI 8, unchanged). `shell::AAX_MAX_PARAMS` is removed.
+
+**Core**
+
+- **Breaking:** `AutomationLane`, `AutomationMode` and `AutomationInterpolation` are behind the Cargo feature `automation` of `openplugin-core`, off by default; no format entry uses them. The aliases `LaneMode` and `CurveInterpolation` are removed: use the two enums.
+- **Breaking:** `preset::parse` returns `Result<Preset, PresetError>`. `PresetError` says the line and the cause, and its `Display` is the text the `String` error was. The preset text format is declared frozen as it is.
+- `GestureQueue` and `ValueMirror` are hidden: only the format entries use them.
+- `AaxIds::is_valid` is a `const fn`.
+
+**DSP**
+
+- **Breaking:** `OversampleFactor` is removed; nothing took it. `lerp` moved from `pcm` to `utility`; `openplugin_dsp::lerp` is unchanged.
+- Deprecated, not breaking, and removed in 2.0: `Compressor` (use `Dynamics`), `VuMeter` (`VuIec`), `Oscillator` and `Wave` (`BandlimitedOsc`, `WavetableOsc`), `SampleVoice` (`SincPlayer`), `Polyphony` (`VoiceAllocator`), `Oversampler2x` (`MinPhaseHalfband`) and `window::hann` (`WindowKind::Hann`).
+- `SurroundAdapter::meters` reports the deepest gain reduction of its engines, which its `gain_reduction_db` did before.
+- `adaa::log_cosh`, `loudness::lufs_of` and `energy_of`, and `KWeighting::coefficients` are hidden.
+
+**Tools**
+
+- `openplugin-port scan` writes `PluginInfo::new(..)` and `.with_flag(..)`.
+- The conformance kit's `Check` and `Status` and the bench's `Verdict` are `#[non_exhaustive]`.
+
 ### Added
 
 - The shells read a renamed parameter table, and the Audio Unit and AAX bypass follows a run-time latency change (the 0.6 task 7 follow-ups), on shell ABI 9 ([docs/SHELL.md](docs/SHELL.md#the-instances-table-and-its-largest-latency-abi-9)). After `HostNotifier::param_info_changed` a VST3, Audio Unit or AAX host reads the names, units and value text of the table `Plugin::info` now returns (`op_shell_instance_param`, `op_shell_instance_param_format`, `op_shell_instance_param_parse`); before, the shells kept showing the type's first table. New `Plugin::max_latency` (default `None`): the largest latency the plugin may report; the Audio Unit and AAX shells size their bypass delay for it off the audio thread (`op_shell_max_latency`) and move its read point to the latency of each block (`op_shell_latency_now`), so a bypassed signal is delayed by the new latency with no allocation on the render thread. A plugin that declares none behaves as before. `OP_SHELL_ABI` is 9: a shell built from this header refuses an older library. Proofs `vst3_changes_proof`, `au_changes_proof`, `aax_changes_proof`, `au_alloc_changes_proof` and `aax_alloc_latency_proof`, with negative controls.

@@ -64,7 +64,7 @@ These are the SDK's real-time rules ([PERFORMANCE.md](PERFORMANCE.md), [STABILIT
 
 ### Slices, not copies
 
-`Plugin::process` gets `&mut [Vec<f32>]`, planar. The wrapper calls `ffi::process(dsp, channel_index, &mut channel[..frames])`; cxx maps `&mut [f32]` to `rust::Slice<float>` (a pointer and a length) so nothing is copied. If your C++ wants interleaved audio or a fixed block size, convert in a buffer allocated in `prepare`; never size it on the audio thread.
+`Plugin::process` gets `&mut [&mut [f32]]`, planar. The wrapper calls `ffi::process(dsp, channel_index, &mut channel[..frames])`; cxx maps `&mut [f32]` to `rust::Slice<float>` (a pointer and a length) so nothing is copied. If your C++ wants interleaved audio or a fixed block size, convert in a buffer allocated in `prepare`; never size it on the audio thread.
 
 ### Errors, not panics or throws
 

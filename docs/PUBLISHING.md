@@ -23,12 +23,12 @@ Each crate must be on the registry, and visible in the index, before the next on
 |---|----------------------|--------------------------------------------------------|------------------------------------------------------------|
 | 1 | `openplugin-core`    | none                                                   | passes (38 files, 177 KiB, 45 KiB compressed)              |
 | 2 | `openplugin-dsp`     | core                                                   | blocked: `openplugin-core` is not on crates.io yet         |
-| 3 | `openplugin-ffi`     | core                                                   | blocked: `openplugin-core` is not on crates.io yet         |
+| 3 | `openplugin-host`     | core                                                   | blocked: `openplugin-core` is not on crates.io yet         |
 | 4 | `openplugin-dri`     | core, `goodlookindri`, `goodlookindri-shell`           | blocked: GoodLookin DRI and `openplugin-core` not published |
-| 5 | `openplugin-targets` | core, dri, ffi (dsp as a dev dependency)               | blocked: SDK crates above not published                    |
-| 6 | `openplugin`         | core, dsp, dri, targets, ffi                           | blocked: SDK crates above not published                    |
+| 5 | `openplugin-targets` | core, dri, host (dsp as a dev dependency)               | blocked: SDK crates above not published                    |
+| 6 | `openplugin`         | core, dsp, dri, targets, host                          | blocked: SDK crates above not published                    |
 
-`dsp` and `ffi` do not depend on each other and can swap places. `dsp` is also a dev dependency of `targets`, so it must be published before `targets`.
+`dsp` and `host` do not depend on each other and can swap places. `dsp` is also a dev dependency of `targets`, so it must be published before `targets`.
 
 Every blocker above is an unpublished dependency. Metadata, package contents and package size were checked and need nothing more: each package holds `Cargo.toml`, `README.md`, `src/` and, where present, `tests/` (6 to 38 files).
 
@@ -65,7 +65,7 @@ cargo publish --dry-run -p openplugin-core
 cargo publish -p openplugin-core
 
 cargo publish -p openplugin-dsp
-cargo publish -p openplugin-ffi
+cargo publish -p openplugin-host
 cargo publish -p openplugin-dri
 cargo publish -p openplugin-targets
 cargo publish -p openplugin

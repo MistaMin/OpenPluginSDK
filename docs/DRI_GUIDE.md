@@ -4,13 +4,13 @@
 
 GoodLookin DRI draws through the `goodlookindri` crate. That crate is the JUCE-free port of the 47 knob styles, 40 faceplates, meters, faders, switches, and spectrum. `openplugin-dri` does not keep a second copy of those drawers.
 
-`draw_knob` and `draw_faceplate` accept the short style enums and call GoodLookin DRI. `draw_knob_code` and `draw_faceplate_code` take any GoodLookin style code, for example `"Chk"` or `"Walnut"`.
+`draw_knob` and `draw_faceplate` take any GoodLookin style code, for example `"Chk"` or `"Walnut"`. The codes are the one style system: there are no style enums.
 
 This release follows GoodLookin DRI 0.2.
 
 ## Knob tiers
 
-GoodLookin DRI 0.2 draws a knob in one of three tiers. `DrawList::knob_tier` picks one for every knob an editor draws:
+GoodLookin DRI 0.2 draws a knob in one of three tiers. `DrawList::set_knob_tier` picks one for every knob an editor draws:
 
 | Tier | What it is | Default |
 |---|---|---|
@@ -33,8 +33,8 @@ impl Editor for MyEditor {
         self.canvas.frame_layered(
             scale,
             0,                                                      // key for the static layer
-            |dl| draw_faceplate_code(dl, 240.0, 160.0, "Navy"),     // painted once per scale
-            |dl| draw_knob_code(dl, 55.0, 68.0, 30.0, gain, "GAIN", "0 dB", "Brit", Color::BRIT_RED),
+            |dl| draw_faceplate(dl, 240.0, 160.0, "Navy"),     // painted once per scale
+            |dl| draw_knob(dl, 55.0, 68.0, 30.0, gain, "GAIN", "0 dB", "Brit", Color::RED),
         )
     }
     // ...
@@ -87,9 +87,9 @@ A drag does not get faster because the lit knob is shaded per pixel for each new
 
 `SceneCanvas::resize(width, height)` sets a new size in points. The next frame has the new pixel size, and the cached layer is dropped, so `frame_layered` paints the plate again at that size and then reuses it. The same size changes nothing, and going back to an earlier size repaints it once. The layer's cache key already includes the pixel size, so a canvas that is resized without `resize` repaints too; `resize` is the call that changes the size the editor draws for.
 
-Draw from the editor's current size, not from constants: pass the width and height to `draw_faceplate_code`, and scale the positions, radii and text sizes of the parts by one factor. `examples/editor` has a `layout(width, height)` function that returns the scale and the hit areas, and uses the same function to draw and to hit-test, so a click lands on what is drawn. Painting the plate costs the most (310 ms at 1080 × 700 points above), and it happens once per size, so a host that sends many sizes during a drag pays for each one. Keep the size range modest, or draw the plate more cheaply while the size is changing. See [EDITOR.md](EDITOR.md) for the contract.
+Draw from the editor's current size, not from constants: pass the width and height to `draw_faceplate`, and scale the positions, radii and text sizes of the parts by one factor. `examples/editor` has a `layout(width, height)` function that returns the scale and the hit areas, and uses the same function to draw and to hit-test, so a click lands on what is drawn. Painting the plate costs the most (310 ms at 1080 × 700 points above), and it happens once per size, so a host that sends many sizes during a drag pays for each one. Keep the size range modest, or draw the plate more cheaply while the size is changing. See [EDITOR.md](EDITOR.md) for the contract.
 
-`DrawList::commands` stays for hosts that only draw basic shapes. It is GoodLookin DRI's `Scene::lower_basic`, with each lit knob drawn again in the classic tier, because a basic host has no images.
+`DrawList::commands()` stays for hosts that only draw basic shapes. It is GoodLookin DRI's `Scene::lower_basic`, with each lit knob drawn again in the classic tier, because a basic host has no images.
 
 `cargo run -p example-editor --bin snapshot -- out.ppm 2 6 1` writes the example editor to an image. With `OP_SNAPSHOT_FRAMES=60` set, it also prints the time per frame.
 
@@ -97,20 +97,20 @@ Draw from the editor's current size, not from constants: pass the width and heig
 
 ### 1. Procedural Knobs
 47 procedural styles, lit by default (see Knob tiers):
-- `KnobStyle::Brit`: Classic vintage British console fluted skirt with distinct colored caps (Red, Blue, Green, Cream).
-- `KnobStyle::N`: Knurled industrial discrete channel strip dials.
-- `KnobStyle::A`: Precision studio pointer knobs with radial markers.
-- `KnobStyle::Bakelite`: Heavy vintage fluted bakelite with deep drop-shadows and engraved white indicators.
-- `KnobStyle::Metal` / `Chrome`: Machined concentric metallic specular rings.
-- `KnobStyle::Wood`: Hand-finished studio mahogany and walnut knobs.
-- `KnobStyle::Neon` / `Digital`: Cyberpunk neon rings and high-contrast digital displays.
+- `"Brit"`: Classic vintage British console fluted skirt with distinct colored caps (Red, Blue, Green, Cream).
+- `"N"`: Knurled industrial discrete channel strip dials.
+- `"A"`: Precision studio pointer knobs with radial markers.
+- `"Bk"`: Heavy vintage fluted bakelite with deep drop-shadows and engraved white indicators.
+- `"Mtl"` / `"Chr"`: Machined concentric metallic specular rings.
+- `"Wd"`: Hand-finished studio mahogany and walnut knobs.
+- `"Neo"` / `"Seg"`: Cyberpunk neon rings and high-contrast digital displays.
 
 ### 2. Faceplates
 40 plate finishes generated without bitmap images:
-- `FaceplateStyle::BrushedAluminum`: Horizontal anodized grain lines.
-- `FaceplateStyle::BritishConsole`: Classic olive/navy console finish with recessed beveled boundary.
-- `FaceplateStyle::DarkAnodized`: Matte black 19-inch rack unit aesthetic.
-- `FaceplateStyle::Cyberpunk`: High-contrast dark chassis with cyan/magenta neon edge glows.
+- `"Silver"`: Horizontal anodized grain lines.
+- `"Navy"`: Classic olive/navy console finish with recessed beveled boundary.
+- `"Stealth"`: Matte black 19-inch rack unit aesthetic.
+- `"Cyber"`: High-contrast dark chassis with cyan/magenta neon edge glows.
 
 ### 3. Ballistic Meters
 - `MeterStyle::AnalogVu`: 300 ms ANSI C16.5 ballistic integration with illuminated warm yellow incandescent dial face.
@@ -149,7 +149,7 @@ controls.param_changed(index, plain);
 for c in controls.iter() {           // back to front
     let (x, y, w, h) = c.area.bounds();
     match c.kind {
-        ControlKind::Knob => draw_knob_code(dl, x + w * 0.5, y + h * 0.5, w * 0.5, c.normalized(), "GAIN", &c.info.format(c.value()), "Brit", Color::BRIT_RED),
+        ControlKind::Knob => draw_knob(dl, x + w * 0.5, y + h * 0.5, w * 0.5, c.normalized(), "GAIN", &c.info.format(c.value()), "Brit", Color::RED),
         ControlKind::Toggle => { /* c.is_on(), c.hover(), c.pressed() */ }
         _ => {}
     }

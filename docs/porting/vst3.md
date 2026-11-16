@@ -19,14 +19,14 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 |---|---|---|
 | `AudioEffect` (`IComponent`, `IAudioProcessor`) and `EditController` (`IEditController`), or `SingleComponentEffect` | One `struct` with `impl Plugin` and `impl Default` | The shell provides both VST3 classes |
 | The factory: `DEF_CLASS2`, `kVstAudioEffectClass`, `kVstComponentControllerClass`, the two class `FUID`s | `export_shell!`, and the shell built by `scripts/build_plugin.sh` | The class ids are derived from `PluginInfo::id` and cannot be set yet; see the list at the end |
-| The factory's vendor, URL, e-mail and version; the class name | `PluginInfo { vendor, url, email, version, name, .. }` | |
+| The factory's vendor, URL, e-mail and version; the class name | `PluginInfo::new(..)`, `with_url`, `with_email` | |
 | Subcategories such as `Fx`, `Fx\|Delay`, `Instrument\|Synth` | `PluginInfo::category`, `PluginInfo::is_instrument` | |
 | `initialize`, `terminate` | `Default::default`, `Drop` | |
 | `setupProcessing(ProcessSetup&)`: `sampleRate`, `maxSamplesPerBlock` | `prepare(sample_rate, max_block, channels)` | Allocate here |
 | `ProcessSetup::processMode`, `kOffline` | `Plugin::set_offline` | |
 | `canProcessSampleSize(kSample64)` | Not available | `process` is `f32`; see the list at the end |
 | `setActive`, `setProcessing` | `prepare` before the first block; `reset` to clear history | `reset` must not allocate |
-| `process(ProcessData&)`: `inputs[0].channelBuffers32`, `outputs[0].channelBuffers32`, `numSamples` | `process(io: &mut [Vec<f32>], frames)` | In place, planar: `io[channel][..frames]` |
+| `process(ProcessData&)`: `inputs[0].channelBuffers32`, `outputs[0].channelBuffers32`, `numSamples` | `process(io: &mut [&mut [f32]], frames)` | In place, planar: `io[channel][..frames]` |
 | A `process` call with `numSamples == 0` to flush parameters | Nothing to write | The shell applies the changes |
 | `getLatencySamples`, `restartComponent(kLatencyChanged)` | `Plugin::latency`, `HostNotifier::latency_changed` | The shell also compares `latency` after every block |
 | `getTailSamples`, `kNoTail`, `kInfiniteTail` | `Plugin::tail`: `Tail::None`, `Tail::Finite(n)`, `Tail::Infinite` | |
@@ -42,7 +42,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `StringListParameter`, `ParameterInfo::kIsList` | `.with_choices(&[...])` | The value is the index |
 | `ParameterInfo::stepCount` | `.with_steps(step_count + 1)` | Positions including both ends |
 | `kCanAutomate` | The default | |
-| `kIsReadOnly`, `kIsHidden` | `.flag(ParamFlags::READ_ONLY)`, `.flag(ParamFlags::HIDDEN)` | |
+| `kIsReadOnly`, `kIsHidden` | `.with_flag(ParamFlags::READ_ONLY)`, `.with_flag(ParamFlags::HIDDEN)` | |
 | `ParameterInfo::unitId`, `addUnit`, `IUnitInfo` | `.with_group("Filter/Envelope")` | The shell builds the units |
 | `ParameterInfo::units` | `Unit::Db`, `Unit::Hz`, `Unit::Ms`, ... | |
 | `normalizedParamToPlain`, `plainParamToNormalized`, `Parameter::toPlain` | `ParamInfo::from_normalized`, `ParamInfo::to_normalized` | Done by the shell. Linear or logarithmic only; see the list at the end |
@@ -130,18 +130,16 @@ static PARAMS: [ParamInfo; 3] = [
 ];
 
 // The factory's and the class's strings.
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.ported-tremolo",
-    name: "Ported Tremolo",
-    vendor: "Example Audio",
-    url: "https://example.com",
-    email: "support@example.com",
-    version: "2.0.0",
-    category: Category::Modulation,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.ported-tremolo",
+    "Ported Tremolo",
+    "Example Audio",
+    "2.0.0",
+    Category::Modulation,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("support@example.com");
 
 pub struct PortedTremolo {
     rate_hz: f32,
@@ -218,7 +216,7 @@ impl Plugin for PortedTremolo {
     }
 
     // `process`, in place.
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let depth = self.depth / 100.0;
         for i in 0..frames {
             let gain = 1.0 - depth * self.lfo.next_unipolar();
@@ -248,7 +246,7 @@ openplugin_testing::install_allocator!();
 
 fn block_of_ones(plugin: &mut PortedTremolo, frames: usize) -> Vec<f32> {
     let mut io = vec![vec![1.0f32; frames]; 2];
-    plugin.process(&mut io, frames);
+    plugin.process(&mut ChannelsMut::new(&mut io), frames);
     io.swap_remove(0)
 }
 
@@ -263,7 +261,13 @@ fn main() {
     plugin.set_param("sync", 1.0);
 
     // 120 BPM: a quarter note is 24000 samples at 48 kHz.
-    let at = |quarter_notes| Transport { playing: true, tempo: 120.0, quarter_notes, ..Transport::default() };
+    let at = |quarter_notes| {
+        let mut t = Transport::default();
+        t.playing = true;
+        t.tempo = 120.0;
+        t.quarter_notes = quarter_notes;
+        t
+    };
     plugin.set_transport(&at(0.0));
     let out = block_of_ones(&mut plugin, 24_000);
     assert!((out[0] - 0.5).abs() < 1e-3);
@@ -300,7 +304,7 @@ What moved where:
 - **Custom curves between normalised and plain values.** `Taper` is linear or logarithmic.
 - **Custom value text.** A parameter prints and parses by its `Unit` and its choice names.
 - **64-bit processing** (`kSample64`).
-- **Program lists.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`, and the plugin's own editor can offer them, but no format entry publishes a program list to the host yet.
+- **Program lists.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`, and the plugin's own editor can offer them, but no format entry publishes a program list to the host yet.
 - **More than one output bus, or more than one aux input.**
 - **SysEx and other data events.** MIDI reaches the plugin as messages of up to three bytes.
 - **Messages between controller and processor.** Use the shared editor state.

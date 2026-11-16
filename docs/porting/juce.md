@@ -19,7 +19,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | JUCE | OpenPluginSDK | Notes |
 |---|---|---|
 | A class derived from `AudioProcessor`; `createPluginFilter()` | A `struct` with `impl Plugin` and `impl Default`; the export macros | `Default::default()` is what the format entries call |
-| `juce_add_plugin`: `PRODUCT_NAME`, `COMPANY_NAME`, `VERSION` | `PluginInfo { name, vendor, version, .. }` | Returned by `Plugin::info` |
+| `juce_add_plugin`: `PRODUCT_NAME`, `COMPANY_NAME`, `VERSION` | `PluginInfo::new(..)` | Returned by `Plugin::info` |
 | `BUNDLE_ID`, `PLUGIN_MANUFACTURER_CODE`, `PLUGIN_CODE` | `PluginInfo::id`, and `--bundle-id`, `--au-manufacturer`, `--au-subtype` of `scripts/build_plugin.sh` | See [BUILD.md](../BUILD.md). Keep the old four-character codes for the Audio Unit |
 | `AAX_IDENTIFIER` and the AAX codes | `Plugin::aax_ids` | |
 | `LV2URI` | `Plugin::lv2_uri` | |
@@ -27,15 +27,15 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `prepareToPlay(sampleRate, samplesPerBlock)` | `prepare(sample_rate, max_block, channels)` | Allocate here |
 | `releaseResources()` | Nothing; `Drop` | |
 | `reset()` | `reset()` | Must not allocate |
-| `processBlock(AudioBuffer<float>&, MidiBuffer&)` | `process(io: &mut [Vec<f32>], frames)` | In place, planar: `io[channel][..frames]`. MIDI arrives separately |
+| `processBlock(AudioBuffer<float>&, MidiBuffer&)` | `process(io: &mut [&mut [f32]], frames)` | In place, planar: `io[channel][..frames]`. MIDI arrives separately |
 | `supportsDoublePrecisionProcessing`, the `double` overload | Not available | See the list at the end |
 | `processBlockBypassed`, `getBypassParameter` | `Plugin::set_host_bypass`, `ParamFlags::BYPASS`, `openplugin::dsp::SoftBypass` | The shells already delay and crossfade the dry signal by the reported latency |
 | `setLatencySamples` | `Plugin::latency` | The entries read it after every block. `HostNotifier::latency_changed` reports a change made outside `process` |
-| `getTailLengthSeconds` | `Plugin::tail_samples` or `Plugin::tail` | In samples. `Tail::Infinite` exists |
+| `getTailLengthSeconds` | `Plugin::tail` | `Tail::from_samples(n)`. `Tail::Infinite` exists |
 | `isNonRealtime` | `Plugin::set_offline` | |
 | `getPlayHead()`, `AudioPlayHead::PositionInfo` | `Plugin::set_transport(&Transport)` | Called before each block; keep the fields you use |
 | `ScopedNoDenormals` | Nothing to write | Every entry flushes denormals around the audio calls (`Plugin::flush_denormals`) |
-| `dsp::ProcessSpec`, `dsp::IIR`, `dsp::DelayLine`, `dsp::Oversampling`, `SmoothedValue` | `openplugin::dsp`: `Biquad`, `Svf`, `ModDelay`, `Oversampler2x`, `LinearPhaseOversampler`; `OnePole`, `SampleRamp` | Not drop-in equivalents: responses differ in detail. See [DSP_COOKBOOK.md](../DSP_COOKBOOK.md) and check with the null test |
+| `dsp::ProcessSpec`, `dsp::IIR`, `dsp::DelayLine`, `dsp::Oversampling`, `SmoothedValue` | `openplugin::dsp`: `Biquad`, `Svf`, `ModDelay`, `MinPhaseHalfband`, `LinearPhaseOversampler`; `OnePole`, `SampleRamp` | Not drop-in equivalents: responses differ in detail. See [DSP_COOKBOOK.md](../DSP_COOKBOOK.md) and check with the null test |
 
 ### Parameters
 
@@ -48,7 +48,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `AudioParameterBool` | `Unit::Toggle` | |
 | `AudioParameterChoice` | `.with_choices(&[...])` | The value is the index |
 | `withLabel`, `withStringFromValueFunction`, `withValueFromStringFunction` | `Unit::Db`, `Unit::Hz`, `Unit::Ms`, ... | The unit prints and parses the value. No custom text function; see the list at the end |
-| `withAutomatable(false)` | `.flag(ParamFlags::NOT_REALTIME)` | |
+| `withAutomatable(false)` | `.with_flag(ParamFlags::NOT_REALTIME)` | |
 | `AudioProcessorParameterGroup` | `.with_group("Filter/Envelope")` | |
 | `getRawParameterValue(id)` read in `processBlock` | A field of the plugin, written in `set_param` | Plain units, clamped by `ParamInfo::clamp` |
 | A parameter listener's `parameterChanged` | `set_param(id, value)` | Compute coefficients here. Override `set_param_index` to skip the string match |
@@ -101,7 +101,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `acceptsMidi`, `producesMidi`, `isMidiEffect` | `note_ports() -> NotePorts { input, output }`, `PluginInfo::is_instrument` | An effect that reads no MIDI returns both `false` |
 | Iterating the `MidiBuffer` by sample position | `note_on(offset, note, velocity)`, `note_off(offset, note)`, `midi(offset, [u8; 3])` | The entries split the block at each event, so there is nothing to iterate. A note-on with velocity 0 arrives as a note-on |
 | Adding events to the `MidiBuffer` | `pull_midi() -> Option<(u32, [u8; 3])>` | The entry drains it after each block |
-| `Synthesiser`, `MPESynthesiser` | `openplugin::dsp::voice_alloc`, `Polyphony`, `Plugin::mpe_input` | See [EXPRESSION.md](../EXPRESSION.md) |
+| `Synthesiser`, `MPESynthesiser` | `openplugin::dsp::voice_alloc`, `Plugin::mpe_input` | See [EXPRESSION.md](../EXPRESSION.md) |
 | SysEx messages | Not available | See the list at the end |
 
 ### Threading
@@ -135,18 +135,15 @@ static PARAMS: [ParamInfo; 3] = [
     ParamInfo::new("mix", "Mix", 0.0, 100.0, 30.0, Unit::Percent),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.ported-echo",
-    name: "Ported Echo",
-    vendor: "Example Audio",
-    url: "https://example.com",
-    email: "",
-    version: "2.0.0",
-    category: Category::Delay,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.ported-echo",
+    "Ported Echo",
+    "Example Audio",
+    "2.0.0",
+    Category::Delay,
+    &PARAMS,
+)
+.with_url("https://example.com");
 
 // ---- The old plugin's state -------------------------------------------------
 
@@ -294,7 +291,7 @@ impl Plugin for PortedEcho {
     }
 
     // `processBlock`, in place.
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let target = self.delay_samples();
         let feedback = self.values[1] / 100.0;
         let mix = self.values[2] / 100.0;
@@ -312,8 +309,8 @@ impl Plugin for PortedEcho {
     }
 
     // `getTailLengthSeconds`, in samples.
-    fn tail_samples(&self) -> usize {
-        self.tail
+    fn tail(&self) -> Tail {
+        Tail::from_samples(self.tail)
     }
 
     fn note_ports(&self) -> NotePorts {
@@ -370,7 +367,7 @@ fn main() {
     plugin.reset();
     let mut io = vec![vec![0.0f32; 512]; 2];
     io[0][0] = 1.0;
-    plugin.process(&mut io, 512);
+    plugin.process(&mut ChannelsMut::new(&mut io), 512);
     assert_eq!(io[0][0], 0.5);
     assert!(io[0][1..470].iter().all(|s| *s == 0.0));
     assert!((io[0][480] - 0.5).abs() < 1e-3, "{}", io[0][480]);
@@ -406,7 +403,7 @@ What moved where:
 
 - The parameter layout became the `PARAMS` table, in the old order. `set_param` replaces the listener; because it never overlaps `process`, the values are a plain array.
 - The delay lines are the SDK's `ModDelay`, sized in `prepare`. It stores NaN and infinity as silence and flushes denormals, two things the conformance kit checks and a hand-written buffer has to do itself.
-- `getTailLengthSeconds` became `tail_samples`, computed when a parameter changes, because the entries read it once per block on the audio thread.
+- `getTailLengthSeconds` became `tail`, computed when a parameter changes, because the entries read it once per block on the audio thread.
 - `setStateInformation` became `load_state` with the import pattern: detect by looking at the front of the bytes, decode into the old ids and values, map them to the port's ids and units, and only then change the plugin. A state that is recognised but damaged is refused.
 - The port saves a chunk of its own, with the parameter values in it. A plugin that saves no chunk has its parameters stored by the SDK and is never handed foreign bytes.
 
@@ -420,6 +417,6 @@ Keep the captured blobs in the port's repository and load each one in a test, co
 - **More than one output bus, or more than one sidechain.** An `IoConfig` is one main input, one main output and one optional sidechain.
 - **SysEx.** MIDI reaches the plugin as messages of up to three bytes.
 - **OpenGL and web view editors.** The editor contract is a frame of pixels.
-- **Factory presets in the host's menu.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`, and the plugin's own editor can offer them, but no format entry publishes a program list to the host yet.
+- **Factory presets in the host's menu.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`, and the plugin's own editor can offer them, but no format entry publishes a program list to the host yet.
 - **An undo manager.** `AbCompare` gives an A/B pair of parameter snapshots; there is no undo history.
 - **Keeping the old plugin's saved state outside CLAP.** The identity itself carries over: the Audio Unit codes, the VST3 class ids and JUCE's hashed parameter ids are pinned in the plugin (`Plugin::au_ids`, `Plugin::vst3_ids`, `ParamInfo::with_host_id`; see [Identity pinning](../PORTING.md#identity-pinning), and `openplugin-port scan` writes them). The VST3, Audio Unit and AAX shells still accept only state they wrote themselves, so the old plugin's bytes reaches `load_state` only through CLAP; that part is open.
