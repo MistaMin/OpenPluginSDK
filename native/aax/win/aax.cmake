@@ -121,6 +121,8 @@ function(op_aax_proof target_name)
   endforeach()
   add_executable(${target_name} ${sources})
   op_aax_settings(${target_name})
+  # <pthread.h> for the allocation proofs (native/win/compat).
+  target_include_directories(${target_name} PRIVATE "${OP_NATIVE_DIR}/win/compat")
 endfunction()
 
 op_aax_proof(AAXProof host_process.cpp OpenPluginAAXProcess.cpp)

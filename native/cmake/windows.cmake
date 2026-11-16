@@ -8,7 +8,7 @@
 #
 # From the repository root, in PowerShell (the SDK stays outside this tree):
 #
-#   cargo build --release --lib -p example-editor -p example-role-tags
+#   cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
 #   cmake -S native -B build-shell -A x64 `
 #     -DOP_RUST_LIB="$PWD\target\release\example_editor.lib" `
 #     -DOP_VST3_SDK=C:\path\to\vst3sdk `
@@ -74,6 +74,23 @@ if(OP_ROLE_LIB AND EXISTS "${OP_ROLE_LIB}")
 else()
   set(OP_ROLE_PROOFS OFF)
   message(STATUS "Role proofs not built: no example_role_tags.lib (cargo build --release --lib -p example-role-tags)")
+endif()
+
+# Expression Synth (examples/expression_synth) for the per-note expression proof,
+# found next to OP_RUST_LIB.
+set(OP_EXPRESSION_LIB "" CACHE FILEPATH "Rust static library of examples/expression_synth, for the expression proof")
+if(NOT OP_EXPRESSION_LIB)
+  get_filename_component(OP_RUST_LIB_DIR "${OP_RUST_LIB}" DIRECTORY)
+  if(EXISTS "${OP_RUST_LIB_DIR}/example_expression_synth.lib")
+    set(OP_EXPRESSION_LIB "${OP_RUST_LIB_DIR}/example_expression_synth.lib")
+  endif()
+endif()
+if(OP_EXPRESSION_LIB AND EXISTS "${OP_EXPRESSION_LIB}")
+  set(OP_EXPRESSION_PROOFS ON)
+  message(STATUS "Expression proof over ${OP_EXPRESSION_LIB}")
+else()
+  set(OP_EXPRESSION_PROOFS OFF)
+  message(STATUS "Expression proof not built: no example_expression_synth.lib (cargo build --release --lib -p example-expression-synth)")
 endif()
 
 # Links the Rust library: OP_RUST_LIB, or the library given as the second argument.

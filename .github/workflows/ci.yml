@@ -256,9 +256,11 @@ jobs:
           path: vst3sdk
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      - name: Build the example and Role Tags as static libraries
+      # The proofs load the example ("Example Gain"); the role proof loads Role Tags and
+      # the per-note expression proof Expression Synth, found next to it.
+      - name: Build the example, Role Tags and Expression Synth as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
       # Only the VST3 shell, no editor. The Rust library has the release C
       # runtime, so the shell is built as Release. Each -D is quoted: PowerShell
       # splits an unquoted -DOP_VERSION=0.3.1 at the first dot.
@@ -277,7 +279,7 @@ jobs:
       - name: Build the VST3 shell and its proofs
         working-directory: OpenPluginSDK
         run: cmake --build build-shell --config Release -j 4
-      # The eleven vst3_* proofs. vst3_noalloc_events_proof prepares a point per
+      # The twelve vst3_* proofs. vst3_noalloc_events_proof prepares a point per
       # sample for 2081 parameters and takes a few minutes.
       - name: Run the VST3 proofs
         working-directory: OpenPluginSDK

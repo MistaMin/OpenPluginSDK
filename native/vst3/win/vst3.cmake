@@ -8,8 +8,8 @@
 #     `Contents\Resources`. There is no Info.plist, PkgInfo or code signature.
 #   - The entry points are InitDll and ExitDll from the SDK's dllmain.cpp.
 #   - The proofs are the macOS sources unchanged. vst3/win/compat stands in for the
-#     CoreFoundation, pthread and unistd calls they make, vst3/win/alloc_hook.cpp
-#     for libmalloc's malloc_logger.
+#     CoreFoundation and unistd calls they make, win/compat for the pthread ones,
+#     vst3/win/alloc_hook.cpp for libmalloc's malloc_logger.
 #   - The settings are given to each target here, so they reach neither the VST3
 #     SDK's own targets nor another format's.
 set(OP_VST3_WIN_DIR "${CMAKE_CURRENT_LIST_DIR}")
@@ -59,7 +59,7 @@ endfunction()
 # What the proofs and the stand-in plugins use in place of CoreFoundation and pthread.
 add_library(OpenPluginWinCompat STATIC "${OP_VST3_WIN_DIR}/cf_compat.cpp")
 op_vst3_settings(OpenPluginWinCompat)
-target_include_directories(OpenPluginWinCompat PUBLIC "${OP_VST3_WIN_DIR}/compat")
+target_include_directories(OpenPluginWinCompat PUBLIC "${OP_VST3_WIN_DIR}/compat" "${OP_NATIVE_DIR}/win/compat")
 target_link_libraries(OpenPluginWinCompat PUBLIC user32)
 
 # The stand-in plugins export what a proof looks up with the GCC spelling.
@@ -185,6 +185,20 @@ if(NOT OP_EDITOR)
   add_test(NAME vst3_noalloc_events_proof COMMAND VST3NoAllocProof "${OP_VST3_DIR_OpenPluginVST3Events}")
   add_test(NAME vst3_events_proof COMMAND VST3EventsProof
     "${OP_VST3_DIR_OpenPluginVST3Events}" "${OP_VST3_DIR_OpenPluginVST3Synth}" "${OP_VST3_DIR_OpenPluginVST3Notes}")
+
+  # Per-note expression proof (ABI 7): the shell over Expression Synth, note ids and
+  # kNoteExpressionValueEvent in, INoteExpressionController read back. It counts with
+  # its own operator new, like the events proof.
+  if(OP_EXPRESSION_PROOFS)
+    op_vst3_module(OpenPluginVST3Expression "Expression Synth")
+    op_link_rust(OpenPluginVST3Expression "${OP_EXPRESSION_LIB}")
+    op_vst3_proof(VST3ExpressionProof expression_host.cpp
+      "${OP_VST3_WIN_DIR}/alloc_hook.cpp"
+      "${OP_VST3_WIN_DIR}/new_bridge.cpp"
+      "${OP_SDK_SOURCE}/vst/hosting/eventlist.cpp")
+    add_dependencies(VST3ExpressionProof OpenPluginVST3Expression)
+    add_test(NAME vst3_expression_proof COMMAND VST3ExpressionProof "${OP_VST3_DIR_OpenPluginVST3Expression}")
+  endif()
 
   # Channel order proof: the shell over Role Tags, every layout from mono to 9.1.6.
   if(OP_ROLE_PROOFS)
