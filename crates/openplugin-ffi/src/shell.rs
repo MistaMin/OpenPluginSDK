@@ -127,7 +127,10 @@ pub struct ShellInstance {
 fn put(dst: &mut [u8], src: &str) {
     dst.fill(0);
     let bytes = src.as_bytes();
-    let count = bytes.len().min(dst.len().saturating_sub(1));
+    let mut count = bytes.len().min(dst.len().saturating_sub(1));
+    while !src.is_char_boundary(count) {
+        count -= 1;
+    }
     dst[..count].copy_from_slice(&bytes[..count]);
 }
 
@@ -1474,6 +1477,15 @@ mod tests {
             assert!((db - 6.0).abs() < 0.02, "{db}");
             destroy(instance);
         }
+    }
+
+    #[test]
+    fn put_cuts_on_a_char_boundary() {
+        let mut desc = unsafe { std::mem::zeroed::<OpParamDesc>() };
+        let name = format!("{}é", "a".repeat(62));
+        put(&mut desc.name, &name);
+        let end = desc.name.iter().position(|&b| b == 0).unwrap();
+        assert_eq!(std::str::from_utf8(&desc.name[..end]).unwrap(), "a".repeat(62));
     }
 
     fn format_text<P: Plugin + Default>(index: u32, plain: f64) -> String {

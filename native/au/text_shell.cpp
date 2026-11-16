@@ -5,7 +5,8 @@
 //   Level  -24..24 dB, continuous, "6.0 dB"; reads "6", "6 dB", "-inf"
 //   Switch toggle, "Off" / "On"
 //   Mode   choice of three, "Clean", "Soft", "Größe" (a label with a non-ASCII letter)
-//   Steps  five whole steps 0..4, text "0".."4" (a stepped number, not a choice)
+//   Steps  five whole steps 0..4, text "0".."4" (a stepped number, not a choice); its name ends
+//          in half a UTF-8 sequence, so the unit must fall back to the id "steps"
 // It passes audio through. Linked into a test bundle and never into a product.
 #include "op_shell.h"
 #include <cmath>
@@ -42,7 +43,7 @@ uint32_t op_shell_info(OpShellInfo* out) {
 }
 uint32_t op_shell_param(uint32_t index, OpParamDesc* out) {
     if (index >= kParams || !out) return 0;
-    static const char* names[] = {"Level", "Switch", "Mode", "Steps"};
+    static const char* names[] = {"Level", "Switch", "Mode", "Steps\xC3"};
     static const char* ids[] = {"level", "switch", "mode", "steps"};
     std::memset(out, 0, sizeof(*out));
     out->min = minOf(index);
