@@ -162,7 +162,7 @@ unsafe extern "C" fn instantiate(
                 true
             }
         };
-        let first = creator().map(|create| PortMap::of(create().as_ref()).first_param()).unwrap_or(AUDIO_PORTS);
+        let first = first_param();
         let Some(mut editor) = factory(host_for(Link { write, controller, touch, first }).with_resize(ask)) else {
             return std::ptr::null_mut();
         };

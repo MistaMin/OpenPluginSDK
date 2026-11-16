@@ -13,6 +13,10 @@
 //!   value (the clipboard text is passed in, so the user's clipboard is never
 //!   touched) and type value (which opens the text field). The real menu action,
 //!   `openpluginMenuItem:`, is sent for the two items that do not use the clipboard.
+//! - A host menu is modal: while it is open the view's timer still fires, and the
+//!   host may close the editor. Neither reaches the editor while its own call is
+//!   on the stack: the nested tick is refused, and the editor is dropped when the
+//!   call ends.
 //! - Through the shell's editor ABI (`shell::editor`, what `op_editor_*` call), a
 //!   host menu callback and the host's track reach an editor.
 
@@ -30,7 +34,9 @@ fn main() {
     mac::host_menu_is_asked_for_the_parameter();
     mac::sdk_menu_when_the_host_has_none();
     mac::shell_abi_carries_the_menu_and_the_track();
-    println!("menu (editor): 3 passed");
+    mac::a_host_callback_cannot_reenter_the_editor();
+    mac::closing_the_view_inside_a_host_callback_waits_for_the_call();
+    println!("menu (editor): 5 passed");
 }
 
 #[cfg(target_os = "macos")]
@@ -228,6 +234,102 @@ mod mac {
             editor::set_context_menu(std::ptr::null_mut(), std::ptr::null_mut(), None);
             editor::destroy(handle);
             tell0(pool, c"release");
+        }
+    }
+
+    /// What a [`Modal`] editor saw.
+    #[derive(Default)]
+    struct Seen {
+        /// Inside `right_mouse_down`.
+        inside: bool,
+        /// Calls that arrived while inside.
+        nested: u32,
+        ticks: u32,
+        dropped: bool,
+        /// The editor was dropped before its own call returned.
+        dropped_inside: bool,
+    }
+
+    type Callback = Rc<RefCell<Option<Box<dyn FnMut()>>>>;
+
+    /// An editor whose right click runs `callback` the way a host's modal
+    /// context menu runs its own loop inside the editor's call.
+    struct Modal {
+        seen: Rc<RefCell<Seen>>,
+        callback: Callback,
+        pixels: Vec<u32>,
+    }
+
+    impl Drop for Modal {
+        fn drop(&mut self) {
+            self.seen.borrow_mut().dropped = true;
+        }
+    }
+
+    impl Editor for Modal {
+        fn size(&self) -> (u32, u32) {
+            (40, 30)
+        }
+        fn param_changed(&mut self, _: usize, _: f32) {}
+        fn tick(&mut self, _dt: f32) {
+            let mut seen = self.seen.borrow_mut();
+            seen.ticks += 1;
+            seen.nested += u32::from(seen.inside);
+        }
+        fn render(&mut self, _scale: f32) -> Frame<'_> {
+            let mut seen = self.seen.borrow_mut();
+            seen.nested += u32::from(seen.inside);
+            Frame { pixels: &self.pixels, width: 40, height: 30 }
+        }
+        fn right_mouse_down(&mut self, _x: f32, _y: f32) -> bool {
+            self.seen.borrow_mut().inside = true;
+            let call = self.callback.borrow_mut().take();
+            if let Some(mut call) = call {
+                call();
+            }
+            let mut seen = self.seen.borrow_mut();
+            seen.inside = false;
+            seen.dropped_inside = seen.dropped;
+            true
+        }
+    }
+
+    unsafe fn modal_rig() -> (Rig, Rc<RefCell<Seen>>, Callback) { unsafe {
+        let seen: Rc<RefCell<Seen>> = Rc::default();
+        let callback: Callback = Rc::default();
+        let (s, c) = (seen.clone(), callback.clone());
+        let rig = Rig::new(move |_| Some(Box::new(Modal { seen: s, callback: c, pixels: vec![0; 40 * 30] })));
+        (rig, seen, callback)
+    }}
+
+    pub fn a_host_callback_cannot_reenter_the_editor() {
+        unsafe {
+            let (rig, seen, callback) = modal_rig();
+            let view = rig.raw();
+            // The timer is in the common modes, so it fires inside a menu's loop.
+            *callback.borrow_mut() = Some(Box::new(move || tell(view, c"openpluginTick:", std::ptr::null_mut())));
+            right_click(&rig, 5.0, 5.0);
+            assert_eq!(seen.borrow().nested, 0, "no editor call while right_mouse_down is on the stack");
+            assert_eq!(seen.borrow().ticks, 0, "the nested tick was refused");
+            // The view works as before once the call has ended.
+            tell(view, c"openpluginTick:", std::ptr::null_mut());
+            assert_eq!(seen.borrow().ticks, 1);
+        }
+    }
+
+    pub fn closing_the_view_inside_a_host_callback_waits_for_the_call() {
+        unsafe {
+            let (mut rig, seen, callback) = modal_rig();
+            let raw = rig.raw();
+            let at = CGPoint { x: 5.0, y: rig.view_height() - 5.0 };
+            let event = mouse_event(3, at, 0, rig.window);
+            // The host closes the editor from inside its menu (the view is dropped).
+            let mut owned = rig.view.take();
+            *callback.borrow_mut() = Some(Box::new(move || drop(owned.take())));
+            tell(raw, c"rightMouseDown:", event);
+            assert!(!seen.borrow().dropped_inside, "the editor outlives its own call");
+            assert!(seen.borrow().dropped, "and is dropped when the call has ended");
+            assert_eq!(seen.borrow().nested, 0);
         }
     }
 }

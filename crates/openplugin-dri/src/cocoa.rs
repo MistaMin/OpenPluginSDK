@@ -216,6 +216,10 @@ struct State {
     /// A resize that came in while `busy`: width, height, and whether the
     /// view's frame must follow (it must not when the host set the frame).
     pending: Option<(u32, u32, bool)>,
+    /// A paint or an invalidation that came in while `busy`.
+    repaint: bool,
+    /// The view was dropped while `busy`: the state goes when the call ends.
+    closing: bool,
     /// The view is changing its own frame.
     in_frame: bool,
     /// The backing scale of the last frame drawn (0 before the first).
@@ -291,15 +295,32 @@ unsafe fn state<'a>(this: Id) -> Option<&'a mut State> { unsafe {
     (p as *mut State).as_mut()
 }}
 
+/// The state, unless the editor is inside one of its calls (a host's modal
+/// loop runs timers and queries there): nothing else may reach the editor then.
+unsafe fn idle<'a>(this: Id) -> Option<&'a mut State> { unsafe {
+    state(this).filter(|st| !st.busy)
+}}
+
 /// Run an editor call. A resize that arrived meanwhile is applied after it.
-unsafe fn guarded(this: Id, call: impl FnOnce(&mut State)) { unsafe {
-    let Some(st) = state(this) else { return };
+/// False, and no call, when the editor is already inside a call.
+unsafe fn guarded(this: Id, call: impl FnOnce(&mut State)) -> bool { unsafe {
+    let Some(st) = idle(this) else { return false };
     st.busy = true;
     call(st);
     st.busy = false;
+    if st.closing {
+        // The view was dropped inside the call. Its callers may still use `this`.
+        drop(Box::from_raw(st as *mut State));
+        send!(Id, this, b"autorelease\0");
+        return true;
+    }
     if let Some((w, h, frame)) = st.pending.take() {
         apply(this, st, w, h, frame);
     }
+    if std::mem::take(&mut st.repaint) {
+        redraw(this);
+    }
+    true
 }}
 
 /// Give the editor a size inside its range, and follow the size it ends up with.
@@ -368,7 +389,13 @@ unsafe fn backing_scale(view: Id) -> f32 { unsafe {
 }}
 
 extern "C" fn draw_rect(this: Id, _cmd: Sel, _dirty: CGRect) {
-    unsafe { guarded(this, |st| draw(this, st)) }
+    unsafe {
+        if !guarded(this, |st| draw(this, st)) {
+            if let Some(st) = state(this) {
+                st.repaint = true;
+            }
+        }
+    }
 }
 
 unsafe fn draw(this: Id, st: &mut State) {
@@ -532,7 +559,7 @@ extern "C" fn flags_changed(this: Id, _cmd: Sel, event: Id) {
 }
 
 extern "C" fn accepts_first_responder(this: Id, _cmd: Sel) -> i8 {
-    unsafe { state(this).is_some_and(|st| st.editor.wants_keys()) as i8 }
+    unsafe { idle(this).is_some_and(|st| st.editor.wants_keys()) as i8 }
 }
 
 extern "C" fn become_first_responder(this: Id, _cmd: Sel) -> i8 {
@@ -571,6 +598,11 @@ fn view_rect(r: &openplugin_core::editor::DamageRect, editor: (u32, u32), view: 
 
 /// Ask the editor what changed and invalidate that: nothing, some rectangles, or the whole view.
 unsafe fn invalidate(this: Id) { unsafe {
+    let Some(st) = state(this) else { return };
+    if st.busy {
+        st.repaint = true;
+        return;
+    }
     ax_sync(this);
     poll_requests(this);
     sync_tooltips(this);
@@ -635,7 +667,7 @@ extern "C" fn mouse_down(this: Id, _cmd: Sel, event: Id) {
         close_text_field(this, true);
         // A click gives the editor the keyboard, when it wants keys. Outside the
         // editor call: taking focus calls the editor again.
-        if state(this).is_some_and(|st| st.editor.wants_keys()) {
+        if idle(this).is_some_and(|st| st.editor.wants_keys()) {
             let window = send!(Id, this, b"window\0");
             if !window.is_null() {
                 send!(i8, window, b"makeFirstResponder:\0", Id = this);
@@ -686,7 +718,7 @@ extern "C" fn scroll_wheel(this: Id, _cmd: Sel, event: Id) {
 
 extern "C" fn tick(this: Id, _cmd: Sel, _timer: Id) {
     unsafe {
-        guarded(this, |st| {
+        let ran = guarded(this, |st| {
             if let Some(poll) = st.poll.as_mut() {
                 poll(st.editor.as_mut());
             }
@@ -701,6 +733,9 @@ extern "C" fn tick(this: Id, _cmd: Sel, _timer: Id) {
                 st.editor.file_dialog_done(tag, paths);
             }
         });
+        if !ran {
+            return;
+        }
         ensure_drag_registration(this);
         // A window moved to a display of another scale gets a full frame.
         if state(this).is_some_and(|st| st.scale != 0.0 && st.scale != backing_scale(this).clamp(1.0, 3.0)) {
@@ -1134,7 +1169,7 @@ unsafe fn sync_tooltips(this: Id) { unsafe {
 extern "C" fn tooltip_string(this: Id, _cmd: Sel, _view: Id, _tag: isize, _point: CGPoint, data: *mut c_void) -> Id {
     unsafe {
         let index = data as usize;
-        match state(this).and_then(|st| st.editor.tooltips().into_iter().nth(index)) {
+        match idle(this).and_then(|st| st.editor.tooltips().into_iter().nth(index)) {
             Some(t) => ns_string(&t.text),
             None => null_mut(),
         }
@@ -1341,15 +1376,25 @@ unsafe fn ivar(obj: Id, name: &[u8]) -> *mut c_void { unsafe {
 unsafe fn ax_node(element: Id) -> Option<(Id, usize, AccessNode)> { unsafe {
     let view = ivar(element, AX_VIEW_IVAR);
     let index = ivar(element, AX_INDEX_IVAR) as usize;
-    let st = state(view)?;
+    let st = idle(view)?;
     let node = st.editor.accessibility_nodes().into_iter().nth(index)?;
     Some((view, index, node))
 }}
 
-/// The view's elements, one per node, made or dropped to match.
-unsafe fn ax_elements(this: Id) -> Vec<Id> { unsafe {
+/// The view's elements for the editor's nodes as they are now (as they were
+/// last, inside an editor call).
+unsafe fn ax_children(this: Id) -> Vec<Id> { unsafe {
     let Some(st) = state(this) else { return Vec::new() };
+    if st.busy {
+        return st.ax_elements.clone();
+    }
     let count = st.editor.accessibility_nodes().len();
+    ax_elements(this, count)
+}}
+
+/// The view's elements, one per node of `count`, made or dropped to match.
+unsafe fn ax_elements(this: Id, count: usize) -> Vec<Id> { unsafe {
+    let Some(st) = state(this) else { return Vec::new() };
     while st.ax_elements.len() > count {
         if let Some(old) = st.ax_elements.pop() {
             object_setInstanceVariable(old, AX_VIEW_IVAR.as_ptr() as *const c_char, null_mut());
@@ -1372,13 +1417,14 @@ unsafe fn ax_elements(this: Id) -> Vec<Id> { unsafe {
 /// Post the notifications for what changed in the nodes since the last pass.
 unsafe fn ax_sync(this: Id) { unsafe {
     let Some(st) = state(this) else { return };
-    let now = st.editor.accessibility_nodes();
-    if now.is_empty() && st.ax_seen.is_empty() {
+    // Elements are made when something asks for the view's children: until then nobody listens.
+    if st.ax_elements.is_empty() {
         return;
     }
+    let now = st.editor.accessibility_nodes();
     let diff = ax_diff(&st.ax_seen, &now);
     st.ax_seen = now.iter().map(|n| AxSeen { value: n.value.clone(), focused: n.focused }).collect();
-    let elements = ax_elements(this);
+    let elements = ax_elements(this, now.len());
     if diff.layout {
         NSAccessibilityPostNotification(this, NSAccessibilityLayoutChangedNotification);
     }
@@ -1523,7 +1569,7 @@ extern "C" fn ax_set_focused(this: Id, _cmd: Sel, focused: i8) {
         if focused == 0 {
             return;
         }
-        if state(view).is_some_and(|st| st.editor.wants_keys()) {
+        if idle(view).is_some_and(|st| st.editor.wants_keys()) {
             let window = send!(Id, view, b"window\0");
             if !window.is_null() {
                 send!(i8, window, b"makeFirstResponder:\0", Id = view);
@@ -1565,7 +1611,7 @@ unsafe fn ns_array(items: &[Id]) -> Id { unsafe {
 
 /// The view is a group when the editor has nodes; otherwise it is as opaque as before.
 extern "C" fn view_is_ax_element(this: Id, _cmd: Sel) -> i8 {
-    unsafe { state(this).is_some_and(|st| !st.editor.accessibility_nodes().is_empty()) as i8 }
+    unsafe { idle(this).is_some_and(|st| !st.editor.accessibility_nodes().is_empty()) as i8 }
 }
 
 extern "C" fn view_ax_role(_this: Id, _cmd: Sel) -> Id {
@@ -1573,13 +1619,13 @@ extern "C" fn view_ax_role(_this: Id, _cmd: Sel) -> Id {
 }
 
 extern "C" fn view_ax_children(this: Id, _cmd: Sel) -> Id {
-    unsafe { ns_array(&ax_elements(this)) }
+    unsafe { ns_array(&ax_children(this)) }
 }
 
 extern "C" fn view_ax_focused_element(this: Id, _cmd: Sel) -> Id {
     unsafe {
-        let focus = state(this).and_then(|st| st.editor.accessibility_nodes().iter().position(|n| n.focused));
-        let elements = ax_elements(this);
+        let focus = idle(this).and_then(|st| st.editor.accessibility_nodes().iter().position(|n| n.focused));
+        let elements = ax_children(this);
         focus.and_then(|i| elements.get(i).copied()).unwrap_or(this)
     }
 }
@@ -1587,7 +1633,7 @@ extern "C" fn view_ax_focused_element(this: Id, _cmd: Sel) -> Id {
 /// The element under a point in screen coordinates (VoiceOver pointing, touch).
 extern "C" fn view_ax_hit_test(this: Id, _cmd: Sel, point: CGPoint) -> Id {
     unsafe {
-        let elements = ax_elements(this);
+        let elements = ax_children(this);
         for &e in elements.iter().rev() {
             let f = ax_frame(e, sel(b"accessibilityFrame\0"));
             if point.x >= f.origin.x && point.x < f.origin.x + f.size.w && point.y >= f.origin.y && point.y < f.origin.y + f.size.h {
@@ -1714,7 +1760,7 @@ impl EditorView {
             if view.is_null() {
                 return None;
             }
-            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, in_frame: false, scale: 0.0, ax_elements: Vec::new(), ax_seen: Vec::new(), text_field: None, field_cancel: false, opening: false, tip_key: Vec::new(), drags: false, file_results: Vec::new(), file_hook: None, menu_param: 0, menu_hook: None }));
+            let state = Box::into_raw(Box::new(State { editor, poll, size, last: Instant::now(), modifiers: Modifiers::NONE, busy: false, pending: None, repaint: false, closing: false, in_frame: false, scale: 0.0, ax_elements: Vec::new(), ax_seen: Vec::new(), text_field: None, field_cancel: false, opening: false, tip_key: Vec::new(), drags: false, file_results: Vec::new(), file_hook: None, menu_param: 0, menu_hook: None }));
             object_setInstanceVariable(view, IVAR.as_ptr() as *const c_char, state as *mut c_void);
 
             // Mouse-moved events need a tracking area: moved | active always | in visible rect.
@@ -1897,6 +1943,11 @@ impl Drop for EditorView {
             // Detach the state first: the host may keep the view a while longer.
             object_setInstanceVariable(self.view, IVAR.as_ptr() as *const c_char, null_mut());
             send!((), self.view, b"removeFromSuperview\0");
+            // Dropped from a host callback inside an editor call: `guarded` frees both when the call ends.
+            if let Some(st) = self.state.as_mut().filter(|st| st.busy) {
+                st.closing = true;
+                return;
+            }
             send!((), self.view, b"release\0");
             if !self.state.is_null() {
                 drop(Box::from_raw(self.state));
