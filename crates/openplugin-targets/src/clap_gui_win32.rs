@@ -6,6 +6,9 @@
 //! the host's (`set_scale`) or, when the host sets none, the DPI of the
 //! parent window. The window is as resizable as the editor says, and the
 //! editor can ask the host for a size through `clap_host_gui::request_resize`.
+//! A right click asks the host for its parameter menu (`clap.context-menu`)
+//! at the click in pixels: in the plugin's window when the editor is embedded,
+//! on the screen when it floats, as the extension says.
 use super::*;
 use openplugin_core::editor::SizeRange;
 use openplugin_core::{Editor, ValueMirror};
@@ -61,7 +64,22 @@ unsafe extern "C" fn create(plugin: *const clap_plugin, api: *const c_char, floa
                 None => false,
             }
         };
-        let Some(mut editor) = factory(editor_host_for(instance).with_resize(request)) else { return false };
+        // The host's menu on a parameter. CLAP wants the place in pixels relative to the
+        // plugin's window when the editor is embedded, and on the screen when it floats;
+        // the editor says it in points.
+        let menu = move |param: u32, x: i32, y: i32| -> bool {
+            let Some(view) = (unsafe { (*raw).gui.as_ref() }).map(|g| &g.view) else { return false };
+            let (px, py) = if floating {
+                match view.to_screen(x as f32, y as f32) {
+                    Some(at) => at,
+                    None => return false,
+                }
+            } else {
+                view.to_client(x as f32, y as f32)
+            };
+            host_context_popup(host, param, px, py)
+        };
+        let Some(mut editor) = factory(editor_host_for(instance).with_resize(request).with_context_menu(menu)) else { return false };
         editor.bind(instance.editor_state.clone());
         if let Some(info) = instance.track_info.as_ref() {
             editor.track_info(info);

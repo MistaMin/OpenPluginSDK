@@ -24,16 +24,24 @@
 # not needed.
 #
 # The Rust library is `<name>.lib`, built for the MSVC target against the release C
-# runtime, so build the shells as Release (or RelWithDebInfo). OP_RUST_NATIVE_LIBS
-# lists the system libraries it needs; take the list from
+# runtime (Rust has no build against the debug one). So every configuration of the
+# shells links the release C runtime too, Debug included: `--config Debug` gives
+# unoptimized code with debug information and the SDKs' own checks, without the
+# debug heap and the checked iterators of the debug runtime, and it links and runs
+# with the same Rust library as Release. The bundles in the build folder are those
+# of the configuration built last. OP_RUST_NATIVE_LIBS
+# lists the system libraries the Rust library needs; take the list from
 #   cargo rustc --release --lib -p <crate> --crate-type staticlib -- --print native-static-libs
 # when a plugin needs more.
-project(OpenPluginShell LANGUAGES C CXX)
+project(OpenPluginShell LANGUAGES C CXX RC)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT MSVC)
   message(FATAL_ERROR "The Windows shells are built with MSVC (Visual Studio or its Build Tools)")
 endif()
+# The release C runtime (/MD) in every configuration: one process cannot mix it with
+# the debug runtime (/MDd), and the Rust library brings the release one.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 get_property(OP_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 if(NOT OP_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -101,6 +109,45 @@ function(op_link_rust target_name)
   endif()
   target_link_libraries(${target_name} PRIVATE "${rust_lib}" ${OP_RUST_NATIVE_LIBS})
 endfunction()
+
+# The version resource of a plug-in binary (native/win/version.rc.in): the product,
+# OP_VERSION and OP_MANUFACTURER, with `description` as the file description and
+# `file_name` as the original file name.
+function(op_version_resource target_name product description file_name)
+  set(numbers 0 0 0)
+  if(OP_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    set(numbers ${CMAKE_MATCH_1} ${CMAKE_MATCH_2} ${CMAKE_MATCH_3})
+  elseif(OP_VERSION MATCHES "^([0-9]+)\\.([0-9]+)")
+    set(numbers ${CMAKE_MATCH_1} ${CMAKE_MATCH_2} 0)
+  elseif(OP_VERSION MATCHES "^([0-9]+)")
+    set(numbers ${CMAKE_MATCH_1} 0 0)
+  endif()
+  list(JOIN numbers "," OP_RC_VERSION_COMMAS)
+  set(OP_RC_VERSION_COMMAS "${OP_RC_VERSION_COMMAS},0")
+  # A resource string: a quote is doubled, a backslash escaped.
+  foreach(pair IN ITEMS "OP_RC_VERSION|${OP_VERSION}" "OP_RC_COMPANY|${OP_MANUFACTURER}" "OP_RC_PRODUCT|${product}"
+      "OP_RC_DESCRIPTION|${description}" "OP_RC_FILE|${file_name}")
+    string(FIND "${pair}" "|" bar)
+    string(SUBSTRING "${pair}" 0 ${bar} name)
+    math(EXPR after "${bar} + 1")
+    string(SUBSTRING "${pair}" ${after} -1 text)
+    string(REPLACE "\\" "\\\\" text "${text}")
+    string(REPLACE "\"" "\"\"" text "${text}")
+    set(${name} "${text}")
+  endforeach()
+  set(rc "${CMAKE_BINARY_DIR}/version/${target_name}.rc")
+  configure_file("${OP_NATIVE_DIR}/win/version.rc.in" "${rc}" @ONLY)
+  target_sources(${target_name} PRIVATE "${rc}")
+endfunction()
+
+# Folders taken off the front of __FILE__ in the C++ code (an assert in an SDK header
+# carries its path), so a shipped binary names no folder of the build machine.
+# scripts/windows/build_plugin.ps1 gives the home, SDK and build folders.
+set(OP_TRIM_PATHS "" CACHE STRING "Path prefixes to cut from __FILE__ (a ;-list), for shipped builds")
+foreach(prefix IN LISTS OP_TRIM_PATHS)
+  file(TO_NATIVE_PATH "${prefix}" prefix)
+  add_compile_options("/d1trimfile:${prefix}\\")
+endforeach()
 
 enable_testing()
 

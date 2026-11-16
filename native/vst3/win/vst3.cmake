@@ -9,7 +9,7 @@
 #   - The entry points are InitDll and ExitDll from the SDK's dllmain.cpp.
 #   - The proofs are the macOS sources unchanged. vst3/win/compat stands in for the
 #     CoreFoundation and unistd calls they make, win/compat for the pthread ones,
-#     vst3/win/alloc_hook.cpp for libmalloc's malloc_logger.
+#     win/alloc_hook.cpp for libmalloc's malloc_logger.
 #   - The settings are given to each target here, so they reach neither the VST3
 #     SDK's own targets nor another format's.
 set(OP_VST3_WIN_DIR "${CMAKE_CURRENT_LIST_DIR}")
@@ -36,6 +36,22 @@ set(SMTG_CREATE_PLUGIN_LINK OFF CACHE BOOL "" FORCE)
 set(SMTG_RUN_VST_VALIDATOR OFF CACHE BOOL "" FORCE)
 set(SMTG_CREATE_MODULE_INFO OFF CACHE BOOL "" FORCE)
 add_subdirectory("${OP_VST3_SDK}" vst3-sdk EXCLUDE_FROM_ALL)
+# The SDK's own CMake names the C runtime per configuration (/MDd for Debug). Its
+# libraries are linked into the shells, which use the release runtime in every
+# configuration (native/cmake/windows.cmake), so that choice is taken off them.
+foreach(sdk_target IN ITEMS base pluginterfaces sdk sdk_common sdk_hosting)
+  if(TARGET ${sdk_target})
+    get_target_property(sdk_options ${sdk_target} COMPILE_OPTIONS)
+    if(sdk_options)
+      list(FILTER sdk_options EXCLUDE REGEX "/M[DT]d?>$")
+      set_property(TARGET ${sdk_target} PROPERTY COMPILE_OPTIONS "${sdk_options}")
+    endif()
+    get_target_property(sdk_type ${sdk_target} TYPE)
+    if(NOT sdk_type STREQUAL "INTERFACE_LIBRARY")
+      set_property(TARGET ${sdk_target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    endif()
+  endif()
+endforeach()
 
 # UNICODE: dllmain.cpp reads the module path as wide characters. _USE_MATH_DEFINES:
 # the proofs use M_PI. The sources are UTF-8 and carry text outside ASCII.
@@ -97,6 +113,7 @@ function(op_vst3_module target_name product_name)
   if(ARGN)
     target_link_libraries(${target_name} PRIVATE OpenPluginWinCompat)
   endif()
+  op_version_resource(${target_name} "${product_name}" "${product_name} (VST3)" "${product_name}.vst3")
   add_custom_command(TARGET ${target_name} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${bundle_dir}/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_VST3_SDK}/LICENSE.txt" "${bundle_dir}/Contents/Resources/VST3-SDK-LICENSE.txt")
@@ -121,9 +138,10 @@ op_link_rust(VST3Proof)
 add_dependencies(VST3Proof OpenPluginVST3)
 add_test(NAME vst3_proof COMMAND VST3Proof "${OP_VST3_DIR_OpenPluginVST3}")
 # process() must not allocate: counted through operator new and the heap functions
-# every allocation in the process ends in (vst3/win/alloc_hook.cpp).
+# every allocation in the process ends in (win/alloc_hook.cpp).
 op_vst3_proof(VST3NoAllocProof noalloc.cpp
-  "${OP_VST3_WIN_DIR}/alloc_hook.cpp"
+  "${OP_NATIVE_DIR}/win/alloc_hook.cpp"
+  "${OP_VST3_WIN_DIR}/hook_on_load.cpp"
   "${OP_SDK_SOURCE}/vst/hosting/parameterchanges.cpp")
 add_dependencies(VST3NoAllocProof OpenPluginVST3)
 add_test(NAME vst3_noalloc_proof COMMAND VST3NoAllocProof "${OP_VST3_DIR_OpenPluginVST3}")
@@ -175,7 +193,8 @@ if(NOT OP_EDITOR)
   # The proof counts with its own operator new, which a Windows module does not share:
   # vst3/win/new_bridge.cpp brings every heap allocation in the process to it.
   op_vst3_proof(VST3EventsProof events_host.cpp
-    "${OP_VST3_WIN_DIR}/alloc_hook.cpp"
+    "${OP_NATIVE_DIR}/win/alloc_hook.cpp"
+    "${OP_VST3_WIN_DIR}/hook_on_load.cpp"
     "${OP_VST3_WIN_DIR}/new_bridge.cpp"
     "${OP_SDK_SOURCE}/common/memorystream.cpp"
     "${OP_SDK_SOURCE}/vst/hosting/parameterchanges.cpp"
@@ -193,7 +212,8 @@ if(NOT OP_EDITOR)
     op_vst3_module(OpenPluginVST3Expression "Expression Synth")
     op_link_rust(OpenPluginVST3Expression "${OP_EXPRESSION_LIB}")
     op_vst3_proof(VST3ExpressionProof expression_host.cpp
-      "${OP_VST3_WIN_DIR}/alloc_hook.cpp"
+      "${OP_NATIVE_DIR}/win/alloc_hook.cpp"
+    "${OP_VST3_WIN_DIR}/hook_on_load.cpp"
       "${OP_VST3_WIN_DIR}/new_bridge.cpp"
       "${OP_SDK_SOURCE}/vst/hosting/eventlist.cpp")
     add_dependencies(VST3ExpressionProof OpenPluginVST3Expression)

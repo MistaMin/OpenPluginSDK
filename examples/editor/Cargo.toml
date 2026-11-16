@@ -49,3 +49,8 @@ harness = false
 # The test's own X connection: it plays the host.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.13", default-features = false }
+
+# The system's menu, tooltip and open dialog as the HWND view opens them (Windows, when OP_SYSTEM_UI is set).
+[[test]]
+name = "win32_system_ui"
+harness = false

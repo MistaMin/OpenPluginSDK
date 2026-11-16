@@ -215,7 +215,7 @@ REAPER 7.80 (a portable copy with its own `-cfgfile` and the Dummy Audio device)
 
 ## Windows: VST3 and AAX shells
 
-`native/CMakeLists.txt` hands a Windows build machine to `native/cmake/windows.cmake`, which holds the options, the Rust library and its system libraries, and includes one file per format: `native/vst3/win/vst3.cmake` and `native/aax/win/aax.cmake`. The compiler is MSVC (Visual Studio or its Build Tools) for x64. There is no Audio Unit on Windows, and `scripts/build_plugin.sh` is macOS only: on Windows the bundles come from CMake directly. In PowerShell, from the repository root, with the SDK checkouts outside the tree:
+`native/CMakeLists.txt` hands a Windows build machine to `native/cmake/windows.cmake`, which holds the options, the Rust library and its system libraries, and includes one file per format: `native/vst3/win/vst3.cmake` and `native/aax/win/aax.cmake`. The compiler is MSVC (Visual Studio or its Build Tools) for x64. There is no Audio Unit on Windows. `scripts\windows\build_plugin.ps1` drives this build for a plugin crate (see Windows: packaging below); what follows is the build underneath it, which is also how the SDK's own proofs are built. In PowerShell, from the repository root, with the SDK checkouts outside the tree:
 
 ```powershell
 cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
@@ -230,7 +230,7 @@ ctest --test-dir build-shell -C Release --output-on-failure
 ```
 
 - **Quote each `-D`.** PowerShell splits an unquoted `-DOP_VERSION=0.3.1` at the first dot, and CMake then reads `.3.1` as a path.
-- **Release only.** The Rust library is built against the release C runtime, so the shells are built as `Release` (or `RelWithDebInfo`). A `Debug` build mixes two C runtimes.
+- **Release and Debug.** `--config Release` is what ships. `--config Debug` (with `ctest -C Debug`) builds and passes the same proofs: unoptimized C++ with debug information and the SDKs' own checks, for stepping through a shell. Every configuration links the release C runtime (`/MD`), Debug included, because the Rust library is built against it and Rust has no build against the debug runtime; one process cannot mix the two. So a Debug shell has no debug heap and no checked iterators, and it links the same `target\release\<name>.lib` as Release. The VST3 SDK's own CMake asks for `/MDd` in Debug; `native/vst3/win/vst3.cmake` takes that off the SDK's libraries. The bundles in the build folder are those of the configuration built last.
 - **One format.** `-DOP_BUILD_AAX=OFF` or `-DOP_BUILD_VST3=OFF` leaves a format out, and its SDK is then not needed. The AAX shell wants AAX SDK 2.8.1: with 2.10 two of the proofs do not build.
 - **System libraries.** `OP_RUST_NATIVE_LIBS` lists what the Rust library links (`user32`, `gdi32`, `shell32`, `comdlg32`, `comctl32` and the ones `std` needs). When a plugin needs more, take the list from `cargo rustc --release --lib -p <crate> --crate-type staticlib -- --print native-static-libs`. It is a cache variable: a build folder configured earlier keeps its old list until it is given again or removed with `-UOP_RUST_NATIVE_LIBS`.
 - **`-DOP_EDITOR=ON`** makes the shells host the plugin's editor (`native/include/op_editor_win.h`). The stand-in plugins have no editor, so, as on macOS, that build has fewer proofs and adds `vst3_editor_proof`, which opens real windows and needs a desktop session (`scripts\windows\run_in_desktop.ps1` from SSH).
@@ -257,7 +257,56 @@ On 16 November 2026, on Windows 11 x64 (Rust 1.100.0 MSVC, MSVC 14.51, CMake 4.4
 - pluginval 1.0.4, `--strictness-level 10`, on the VST3 bundle: `SUCCESS` without the editor (`--skip-gui-tests`, over SSH) and with the editor and pluginval's editor tests (in the desktop session).
 - `openplugin-port scan` and the port's VST3 fixture tests (`OPENPLUGIN_PORT_FIXTURES` at the build folder): the scan reproduces the example's parameters, buses and class ids; capture and null tests pass, the latency one against `Latency Stub.vst3`.
 - REAPER 7.80 with a configuration of its own (`-cfgfile`, `-newinst`) and `scripts/host_smoke/reaper_smoke.lua` unchanged: the VST3 is found and inserted, Gain reads in dB, offline renders have the expected peaks (0.2500 at 0 dB, 0.4988 at +6 dB, 0.0628 at -12 dB, 0.9953 at +12 dB, 0.7596 with Warm on), state and a Gain envelope survive save and reopen, and the plug-in's own editor opens in REAPER's window, twice.
+- `ctest -C Debug` on a `--config Debug` build: 27 of 27 with the editor off and 18 of 18 with it on. `vst3_noalloc_events_proof` takes about six minutes there, because the proof's own setup is unoptimized. The Debug modules import `VCRUNTIME140.dll` and `MSVCP140.dll`, not the `...D.dll` debug runtime.
 
 CI runs the VST3 part without the editor in the `vst3-shell-windows` job on `windows-latest`: the build, the twelve proofs and the port's fixture tests. That job has not run on GitHub yet; its steps were run locally.
 
-Not covered: `Debug` builds, ARM64, a signed or installed bundle, Pro Tools (PACE signing), Cubase or another Steinberg host, and a version resource in the DLLs (they carry none).
+Not covered: ARM64, a signed or installed bundle, Pro Tools (PACE signing), and Cubase or another Steinberg host.
+
+## Windows: packaging
+
+`scripts\windows\build_plugin.ps1` turns a plugin crate into Windows plug-ins in one command: a CLAP file, a VST3 bundle and an AAX bundle. It is the Windows counterpart of `scripts/build_plugin.sh` and `scripts/build_plugin_linux.sh`, with the same options where they mean the same thing, spelled the PowerShell way (`--manifest-path` is `-ManifestPath`), and the same environment variables. It needs Rust for the MSVC target, CMake, and Visual Studio or its Build Tools with the C++ workload; it finds the compiler, `rc` and `dumpbin` itself (`vswhere`, `vcvars64.bat`). Nothing is installed, signed or copied into a plug-in folder.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build_plugin.ps1 `
+  -ManifestPath examples\editor\Cargo.toml -Name "Example Gain" -Version 0.3.1 `
+  -Manufacturer OpenGrid -BundleId com.opengrid.example -Editor -Tail -AaxPages `
+  -Vst3Sdk C:\path\to\vst3sdk -AaxSdk C:\path\to\aax-sdk-2-8-1 `
+  -Out dist -WorkDir build\openplugin-windows
+```
+
+| Option | Meaning |
+|---|---|
+| `-ManifestPath` | The plugin's `Cargo.toml`. Required |
+| `-Package`, `-LibName` | cargo package, and the library stem if it is not the lib target's name. Default: from `cargo metadata` |
+| `-Name` | Product name: the file names and the product in the version resource. Default: the package name |
+| `-Version` | Numbers only (a `-beta` suffix is cut off). Default: the manifest's, also when it is inherited from the workspace |
+| `-Manufacturer` | The vendor: the company in the version resource. Give the name the plugin reports. Default `OpenPlugin` |
+| `-BundleId` | Passed on for parity with macOS; no Windows format reads it |
+| `-Formats` | `clap,vst3,aax` or `all`. Default: `clap`, plus `vst3` when a VST3 SDK is given and `aax` when an AAX SDK is given |
+| `-Editor`, `-Tail`, `-AaxPages` | `OP_EDITOR`, `OP_TAIL` and `OP_AAX_PAGES` in the shells. Off by default |
+| `-Features` | cargo features for the plugin crate |
+| `-AllowLib` | A DLL the plug-in may import besides the system ones and the Visual C++ runtime. Repeatable |
+| `-Vst3Sdk`, `-AaxSdk` | SDK checkouts, or `VST3_SDK`, `AAX_SDK`. Each is needed only for its own format |
+| `-Out`, `-WorkDir`, `-Jobs` | Output folder (default `dist`), build folder, parallel jobs |
+| `-DryRun`, `-NoVerify` | Print without running; skip the final checks |
+
+What it does:
+
+1. Builds the crate once with `cargo rustc --release --lib`: the `cdylib` is the CLAP, the `staticlib` goes into the shells. Source paths are remapped (`--remap-path-prefix`: the home folder, the folder that holds the workspace, the SDK, the Cargo and rustup homes, the workspace, the plugin crate, the build folder), and the DLL's PDB is recorded by name only (`/PDBALTPATH`).
+2. CLAP: copies the DLL to `<Name>.clap`. A CLAP on Windows is the DLL itself.
+3. VST3 and AAX: configures `native/CMakeLists.txt` over the static library, as `Release`, and builds only the bundle targets. `OP_TRIM_PATHS` takes the build machine's folders off `__FILE__` in the C++ code (`/d1trimfile`), because an assert in an SDK header carries its path.
+4. Every binary gets a version resource from `native/win/version.rc.in`: product name, version (as text and as the four numbers), company, a file description that names the format, and the original file name. The script compiles it with `rc` and hands the `.res` to the linker for the CLAP; CMake does the same for the VST3 and AAX modules (`op_version_resource`), in every build, not only through this script.
+5. Checks every binary, and fails the run on any miss: it is a 64-bit DLL; it holds none of the build machine's folders, as bytes or as UTF-16, with either slash; it imports only system DLLs and the Visual C++ runtime (`dumpbin /dependents`); it exports its format's entry points (`clap_entry`; `GetPluginFactory`, `InitDll`, `ExitDll`; the seven `ACF*` functions); and `(Get-Item x).VersionInfo` shows the product, version and manufacturer given.
+
+The plug-ins import `VCRUNTIME140.dll` (the shells also `MSVCP140.dll`), so the machine that loads them needs the Visual C++ Redistributable, which hosts normally bring along. A statically linked C runtime is not built.
+
+### Checks run on the example
+
+On 16 November 2026 the command above built `examples/editor` into a folder with a space in its name (`build-package\out dir`, build folder `build-package\work dir`), every format, with the editor, the tail and the AAX page table. The script's own checks passed for the three binaries, each with the version resource `Example Gain` 0.3.1 by `OpenGrid`. Then, on its output:
+
+- `clap-validator` 0.4.1 `validate` on `Example Gain.clap`: 44 run, 33 passed, 0 failed, 0 warnings, 11 skipped.
+- pluginval 1.0.4, `--strictness-level 10` with its editor tests, in the desktop session, on `Example Gain.vst3`: `SUCCESS`.
+- The AAX Validator on `Example Gain.aaxplugin` (`scripts\windows\aax_validate.ps1 -Bundle`): 14 results, 13 passed, 0 failed, 1 skipped (`test.cycle_counts`).
+
+Before `OP_TRIM_PATHS` the AAX module held the AAX SDK's folder three times (asserts in `AAX_CParameter.h`), which is what the path check is for. Not covered: a signed bundle or an installer, ARM64, and a plugin whose crate has no `staticlib`.
