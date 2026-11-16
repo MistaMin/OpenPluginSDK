@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: MIT
+// See editor_pixels.h. Main thread only, like every op_editor_* call.
+#include "editor_pixels.h"
+#include <cmath>
+#include <cstddef>
+#include <initializer_list>
+#include <vector>
+
+namespace openplugin_vst_linux {
+namespace {
+// What the shell asked to hear from one editor. The editor calls the functions
+// below with the Link as its context; they convert and call the shell.
+struct Link {
+    void* editor = nullptr;
+    void* resizeContext = nullptr;
+    OpEditorRequestResize resize = nullptr;
+    void* menuContext = nullptr;
+    OpEditorContextMenu menu = nullptr;
+};
+// One per open editor: a host has a handful at most.
+std::vector<Link*>& links() {
+    static std::vector<Link*> all;
+    return all;
+}
+Link* linkOf(void* editor) {
+    for (Link* link : links()) {
+        if (link->editor == editor) return link;
+    }
+    Link* link = new Link;
+    link->editor = editor;
+    links().push_back(link);
+    return link;
+}
+
+double displayScale() {
+    const double scale = op_editor_display_scale();
+    return scale > 0.0 ? scale : 1.0;
+}
+double scaleOf(void* editor) {
+    const double scale = editor ? op_editor_scale(editor) : 0.0;
+    return scale > 0.0 ? scale : displayScale();
+}
+// The rounding of the view itself (openplugin-dri x11: device, and its points).
+uint32_t toPixels(uint32_t points, double scale) {
+    const long value = std::lround(static_cast<double>(points) * scale);
+    return value < 1 ? 1u : static_cast<uint32_t>(value);
+}
+uint32_t toPoints(uint32_t pixels, double scale) {
+    const long value = std::lround(static_cast<double>(pixels) / scale);
+    return value < 1 ? 1u : static_cast<uint32_t>(value);
+}
+
+uint32_t requestResize(void* context, uint32_t width, uint32_t height) {
+    auto* link = static_cast<Link*>(context);
+    if (!link->resize) return 0;
+    const double scale = scaleOf(link->editor);
+    return link->resize(link->resizeContext, toPixels(width, scale), toPixels(height, scale));
+}
+uint32_t showMenu(void* context, uint32_t index, int32_t x, int32_t y) {
+    auto* link = static_cast<Link*>(context);
+    if (!link->menu) return 0;
+    const double scale = scaleOf(link->editor);
+    return link->menu(link->menuContext, index, static_cast<int32_t>(std::lround(x * scale)), static_cast<int32_t>(std::lround(y * scale)));
+}
+}
+
+uint32_t editor_size(uint32_t* width, uint32_t* height) {
+    if (!width || !height) return 0;
+    const uint32_t ok = op_editor_size(width, height);
+    const double scale = displayScale();
+    *width = toPixels(*width, scale);
+    *height = toPixels(*height, scale);
+    return ok;
+}
+
+uint32_t editor_size_range(uint32_t* min_width, uint32_t* min_height, uint32_t* max_width, uint32_t* max_height,
+                           uint32_t* aspect_width, uint32_t* aspect_height) {
+    if (!op_editor_size_range(min_width, min_height, max_width, max_height, aspect_width, aspect_height)) return 0;
+    const double scale = displayScale();
+    for (uint32_t* value : {min_width, min_height, max_width, max_height}) {
+        if (value) *value = toPixels(*value, scale);
+    }
+    return 1;
+}
+
+uint32_t editor_get_size(void* editor, uint32_t* width, uint32_t* height) {
+    if (!width || !height || !op_editor_get_size(editor, width, height)) return 0;
+    const double scale = scaleOf(editor);
+    *width = toPixels(*width, scale);
+    *height = toPixels(*height, scale);
+    return 1;
+}
+
+uint32_t editor_adjust_size(void* editor, uint32_t* width, uint32_t* height) {
+    if (!editor || !width || !height) return 0;
+    const double scale = scaleOf(editor);
+    uint32_t w = toPoints(*width, scale);
+    uint32_t h = toPoints(*height, scale);
+    if (!op_editor_adjust_size(editor, &w, &h)) return 0;
+    *width = toPixels(w, scale);
+    *height = toPixels(h, scale);
+    return 1;
+}
+
+uint32_t editor_resize(void* editor, uint32_t width, uint32_t height) {
+    if (!editor) return 0;
+    const double scale = scaleOf(editor);
+    uint32_t w = toPoints(width, scale);
+    uint32_t h = toPoints(height, scale);
+    // Rounding to points may leave the range by one: the nearest size inside it.
+    if (!op_editor_adjust_size(editor, &w, &h)) return 0;
+    return op_editor_resize(editor, w, h);
+}
+
+void editor_set_request_resize(void* editor, void* context, OpEditorRequestResize request) {
+    if (!editor) return;
+    Link* link = linkOf(editor);
+    link->resizeContext = context;
+    link->resize = request;
+    op_editor_set_request_resize(editor, link, request ? requestResize : nullptr);
+}
+
+void editor_set_context_menu(void* editor, void* context, OpEditorContextMenu show) {
+    if (!editor) return;
+    Link* link = linkOf(editor);
+    link->menuContext = context;
+    link->menu = show;
+    op_editor_set_context_menu(editor, link, show ? showMenu : nullptr);
+}
+
+void editor_destroy(void* editor) {
+    // The editor first: it may still call out while it closes.
+    op_editor_destroy(editor);
+    auto& all = links();
+    for (size_t i = 0; i < all.size(); ++i) {
+        if (all[i]->editor == editor) {
+            delete all[i];
+            all.erase(all.begin() + static_cast<std::ptrdiff_t>(i));
+            break;
+        }
+    }
+}
+}

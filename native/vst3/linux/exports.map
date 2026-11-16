@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+# What a VST3 module exports on Linux: the three functions a host looks up, and what
+# a proof asks of a stand-in plugin (op_stub_*, in native/vst3/*_stub.cpp only).
+# Everything else stays inside the module: the plugin's op_shell_* and op_editor_*,
+# the VST3 SDK and the C++ runtime, so two plug-ins in one host never share a symbol.
+{
+  global:
+    GetPluginFactory;
+    ModuleEntry;
+    ModuleExit;
+    op_stub_*;
+  local:
+    *;
+};
