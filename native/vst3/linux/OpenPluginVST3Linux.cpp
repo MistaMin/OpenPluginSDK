@@ -71,7 +71,26 @@ public:
             EditorView::removed();
             return kResultFalse;
         }
+        // The host reads the size next (getSize): that is the size it knows.
+        hostW_ = hostH_ = askedW_ = askedH_ = 0;
+        op_editor_get_size(editor, &hostW_, &hostH_);
         return kResultOk;
+    }
+    // A host that embeds through a socket (Ardour's GtkSocket) makes the view's
+    // window the size of its own area whatever the view answers, and gives that
+    // size here. An editor with a fixed shape takes the width it is given and the
+    // height that goes with it; followSize then asks the frame for that height.
+    // A size that already has the shape comes out as it went in.
+    tresult PLUGIN_API onSize(ViewRect* newSize) SMTG_OVERRIDE {
+        if (!newSize) return kInvalidArgument;
+        hostW_ = static_cast<uint32_t>(newSize->getWidth() > 0 ? newSize->getWidth() : 1);
+        hostH_ = static_cast<uint32_t>(newSize->getHeight() > 0 ? newSize->getHeight() : 1);
+        ViewRect shaped = *newSize;
+        if (aspectW_ > 0 && aspectH_ > 0) {
+            const long height = std::lround(static_cast<double>(hostW_) * aspectH_ / aspectW_);
+            shaped.bottom = shaped.top + static_cast<int32>(height < 1 ? 1 : height);
+        }
+        return EditorView::onSize(&shaped);
     }
     tresult PLUGIN_API removed() SMTG_OVERRIDE {
         // The host stops calling before the view closes its connection.
@@ -134,20 +153,37 @@ private:
         followSize();
     }
     // An X11 child window does not resize its parent. When the editor's size is
-    // no longer the one the host knows (it changed size on its own, or its window
-    // was given a size directly), the frame is asked for it.
+    // not the one the host knows (it changed size on its own, its window was given
+    // a size directly, or it took another size than the host gave), the frame is
+    // asked for it: once for each size, so a host that cannot give it is not
+    // asked again on every turn.
     void followSize() {
         void* editor = ownEditor();
         uint32_t width = 0;
         uint32_t height = 0;
         if (!editor || !op_editor_get_size(editor, &width, &height)) return;
-        if (static_cast<int32>(width) == rect.getWidth() && static_cast<int32>(height) == rect.getHeight()) return;
+        if (width == hostW_ && height == hostH_) {
+            askedW_ = askedH_ = 0;
+            return;
+        }
+        if (width == askedW_ && height == askedH_) return;
+        askedW_ = width;
+        askedH_ = height;
         ViewRect asked(rect.left, rect.top, rect.left + static_cast<int32>(width), rect.top + static_cast<int32>(height));
         rect = asked;
-        if (plugFrame) plugFrame->resizeView(this, &asked);
+        // The host may call onSize from inside this, which sets what it knows.
+        if (plugFrame && plugFrame->resizeView(this, &asked) == kResultTrue && ownEditor() == editor) {
+            if (op_editor_get_size(editor, &width, &height)) {
+                hostW_ = width;
+                hostH_ = height;
+            }
+        }
     }
     IPtr<Linux::IRunLoop> loop_;
     bool watching_ = false;
+    // The size the host has (from getSize after attached, onSize, or a resizeView
+    // it accepted) and the last one the frame was asked for, in pixels.
+    uint32_t hostW_ = 0, hostH_ = 0, askedW_ = 0, askedH_ = 0;
 };
 
 IPlugView* PLUGIN_API Controller::createView(FIDString name) {

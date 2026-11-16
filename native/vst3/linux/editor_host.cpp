@@ -44,6 +44,7 @@
 #include "pluginterfaces/vst/ivstcontextmenu.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstmessage.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -538,6 +539,45 @@ int main(int argc, char** argv) {
     ViewRect odd(0, 0, big.getWidth(), small.getHeight() + (big.getHeight() - small.getHeight()) / 2);
     CHECK(view->checkSizeConstraint(&odd) == kResultOk);
     CHECK(std::abs(odd.getWidth() * big.getHeight() - odd.getHeight() * big.getWidth()) <= big.getWidth() * (slack + 1));
+    // A host that gives its own width and leaves the height (Ardour: the view's
+    // window is in a socket as wide as the host's toolbar). The view takes the
+    // width and the height of its shape, and asks the frame for that size once.
+    {
+        const int32 wideWidth = std::min(rect.getWidth() * 3 / 2, big.getWidth());
+        const auto shaped = [&](const ViewRect& r) {
+            return r.getWidth() == wideWidth && std::abs(r.getWidth() * big.getHeight() - r.getHeight() * big.getWidth()) <= big.getWidth() * (slack + 1);
+        };
+        ViewRect got{};
+        // A frame that cannot give the height is asked once, not on every turn.
+        plugFrame.grant = false;
+        int count = plugFrame.requests;
+        ViewRect wide(0, 0, wideWidth, rect.getHeight());
+        CHECK(view->onSize(&wide) == kResultOk);
+        CHECK(view->getSize(&got) == kResultOk && shaped(got));
+        CHECK(spinUntil([&] { return plugFrame.requests == count + 1; }));
+        CHECK(plugFrame.width == got.getWidth() && plugFrame.height == got.getHeight());
+        spin(0.2);
+        CHECK(plugFrame.requests == count + 1);
+        plugFrame.grant = true;
+        ViewRect back(0, 0, rect.getWidth(), rect.getHeight());
+        CHECK(view->onSize(&back) == kResultOk);
+        spin(0.1);
+        CHECK(plugFrame.requests == count + 1);
+        // A frame that gives it: asked once, and the window has the shape.
+        count = plugFrame.requests;
+        wide = ViewRect(0, 0, wideWidth, rect.getHeight());
+        CHECK(view->onSize(&wide) == kResultOk);
+        CHECK(spinUntil([&] { return plugFrame.requests == count + 1; }));
+        CHECK(view->getSize(&got) == kResultOk && shaped(got));
+        CHECK(plugFrame.width == got.getWidth() && plugFrame.height == got.getHeight());
+        CHECK(spinUntil([&] { return display.sizeIs(editor, got.getWidth(), got.getHeight()); }));
+        spin(0.2);
+        CHECK(plugFrame.requests == count + 1);
+        std::printf("host gave %dx%d, view took %dx%d and asked the frame once\n", wideWidth, rect.getHeight(), got.getWidth(), got.getHeight());
+        back = ViewRect(0, 0, rect.getWidth(), rect.getHeight());
+        CHECK(view->onSize(&back) == kResultOk);
+        CHECK(spinUntil([&] { return display.sizeIs(editor, rect.getWidth(), rect.getHeight()); }));
+    }
     // The click point scales with the view: examples/editor keeps its shape from the origin.
     const double factor = double(big.getWidth()) / rect.getWidth();
     const int asked = plugFrame.requests;
