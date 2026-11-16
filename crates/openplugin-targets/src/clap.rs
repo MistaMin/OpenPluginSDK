@@ -69,7 +69,7 @@ pub fn set_editor(factory: EditorFactory) {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn editor_factory() -> Option<EditorFactory> {
     EDITOR.lock().ok().and_then(|slot| *slot)
 }
@@ -212,7 +212,7 @@ struct Instance {
     host_params: *const clap_host_params,
     /// What the host last said about the track (main thread), kept for an editor made later.
     track_info: Option<TrackInfo>,
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     gui: Option<gui::Gui>,
     meters: Seqlock<MeterFrame>,
     bus_meters: Seqlock<BusMeters>,
@@ -628,12 +628,12 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
         }
         let data = unsafe { (*plugin).plugin_data };
         if !data.is_null() {
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             let mut instance = unsafe { Box::from_raw(data as *mut Instance) };
-            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+            #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
             let instance = unsafe { Box::from_raw(data as *mut Instance) };
             // The view goes before the engine whose state it shows.
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             {
                 instance.gui = None;
             }
@@ -1832,7 +1832,7 @@ unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_c
         if id == EXT_AMBISONIC || id == EXT_AMBISONIC_COMPAT {
             return &AMBISONIC as *const clap_plugin_ambisonic as *const c_void;
         }
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         if id == EXT_GUI && editor_factory().is_some() {
             return &gui::GUI as *const clap_plugin_gui as *const c_void;
         }
@@ -1903,7 +1903,7 @@ fn track_info_changed(plugin: *const clap_plugin) {
             unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.track_info_changed(&info);
         }
     }
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     if let Some(editor) = inst.gui.as_mut().and_then(|gui| gui.view.editor()) {
         editor.track_info(&info);
     }
@@ -2050,7 +2050,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
         editor_state,
         host_params: std::ptr::null(),
         track_info: None,
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         gui: None,
         meters: Seqlock::new(MeterFrame::SILENT),
         bus_meters: Seqlock::new(BusMeters::SILENT),
@@ -2264,6 +2264,10 @@ fn editor_host_for(instance: &Instance) -> openplugin_core::EditorHost {
     })
     .with_context_menu(menu)
 }
+
+#[cfg(windows)]
+#[path = "clap_gui_win32.rs"]
+mod gui;
 
 #[cfg(target_os = "macos")]
 mod gui {

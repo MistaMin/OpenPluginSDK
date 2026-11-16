@@ -11,7 +11,7 @@
 //! pixels an [`openplugin_core::Editor`] returns, at the display's backing scale.
 //!
 //! On macOS, [`cocoa::EditorView`] hosts an [`openplugin_core::Editor`] in an `NSView`;
-//! every format bridge uses it.
+//! every format bridge uses it. On Windows, [`win32::EditorView`] hosts it in a child `HWND`.
 
 pub mod canvas;
 #[cfg(target_os = "macos")]
@@ -21,6 +21,8 @@ pub mod design_editor;
 pub mod hit;
 pub mod render;
 pub mod styles;
+#[cfg(windows)]
+pub mod win32;
 pub mod window;
 #[cfg(target_os = "linux")]
 pub mod x11;

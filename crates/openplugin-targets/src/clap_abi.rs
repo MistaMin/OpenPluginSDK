@@ -615,3 +615,9 @@ pub struct clap_host_posix_fd_support {
     pub modify_fd: Option<unsafe extern "C" fn(host: *const clap_host, fd: i32, flags: u32) -> bool>,
     pub unregister_fd: Option<unsafe extern "C" fn(host: *const clap_host, fd: i32) -> bool>,
 }
+
+// ---- Windows ---------------------------------------------------------------
+
+/// `CLAP_WINDOW_API_WIN32`: `clap_window::ptr` is an `HWND`, and sizes are physical pixels.
+#[cfg(windows)]
+pub const WINDOW_API_WIN32: &[u8] = b"win32\0";
