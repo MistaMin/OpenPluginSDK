@@ -349,6 +349,9 @@ bool ProcessState::prepareStems(double rate, AAX_EStemFormat inputStem, AAX_ESte
     }
     events.assign(OP_MAX_EVENTS, OpEvent{});
     pieceEvents.assign(OP_MAX_EVENTS, OpEvent{});
+    held.assign(paramCount, 0.f);
+    check.assign(paramCount, 0);
+    engineWritten();
     linePos = 0;
     mixStep = static_cast<float>(1.0 / std::max(1.0, kBypassFadeSeconds * rate));
     mix = 0.f;
@@ -477,9 +480,16 @@ void AAX_CALLBACK process(Context* const begin[], const void* end) {
             }
         }
         if (valid) {
+            const bool resync = state.resync.exchange(false, std::memory_order_acquire);
             for (uint32_t i = 0; i < packet.count; ++i) {
-                // The engine's own value is the reference, so a block lost to a state call heals on the next one.
-                if (op_shell_get_plain(state.engine, i) == plain[i]) continue;
+                // The engine's own value is the reference, so a block lost to a state call heals on
+                // the next one. It is asked only where it may differ from what was last seen there.
+                if (resync || state.check[i]) {
+                    state.held[i] = op_shell_get_plain(state.engine, i);
+                    state.check[i] = 0;
+                }
+                if (state.held[i] == plain[i]) continue;
+                state.held[i] = plain[i];
                 if (events < OP_MAX_EVENTS) {
                     OpEvent& event = state.events[events++];
                     event = OpEvent{};
@@ -487,6 +497,7 @@ void AAX_CALLBACK process(Context* const begin[], const void* end) {
                     event.kind = OP_EVENT_PARAM_PLAIN;
                     event.index = i;
                     event.value = plain[i];
+                    state.check[i] = 1;
                 } else {
                     // More changes than the event list holds (the first block of a large plugin): set directly.
                     op_shell_set_plain(state.engine, i, plain[i]);

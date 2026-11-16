@@ -2,6 +2,7 @@
 #include "OpenPluginAAX.h"
 #include "OpenPluginAAXState.h"
 #include "main_thread.h"
+#include "op_shell_calls.h"
 #include "AAX_CBinaryDisplayDelegate.h"
 #include "AAX_CBinaryTaperDelegate.h"
 #include "AAX_CEffectParameters.h"
@@ -37,15 +38,7 @@ PacketBuffer defaults() {
 // The plugin's own parameter text (shell ABI 3), not the SDK's number display. Main
 // thread only: both ABI calls may allocate, and AAX asks for parameter text through
 // the data model's main-thread entry points, never from the audio callback.
-std::string shellText(uint32_t index, double plain) {
-    char small[128];
-    const size_t length = op_shell_param_format(index, plain, small, sizeof small);
-    if (length < sizeof small) return std::string(small, length);
-    std::string big(length + 1, '\0');
-    const size_t again = op_shell_param_format(index, plain, &big[0], big.size());
-    big.resize(std::min(again, big.size() - 1));
-    return big;
-}
+std::string shellText(uint32_t index, double plain) { return op_shell_calls::param_text(index, plain); }
 // The ABI has no short form of a parameter's text, so a short request is answered
 // from the full text, in this order, taking the first that fits `maxChars` bytes:
 // the whole text; the text without spaces ("6.0 dB" -> "6.0dB"); the number alone
@@ -108,6 +101,10 @@ public:
 class Parameters final : public AAX_CEffectParameters {
     mutable ProcessState state_;
     std::vector<std::string> ids_;
+    // The parameter manager's objects in table order, and its bypass: a value read is
+    // a pointer away, not a search by string id.
+    std::vector<AAX_IParameter*> params_;
+    AAX_IParameter* bypass_ = nullptr;
     // The controls packet is posted by this class, not by AAX_CPacketDispatcher,
     // because its size follows the parameter count and a dispatcher packet has a
     // compile-time size. Parameter updates only set the flag; the host's
@@ -211,6 +208,7 @@ public:
         }
         tellTrack();
         ids_.assign(info.param_count, std::string());
+        params_.clear();
         posted_ = PacketBuffer(info.param_count);
         for (uint32_t i = 0; i < info.param_count; ++i) {
             OpParamDesc desc{};
@@ -244,6 +242,7 @@ public:
                 // The AAX Validator rejects 10001 ("Number of parameter steps exceeds limit").
                 parameter->SetType(AAX_eParameterType_Continuous);
             }
+            params_.push_back(parameter.get());
             mParameterManager.AddParameter(parameter.release());
         }
         auto bypass = std::make_unique<AAX_CParameter<bool>>(
@@ -251,6 +250,7 @@ public:
             AAX_CBinaryTaperDelegate<bool>(), AAX_CBinaryDisplayDelegate<bool>("Off", "On"), true);
         bypass->SetNumberOfSteps(2);
         bypass->SetType(AAX_eParameterType_Discrete);
+        bypass_ = bypass.get();
         mParameterManager.AddParameter(bypass.release());
         return result;
     }
@@ -307,6 +307,7 @@ public:
         // the values saved beside it even before any block has carried them.
         for (uint32_t i = 0; state_.engine && i < values.count; ++i)
             if (!op_shell_set_plain(state_.engine, i, values.plain[i])) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        state_.engineWritten();
         std::vector<uint8_t> blob;
         if (!saveBlob(blob)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         const size_t bytes = state::encodedSize(blob.size());
@@ -477,38 +478,20 @@ private:
     // time. Only a state that grew since costs another save, at the size the engine then
     // asked for. Main thread only: it allocates.
     bool saveBlob(std::vector<uint8_t>& blob) const {
-        void* engine = state_.engine;
-        if (!engine) return false;
-        uint32_t size = blobBytes_;
-        for (int attempt = 0; attempt < 8; ++attempt) {
-            blob.assign(size, 0);
-            uint32_t written = 0;
-            const uint32_t result = op_shell_save_state(engine, blob.data(), size, &written);
-            if (result == OP_STATE_OK) {
-                if (written == 0 || written > blob.size()) return false;
-                blob.resize(written);
-                blobBytes_ = written;
-                return true;
-            }
-            if (result != OP_STATE_TOO_SMALL || written == 0) return false;
-            size = written;
-        }
-        return false;
+        if (!op_shell_calls::save_blob(state_.engine, blob, blobBytes_)) return false;
+        blobBytes_ = static_cast<uint32_t>(blob.size());
+        return true;
     }
-    // Reads every parameter into `out`, which is resized to the parameter count.
+    // Reads every parameter into `out`, which is given the parameter count if it has another.
     AAX_Result fill(PacketBuffer& out) const {
-        PacketBuffer next(static_cast<uint32_t>(ids_.size()));
-        for (uint32_t i = 0; i < ids_.size(); ++i) {
-            const auto* parameter = mParameterManager.GetParameterByID(ids_[i].c_str());
-            float value = 0.f;
-            if (!parameter || !parameter->GetValueAsFloat(&value)) return AAX_ERROR_INVALID_PARAMETER_ID;
-            next.plain()[i] = value;
+        if (params_.size() != ids_.size()) return AAX_ERROR_INVALID_PARAMETER_ID;
+        if (out.count() != params_.size()) out = PacketBuffer(static_cast<uint32_t>(params_.size()));
+        for (size_t i = 0; i < params_.size(); ++i) {
+            if (!params_[i]->GetValueAsFloat(&out.plain()[i])) return AAX_ERROR_INVALID_PARAMETER_ID;
         }
         bool bypass = false;
-        if (const auto* parameter = mParameterManager.GetParameterByID(cDefaultMasterBypassID))
-            parameter->GetValueAsBool(&bypass);
-        next.get()->bypass = bypass ? 1u : 0u;
-        out = std::move(next);
+        if (bypass_) bypass_->GetValueAsBool(&bypass);
+        out.get()->bypass = bypass ? 1u : 0u;
         return AAX_SUCCESS;
     }
     bool collect(state::Values& out) const {
@@ -532,17 +515,14 @@ private:
     // parameter is touched either. Only then are the AAX parameters written, which cannot fail.
     AAX_Result apply(const state::Values& values) {
         if (values.count != ids_.size()) return AAX_ERROR_MALFORMED_CHUNK;
-        std::vector<AAX_IParameter*> targets(values.count, nullptr);
-        for (uint32_t i = 0; i < values.count; ++i) {
-            targets[i] = mParameterManager.GetParameterByID(ids_[i].c_str());
-            if (!targets[i]) return AAX_ERROR_INVALID_PARAMETER_ID;
-        }
-        AAX_IParameter* bypass = mParameterManager.GetParameterByID(cDefaultMasterBypassID);
-        if (!bypass) return AAX_ERROR_INVALID_PARAMETER_ID;
+        const std::vector<AAX_IParameter*>& targets = params_;
+        AAX_IParameter* bypass = bypass_;
+        if (targets.size() != ids_.size() || !bypass) return AAX_ERROR_INVALID_PARAMETER_ID;
         if (values.version == state::kVersion) {
             if (!state_.engine || values.blobSize > UINT32_MAX ||
                 !op_shell_load_state(state_.engine, values.blob, static_cast<uint32_t>(values.blobSize)))
                 return AAX_ERROR_MALFORMED_CHUNK;
+            state_.engineWritten();
             if (values.byBlob) {
                 // Written by a build with another parameter order: the blob names its values
                 // by parameter, so the engine now holds each one in its place. Read them back.
@@ -553,6 +533,7 @@ private:
             }
             // The chunk's values are the ones the host sees; give them to the engine too.
             for (uint32_t i = 0; i < values.count; ++i) op_shell_set_plain(state_.engine, i, values.plain[i]);
+            state_.engineWritten();
         }
         for (uint32_t i = 0; i < values.count; ++i) targets[i]->SetValueWithFloat(values.plain[i]);
         bypass->SetValueWithBool(values.bypass);

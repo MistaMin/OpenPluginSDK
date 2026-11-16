@@ -39,6 +39,7 @@ uint32_t op_stub_loads(void* instance);
 void op_stub_grow_on_query(void* instance, uint32_t bytes);
 uint32_t op_stub_saves(void* instance);
 uint32_t op_stub_sets(void* instance);
+uint32_t op_stub_gets(void* instance);
 }
 
 static void require(bool ok, const char* message) {
@@ -395,6 +396,32 @@ int main() {
         require(since(saves, op_stub_saves(engine)) == 0, "and costs no save");
         require(since(sets, op_stub_sets(engine)) == 0 && op_shell_get_plain(engine, 1) == 0.125f, "CompareActiveChunk never writes to the engine");
         std::puts("AAX state blob: GetChunkSize, GetChunk and an equal CompareActiveChunk each run one op_shell_save_state; a compare with a different value runs none; compare writes nothing to the engine");
+    }
+
+    // The algorithm asks the engine for a parameter's value only where it may differ from
+    // the packet: after a chunk call wrote the engine, and once after a value it sent.
+    {
+        Instance a(2);
+        void* engine = a.engine();
+        ProcessState& state = *a.processState();
+        PacketBuffer packet = a.packet();
+        const uint32_t count = packet.count();
+        render(state, packet, 2, 2);
+        uint32_t gets = op_stub_gets(engine);
+        render(state, packet, 2, 64);
+        require(op_stub_gets(engine) == gets, "64 steady blocks ask the engine nothing");
+        packet.plain()[1] = 0.5f;
+        render(state, packet, 2, 8);
+        require(op_stub_gets(engine) - gets == 1 && state.held[1] == 0.5f, "a changed value is sent once and confirmed once");
+        gets = op_stub_gets(engine);
+        const uint32_t bytes = a.size();
+        Chunk saved(bytes);
+        saved.get()->fChunkID = state::kChunkId;
+        require(a.params->GetChunk(state::kChunkId, saved.get()) == AAX_SUCCESS, "GetChunk");
+        // GetChunk gave the engine the data model's values, which are not the packet's here.
+        render(state, packet, 2, 8);
+        require(op_stub_gets(engine) - gets == count + 1 && state.held[1] == 0.5f, "after a chunk call every value is asked once, and the packet's value sent again");
+        std::printf("AAX state blob: 64 steady blocks make no op_shell_get_plain call (%u per block before); a chunk call makes the next block ask all %u\n", count, count);
     }
 
     // A large plugin chunk.

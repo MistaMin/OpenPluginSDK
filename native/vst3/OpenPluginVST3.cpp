@@ -3,6 +3,7 @@
 // contain DSP. With OP_HAS_EDITOR the controller hosts the plugin's op_editor_* view;
 // without it a host shows its generic controls.
 #include "op_shell.h"
+#include "op_shell_calls.h"
 #if OP_HAS_EDITOR
 // The host's parameter menu and track reach the editor (op_editor.h).
 #ifndef OP_EDITOR_MENU
@@ -38,7 +39,7 @@
 #include <cctype>
 #include <cstring>
 #include <memory>
-#include <string>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -176,6 +177,10 @@ std::string category_for(const char* library, uint32_t kind) {
 constexpr ParamID kMidiParamBase = 0x4D494400;  // "MID", clear of 0..n-1 and kBypassId
 constexpr uint32_t kMidiControllers = 130;
 constexpr uint32_t kMidiParamCount = 16 * kMidiControllers;
+// The host bypass parameter. Its ID is far outside 0..n-1 so the plugin's own
+// parameter IDs are the ABI indices, unshifted (or its pinned IDs, which the
+// library keeps clear of this one).
+constexpr ParamID kBypassId = 0x42595053;
 
 // ---- Parameter IDs (ABI 8) ---------------------------------------------------
 // The ParamID the host stores for each plugin parameter, and the way back. A
@@ -183,9 +188,6 @@ constexpr uint32_t kMidiParamCount = 16 * kMidiControllers;
 // pinned one (op_shell_param_host_id) keeps its IDs through any reordering of
 // its table. Everything inside the shell and the ABI addresses a parameter by
 // its index; only the edge to the host uses the ID.
-constexpr ParamID kBypassParamId = 0x42595053;
-constexpr ParamID kMidiParamFirst = 0x4D494400;
-constexpr uint32_t kMidiParamSpan = 16 * 130;
 class ParamIds {
 public:
     void load(uint32_t count) {
@@ -199,7 +201,7 @@ public:
             if (id != i) identity_ = false;
             // The library has checked its pins; a library that answers an ID the
             // shell keeps for itself, or none, gets the indices instead.
-            if (id > 0x7FFFFFFFu || id == kBypassParamId || (id >= kMidiParamFirst && id - kMidiParamFirst < kMidiParamSpan)) usable = false;
+            if (id > 0x7FFFFFFFu || id == kBypassId || (id >= kMidiParamBase && id - kMidiParamBase < kMidiParamCount)) usable = false;
         }
         if (!identity_ && usable) {
             sorted_.reserve(count);
@@ -231,6 +233,10 @@ private:
 // ---- The head of the component state -------------------------------------------
 // Version 1 (a plugin without pinned parameter IDs writes it, as always):
 //   int32 1, int32 count, count normalized doubles in table order, int32 bypass.
+// A shell without pins reads a version 1 head with fewer values than it has
+// parameters (an older build, whose table ended earlier): the first `count`
+// parameters take them and the rest keep their defaults. More values than
+// parameters is another plugin's state, or a newer one's, and is refused.
 // Version 2 (written when the parameter IDs are pinned):
 //   int32 2, int32 count, count pairs of (int32 ParamID, double normalized), int32 bypass.
 // The plugin-state trailer follows either. A pinned shell reads both: in a
@@ -246,9 +252,9 @@ inline bool read_state_head(IBStreamer& reader, const ParamIds& ids, std::vector
     if (!reader.readInt32(version) || !reader.readInt32(count)) return false;
     const auto usable = [clampRange](double value) { return std::isfinite(value) && (!clampRange || (value >= 0.0 && value <= 1.0)); };
     if (ids.identity()) {
-        if (version != 1 || count != static_cast<int32>(values.size())) return false;
-        for (double& slot : values) {
-            if (!reader.readDouble(slot) || !usable(slot)) return false;
+        if (version != 1 || count < 1 || count > static_cast<int32>(values.size())) return false;
+        for (int32 i = 0; i < count; ++i) {
+            if (!reader.readDouble(values[static_cast<size_t>(i)]) || !usable(values[static_cast<size_t>(i)])) return false;
         }
         return true;
     }
@@ -348,17 +354,6 @@ std::string utf16_to_utf8(const TChar* text) {
     return out;
 }
 
-// The plugin's text for plain value `plain` of parameter `index`.
-std::string shell_format(uint32_t index, double plain) {
-    char small[128];
-    const size_t length = op_shell_param_format(index, plain, small, sizeof(small));
-    if (length < sizeof(small)) return std::string(small, length);
-    std::string big(length + 1, '\0');
-    const size_t again = op_shell_param_format(index, plain, big.data(), big.size());
-    big.resize(std::min(again, big.size() - 1));
-    return big;
-}
-
 // ---- Per-note expression (ABI 7) -> VST3 note expression ---------------------
 // The library lists the expressions the plugin reacts to (op_shell_expressions)
 // with their range in the SDK's units (op_shell_expression_info). Volume to
@@ -405,17 +400,6 @@ struct ShellExpressions {
 };
 
 // ---- Parameter groups (ABI 5) -> IUnitInfo -----------------------------------
-// The group path of parameter `index` ("Filter/Envelope"; "" is the top level).
-std::string shell_group(uint32_t index) {
-    char small[128];
-    const size_t length = op_shell_param_group(index, small, sizeof(small));
-    if (length < sizeof(small)) return std::string(small, length);
-    std::string big(length + 1, '\0');
-    const size_t again = op_shell_param_group(index, big.data(), big.size());
-    big.resize(std::min(again, big.size() - 1));
-    return big;
-}
-
 // One VST3 unit per group path. units[0] is the root (kRootUnitId, named
 // "Root"); then one unit for every path and every parent of a path, parents
 // first, numbered from 1 in the order their first parameter is declared. A
@@ -436,7 +420,7 @@ ShellUnits shell_units(uint32_t count) {
     ShellUnits out;
     out.unitOf.assign(count, kRootUnitId);
     for (uint32_t i = 0; i < count; ++i) {
-        const std::string path = shell_group(i);
+        const std::string path = op_shell_calls::param_group(i);
         if (path.empty()) continue;
         if (out.units.empty()) out.units.push_back({kRootUnitId, kNoParentUnitId, "Root", ""});
         UnitID parent = kRootUnitId;
@@ -483,7 +467,7 @@ public:
     // VST3 hosts print the parameter's units after this string, so a trailing
     // unit the plugin's text already carries is dropped ("6.0 dB" -> "6.0").
     void toString(ParamValue normalized, String128 string) const SMTG_OVERRIDE {
-        std::string text = shell_format(index_, toPlain(normalized));
+        std::string text = op_shell_calls::param_text(index_, toPlain(normalized));
         OpParamDesc desc{};
         if (op_shell_param(index_, &desc)) text = strip_unit(text, desc.unit);
         utf8_to_utf16(text.data(), text.size(), string, 128);
@@ -525,10 +509,6 @@ public:
     OBJ_METHODS(BypassParameter, Parameter)
 };
 
-// The host bypass parameter. Its ID is far outside 0..n-1 so the plugin's own
-// parameter IDs are the ABI indices, unshifted (or its pinned IDs, which the
-// library keeps clear of this one).
-constexpr ParamID kBypassId = kBypassParamId;
 // Length of the switch between processed and bypassed audio.
 constexpr double kBypassFadeSeconds = 0.010;
 
@@ -555,73 +535,6 @@ struct TrackState {
     const char* nameOrNull() const { return name.empty() ? nullptr : name.c_str(); }
 };
 
-// UTF-16 (a VST3 TChar string) to UTF-8, with surrogate pairs; an unpaired
-// surrogate becomes U+FFFD.
-std::string utf8_from_tchar(const TChar* text) {
-    std::string out;
-    if (!text) return out;
-    for (size_t i = 0; text[i]; ++i) {
-        uint32_t c = text[i];
-        if (c >= 0xD800 && c <= 0xDBFF && text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
-            c = 0x10000 + ((c - 0xD800) << 10) + (text[i + 1] - 0xDC00);
-            ++i;
-        } else if (c >= 0xD800 && c <= 0xDFFF) {
-            c = 0xFFFD;
-        }
-        if (c < 0x80) {
-            out += static_cast<char>(c);
-        } else if (c < 0x800) {
-            out += static_cast<char>(0xC0 | (c >> 6));
-            out += static_cast<char>(0x80 | (c & 0x3F));
-        } else if (c < 0x10000) {
-            out += static_cast<char>(0xE0 | (c >> 12));
-            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (c & 0x3F));
-        } else {
-            out += static_cast<char>(0xF0 | (c >> 18));
-            out += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
-            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-            out += static_cast<char>(0x80 | (c & 0x3F));
-        }
-    }
-    return out;
-}
-
-// UTF-8 to UTF-16 into `out` (room for `capacity` TChars, NUL included). Text
-// that is cut falls on a character boundary; invalid bytes become U+FFFD.
-void tchar_from_utf8(const std::string& text, TChar* out, size_t capacity) {
-    size_t n = 0;
-    for (size_t i = 0; i < text.size();) {
-        const uint8_t b = static_cast<uint8_t>(text[i]);
-        uint32_t c = 0xFFFD;
-        size_t len = 1;
-        if (b < 0x80) {
-            c = b;
-        } else if (b >= 0xC2 && b < 0xE0 && i + 1 < text.size() && (text[i + 1] & 0xC0) == 0x80) {
-            c = ((b & 0x1F) << 6) | (text[i + 1] & 0x3F);
-            len = 2;
-        } else if (b >= 0xE0 && b < 0xF0 && i + 2 < text.size() && (text[i + 1] & 0xC0) == 0x80 && (text[i + 2] & 0xC0) == 0x80) {
-            c = ((b & 0x0F) << 12) | ((text[i + 1] & 0x3F) << 6) | (text[i + 2] & 0x3F);
-            len = 3;
-        } else if (b >= 0xF0 && b < 0xF5 && i + 3 < text.size() && (text[i + 1] & 0xC0) == 0x80 && (text[i + 2] & 0xC0) == 0x80 && (text[i + 3] & 0xC0) == 0x80) {
-            c = ((b & 0x07) << 18) | ((text[i + 1] & 0x3F) << 12) | ((text[i + 2] & 0x3F) << 6) | (text[i + 3] & 0x3F);
-            len = 4;
-        }
-        if (c >= 0xD800 && c <= 0xDFFF) c = 0xFFFD;
-        const size_t need = c >= 0x10000 ? 2 : 1;
-        if (n + need + 1 > capacity) break;
-        if (c >= 0x10000) {
-            c -= 0x10000;
-            out[n++] = static_cast<TChar>(0xD800 + (c >> 10));
-            out[n++] = static_cast<TChar>(0xDC00 + (c & 0x3FF));
-        } else {
-            out[n++] = static_cast<TChar>(c);
-        }
-        i += len;
-    }
-    if (capacity > 0) out[n] = 0;
-}
-
 // Component state. The head is unchanged since version 1: int32 version (1),
 // int32 parameter count, one double per parameter, then an int32 bypass flag
 // (absent in states written before bypass). After the flag a state may carry
@@ -635,26 +548,58 @@ constexpr uint32 kStateTrailerTag = 0x4F505342;  // 'OPSB'
 constexpr int32 kStateTrailerVersion = 1;
 constexpr uint32 kMaxStateBlob = 1u << 30;
 
-// Saves the whole state of `instance`: query the size, then copy, and repeat
-// while the plugin says the state grew in between (OP_STATE_TOO_SMALL).
+// The whole state of `instance` (op_shell_calls::save_blob), refused above kMaxStateBlob.
 bool save_blob(void* instance, std::vector<uint8_t>& out) {
-    uint32_t needed = 0;
-    if (!instance || op_shell_save_state(instance, nullptr, 0, &needed) != OP_STATE_TOO_SMALL) return false;
-    for (int attempt = 0; attempt < 64; ++attempt) {
-        if (needed == 0 || needed > kMaxStateBlob) return false;
-        out.assign(needed, 0);
-        const uint32_t result = op_shell_save_state(instance, out.data(), needed, &needed);
-        if (result == OP_STATE_OK) {
-            if (needed == 0 || needed > out.size()) return false;
-            out.resize(needed);
-            return true;
-        }
-        if (result != OP_STATE_TOO_SMALL) return false;
-    }
-    return false;
+    return op_shell_calls::save_blob(instance, out) && out.size() <= kMaxStateBlob;
 }
 
-class Processor final : public AudioEffect, public ITimerCallback {
+// ---- telling the host about changes (ABI 6) -----------------------------------
+// One main-thread timer for every processor in the process, running while any
+// of them has an engine. Each tick asks each engine what changed
+// (Processor::pollChanges). The lock is never held during a poll: a poll leads
+// to restartComponent, in which a host may activate or deactivate processors.
+// A template only because Processor is defined below.
+template <class Polled> class ChangesTimer final : public ITimerCallback {
+public:
+    static ChangesTimer& shared() {
+        static ChangesTimer* timer = new ChangesTimer;  // never destroyed: no order to get wrong at exit
+        return *timer;
+    }
+    void add(Polled* polled) {
+        std::lock_guard<std::mutex> lock(lock_);
+        if (std::find(polled_.begin(), polled_.end(), polled) != polled_.end()) return;
+        polled_.push_back(polled);
+        if (!timer_) timer_ = Timer::create(this, kChangesPollMs);
+    }
+    void remove(Polled* polled) {
+        std::lock_guard<std::mutex> lock(lock_);
+        polled_.erase(std::remove(polled_.begin(), polled_.end(), polled), polled_.end());
+        if (polled_.empty() && timer_) {
+            timer_->stop();
+            timer_->release();
+            timer_ = nullptr;
+        }
+    }
+    void onTimer(Timer*) SMTG_OVERRIDE {
+        // By index: a poll may add or remove processors.
+        for (size_t i = 0;; ++i) {
+            Polled* polled = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(lock_);
+                if (i >= polled_.size()) return;
+                polled = polled_[i];
+            }
+            polled->pollChanges();
+        }
+    }
+
+private:
+    std::mutex lock_;
+    std::vector<Polled*> polled_;
+    Timer* timer_ = nullptr;
+};
+
+class Processor final : public AudioEffect {
 public:
     Processor() {
         OpShellInfo info{};
@@ -678,6 +623,7 @@ public:
     ~Processor() override {
         stopPolling();
         destroy();
+        dropScratch();
     }
     static FUnknown* create(void*) { return static_cast<IAudioProcessor*>(new Processor); }
 
@@ -701,6 +647,8 @@ public:
     // next activation. A host that offers something else gets false and reads
     // the current arrangement back through getBusArrangement.
     tresult PLUGIN_API setBusArrangements(SpeakerArrangement* inputs, int32 inputCount, SpeakerArrangement* outputs, int32 outputCount) SMTG_OVERRIDE {
+        // The bypass buffers are sized for the layout the engine was made with.
+        if (engine_) return kResultFalse;
         const int32 mainIn = hasIn_ ? 1 : 0;
         const int32 fullIn = mainIn + (hasSide_ ? 1 : 0);
         const int32 fullOut = hasOut_ ? 1 : 0;
@@ -746,12 +694,15 @@ public:
             return AudioEffect::setActive(active);
         }
         if (processSetup.maxSamplesPerBlock < 1) return kResultFalse;
-        void* next = op_shell_create(processSetup.sampleRate, static_cast<uint32_t>(processSetup.maxSamplesPerBlock), channels_);
+        // The engine setState made to check a blob already holds that blob; it is
+        // this engine when it was made for the same rate, block size and layout.
+        const EngineSetup setup = engineSetup();
+        void* next = scratch_;
+        const bool adopted = next && scratchSetup_ == setup;
+        scratch_ = nullptr;
+        if (next && !adopted) op_shell_destroy(next);
+        if (!adopted) next = makeEngine(setup);
         if (!next) return kResultFalse;
-        if (layoutIndex_ != kLegacyLayout && !op_shell_set_layout(next, layoutIndex_)) {
-            op_shell_destroy(next);
-            return kResultFalse;
-        }
         offline_ = false;
         keepChunk();
         destroy();
@@ -760,7 +711,7 @@ public:
         // just went away, goes into the new engine, then the values held here.
         // The reset applies them, so the latency the host reads next (after a
         // kLatencyChanged restart, too) is the latency of these values.
-        if (!pendingBlob_.empty()) op_shell_load_state(engine_, pendingBlob_.data(), static_cast<uint32_t>(pendingBlob_.size()));
+        if (!adopted && !pendingBlob_.empty()) op_shell_load_state(engine_, pendingBlob_.data(), static_cast<uint32_t>(pendingBlob_.size()));
         pendingBlob_.clear();
         pushValues(engine_);
         op_shell_reset(engine_);
@@ -778,7 +729,7 @@ public:
             if (!attributes) return kInvalidArgument;
             TrackState next;
             TChar name[256] = {};
-            if (attributes->getString("name", name, sizeof(name)) == kResultOk) next.name = utf8_from_tchar(name);
+            if (attributes->getString("name", name, sizeof(name)) == kResultOk) next.name = utf16_to_utf8(name);
             int64 rgba = 0, flags = 0;
             if (attributes->getInt("rgba", rgba) == kResultOk) next.rgba = static_cast<uint32_t>(rgba);
             if (attributes->getInt("flags", flags) == kResultOk) next.flags = static_cast<uint32_t>(flags);
@@ -830,14 +781,15 @@ public:
             if (engine_) {
                 if (!op_shell_load_state(engine_, blob.data(), static_cast<uint32_t>(blob.size()))) return kResultFalse;
             } else {
-                // No engine to load into: check the blob on a scratch instance
-                // and keep it for the next setActive.
+                // No engine to load into: the blob goes into a scratch engine,
+                // which the next setActive adopts, and is kept for a save.
                 if (!checkBlob(blob)) return kResultFalse;
                 pendingBlob_ = std::move(blob);
             }
         }
         for (uint32_t i = 0; i < count_; ++i) values_[i].store(loaded[i]);
         bypass_.store(bypass != 0);
+        generation_.fetch_add(1, std::memory_order_release);
         if (hasTrailer && engine_) pushValues(engine_);
         return kResultOk;
     }
@@ -905,13 +857,23 @@ public:
             offline_ = offline;
         }
         // Start from the values held at the end of the previous block, then
-        // record the values this block's points leave behind.
+        // record the values this block's points leave behind. The engine already
+        // holds a value unless the main thread wrote the values or the engine
+        // (generation_), or the previous block carried a point for it, which the
+        // engine may not have applied (a block during a state call is skipped).
+        const uint32_t generation = generation_.load(std::memory_order_acquire);
+        const bool all = generation != pushed_;
         for (uint32_t i = 0; i < count_; ++i) {
+            if (!all && !repush_[i]) continue;
             if (!op_shell_set_normalized(engine_, i, static_cast<float>(values_[i].load()))) return kResultFalse;
+            repush_[i] = 0;
         }
+        pushed_ = generation;
         for (uint32_t i = 0; i < nTagged_; ++i) {
             const OpEvent& ev = tagged_[i].ev;
-            if (ev.kind == OP_EVENT_PARAM_NORMALIZED) values_[ev.index].store(ev.value);
+            if (ev.kind != OP_EVENT_PARAM_NORMALIZED) continue;
+            values_[ev.index].store(ev.value);
+            repush_[ev.index] = 1;
         }
         const bool haveTransport = data.processContext != nullptr;
         if (haveTransport) buildTransport(*data.processContext);
@@ -1009,19 +971,52 @@ private:
         present = true;
         return true;
     }
-    // Checks a blob without an engine: a scratch instance loads it, then goes.
-    bool checkBlob(const std::vector<uint8_t>& blob) const {
-        const double rate = processSetup.sampleRate >= 8000.0 ? processSetup.sampleRate : 48000.0;
-        const uint32_t block = processSetup.maxSamplesPerBlock >= 1 ? static_cast<uint32_t>(processSetup.maxSamplesPerBlock) : 512u;
-        void* scratch = op_shell_create(rate, block, channels_);
-        if (!scratch) return false;
-        const bool ok = op_shell_load_state(scratch, blob.data(), static_cast<uint32_t>(blob.size())) != 0;
-        op_shell_destroy(scratch);
-        return ok;
+    // What an engine is made for. A host that has not set the processing up
+    // yet gets 48 kHz and 512 frames.
+    struct EngineSetup {
+        double rate = 0.0;
+        uint32_t block = 0, channels = 0, layout = 0;
+        bool operator==(const EngineSetup& o) const { return rate == o.rate && block == o.block && channels == o.channels && layout == o.layout; }
+    };
+    EngineSetup engineSetup() const {
+        return {processSetup.sampleRate >= 8000.0 ? processSetup.sampleRate : 48000.0,
+                processSetup.maxSamplesPerBlock >= 1 ? static_cast<uint32_t>(processSetup.maxSamplesPerBlock) : 512u, channels_, layoutIndex_};
     }
-    // Hands the engine the parameter values held here.
+    // A new engine on the selected layout, or null.
+    static void* makeEngine(const EngineSetup& setup) {
+        void* engine = op_shell_create(setup.rate, setup.block, setup.channels);
+        if (engine && setup.layout != kLegacyLayout && !op_shell_set_layout(engine, setup.layout)) {
+            op_shell_destroy(engine);
+            engine = nullptr;
+        }
+        return engine;
+    }
+    // Checks a blob without an engine by loading it into a scratch engine made as
+    // setActive would make it. An accepted blob stays there for setActive to
+    // adopt, so a session that restores before it activates builds each engine
+    // once. A refused blob takes the scratch engine with it.
+    bool checkBlob(const std::vector<uint8_t>& blob) {
+        const EngineSetup setup = engineSetup();
+        if (scratch_ && !(scratchSetup_ == setup)) dropScratch();
+        if (!scratch_) scratch_ = makeEngine(setup);
+        scratchSetup_ = setup;
+        if (scratch_ && op_shell_load_state(scratch_, blob.data(), static_cast<uint32_t>(blob.size())) != 0) return true;
+        dropScratch();
+        return false;
+    }
+    void dropScratch() {
+        if (scratch_) op_shell_destroy(scratch_);
+        scratch_ = nullptr;
+    }
+    // Holds pendingBlob_ whenever it exists; only while there is no engine.
+    void* scratch_ = nullptr;
+    EngineSetup scratchSetup_;
+    // Hands the engine the parameter values held here. Main thread: the audio
+    // thread then pushes them all once more, since it may have been between its
+    // own push and its points when this ran.
     void pushValues(void* instance) {
         for (uint32_t i = 0; i < count_; ++i) op_shell_set_normalized(instance, i, static_cast<float>(values_[i].load()));
+        generation_.fetch_add(1, std::memory_order_release);
     }
     // Before the engine goes away, keep the plugin's state for the next one.
     void keepChunk() {
@@ -1442,6 +1437,7 @@ private:
         const size_t block = static_cast<size_t>(std::max(processSetup.maxSamplesPerBlock, 1));
         paramCapacity_ = static_cast<uint32_t>(std::max<size_t>(kMinChangeCapacity, static_cast<size_t>(count_) + 1));
         tagged_.assign(paramCapacity_ + kNoteCapacity, Tagged{});
+        repush_.assign(count_, 0);
         bypassPoints_.assign(paramCapacity_, BypassPoint{0, 0, false});
         dry_.assign(outCh_, std::vector<float>(block, 0.0f));
         line_.assign(outCh_, std::vector<float>());
@@ -1454,11 +1450,10 @@ private:
         for (auto& line : line_) std::fill(line.begin(), line.end(), 0.0f);
         linePos_ = 0;
     }
-    // ---- telling the host about changes (ABI 6) -----------------------------
-    // A main-thread timer runs while an engine exists. Each tick asks the
-    // engine what changed and hands it to the controller, which owns the host's
+public:
+    // A tick of the shared timer (ChangesTimer), main thread: what the engine
+    // says changed goes to the controller, which owns the host's
     // IComponentHandler and calls restartComponent. Never on the audio thread.
-    void onTimer(Timer*) SMTG_OVERRIDE { pollChanges(); }
     void pollChanges() {
         if (!engine_) return;
         const uint32_t flags = op_shell_take_changes(engine_) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
@@ -1469,17 +1464,10 @@ private:
             sendMessage(message);
         }
     }
-    void startPolling() {
-        if (!timer_) timer_ = Timer::create(this, kChangesPollMs);
-    }
-    void stopPolling() {
-        if (timer_) {
-            timer_->stop();
-            timer_->release();
-            timer_ = nullptr;
-        }
-    }
-    Timer* timer_ = nullptr;
+
+private:
+    void startPolling() { ChangesTimer<Processor>::shared().add(this); }
+    void stopPolling() { ChangesTimer<Processor>::shared().remove(this); }
     // Tells the controller which engine an open editor should show. The pointer
     // only means something in this process, and the editor checks it is live.
     void announce(void* engine) {
@@ -1512,6 +1500,8 @@ private:
     uint32_t channels_ = 2;  // engine bus width given to op_shell_create (the legacy path)
     std::unique_ptr<std::atomic<double>[]> values_;
     std::atomic<bool> bypass_{false};
+    // Moves when the main thread writes values_ or the engine's values.
+    std::atomic<uint32_t> generation_{1};
 
     // Layouts as VST3 arrangements, the buses they imply, and the selection.
     
@@ -1539,6 +1529,8 @@ private:
     static constexpr uint32_t kNoteCapacity = OP_MAX_EVENTS;
     std::vector<Tagged> tagged_;
     std::vector<BypassPoint> bypassPoints_;
+    uint32_t pushed_ = 0;          // the generation_ the engine last got every value of
+    std::vector<uint8_t> repush_;  // per parameter: the last block carried a point for it
     uint32_t paramCapacity_ = 0, nTagged_ = 0, nBypass_ = 0, order_ = 0;
     OpEvent chunk_[OP_MAX_EVENTS] = {};
     OpMidiEvent midi_[OP_MAX_MIDI_OUT] = {};
@@ -1667,7 +1659,7 @@ public:
     tresult PLUGIN_API setChannelContextInfos(IAttributeList* list) SMTG_OVERRIDE {
         if (!list) return kInvalidArgument;
         TChar name[256] = {};
-        if (list->getString(ChannelContext::kChannelNameKey, name, sizeof(name)) == kResultTrue) track_.name = utf8_from_tchar(name);
+        if (list->getString(ChannelContext::kChannelNameKey, name, sizeof(name)) == kResultTrue) track_.name = utf16_to_utf8(name);
         int64 color = 0;
         if (list->getInt(ChannelContext::kChannelColorKey, color) == kResultTrue) {
             // ARGB (ChannelContext::GetAlpha and friends) to 0xRRGGBBAA.
@@ -1717,8 +1709,8 @@ public:
             if (!op_shell_param(i, &desc)) return kResultFalse;
             String128 title{};
             String128 unit{};
-            UString(title, 128).fromAscii(desc.name);
-            UString(unit, 128).fromAscii(desc.unit);
+            utf8_to_utf16(desc.name, std::strlen(desc.name), title, 128);
+            utf8_to_utf16(desc.unit, std::strlen(desc.unit), unit, 128);
             int32 steps = desc.steps > 1 ? static_cast<int32>(desc.steps - 1) : 0;
             int32 flags = (desc.flags & OP_PARAM_AUTOMATABLE) ? ParameterInfo::kCanAutomate : 0;
             auto* parameter = new ShellParameter(title, unit, ids_.id(i), i, desc.default_normalized, steps, flags);
@@ -1884,7 +1876,7 @@ private:
             IAttributeList* attributes = message->getAttributes();
             if (!track_.name.empty()) {
                 TChar name[256] = {};
-                tchar_from_utf8(track_.name, name, 256);
+                utf8_to_utf16(track_.name.data(), track_.name.size(), name, 256);
                 attributes->setString("name", name);
             }
             attributes->setInt("rgba", static_cast<int64>(track_.rgba));

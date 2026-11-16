@@ -291,9 +291,12 @@ int main(int argc, char** argv) {
 
         Unit second(plainB);
         CHECK(sameComponent(second.desc, first.desc));
-        // The positional state of three parameters is not a state of four: refused whole.
-        CHECK(second.load(saved) != noErr);
-        CHECK(second.get(second.idOf("Level")) == 1.0f && second.get(second.idOf("Invert")) == 0.0f);
+        // The positional state of three parameters loads as the first three of four, the rule
+        // for a table that grew at its end (docs/SHELL.md, Plugin state). This table was
+        // reordered too, so each value lands on the parameter now at its position (offset's on
+        // Drive, invert's on Offset), and Level, which the state does not reach, keeps its default.
+        CHECK(second.load(saved) == noErr);
+        CHECK(second.get(second.idOf("Drive")) == 0.25f && second.get(second.idOf("Offset")) == 1.0f && second.get(second.idOf("Level")) == 1.0f);
         // The lane's ids are positions: 0 was level and is invert now, 1 was offset and is drive.
         CHECK(second.idOf("Invert") == level && second.idOf("Drive") == offset);
         const std::vector<std::pair<AudioUnitParameterID, float>> byName = {{second.idOf("Level"), 0.5f}, {second.idOf("Offset"), 0.25f}, {second.idOf("Invert"), 1.0f}, {second.idOf("Drive"), 0.0f}};
@@ -310,7 +313,7 @@ int main(int argc, char** argv) {
         CHECK(third.get(third.idOf("Invert")) == 0.5f && third.get(third.idOf("Level")) == 1.0f);
         CFRelease(old);
         CFRelease(saved);
-        std::printf("AU identity, negative control: without pins the reordered build refuses the saved state, a preset of parameter values lands on other parameters, and the lane moves other parameters (the audio differs); addressed by name the same lane is right\n");
+        std::printf("AU identity, negative control: without pins the reordered build takes the saved state by position, on other parameters, as a preset of parameter values does, and the lane moves other parameters (the audio differs); addressed by name the same lane is right\n");
     }
     std::printf("AU identity proof passed\n");
     return 0;

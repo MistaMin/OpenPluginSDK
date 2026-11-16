@@ -375,8 +375,11 @@ int main(int argc, char** argv) {
 
         Plug second(argv[4]);
         CHECK(second.processorId == project.classId);
-        // Three positional values are not a state of four parameters.
-        CHECK(!second.load(project.state));
+        // Three positional values load as the first three of four, the rule for a table that
+        // grew at its end (docs/SHELL.md, VST3 state). This table was reordered too, so each
+        // value lands on the parameter now at its position: offset's on Drive, invert's on Offset.
+        CHECK(second.load(project.state));
+        CHECK(second.shown(second.idOf("Drive")) == 0.625 && second.shown(second.idOf("Offset")) == 1.0);
         // The lane's ids are positions: 0 was level and is invert now, 1 was offset and is drive.
         CHECK(second.idOf("Invert") == level && second.idOf("Drive") == offset);
         CHECK(second.render(0.5f, project.lane) != heard);
@@ -387,7 +390,7 @@ int main(int argc, char** argv) {
         // ...and addressed by name it is right: only the ids were wrong.
         second.set(byName);
         CHECK(second.render(0.5f, lane(second.idOf("Level"), second.idOf("Offset"))) == heard);
-        std::printf("VST3 identity, negative control: without pins the reordered build refuses the saved state and plays the lane on other parameters (the audio differs); addressed by name the same lane is right\n");
+        std::printf("VST3 identity, negative control: without pins the reordered build takes the saved values by position, on other parameters, and plays the lane on other parameters (the audio differs); addressed by name the same lane is right\n");
     }
     std::printf("VST3 identity proof passed\n");
     return 0;

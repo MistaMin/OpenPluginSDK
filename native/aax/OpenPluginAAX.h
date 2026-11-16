@@ -124,6 +124,14 @@ struct ProcessState {
     // Block scratch, sized in prepare(): the events of the whole AAX buffer and of one piece of it.
     std::vector<OpEvent> events;
     std::vector<OpEvent> pieceEvents;
+    // The value the engine holds for each parameter, as far as the algorithm knows, so a
+    // block asks the engine only about what may have moved: `check` marks a value sent as
+    // an event in the last block (a block during a state call is skipped, events and all),
+    // `resync` that the main thread wrote the engine's values (engineWritten).
+    std::vector<float> held;
+    std::vector<uint8_t> check;
+    std::atomic<bool> resync{true};
+    void engineWritten() { resync.store(true, std::memory_order_release); }
     ProcessState() = default;
     ProcessState(const ProcessState&) = delete;
     ProcessState& operator=(const ProcessState&) = delete;

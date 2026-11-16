@@ -18,25 +18,35 @@ struct Table {
     uint32_t hash = 0;
     float min[kMaxParams] = {};
     float max[kMaxParams] = {};
+    float def[kMaxParams] = {};
     bool valid = false;
 };
+// The layout hash of a table that is the first `count` parameters of this one.
+uint32_t layoutHash(uint32_t count) {
+    uint32_t hash = 2166136261u;
+    const auto mix = [&](uint8_t byte) { hash = (hash ^ byte) * 16777619u; };
+    for (int i = 0; i < 4; ++i) mix(static_cast<uint8_t>(count >> (8 * i)));
+    for (uint32_t i = 0; i < count; ++i) {
+        OpParamDesc desc{};
+        op_shell_param(i, &desc);
+        for (const char* c = desc.id; *c; ++c) mix(static_cast<uint8_t>(*c));
+        mix(0);
+    }
+    return hash;
+}
 Table readTable() {
     Table table;
     OpShellInfo info{};
     if (!op_shell_info(&info) || info.abi != OP_SHELL_ABI || info.param_count == 0 || info.param_count > kMaxParams) return table;
-    uint32_t hash = 2166136261u;
-    const auto mix = [&](uint8_t byte) { hash = (hash ^ byte) * 16777619u; };
-    for (int i = 0; i < 4; ++i) mix(static_cast<uint8_t>(info.param_count >> (8 * i)));
     for (uint32_t i = 0; i < info.param_count; ++i) {
         OpParamDesc desc{};
         if (!op_shell_param(i, &desc)) return table;
-        for (const char* c = desc.id; *c; ++c) mix(static_cast<uint8_t>(*c));
-        mix(0);
         table.min[i] = static_cast<float>(desc.min);
         table.max[i] = static_cast<float>(desc.max);
+        table.def[i] = static_cast<float>(desc.default_plain);
     }
     table.count = info.param_count;
-    table.hash = hash;
+    table.hash = layoutHash(info.param_count);
     table.valid = true;
     return table;
 }
@@ -99,9 +109,12 @@ Status decode(const uint8_t* data, size_t size, Values& out) {
     if (!table.valid) return Status::badLayout;
     if (version != kVersion1 && version != kVersion) return Status::badVersion;
     const uint32_t count = get32(data + 8);
+    const bool keyed = (op_shell_identity() & OP_IDENTITY_KEYED_STATE) != 0;
+    // An older build of a plugin without pins, whose table was the start of this one.
+    const bool older = !keyed && count > 0 && count < table.count && get32(data + 12) == layoutHash(count);
     // Another parameter layout: readable only through a blob that names its values.
-    const bool otherLayout = count != table.count || get32(data + 12) != table.hash;
-    if (otherLayout && (version != kVersion || count > kMaxParams || !(op_shell_identity() & OP_IDENTITY_KEYED_STATE))) return Status::badLayout;
+    const bool otherLayout = !older && (count != table.count || get32(data + 12) != table.hash);
+    if (otherLayout && (version != kVersion || count > kMaxParams || !keyed)) return Status::badLayout;
     const size_t fixed = kHeaderBytes + static_cast<size_t>(count) * sizeof(float);
     size_t blobSize = 0;
     if (version == kVersion1) {
@@ -125,6 +138,7 @@ Status decode(const uint8_t* data, size_t size, Values& out) {
         if (!std::isfinite(value) || value < table.min[i] || value > table.max[i]) return Status::badValue;
         next.plain[i] = value;
     }
+    for (uint32_t i = count; older && i < table.count; ++i) next.plain[i] = table.def[i];
     if (version == kVersion) {
         next.blob = data + fixed + sizeof(uint32_t);
         next.blobSize = blobSize;

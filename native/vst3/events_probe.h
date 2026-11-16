@@ -17,5 +17,8 @@ struct EventsProbe {
     uint32_t frames;
     uint32_t blocks;         // blocks processed
     uint32_t layout;         // selected layout
+    // Counted over the whole process, and written when the state is saved:
+    uint32_t creates;        // op_shell_create calls
+    uint32_t param_sets;     // op_shell_set_plain and op_shell_set_normalized calls
 };
 constexpr uint32_t kEventsProbeMagic = 0x45565054;  // 'EVPT'

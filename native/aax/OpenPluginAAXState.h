@@ -23,7 +23,11 @@
 // A version 2 chunk whose count or layout hash is not this build's is then read
 // through its blob alone (Values::byBlob): the positional values are skipped,
 // the blob is loaded, and the parameters are read back from the engine. Without
-// pins such a chunk is refused, as before.
+// pins such a chunk is refused, with one exception: a chunk with fewer parameters,
+// whose layout hash is that of the first `count` parameters of this build's table,
+// comes from an older build that ended there. Its values load in table order and
+// the parameters it does not have take their defaults; its blob is the positional
+// one of that build, which op_shell_load_state reads the same way.
 #pragma once
 #include "OpenPluginAAX.h"
 #include <cstddef>
