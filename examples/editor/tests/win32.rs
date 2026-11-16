@@ -15,7 +15,8 @@
 //! - CLAP: `clap.gui` with the `win32` API creates, scales, sizes (in pixels),
 //!   parents, shows, hides and destroys the view; the view's timer polls the
 //!   plane; a click asks the host to flush. A floating editor gets a window of
-//!   its own, and closing it tells the host.
+//!   its own, and closing it tells the host. A right click asks the host for its
+//!   parameter menu in window pixels (embedded) or screen pixels (floating).
 //!
 //! Screenshots go to `OP_SHOT_DIR` when it is set (what the window drew, and,
 //! in a logged-in desktop session, what the screen shows). The process may
@@ -536,9 +537,27 @@ mod win {
         false
     }
     static HOST_GUI: clap_host_gui = clap_host_gui { resize_hints_changed: None, request_resize: Some(host_gui_resize), request_show: None, request_hide: None, closed: Some(host_gui_closed) };
+    thread_local! {
+        /// The host's parameter menus asked for: parameter, x, y.
+        static POPUPS: RefCell<Vec<(u32, i32, i32)>> = const { RefCell::new(Vec::new()) };
+    }
+    unsafe extern "C" fn host_can_popup(_h: *const clap_host) -> bool {
+        true
+    }
+    unsafe extern "C" fn host_popup(_h: *const clap_host, target: *const clap_context_menu_target, _screen: i32, x: i32, y: i32) -> bool {
+        unsafe {
+            assert_eq!((*target).kind, CONTEXT_MENU_TARGET_KIND_PARAM);
+            POPUPS.with(|p| p.borrow_mut().push(((*target).id, x, y)));
+        }
+        true
+    }
+    static HOST_MENU: clap_host_context_menu = clap_host_context_menu { populate: None, perform: None, can_popup: Some(host_can_popup), popup: Some(host_popup) };
     unsafe extern "C" fn host_extension(_h: *const clap_host, id: *const c_char) -> *const c_void {
         unsafe {
             let id = CStr::from_ptr(id).to_bytes_with_nul();
+            if id == EXT_CONTEXT_MENU {
+                return &HOST_MENU as *const clap_host_context_menu as *const c_void;
+            }
             if id == EXT_PARAMS {
                 &HOST_PARAMS as *const clap_host_params as *const c_void
             } else if id == EXT_GUI {
@@ -669,6 +688,17 @@ mod win {
             save("clap_150_warm.bmp", &shot(view));
             save_screen("screen_clap_150.bmp", parent);
 
+            // A right click on the knob asks the host for its menu on that parameter, at
+            // the click in pixels of the plugin's window (the editor is embedded).
+            POPUPS.with(|p| p.borrow_mut().clear());
+            let (kx, ky) = ((KNOB.0 + KNOB.2 * 0.5) * 1.5, (KNOB.1 + KNOB.3 * 0.5) * 1.5);
+            testing::send(view, 0x0204, 2, testing::mouse_lparam(kx as i32, ky as i32));
+            let popups = POPUPS.with(|p| p.borrow().clone());
+            assert_eq!(popups.len(), 1, "the host's menu was asked for once");
+            let (param, px, py) = popups[0];
+            assert_eq!(param, 0);
+            assert!((px - kx as i32).abs() <= 2 && (py - ky as i32).abs() <= 2, "window pixels: {px}, {py} for a click at {kx}, {ky}");
+
             // The host sizes the editor in pixels; the editor follows in points.
             assert!(gui.set_size.unwrap()(plugin, LARGE_SIZE.0 * 3 / 2, LARGE_SIZE.1 * 3 / 2));
             assert_eq!(testing::client_size(view), (LARGE_SIZE.0 * 3 / 2, LARGE_SIZE.1 * 3 / 2));
@@ -722,6 +752,20 @@ mod win {
             assert!(meter_is_upright(&drawn, (WIDTH, HEIGHT)));
             save("clap_floating.bmp", &drawn);
             save_screen("screen_clap_floating.bmp", top);
+
+            // A floating editor has no window of the host's around it: the host's menu
+            // is asked for at the click on the screen.
+            POPUPS.with(|p| p.borrow_mut().clear());
+            let scale = w as f32 / WIDTH as f32;
+            let (kx, ky) = (((KNOB.0 + KNOB.2 * 0.5) * scale) as i32, ((KNOB.1 + KNOB.3 * 0.5) * scale) as i32);
+            testing::send(view, 0x0204, 2, testing::mouse_lparam(kx, ky));
+            let popups = POPUPS.with(|p| p.borrow().clone());
+            assert_eq!(popups.len(), 1);
+            let (ox, oy) = testing::client_origin(view);
+            let (param, px, py) = popups[0];
+            assert_eq!(param, 0);
+            assert!((px - (ox + kx)).abs() <= 2 && (py - (oy + ky)).abs() <= 2, "screen pixels: {px}, {py}; the view is at {ox}, {oy}, the click at {kx}, {ky}");
+            assert!((ox, oy) != (0, 0), "the window is not at the screen's corner");
 
             // The user closes the window: the host hears, and decides.
             let before = CLOSED.load(Ordering::Relaxed);

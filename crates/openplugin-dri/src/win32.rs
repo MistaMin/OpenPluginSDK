@@ -1729,6 +1729,30 @@ impl EditorView {
         to_points((width, height), self.st().scale)
     }
 
+    /// A point of the editor (points, origin top left) in the window's client
+    /// pixels. Before the view has a window: the point at the current scale.
+    pub fn to_client(&self, x: f32, y: f32) -> (i32, i32) {
+        let st = self.st();
+        if st.hwnd.is_null() {
+            return ((x * st.scale).round() as i32, (y * st.scale).round() as i32);
+        }
+        let r = unsafe { view_space(st, &DamageRect::new(x, y, 0.0, 0.0)) };
+        (r.left, r.top)
+    }
+
+    /// A point of the editor in screen pixels (where a host pops up a menu
+    /// for a floating editor). `None` before the view has a window.
+    pub fn to_screen(&self, x: f32, y: f32) -> Option<(i32, i32)> {
+        let hwnd = self.st().hwnd;
+        if hwnd.is_null() {
+            return None;
+        }
+        let (cx, cy) = self.to_client(x, y);
+        let mut pt = Point { x: cx, y: cy };
+        unsafe { ClientToScreen(hwnd, &mut pt) };
+        Some((pt.x, pt.y))
+    }
+
     /// Move the editor and the window to `width` x `height` points, brought
     /// into the editor's range. Returns the size the editor takes. If the
     /// editor is inside one of its own calls, the change is made when that
@@ -2285,6 +2309,16 @@ pub mod testing {
             ReleaseDC(null_mut(), screen);
             out
         }
+    }
+
+    /// Where the top left of the window's client area is on the screen, in pixels.
+    ///
+    /// # Safety
+    /// `hwnd` is a window.
+    pub unsafe fn client_origin(hwnd: Hwnd) -> (i32, i32) {
+        let mut pt = Point::default();
+        unsafe { ClientToScreen(hwnd, &mut pt) };
+        (pt.x, pt.y)
     }
 
     /// Put a window at a screen position, above the others.
