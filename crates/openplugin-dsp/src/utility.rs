@@ -113,6 +113,7 @@ pub fn stereo_width_in_place(left: &mut [f32], right: &mut [f32], width: f32) {
 
 /// How pan position becomes channel gains. See the module documentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PanLaw {
     /// Amplitude linear, centre -6.02 dB.
     Linear,
@@ -225,7 +226,7 @@ impl Gain {
     /// Next linear gain.
     #[inline]
     pub fn next_gain(&mut self) -> f32 {
-        self.smoother.next(self.target)
+        self.smoother.next_value(self.target)
     }
 
     /// Apply to a buffer in place.
@@ -273,7 +274,7 @@ impl Panner {
     /// Mono in, stereo out (`out_l`, `out_r` get the panned copies).
     pub fn pan_mono(&mut self, input: &[f32], out_l: &mut [f32], out_r: &mut [f32]) {
         for ((x, l), r) in input.iter().zip(out_l.iter_mut()).zip(out_r.iter_mut()) {
-            let (gl, gr) = self.law.gains(self.smoother.next(self.target));
+            let (gl, gr) = self.law.gains(self.smoother.next_value(self.target));
             *l = x * gl;
             *r = x * gr;
         }
@@ -282,7 +283,7 @@ impl Panner {
     /// Balance a stereo pair in place.
     pub fn balance(&mut self, left: &mut [f32], right: &mut [f32]) {
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
-            let (gl, gr) = balance_gains(self.law, self.smoother.next(self.target));
+            let (gl, gr) = balance_gains(self.law, self.smoother.next_value(self.target));
             *l *= gl;
             *r *= gr;
         }
@@ -296,6 +297,18 @@ impl Panner {
 /// around every audio-thread call into a plugin, unless the plugin opts out
 /// with `Plugin::flush_denormals`.
 pub use openplugin_core::DenormalGuard;
+
+/// `previous + (next - previous) * position`. `position` outside 0..1 is clamped.
+pub fn lerp(previous: f32, next: f32, position: f32) -> f32 {
+    let t = if position.is_finite() {
+        position.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let a = if previous.is_finite() { previous } else { 0.0 };
+    let b = if next.is_finite() { next } else { 0.0 };
+    a + (b - a) * t
+}
 
 #[cfg(test)]
 mod tests {

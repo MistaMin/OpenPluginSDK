@@ -19,18 +19,14 @@ static PARAMS: [ParamInfo; 4] = [
     ParamInfo::new("listen", "Listen to removed", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "test.denoise",
-    name: "Test Denoiser",
-    vendor: "test",
-    url: "",
-    email: "",
-    version: "0",
-    category: Category::Other,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "test.denoise",
+    "Test Denoiser",
+    "test",
+    "0",
+    Category::Other,
+    &PARAMS,
+);
 
 struct Denoiser {
     repair: SpectralRepair,
@@ -109,7 +105,7 @@ impl Plugin for Denoiser {
     fn load_state(&mut self, data: &[u8]) -> bool {
         self.repair.load_profile(data).is_ok()
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for (ch, buf) in io.iter_mut().enumerate().take(self.channels) {
             let n = frames.min(buf.len());
             self.repair.process_in_place(ch, &mut buf[..n]);

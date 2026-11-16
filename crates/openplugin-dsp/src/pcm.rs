@@ -38,18 +38,6 @@ pub fn f32_to_i24(sample: f32) -> i32 {
     scaled.clamp(-8_388_608.0, 8_388_607.0) as i32
 }
 
-/// `previous + (next - previous) * position`. `position` outside 0..1 is clamped.
-pub fn lerp(previous: f32, next: f32, position: f32) -> f32 {
-    let t = if position.is_finite() {
-        position.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let a = finite(previous);
-    let b = finite(next);
-    a + (b - a) * t
-}
-
 fn finite(value: f32) -> f32 {
     if value.is_finite() {
         value
@@ -67,7 +55,6 @@ mod tests {
         assert_eq!(i16_to_f32(0), 0.0);
         assert_eq!(f32_to_i16(0.0), 0);
         assert_eq!(f32_to_i16(1.0), i16::MAX);
-        assert!((lerp(0.0, 1.0, 0.25) - 0.25).abs() < 1e-6);
         assert!(i32_to_f32(0).abs() < 1e-8);
     }
 }

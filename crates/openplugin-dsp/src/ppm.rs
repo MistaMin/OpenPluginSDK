@@ -137,6 +137,7 @@ use std::f64::consts::PI;
 
 /// Which PPM.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PpmType {
     /// EBU, IEC 60268-10 Type IIb.
     Ebu,

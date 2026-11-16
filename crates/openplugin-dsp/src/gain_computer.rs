@@ -18,6 +18,7 @@ use crate::rate::effective_rate;
 
 /// What the gain computer does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DynamicsMode {
     /// Downward compression above the threshold. A ratio of infinity limits.
     Compressor,
@@ -142,6 +143,7 @@ impl GainComputer {
 
 /// How the channels' detector signals combine into one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Link {
     /// The largest rectified channel (the usual choice for stereo and surround).
     Max,
@@ -151,6 +153,7 @@ pub enum Link {
 
 /// Where the attack/release ballistics act.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Smoothing {
     /// On the detected level, before the gain computer (the feed-forward
     /// level-detector form; what [`crate::Compressor`] does).

@@ -27,6 +27,7 @@
 
 /// A K-system scale.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KScale {
     K12,
     K14,
@@ -46,6 +47,7 @@ impl KScale {
 
 /// The colour band of a K reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KZone {
     Green,
     Yellow,

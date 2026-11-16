@@ -1,6 +1,6 @@
 //! Linear-phase 1x / 2x / 4x oversampling.
 //!
-//! Water Channel's up/down path: a Blackman-windowed sinc at the original
+//! The up/down path is a Blackman-windowed sinc at the original
 //! Nyquist, prepared outside the callback. At 2x and 4x the combined latency
 //! is 64 host samples. At 1x it is 0. A dry or bypass path has to delay by
 //! [`LinearPhaseOversampler::latency_samples`] or the mix will comb-filter.
@@ -11,6 +11,7 @@
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OversampleError {
     Factor,
     Channels,

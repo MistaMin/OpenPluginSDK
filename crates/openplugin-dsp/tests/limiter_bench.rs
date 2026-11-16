@@ -13,18 +13,7 @@ use openplugin_testing::bench::{bench, BenchOptions};
 static PARAMS: [ParamInfo; 0] = [];
 
 const fn info(name: &'static str) -> PluginInfo {
-    PluginInfo {
-        id: "com.opengrid.bench.limiter",
-        name,
-        vendor: "OpenGrid",
-        url: "",
-        email: "",
-        version: "0",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    }
+    PluginInfo::new("com.opengrid.bench.limiter", name, "OpenGrid", "0", Category::Utility, &PARAMS)
 }
 
 static LIMITER_INFO: PluginInfo = info("Limiter (true peak)");
@@ -64,7 +53,7 @@ impl Plugin for LimiterBench {
     fn param(&self, _id: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let mut parts: [&mut [f32]; 8] = Default::default();
         let n = io.len().min(8);
         for (slot, ch) in parts.iter_mut().zip(io.iter_mut()) {
@@ -95,7 +84,7 @@ impl Plugin for ClipperBench {
     fn param(&self, _id: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let mut parts: [&mut [f32]; 8] = Default::default();
         let n = io.len().min(8);
         for (slot, ch) in parts.iter_mut().zip(io.iter_mut()) {

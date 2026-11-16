@@ -38,6 +38,7 @@ use crate::svf::{Svf, SvfMode};
 
 /// Which signal the detector listens to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeEssDetect {
     BandPass,
     HighPass,
@@ -45,6 +46,7 @@ pub enum DeEssDetect {
 
 /// Where the reduction acts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeEssMode {
     WideBand,
     SplitBand,

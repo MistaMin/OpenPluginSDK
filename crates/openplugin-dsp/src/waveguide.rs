@@ -332,6 +332,7 @@ impl WaveguideString {
 
 /// How a bore ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BoreEnd {
     /// Pressure reflection `+1` (a wall).
     Closed,

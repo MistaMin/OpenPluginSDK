@@ -113,6 +113,7 @@ impl ResidualAdaa1 {
 
 /// Numerically stable `ln(cosh(x))` for ADAA calculations.
 #[inline]
+#[doc(hidden)]
 pub fn log_cosh(x: f32) -> f32 {
     let ax = x.abs();
     if ax < 1e-4 {

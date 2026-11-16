@@ -64,6 +64,7 @@ use std::f64::consts::PI;
 
 /// Why a design was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FirError {
     /// Fewer than 3 taps, or a size too small for the request.
     TooShort,
@@ -97,6 +98,7 @@ impl std::error::Error for FirError {}
 /// The response shape of a windowed-sinc design. Frequencies are in Hz and are
 /// the -6 dB points (the middle of the transition).
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum FirKind {
     LowPass { cutoff_hz: f64 },
     HighPass { cutoff_hz: f64 },

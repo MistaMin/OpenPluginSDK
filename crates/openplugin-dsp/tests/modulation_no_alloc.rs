@@ -98,7 +98,10 @@ fn modulation_blocks_do_not_allocate() {
     let mut chorus = Chorus::new(2, 48_000.0);
     let mut flanger = Flanger::new(2, 48_000.0);
     let mut phaser = Phaser::new(2, 48_000.0);
-    let transport = Transport { playing: true, tempo: 133.0, quarter_notes: 17.25, ..Transport::default() };
+    let mut transport = Transport::default();
+    transport.playing = true;
+    transport.tempo = 133.0;
+    transport.quarter_notes = 17.25;
     let mut buf = vec![0.0f32; 256];
     for (i, s) in buf.iter_mut().enumerate() {
         *s = (i as f32 * 0.1).sin();

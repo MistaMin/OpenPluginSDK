@@ -78,6 +78,7 @@ pub(crate) fn finite_out(y: f64) -> Option<f32> {
 /// quality, `A = 10^(gain_db / 40)`. Transfer functions use `s` normalised to
 /// `2 pi f`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SvfMode {
     /// `1 / (s^2 + s/Q + 1)`.
     LowPass,

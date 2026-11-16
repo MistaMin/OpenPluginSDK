@@ -15,6 +15,7 @@
 //! modulation to the voices whose note it names ([`NoteRef::matches`]): by
 //! note id when the host gave one, else by port, channel and key with `-1`
 //! as a wildcard.
+#![allow(deprecated)] // this module defines the deprecated items
 
 use openplugin_core::{Expression, NoteRef};
 
@@ -174,6 +175,7 @@ impl NoteExpressions {
 
 /// One voice over a mono slice the caller already owns.
 #[derive(Clone, Copy, Debug)]
+#[deprecated(since = "1.0.0", note = "use `SincPlayer`, which resamples without aliasing")]
 pub struct SampleVoice {
     // f64: an f32 playhead drifts out of tune within seconds and stops at 2^24.
     cursor: f64,
@@ -282,6 +284,7 @@ impl Slot {
 /// Fixed polyphony. `note_on` reuses a free slot or the oldest one.
 /// `N` is chosen when the bank is built, so the audio thread does not grow it.
 #[derive(Clone, Debug)]
+#[deprecated(since = "1.0.0", note = "use `VoiceAllocator`")]
 pub struct Polyphony<const N: usize> {
     slots: [Slot; N],
     attack: u32,

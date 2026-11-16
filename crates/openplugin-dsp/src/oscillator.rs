@@ -3,8 +3,11 @@
 //! The MIT `synth` crate steps a phase accumulator and reads sine, saw, and
 //! square at that phase. Noise and the allocating bezier envelope stay there.
 //! `next` only adds `hz / sample_rate` and wraps.
+#![allow(deprecated)] // this module defines the deprecated items
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+#[deprecated(since = "1.0.0", note = "not band-limited; use `BlWave` with `BandlimitedOsc`")]
 pub enum Wave {
     Sine,
     Saw,
@@ -12,6 +15,7 @@ pub enum Wave {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[deprecated(since = "1.0.0", note = "saw and square alias; use `BandlimitedOsc` or `WavetableOsc`")]
 pub struct Oscillator {
     phase: f32,
     wave: Wave,

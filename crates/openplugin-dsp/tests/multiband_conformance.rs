@@ -20,18 +20,14 @@ static PARAMS: [ParamInfo; 6] = [
     ParamInfo::new("bypass_high", "Bypass high", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "test.multiband",
-    name: "Test Multiband",
-    vendor: "test",
-    url: "",
-    email: "",
-    version: "0",
-    category: Category::Dynamics,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "test.multiband",
+    "Test Multiband",
+    "test",
+    "0",
+    Category::Dynamics,
+    &PARAMS,
+);
 
 struct Multiband {
     mb: MultibandCompressor,
@@ -100,7 +96,7 @@ impl Plugin for Multiband {
     fn state_is_parameters_only(&self) -> bool {
         true
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let mut chans: [&mut [f32]; MAX_CH] = Default::default();
         let n = io.len().min(MAX_CH);
         for (slot, buf) in chans.iter_mut().zip(io.iter_mut()).take(n) {

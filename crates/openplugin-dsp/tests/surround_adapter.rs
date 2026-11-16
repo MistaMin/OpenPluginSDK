@@ -22,18 +22,14 @@ static PARAMS: [ParamInfo; 3] = [
     ParamInfo::new("ratio", "Ratio", 1.0, 20.0, 4.0, Unit::Ratio),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "test.gain-comp",
-    name: "Test Gain Comp",
-    vendor: "test",
-    url: "",
-    email: "",
-    version: "0",
-    category: Category::Dynamics,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "test.gain-comp",
+    "Test Gain Comp",
+    "test",
+    "0",
+    Category::Dynamics,
+    &PARAMS,
+);
 
 const MONO: IoConfig = IoConfig { input: SpeakerLayout::Mono, output: SpeakerLayout::Mono, sidechain: None };
 static STEREO_ONLY: &[IoConfig] = &[IoConfig::STEREO];
@@ -93,8 +89,10 @@ impl Plugin for Comp {
     fn tail(&self) -> Tail {
         Tail::Finite(100)
     }
-    fn gain_reduction_db(&self) -> f32 {
-        self.reduction
+    fn meters(&self) -> openplugin_core::MeterFrame {
+        let mut frame = openplugin_core::MeterFrame::SILENT;
+        frame.reduction_db = self.reduction;
+        frame
     }
     fn state_is_parameters_only(&self) -> bool {
         false
@@ -111,7 +109,7 @@ impl Plugin for Comp {
         }
         true
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let [gain, thresh, ratio] = self.values;
         for i in 0..frames {
             let mut peak = 0.0f32;
@@ -191,7 +189,7 @@ where
         let n = BLOCKS[k % BLOCKS.len()].min(total - start);
         k += 1;
         let mut block: Vec<Vec<f32>> = io.iter().map(|c| c[start..start + n].to_vec()).collect();
-        adapter.process(&mut block, n);
+        adapter.process(&mut openplugin_core::ChannelsMut::new(&mut block), n);
         for (c, b) in io.iter_mut().zip(&block) {
             c[start..start + n].copy_from_slice(b);
         }
@@ -266,7 +264,7 @@ fn run_by_hand(
                     _ if mono_engines => vec![io[chans[0]][at..at + m].to_vec()],
                     _ => vec![io[chans[0]][at..at + m].to_vec(); 2],
                 };
-                p.process(&mut scratch, m);
+                p.process(&mut openplugin_core::ChannelsMut::new(&mut scratch), m);
                 for (j, &c) in chans.iter().enumerate() {
                     io[c][at..at + m].copy_from_slice(&scratch[j]);
                 }
@@ -344,7 +342,7 @@ fn run_by_hand_stereo(p: &mut Comp, input: &[Vec<f32>]) -> Vec<Vec<f32>> {
         let n = BLOCKS[k % BLOCKS.len()].min(io[0].len() - start);
         k += 1;
         let mut block: Vec<Vec<f32>> = io.iter().map(|c| c[start..start + n].to_vec()).collect();
-        p.process(&mut block, n);
+        p.process(&mut openplugin_core::ChannelsMut::new(&mut block), n);
         for (c, b) in io.iter_mut().zip(&block) {
             c[start..start + n].copy_from_slice(b);
         }
@@ -372,6 +370,7 @@ fn independent_engines_match_hand_run_pairs_bit_exact() {
                     }
                     LfeMode::Mute => assert!(got[l].iter().all(|&v| v == 0.0)),
                     LfeMode::Process => assert_ne!(got[l], input[l]),
+                    _ => unimplemented!(),
                 }
             }
         }
@@ -436,7 +435,7 @@ fn linked_gain_reduction_is_the_same_on_every_channel() {
         if let Some(l) = lfe {
             assert!((gain(l) - 1.0).abs() < 1e-6);
         }
-        assert!(linked.gain_reduction_db() > 10.0);
+        assert!(linked.meters().reduction_db > 10.0);
 
         // Independent engines leave the quiet channels alone.
         let mut free = SurroundAdapter::new(comp);
@@ -462,7 +461,7 @@ fn parameters_state_and_reads_cover_every_engine() {
     assert_eq!(a.param("thresh"), Some(-50.0));
     let g = 10f32.powf(-6.0 / 20.0);
     let mut io: Vec<Vec<f32>> = (0..6).map(|_| vec![0.001; 64]).collect();
-    a.process(&mut io, 64);
+    a.process(&mut openplugin_core::ChannelsMut::new(&mut io), 64);
     for (c, ch) in io.iter().enumerate() {
         assert!((ch[63] / 0.001 - g).abs() < 1e-5, "channel {c}");
     }
@@ -476,7 +475,7 @@ fn parameters_state_and_reads_cover_every_engine() {
     assert_eq!(b.tail(), Tail::Finite(100));
     assert!(!b.load_state(&[0, 1]));
     let mut io: Vec<Vec<f32>> = (0..6).map(|_| vec![0.001; 64]).collect();
-    b.process(&mut io, 64);
+    b.process(&mut openplugin_core::ChannelsMut::new(&mut io), 64);
     for ch in &io {
         assert!((ch[63] / 0.001 - g).abs() < 1e-5);
     }
@@ -484,7 +483,7 @@ fn parameters_state_and_reads_cover_every_engine() {
     b.set_layout(IoConfig::STEREO);
     b.prepare_layout(RATE, MAX_BLOCK, IoConfig::STEREO);
     let mut io: Vec<Vec<f32>> = (0..2).map(|_| vec![0.001; 64]).collect();
-    b.process(&mut io, 64);
+    b.process(&mut openplugin_core::ChannelsMut::new(&mut io), 64);
     assert!((io[1][63] / 0.001 - g).abs() < 1e-5);
 }
 
@@ -531,7 +530,7 @@ fn fold_settings_change_the_downmix() {
         .fold_settings(MixSettings { centre_db: 0.0, ..MixSettings::default() });
     adapted(&mut a, config, &[("thresh", 0.0)]);
     let mut io = input.clone();
-    a.process(&mut io, 64);
+    a.process(&mut openplugin_core::ChannelsMut::new(&mut io), 64);
     assert!((io[0][63] - 0.01).abs() < 1e-6 && (io[1][63] - 0.01).abs() < 1e-6);
 }
 
@@ -573,9 +572,9 @@ fn process_does_not_allocate() {
         let mut io = signal(n, 1000);
         let (_, counts) = alloc::measure(|| {
             for _ in 0..20 {
-                a.process(&mut io, 1000);
+                a.process(&mut openplugin_core::ChannelsMut::new(&mut io), 1000);
                 a.set_param("gain", 1.0);
-                let _ = a.gain_reduction_db();
+                let _ = a.meters();
             }
         });
         assert_eq!(counts.allocs, 0, "{}", config.name());
@@ -595,7 +594,7 @@ fn default_adapter_names_a_type_for_the_export_macros() {
     assert_eq!(a.supported_layouts().len(), 6);
     adapted(&mut a, surround(SpeakerLayout::Surround51), &[]);
     let mut io = signal(6, 64);
-    a.process(&mut io, 64);
+    a.process(&mut openplugin_core::ChannelsMut::new(&mut io), 64);
 }
 
 /// An impulse on every channel through an inner plugin with 264 samples of

@@ -7,6 +7,7 @@
 //! hits a harmonic bin only for `h >= N - 32`, where the partials are 1e-5 of
 //! the fundamental). So the power in non-multiples of `k` is the aliased power,
 //! with no window leakage.
+#![allow(deprecated)] // the naive `Oscillator` is the aliasing baseline
 
 use openplugin_dsp::{
     BandlimitedOsc, BlWave, BlepOrder, Oscillator, PinkNoise, Quality, SincKernel, Wave, WavetableOsc,
@@ -258,6 +259,7 @@ fn resampler_removes_what_would_fold_and_keeps_what_does_not() {
             Quality::Medium => -70.0,
             Quality::High => -90.0,
             Quality::Best => -100.0,
+            _ => panic!("no limit for {q:?}"),
         };
         assert!(20.0 * folded.log10() < limit, "{q:?} residue {}", 20.0 * folded.log10());
     }

@@ -14,18 +14,17 @@ static PARAMS: [ParamInfo; 4] = [
     ParamInfo::new("pick", "Pick position", 0.0, 0.5, 0.15, Unit::None),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.pluck",
-    name: "Test Pluck",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "1.0.0-beta",
-    category: Category::Instrument,
-    params: &PARAMS,
-    is_instrument: true,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.pluck",
+    "Test Pluck",
+    "OpenGrid",
+    "1.0.0-beta",
+    Category::Instrument,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com")
+.with_instrument(true);
 
 const VOICES: usize = 6;
 const QUEUE: usize = 128;
@@ -185,8 +184,8 @@ impl Plugin for TestPluck {
         PARAMS.iter().position(|p| p.id == id).map(|i| self.values[i])
     }
 
-    fn tail_samples(&self) -> usize {
-        (DROP_S * self.sample_rate) as usize + 64
+    fn tail(&self) -> openplugin_core::Tail {
+        openplugin_core::Tail::from_samples((DROP_S * self.sample_rate) as usize + 64)
     }
 
     fn note_on(&mut self, offset: usize, note: u8, velocity: u8) {
@@ -207,7 +206,7 @@ impl Plugin for TestPluck {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = 10f32.powf(self.values[0] / 20.0);
         let drop_after = (DROP_S * self.sample_rate) as u32;
         let mut next_event = 0;
@@ -265,7 +264,7 @@ fn test_pluck_sounds_at_the_right_pitch_and_stops() {
     p.set_param("bright", 0.02);
     p.note_on(0, 57, 110); // A3, 220 Hz
     let mut io = vec![vec![0.0f32; 4800], vec![0.0f32; 4800]];
-    p.process(&mut io, 4800);
+    p.process(&mut openplugin_core::ChannelsMut::new(&mut io), 4800);
     let peak = io[0].iter().fold(0.0f32, |m, v| m.max(v.abs()));
     assert!(peak > 0.01, "{peak}");
     assert_eq!(io[0], io[1]);
@@ -281,7 +280,7 @@ fn test_pluck_sounds_at_the_right_pitch_and_stops() {
     assert!((best as f32 - 48_000.0 / 220.0).abs() < 1.5, "lag {best}");
     p.note_off(0, 57);
     for _ in 0..12 {
-        p.process(&mut io, 4800);
+        p.process(&mut openplugin_core::ChannelsMut::new(&mut io), 4800);
     }
     assert!(io[0].iter().all(|v| *v == 0.0), "silent after release");
 }

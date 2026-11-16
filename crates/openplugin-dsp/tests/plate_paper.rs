@@ -102,6 +102,7 @@ fn at_the_paper_rate_the_lengths_and_taps_are_the_papers() {
         RightDelay1 => RIGHT[1],
         RightDiffuser2 => RIGHT[2],
         RightDelay2 => RIGHT[3],
+        _ => unimplemented!(),
     };
     for t in TAPS_LEFT.iter().chain(&TAPS_RIGHT) {
         assert!(t.1 < len(t.0));

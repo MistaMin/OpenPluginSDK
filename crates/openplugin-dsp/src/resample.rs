@@ -48,6 +48,7 @@ pub const MIN_RATIO: f64 = 1.0 / 64.0;
 
 /// Kernel quality presets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Quality {
     /// 16 taps, 60 dB stopband.
     Low,

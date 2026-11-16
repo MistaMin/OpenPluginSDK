@@ -44,6 +44,7 @@ use core::f64::consts::PI;
 
 /// How the loop is brought to the requested pitch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Tuning {
     /// Integer delay only (the original algorithm; the pitch is quantised).
     Integer,

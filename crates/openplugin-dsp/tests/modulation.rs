@@ -254,7 +254,13 @@ fn an_abrupt_delay_change_clicks_without_glide_and_not_with_it() {
 }
 
 fn transport(playing: bool, tempo: f64, quarter_notes: f64) -> Transport {
-    Transport { playing, tempo, quarter_notes, numerator: 4, denominator: 4, ..Transport::default() }
+    let mut t = Transport::default();
+    t.playing = playing;
+    t.tempo = tempo;
+    t.quarter_notes = quarter_notes;
+    t.numerator = 4;
+    t.denominator = 4;
+    t
 }
 
 /// Expected LFO value of the shape at host position `qn` for a cycle of `q` quarters.

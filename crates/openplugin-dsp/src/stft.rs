@@ -55,6 +55,7 @@ impl SpectralProcessor for Identity {
 
 /// Why an [`Stft`] could not be made.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StftError {
     /// Frame size is not a power of two of at least 4.
     FrameSize,

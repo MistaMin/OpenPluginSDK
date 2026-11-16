@@ -20,18 +20,14 @@ static PARAMS: [ParamInfo; 6] = [
     ParamInfo::new("sync", "Sync", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "test.chorus",
-    name: "Test Chorus",
-    vendor: "test",
-    url: "",
-    email: "",
-    version: "0",
-    category: Category::Modulation,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "test.chorus",
+    "Test Chorus",
+    "test",
+    "0",
+    Category::Modulation,
+    &PARAMS,
+);
 
 struct ChorusPlugin {
     chorus: Chorus,
@@ -100,7 +96,7 @@ impl Plugin for ChorusPlugin {
     fn state_is_parameters_only(&self) -> bool {
         true
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for (ch, buf) in io.iter_mut().enumerate().take(self.channels) {
             let n = frames.min(buf.len());
             self.chorus.process(ch, &mut buf[..n]);

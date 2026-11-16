@@ -77,6 +77,7 @@ const DESIGN_CELLS: usize = 1024;
 
 /// Which random density is added before rounding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DitherKind {
     /// Round only. Shows the distortion that dither exists to prevent.
     None,
@@ -88,6 +89,7 @@ pub enum DitherKind {
 
 /// Error-feedback noise shaping. See the module documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NoiseShaping {
     /// Flat (white) requantisation noise.
     None,

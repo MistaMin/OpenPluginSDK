@@ -51,6 +51,7 @@
 
 /// Shape of a stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Curve {
     Linear,
     Exponential,
@@ -58,6 +59,7 @@ pub enum Curve {
 
 /// What `gate_on` does while the gate is held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RetriggerMode {
     /// Every `gate_on` restarts the attack from the current level.
     Retrigger,
@@ -67,6 +69,7 @@ pub enum RetriggerMode {
 
 /// Current stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Stage {
     Idle,
     Attack,
@@ -78,6 +81,7 @@ pub enum Stage {
 
 /// A gate event for [`Adsr::process`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Gate {
     On,
     Off,

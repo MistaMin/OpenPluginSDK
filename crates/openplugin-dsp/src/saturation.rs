@@ -1,6 +1,7 @@
 //! Non-linear tape/tube saturation and harmonic drive curves.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SaturationMode {
     Tape,
     Tube,

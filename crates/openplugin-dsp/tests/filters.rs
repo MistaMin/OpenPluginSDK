@@ -60,6 +60,7 @@ fn prototype(mode: SvfMode, q: f64, gain_db: f64) -> ([f64; 3], [f64; 3]) {
         SvfMode::Bell => ([1.0, a * iq, 1.0], [1.0, iq / a, 1.0]),
         SvfMode::LowShelf => ([a, a * sa * iq, a * a], [a, sa * iq, 1.0]),
         SvfMode::HighShelf => ([a * a, a * sa * iq, a], [1.0, sa * iq, a]),
+        _ => unimplemented!(),
     }
 }
 
@@ -175,6 +176,7 @@ fn matched_prototype(kind: MatchedKind, q: f64, gain_db: f64) -> ([f64; 3], [f64
         MatchedKind::Peaking => SvfMode::Bell,
         MatchedKind::LowShelf => SvfMode::LowShelf,
         MatchedKind::HighShelf => SvfMode::HighShelf,
+        _ => unimplemented!(),
     };
     prototype(mode, q, gain_db)
 }
@@ -188,6 +190,7 @@ fn rbj(kind: MatchedKind) -> FilterType {
         MatchedKind::Peaking => FilterType::Peaking,
         MatchedKind::LowShelf => FilterType::LowShelf,
         MatchedKind::HighShelf => FilterType::HighShelf,
+        _ => unimplemented!(),
     }
 }
 

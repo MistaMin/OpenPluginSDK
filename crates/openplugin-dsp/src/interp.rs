@@ -47,6 +47,7 @@ pub const MAX_THIRAN_ORDER: u8 = 4;
 
 /// Interpolator for a fractional delay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Interpolation {
     /// Two-point linear interpolation (Lagrange order 1).
     Linear,

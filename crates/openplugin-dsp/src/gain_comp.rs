@@ -1,6 +1,6 @@
 //! Slow stereo RMS loudness match.
 //!
-//! Water Channel's gain compensation: a two-second power estimate, a silence
+//! Gain compensation: a two-second power estimate, a silence
 //! gate, and a correction clamped to ±12 dB. It is not LUFS and it is not a
 //! limiter. While disabled, the correction releases back to unity.
 

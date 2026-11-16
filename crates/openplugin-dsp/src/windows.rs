@@ -23,6 +23,7 @@ use std::f64::consts::PI;
 
 /// Window shape.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum WindowKind {
     Rectangular,
     Hann,

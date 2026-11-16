@@ -1,14 +1,16 @@
-//! Metering primitives: peak, RMS, VU, and the Water Channel meter bank.
+//! Metering primitives: peak, RMS, VU, and a stereo meter bank.
 //!
-//! [`MeterBank`] is the stereo quasi-peak / VU / RMS / gain-reduction bank from
-//! Water Channel. 0 VU is a steady -18 dBFS sine (peak-amplitude convention).
+//! [`MeterBank`] is a stereo quasi-peak / VU / RMS / gain-reduction bank.
+//! 0 VU is a steady -18 dBFS sine (peak-amplitude convention).
 //! These are engineering ballistics, not an IEC or ANSI certification.
 //! [`VuMeter`] is a one-pole 300 ms approximation and does not meet the
 //! 300 ms-to-99 % rise of IEC 60268-17; [`VuIec`] does (second-order needle).
 //! Gain reduction must come from the compressor envelope. It is not estimated
 //! from the input/output ratio.
+#![allow(deprecated)] // this module defines the deprecated items
 
 #[derive(Debug, Clone)]
+#[deprecated(since = "1.0.0", note = "a one-pole approximation; use `VuIec`, which meets IEC 60268-17")]
 pub struct VuMeter {
     sample_rate: f32,
     envelope: f32,
@@ -180,6 +182,7 @@ struct ChannelMeter {
 
 /// One stereo frame of input, output, and gain-reduction readings, in dB.
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct MeterReadings {
     pub input_peak: [f64; 2],
     pub output_peak: [f64; 2],
