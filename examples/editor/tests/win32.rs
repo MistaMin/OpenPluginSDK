@@ -18,6 +18,10 @@
 //!   its own, and closing it tells the host. A right click asks the host for its
 //!   parameter menu in window pixels (embedded) or screen pixels (floating).
 //!
+//! - LV2: `lv2ui_descriptor` makes a `ui:WindowsUI` widget in the host's parent
+//!   window, bound through instance-access; port events reach the editor, a
+//!   click writes the control port, and `ui:resize` works both ways in pixels.
+//!
 //! Screenshots go to `OP_SHOT_DIR` when it is set (what the window drew, and,
 //! in a logged-in desktop session, what the screen shows). The process may
 //! have no desktop to make windows on (a service); the test then says so and
@@ -44,7 +48,8 @@ fn main() {
     win::view_menu_tooltips_and_files();
     win::clap_gui_lifecycle();
     win::clap_gui_floats();
-    println!("win32: 6 passed");
+    win::lv2_ui_lifecycle();
+    println!("win32: 7 passed");
 }
 
 #[cfg(windows)]
@@ -781,6 +786,93 @@ mod win {
             let _ = RESIZE_ASKED.load(Ordering::Relaxed);
         }
         println!("clap floating gui: ok");
+    }
+
+    #[repr(C)]
+    struct Lv2Resize {
+        handle: *mut c_void,
+        ui_resize: Option<unsafe extern "C" fn(handle: *mut c_void, width: i32, height: i32) -> i32>,
+    }
+
+    /// The size the UI last asked its host for (width << 16 | height).
+    static LV2_ASKED: AtomicU32 = AtomicU32::new(0);
+    static LV2_WRITES: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn lv2_host_resize(_handle: *mut c_void, width: i32, height: i32) -> i32 {
+        LV2_ASKED.store(((width as u32) << 16) | height as u32, Ordering::Relaxed);
+        0
+    }
+
+    pub fn lv2_ui_lifecycle() {
+        use openplugin::targets::lv2::{Lv2Feature, AUDIO_PORTS};
+        unsafe {
+            let desc = &*example_editor::lv2_descriptor(0);
+            let instance = (desc.instantiate)(desc, 48_000.0, std::ptr::null(), std::ptr::null());
+            assert!(!instance.is_null());
+            let ui = &*example_editor::lv2ui_descriptor(0);
+            assert!(CStr::from_ptr(ui.uri).to_string_lossy().ends_with("#ui"));
+            assert!(example_editor::lv2ui_descriptor(1).is_null());
+            let parent = testing::parent_window("OpenPlugin LV2 editor", 700, 400, 800, 600);
+            let host_resize = Lv2Resize { handle: std::ptr::null_mut(), ui_resize: Some(lv2_host_resize) };
+            let features = [
+                Lv2Feature { uri: c"http://lv2plug.in/ns/extensions/ui#parent".as_ptr(), data: parent },
+                Lv2Feature { uri: c"http://lv2plug.in/ns/ext/instance-access".as_ptr(), data: instance },
+                Lv2Feature { uri: c"http://lv2plug.in/ns/extensions/ui#resize".as_ptr(), data: &host_resize as *const Lv2Resize as *mut c_void },
+            ];
+            unsafe extern "C" fn write(_c: *mut c_void, port: u32, size: u32, protocol: u32, buffer: *const c_void) {
+                unsafe {
+                    assert_eq!((port, size, protocol), (AUDIO_PORTS + 1, 4, 0));
+                    assert_eq!(*(buffer as *const f32), 1.0);
+                    LV2_WRITES.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let mut widget: Id = std::ptr::null_mut();
+            // A child window needs its parent: without `ui:parent` there is no UI.
+            let orphan = [&features[1] as *const Lv2Feature, std::ptr::null()];
+            assert!((ui.instantiate)(ui, desc.uri, c"".as_ptr(), Some(write), std::ptr::null_mut(), &mut widget, orphan.as_ptr()).is_null());
+            let list = [&features[0] as *const Lv2Feature, &features[1], &features[2], std::ptr::null()];
+            let handle = (ui.instantiate)(ui, desc.uri, c"".as_ptr(), Some(write), std::ptr::null_mut(), &mut widget, list.as_ptr());
+            assert!(!handle.is_null());
+            assert!(!widget.is_null(), "the widget is the view's window");
+            assert_eq!(child(parent), widget);
+            // The host was told the size, in pixels: the editor's points at the parent's scale.
+            let (cw, ch) = testing::client_size(widget);
+            let scale = cw as f32 / WIDTH as f32;
+            assert_eq!((cw, ch), ((WIDTH as f32 * scale).round() as u32, (HEIGHT as f32 * scale).round() as u32));
+            assert_eq!(LV2_ASKED.load(Ordering::Relaxed), (cw << 16) | ch, "ui:resize told the host the size");
+            let size = (WIDTH, HEIGHT);
+
+            // A value from the host's port turns the knob.
+            let before = knob_ring(&shot(widget), size);
+            let full = 24.0f32;
+            (ui.port_event)(handle, AUDIO_PORTS, 4, 0, &full as *const f32 as *const c_void);
+            assert_ne!(knob_ring(&shot(widget), size), before, "port_event reached the editor");
+            // A click on the switch writes its control port.
+            testing::send(widget, WM_LBUTTONDOWN, 1, at(SWITCH, scale));
+            assert_eq!(LV2_WRITES.load(Ordering::Relaxed), 1, "the click wrote the Warm port");
+            testing::send(widget, WM_LBUTTONUP, 0, at(SWITCH, scale));
+            save("lv2_ui.bmp", &shot(widget));
+
+            // The UI offers ui:resize for the host, in pixels.
+            let offered = (ui.extension_data)(c"http://lv2plug.in/ns/extensions/ui#resize".as_ptr()) as *const Lv2Resize;
+            assert!(!offered.is_null());
+            assert!((ui.extension_data)(c"http://example.com/nothing".as_ptr()).is_null());
+            let host_sets = (*offered).ui_resize.unwrap();
+            let large = ((LARGE_SIZE.0 as f32 * scale).round() as u32, (LARGE_SIZE.1 as f32 * scale).round() as u32);
+            assert_eq!(host_sets(handle, large.0 as i32, large.1 as i32), 0);
+            assert_eq!(testing::client_size(widget), large);
+            assert!(meter_is_upright(&shot(widget), LARGE_SIZE));
+            assert_ne!(host_sets(handle, (MAX_SIZE.0 as f32 * scale) as i32 + 40, large.1 as i32), 0, "outside the editor's range");
+            assert_ne!(host_sets(handle, -1, 10), 0);
+            assert_eq!(testing::client_size(widget), large);
+
+            (ui.cleanup)(handle);
+            assert!(!testing::is_window(widget), "the window goes with the UI");
+            assert!(child(parent).is_null());
+            (desc.cleanup)(instance);
+            testing::destroy_window(parent);
+        }
+        println!("lv2 ui: ok");
     }
 
     #[link(name = "user32")]
