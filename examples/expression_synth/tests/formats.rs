@@ -9,8 +9,11 @@
 //! to one of them, and reads every voice back from the synth's [`VoiceView`]:
 //! only that voice changed. Each has a negative control (the same events for
 //! another note id, or another channel, leave every voice as it was), hostile
-//! input is refused, and the audio path is measured for allocations.
+//! input is refused, and the audio path is measured for allocations. CLAP
+//! `voice-info` is read, and every finished voice sends one
+//! `CLAP_EVENT_NOTE_END` with its note's id, port, channel and key.
 
+use std::cell::{Cell, RefCell};
 use std::ffi::{c_void, CStr};
 use std::sync::Arc;
 
@@ -157,6 +160,11 @@ impl Clap {
 
     /// One block carrying `events`; returns the process status.
     fn block(&mut self, events: &Events) -> i32 {
+        self.block_out(events, std::ptr::null())
+    }
+
+    /// The same, with the host's output event list.
+    fn block_out(&mut self, events: &Events, out: *const clap_output_events) -> i32 {
         let mut output = clap_audio_buffer {
             data32: self.ptrs.as_mut_ptr(),
             data64: std::ptr::null_mut(),
@@ -173,7 +181,7 @@ impl Clap {
             audio_inputs_count: 0,
             audio_outputs_count: 1,
             in_events: &events.list,
-            out_events: std::ptr::null(),
+            out_events: out,
         };
         let _ = (&self.left, &self.right);
         unsafe { (*self.plugin).process.unwrap()(self.plugin, &process) }
@@ -184,6 +192,48 @@ impl Clap {
         assert_eq!(self.block(&events), PROCESS_CONTINUE);
         let _ = &self.adapter;
         self.view.active()
+    }
+}
+
+/// The host's output list: records every `CLAP_EVENT_NOTE_END` (and counts the rest) into
+/// room reserved up front, so pushing never allocates.
+struct Out {
+    ends: RefCell<Vec<(u32, NoteRef)>>,
+    others: Cell<usize>,
+    list: clap_output_events,
+}
+
+unsafe extern "C" fn out_push(list: *const clap_output_events, event: *const clap_event_header) -> bool {
+    let out = unsafe { &*((*list).ctx as *const Out) };
+    let header = unsafe { &*event };
+    if header.type_ != EVENT_NOTE_END {
+        out.others.set(out.others.get() + 1);
+        return true;
+    }
+    assert_eq!(header.size as usize, std::mem::size_of::<clap_event_note>());
+    assert_eq!(header.space_id, 0);
+    let note = unsafe { &*(event as *const clap_event_note) };
+    let mut ends = out.ends.borrow_mut();
+    if ends.len() == ends.capacity() {
+        return false;
+    }
+    ends.push((header.time, NoteRef::new(note.note_id, note.port_index, note.channel, note.key)));
+    true
+}
+
+impl Out {
+    fn new() -> Box<Self> {
+        let mut out = Box::new(Self {
+            ends: RefCell::new(Vec::with_capacity(64)),
+            others: Cell::new(0),
+            list: clap_output_events { ctx: std::ptr::null_mut(), try_push: Some(out_push) },
+        });
+        out.list.ctx = (&*out) as *const Out as *mut c_void;
+        out
+    }
+
+    fn ends(&self) -> Vec<(u32, NoteRef)> {
+        self.ends.borrow().clone()
     }
 }
 
@@ -307,6 +357,113 @@ fn clap_mpe_over_midi_bends_presses_and_brightens_one_channel() {
     let before: Vec<_> = voices.iter().map(sound).collect();
     let after = clap.play(vec![midi([0xE5, 0, 0]), midi([0xD5, 64, 0]), midi([0xB5, 74, 0])]);
     assert_eq!(after.iter().map(sound).collect::<Vec<_>>(), before);
+}
+
+fn note_at(type_: u16, id: i32, port: i16, channel: i16, key: i16) -> Slot {
+    Slot::of(&clap_event_note {
+        header: header(type_, std::mem::size_of::<clap_event_note>()),
+        note_id: id,
+        port_index: port,
+        channel,
+        key,
+        velocity: 0.8,
+    })
+}
+
+/// Blocks with no events until `done` holds for the recorded output, or `limit` blocks.
+fn run_until(clap: &mut Clap, out: &Out, limit: usize, done: impl Fn(&Out) -> bool) {
+    let quiet = Events::new(Vec::new());
+    for _ in 0..limit {
+        if done(out) {
+            return;
+        }
+        assert_eq!(clap.block_out(&quiet, &out.list), PROCESS_CONTINUE);
+    }
+}
+
+#[test]
+fn clap_voice_info_reports_the_voices() {
+    let clap = Clap::new();
+    let ext = clap.ext::<clap_plugin_voice_info>(c"clap.voice-info");
+    assert!(!ext.is_null(), "a plugin that describes its voices offers voice-info");
+    let mut info = clap_voice_info { voice_count: 99, voice_capacity: 99, flags: 99 };
+    assert!(unsafe { (*ext).get.unwrap()(clap.plugin, &mut info) });
+    assert_eq!(info, clap_voice_info { voice_count: 8, voice_capacity: 8, flags: 0 });
+    assert!(!unsafe { (*ext).get.unwrap()(clap.plugin, std::ptr::null_mut()) });
+}
+
+#[test]
+fn clap_output_of_an_instrument_has_no_in_place_pair() {
+    let clap = Clap::new();
+    let ports = clap.ext::<clap_plugin_audio_ports>(c"clap.audio-ports");
+    assert_eq!(unsafe { (*ports).count.unwrap()(clap.plugin, true) }, 0);
+    let mut info: clap_audio_port_info = unsafe { std::mem::zeroed() };
+    assert!(unsafe { (*ports).get.unwrap()(clap.plugin, 0, false, &mut info) });
+    assert_eq!(info.in_place_pair, CLAP_INVALID_ID, "there is no input port to pair with");
+}
+
+#[test]
+fn clap_sends_one_note_end_per_finished_voice_and_none_for_a_held_one() {
+    let mut clap = Clap::new();
+    let out = Out::new();
+    let on = Events::new(vec![note_at(EVENT_NOTE_ON, 11, 0, 3, 60), note_at(EVENT_NOTE_ON, 12, 1, 9, 64)]);
+    assert_eq!(clap.block_out(&on, &out.list), PROCESS_CONTINUE);
+    assert_eq!(clap.view.active().len(), 2);
+    // Release note 11 only; its 50 ms release ends within a few blocks.
+    let off = Events::new(vec![note_at(EVENT_NOTE_OFF, 11, 0, 3, 60)]);
+    assert_eq!(clap.block_out(&off, &out.list), PROCESS_CONTINUE);
+    run_until(&mut clap, &out, 40, |o| !o.ends.borrow().is_empty());
+    // Ten blocks more: a second end for 11 would show, and one for 12 must not.
+    for _ in 0..10 {
+        assert_eq!(clap.block_out(&Events::new(Vec::new()), &out.list), PROCESS_CONTINUE);
+    }
+    assert_eq!(out.ends(), vec![(FRAMES as u32 - 1, NoteRef::new(11, 0, 3, 60))], "one end, with the note's id, port, channel and key");
+    // Negative control: the held voice sent nothing and still sounds.
+    let held = clap.view.active();
+    assert_eq!(held.len(), 1);
+    assert_eq!((held[0].id, held[0].channel, held[0].key), (12, 9, 64));
+
+    out.ends.borrow_mut().clear();
+    let off = Events::new(vec![note_at(EVENT_NOTE_OFF, 12, 1, 9, 64)]);
+    assert_eq!(clap.block_out(&off, &out.list), PROCESS_CONTINUE);
+    run_until(&mut clap, &out, 40, |o| !o.ends.borrow().is_empty());
+    for _ in 0..10 {
+        assert_eq!(clap.block_out(&Events::new(Vec::new()), &out.list), PROCESS_CONTINUE);
+    }
+    assert_eq!(out.ends(), vec![(FRAMES as u32 - 1, NoteRef::new(12, 1, 9, 64))]);
+    assert!(clap.view.active().is_empty());
+    assert_eq!(out.others.get(), 0);
+}
+
+#[test]
+fn clap_sends_a_note_end_for_a_stolen_voice_and_for_mpe_notes() {
+    let mut clap = Clap::new();
+    let out = Out::new();
+    // Nine held notes on eight voices: the oldest (id 100) is stolen at once.
+    let notes: Vec<Slot> = (0..9).map(|i| note_at(EVENT_NOTE_ON, 100 + i, 0, 0, 48 + i as i16)).collect();
+    assert_eq!(clap.block_out(&Events::new(notes), &out.list), PROCESS_CONTINUE);
+    assert_eq!(out.ends(), vec![(FRAMES as u32 - 1, NoteRef::new(100, 0, 0, 48))]);
+    assert_eq!(clap.view.active().len(), 8);
+    // MPE over the MIDI dialect: a note on member channel 2 ends with no id, its channel and key.
+    let mut clap = Clap::new();
+    let out = Out::new();
+    assert_eq!(clap.block_out(&Events::new(vec![midi([0x91, 67, 100])]), &out.list), PROCESS_CONTINUE);
+    assert_eq!(clap.block_out(&Events::new(vec![midi([0x81, 67, 0])]), &out.list), PROCESS_CONTINUE);
+    run_until(&mut clap, &out, 40, |o| !o.ends.borrow().is_empty());
+    assert_eq!(out.ends().len(), 1);
+    let (_, end) = out.ends()[0];
+    assert_eq!((end.id, end.channel, end.key), (-1, 1, 67));
+    // A host with no output list loses the end, and a later block does not send it late.
+    let mut clap = Clap::new();
+    let quiet = Events::new(Vec::new());
+    clap.block(&Events::new(vec![note(EVENT_NOTE_ON, 7, 0, 60)]));
+    clap.block(&Events::new(vec![note(EVENT_NOTE_OFF, 7, 0, 60)]));
+    for _ in 0..20 {
+        clap.block(&quiet);
+    }
+    let out = Out::new();
+    clap.block_out(&quiet, &out.list);
+    assert!(out.ends().is_empty());
 }
 
 // ---- LV2 ------------------------------------------------------------------------
@@ -621,13 +778,20 @@ fn the_expression_paths_do_not_allocate() {
         midi([0xB1, 74, 90]),
         note(EVENT_NOTE_OFF, 2, 0, 64),
     ]);
+    let out = Out::new();
+    let quiet = Events::new(Vec::new());
     let (_, counts) = openplugin_testing::alloc::measure(|| {
-        clap.block(&notes);
+        clap.block_out(&notes, &out.list);
         for _ in 0..4 {
-            clap.block(&busy);
+            clap.block_out(&busy, &out.list);
+        }
+        // Note 2's release ends here: NOTE_END goes out without allocating.
+        for _ in 0..10 {
+            clap.block_out(&quiet, &out.list);
         }
     });
     assert_eq!((counts.allocs, counts.frees), (0, 0), "CLAP");
+    assert!(out.ends().iter().any(|(_, n)| n.id == 2), "a voice ended inside the measured blocks: {:?}", out.ends());
 
     let mut lv2 = Lv2::new();
     lv2.sequence(&[[0x91, 60, 100], [0xE1, 0, 0x50], [0xD1, 40, 0], [0xB1, 74, 10], [0xB0, 101, 0], [0xB0, 100, 6], [0xB0, 6, 9]]);

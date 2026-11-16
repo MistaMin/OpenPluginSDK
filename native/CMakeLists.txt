@@ -21,7 +21,7 @@
 # OP_TAIL=ON is what makes vst3_proof and au_proof exercise the tail report.
 # The channel order proofs (vst3_roles_proof, au_roles_proof, aax_roles_proof) load
 # Role Tags (examples/role_tags) instead; without its library they are not built.
-# The per-note expression proof (vst3_expression_proof) loads Expression Synth
+# The per-note expression proofs (vst3_expression_proof, au_mpe_proof) load Expression Synth
 # (examples/expression_synth): cargo build --release --lib -p example-expression-synth.
 # The identity pinning proofs (vst3_identity_proof, au_identity_proof, aax_identity_proof)
 # load the four builds of Pinned (examples/pinned/builds): cargo build --release --lib
@@ -849,6 +849,41 @@ if(OP_BUILD_AU)
       target_link_libraries(AURolesProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
       add_dependencies(AURolesProof OpenPluginAURoles)
       add_test(NAME au_roles_proof COMMAND AURolesProof "$<TARGET_BUNDLE_DIR:OpenPluginAURoles>")
+    endif()
+    # kAudioUnitProperty_SupportsMPE (0.7 task 4): 1 from the shell over Expression Synth,
+    # which asks for MPE; 0 from the shell over the example, which does not.
+    add_executable(AUMpeProof au/mpe_host.cpp)
+    target_compile_features(AUMpeProof PRIVATE cxx_std_23)
+    target_include_directories(AUMpeProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/au")
+    target_link_libraries(AUMpeProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+    add_dependencies(AUMpeProof OpenPluginAU)
+    add_test(NAME au_mpe_proof_off COMMAND AUMpeProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>" 0)
+    if(OP_EXPRESSION_PROOFS)
+      function(op_au_expression_plist)
+        set(OP_PRODUCT "ExpressionSynth")
+        set(OP_BUNDLE_ID "com.opengrid.test.expression")
+        set(OP_VERSION "1")
+        set(OP_MANUFACTURER "OpenPlugin")
+        set(OP_AU_SUBTYPE "ExSy")
+        set(OP_AU_MANUFACTURER "OpTs")
+        set(OP_AU_TYPE "aumu")
+        configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-expression-Info.plist" @ONLY)
+      endfunction()
+      op_au_expression_plist()
+      add_library(OpenPluginAUExpression MODULE au/OpenPluginAU.cpp)
+      op_au_set_type(OpenPluginAUExpression aumu)
+      target_compile_features(OpenPluginAUExpression PRIVATE cxx_std_23)
+      target_include_directories(OpenPluginAUExpression PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+      set_target_properties(OpenPluginAUExpression PROPERTIES
+        OUTPUT_NAME "ExpressionSynth"
+        BUNDLE TRUE
+        BUNDLE_EXTENSION component
+        PREFIX ""
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-expression-Info.plist")
+      target_link_libraries(OpenPluginAUExpression PRIVATE openplugin_au_sdk)
+      op_link_rust(OpenPluginAUExpression "${OP_EXPRESSION_LIB}")
+      add_dependencies(AUMpeProof OpenPluginAUExpression)
+      add_test(NAME au_mpe_proof COMMAND AUMpeProof "$<TARGET_BUNDLE_DIR:OpenPluginAUExpression>" 1)
     endif()
   endif()
 endif()

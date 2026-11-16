@@ -41,6 +41,8 @@ pub const AMBISONIC_NORMALIZATION_SN3D: u32 = 1;
 pub const EVENT_NOTE_ON: u16 = 0;
 pub const EVENT_NOTE_OFF: u16 = 1;
 pub const EVENT_NOTE_CHOKE: u16 = 2;
+/// `CLAP_EVENT_NOTE_END`: plugin to host, a voice has ended (`clap_event_note`).
+pub const EVENT_NOTE_END: u16 = 3;
 pub const EVENT_NOTE_EXPRESSION: u16 = 4;
 pub const EVENT_PARAM_VALUE: u16 = 5;
 pub const EVENT_PARAM_MOD: u16 = 6;
@@ -56,6 +58,10 @@ pub const EXT_LATENCY: &[u8] = b"clap.latency\0";
 pub const EXT_PARAMS: &[u8] = b"clap.params\0";
 pub const EXT_STATE: &[u8] = b"clap.state\0";
 pub const EXT_TAIL: &[u8] = b"clap.tail\0";
+/// `CLAP_EXT_VOICE_INFO` (`ext/voice-info.h`).
+pub const EXT_VOICE_INFO: &[u8] = b"clap.voice-info\0";
+/// `CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES`.
+pub const VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES: u64 = 1;
 pub const EXT_RENDER: &[u8] = b"clap.render\0";
 pub const RENDER_REALTIME: u32 = 0;
 pub const RENDER_OFFLINE: u32 = 1;
@@ -322,6 +328,21 @@ pub struct clap_plugin_entry {
     pub init: Option<unsafe extern "C" fn(plugin_path: *const c_char) -> bool>,
     pub deinit: Option<unsafe extern "C" fn()>,
     pub get_factory: Option<unsafe extern "C" fn(factory_id: *const c_char) -> *const c_void>,
+}
+
+/// `clap_voice_info`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct clap_voice_info {
+    pub voice_count: u32,
+    pub voice_capacity: u32,
+    pub flags: u64,
+}
+
+/// `clap_plugin_voice_info`.
+#[repr(C)]
+pub struct clap_plugin_voice_info {
+    pub get: Option<unsafe extern "C" fn(plugin: *const clap_plugin, info: *mut clap_voice_info) -> bool>,
 }
 
 #[repr(C)]

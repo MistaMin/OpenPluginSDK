@@ -333,6 +333,11 @@ uint32_t op_shell_expressions(void);
 // Fills `out` for expression `id`. Returns 1, or 0 writing nothing for a NULL
 // `out`, an unknown id or one the plugin does not list. No instance.
 uint32_t op_shell_expression_info(uint32_t id, OpExpressionInfo* out);
+// An op_shell_note_ports() bit, added with no new ABI version (on ABI 8): the plugin takes MPE on its
+// note input (Plugin::mpe_input). A library from before it leaves the bit clear,
+// which is the right answer for it, so no version check is needed. The Audio
+// Unit shell reports it as kAudioUnitProperty_SupportsMPE.
+enum { OP_NOTE_PORT_MPE = 4 };
 // The text of `value` (the expression's units) with the length rules of
 // op_shell_param_format; an unknown id returns 0 and writes "". Message thread.
 size_t op_shell_expression_format(uint32_t id, double value, char* buf, size_t cap);

@@ -390,7 +390,7 @@ jobs:
         run: cargo +1.85.0 check --workspace --all-targets --locked
 
   clap-validator:
-    name: CLAP validator (examples/editor)
+    name: CLAP validator (examples/editor, examples/expression_synth)
     runs-on: macos-latest
     timeout-minutes: 30
     env:
@@ -427,28 +427,31 @@ jobs:
           tar -xzf clap-validator-*.tar.gz clap-validator
           chmod +x clap-validator
           ./clap-validator --version
-      - name: Build examples/editor
+      # Expression Synth offers voice-info and sends CLAP_EVENT_NOTE_END.
+      - name: Build examples/editor and examples/expression_synth
         working-directory: OpenPluginSDK
-        run: cargo build --release -p example-editor
-      - name: Bundle the example as a .clap
+        run: cargo build --release -p example-editor -p example-expression-synth
+      - name: Bundle the examples as .clap
         working-directory: OpenPluginSDK
         run: |
           set -euo pipefail
-          bundle="$RUNNER_TEMP/bundle/Editor.clap"
           rm -rf "$RUNNER_TEMP/bundle"
-          mkdir -p "$bundle/Contents/MacOS"
-          cp target/release/libexample_editor.dylib "$bundle/Contents/MacOS/Editor"
-          cat > "$bundle/Contents/Info.plist" <<'PLIST'
+          for pair in "Editor:example_editor:editor" "ExpressionSynth:example_expression_synth:expression-synth"; do
+            IFS=: read -r name lib id <<< "$pair"
+            bundle="$RUNNER_TEMP/bundle/$name.clap"
+            mkdir -p "$bundle/Contents/MacOS"
+            cp "target/release/lib$lib.dylib" "$bundle/Contents/MacOS/$name"
+            cat > "$bundle/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
             <key>CFBundleExecutable</key>
-            <string>Editor</string>
+            <string>$name</string>
             <key>CFBundleIdentifier</key>
-            <string>com.opengrid.example.editor</string>
+            <string>com.opengrid.example.$id</string>
             <key>CFBundleName</key>
-            <string>Editor</string>
+            <string>$name</string>
             <key>CFBundlePackageType</key>
             <string>BNDL</string>
             <key>CFBundleVersion</key>
@@ -456,13 +459,15 @@ jobs:
           </dict>
           </plist>
           PLIST
-          codesign --force --sign - "$bundle"
-          codesign --verify --verbose "$bundle"
+            codesign --force --sign - "$bundle"
+            codesign --verify --verbose "$bundle"
+          done
       # clap-validator exits non-zero when any test fails.
-      - name: Validate the bundle
+      - name: Validate the bundles
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/clap-validator/clap-validator" validate "$RUNNER_TEMP/bundle/Editor.clap"
+          "$RUNNER_TEMP/clap-validator/clap-validator" validate "$RUNNER_TEMP/bundle/ExpressionSynth.clap"
 
   vst3-shell:
     name: VST3 shell proofs
@@ -549,11 +554,12 @@ jobs:
           path: AudioUnitSDK
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      # au_roles_proof links Role Tags (examples/role_tags), found next to the example;
-      # au_identity_proof links the four builds of Pinned (examples/pinned/builds).
-      - name: Build the example plugin, Role Tags and Pinned as static libraries
+      # au_roles_proof links Role Tags (examples/role_tags) and au_mpe_proof Expression
+      # Synth (examples/expression_synth), found next to the example; au_identity_proof
+      # links the four builds of Pinned (examples/pinned/builds).
+      - name: Build the example plugin, Role Tags, Expression Synth and Pinned as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b
       - name: Configure the Audio Unit shell only
         working-directory: OpenPluginSDK
         run: >

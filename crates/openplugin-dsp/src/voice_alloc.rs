@@ -62,8 +62,20 @@
 //! (5 ms by default) as [`Voice::advance`] runs, like the glide; a value sent
 //! before the voice's first sample is taken at once. [`Voice::pitch`] and
 //! [`Voice::hz`] include the voice's [`Expression::Tuning`].
+//!
+//! # Ended notes
+//!
+//! The allocator keeps the [`NoteRef`] of every note whose voice has ended,
+//! in order, for [`VoiceAllocator::pop_ended`] (CLAP `CLAP_EVENT_NOTE_END`,
+//! through `Plugin::pull_note_end`). A note ends when its voice is freed
+//! ([`VoiceAllocator::free`]) or taken for a different note (a steal, a
+//! same-note tail reused, a mono or legato change, a held key retriggered
+//! with a new note id). A key retriggered with the same note does not end
+//! it. [`VoiceAllocator::reset`] forgets voices and the list alike. At most
+//! [`ENDED_CAPACITY`] wait; drain them every block. [`VoiceAllocator::voice_info`]
+//! is the matching CLAP `voice-info`.
 
-use openplugin_core::{Expression, NoteRef};
+use openplugin_core::{Expression, NoteRef, VoiceInfo};
 
 use crate::pitch::hz_from_midi;
 use crate::voice::NoteExpressions;
@@ -265,6 +277,9 @@ pub struct NoteOff {
 
 const MAX_HELD: usize = 32;
 
+/// Ended notes that can wait for [`VoiceAllocator::pop_ended`]; more are dropped.
+pub const ENDED_CAPACITY: usize = 64;
+
 /// Expression ramp when none is set: 5 ms.
 const DEFAULT_SMOOTHING: f32 = 0.005;
 
@@ -284,6 +299,12 @@ pub struct VoiceAllocator<S, const N: usize> {
     held_len: usize,
     pedal: bool,
     smoothing: f32,
+    /// Ended notes, a ring of `ended_len` from `ended_head`.
+    ended: [NoteRef; ENDED_CAPACITY],
+    ended_head: usize,
+    ended_len: usize,
+    /// The note of the voice `allocate` or `mono_on` just took, if it was sounding.
+    displaced: Option<NoteRef>,
 }
 
 impl<S: Default, const N: usize> Default for VoiceAllocator<S, N> {
@@ -317,6 +338,10 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
             held_len: 0,
             pedal: false,
             smoothing: DEFAULT_SMOOTHING,
+            ended: [NoteRef::ALL; ENDED_CAPACITY],
+            ended_head: 0,
+            ended_len: 0,
+            displaced: None,
         };
         this.apply_smoothing();
         this
@@ -444,13 +469,50 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         }
     }
 
-    /// Mark a voice free (its release has ended).
+    /// Mark a voice free (its release has ended). A voice that was sounding
+    /// adds its note to the ended list ([`Self::pop_ended`]).
     pub fn free(&mut self, voice: usize) {
-        if let Some(v) = self.voices.get_mut(voice) {
-            v.phase = VoicePhase::Free;
-            v.sustained = false;
-            v.level = 0.0;
+        let Some(v) = self.voices.get_mut(voice) else { return };
+        let ended = (!v.is_free()).then_some(v.reference);
+        v.phase = VoicePhase::Free;
+        v.sustained = false;
+        v.level = 0.0;
+        if let Some(note) = ended {
+            self.push_ended(note);
         }
+    }
+
+    /// The oldest note whose voice has ended and was not popped yet, as its
+    /// note-on named it (note id, port, channel, key). Allocates nothing.
+    pub fn pop_ended(&mut self) -> Option<NoteRef> {
+        if self.ended_len == 0 {
+            return None;
+        }
+        let note = self.ended[self.ended_head];
+        self.ended_head = (self.ended_head + 1) % ENDED_CAPACITY;
+        self.ended_len -= 1;
+        Some(note)
+    }
+
+    /// Ended notes waiting for [`Self::pop_ended`].
+    pub fn ended_len(&self) -> usize {
+        self.ended_len
+    }
+
+    fn push_ended(&mut self, note: NoteRef) {
+        if self.ended_len < ENDED_CAPACITY {
+            self.ended[(self.ended_head + self.ended_len) % ENDED_CAPACITY] = note;
+            self.ended_len += 1;
+        }
+    }
+
+    /// CLAP `voice-info` for these voices: the count is the voices new notes
+    /// may use ([`Self::set_max_voices`]; 1 in the mono modes), the capacity
+    /// `N`. Notes do not overlap: a key held again on the same channel
+    /// retriggers its voice whatever its note id.
+    pub fn voice_info(&self) -> VoiceInfo {
+        let count = if self.mode == VoiceMode::Poly { self.limit.min(N) } else { N.min(1) };
+        VoiceInfo::new(count as u32, N as u32)
     }
 
     fn glide_samples(&self) -> u32 {
@@ -504,9 +566,13 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
             self.note_off_ref(reference);
             return None;
         }
+        self.displaced = None;
         let allocation = self.allocate(note, velocity, reference.channel);
         if let Some(a) = allocation {
             self.voices[a.voice].reference = reference;
+        }
+        if let Some(old) = self.displaced.take().filter(|old| *old != reference) {
+            self.push_ended(old);
         }
         allocation
     }
@@ -556,6 +622,7 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
             index = Some(i);
         }
         let i = index.unwrap_or(0);
+        self.displaced = (!self.voices[i].is_free()).then_some(self.voices[i].reference);
         let from = from_glide(self, None);
         self.voices[i].start(note, vel, age, from, glide);
         self.last_pitch = Some(f32::from(note));
@@ -601,6 +668,7 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
                 if was_held { own.or(self.last_pitch) } else { None }
             }
         };
+        self.displaced = sounding.then_some(v.reference);
         let legato_change = self.mode == VoiceMode::Legato && v.phase == VoicePhase::Held;
         let stolen = (v.phase == VoicePhase::Held && !legato_change).then_some(v.note);
         let voice = &mut self.voices[0];
@@ -716,7 +784,9 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         }
     }
 
-    /// Free every voice at once and forget held keys (transport reset).
+    /// Free every voice at once and forget held keys (transport reset). The
+    /// ended list is cleared too: a host that resets the plugin forgets its
+    /// notes itself (CLAP `reset` kills every voice).
     pub fn reset(&mut self) {
         for v in &mut self.voices {
             v.phase = VoicePhase::Free;
@@ -727,6 +797,8 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         self.held_len = 0;
         self.pedal = false;
         self.last_pitch = None;
+        self.ended_head = 0;
+        self.ended_len = 0;
     }
 }
 
@@ -1022,5 +1094,68 @@ mod tests {
         let w = a.note_on_ref(NoteRef::new(2, 0, 0, 62), 100).unwrap().voice;
         assert_eq!(a.voice(w).unwrap().expression(Expression::Pressure), 0.0);
         assert_eq!(a.voice(w).unwrap().note_ref(), NoteRef::new(2, 0, 0, 62));
+    }
+
+    fn drain(a: &mut Alloc4) -> Vec<NoteRef> {
+        std::iter::from_fn(|| a.pop_ended()).collect()
+    }
+
+    #[test]
+    fn a_freed_voice_ends_its_note_once_and_a_held_one_does_not() {
+        let mut a = Alloc4::new(48_000.0);
+        let x = a.note_on_ref(NoteRef::new(11, 0, 3, 60), 100).unwrap().voice;
+        let y = a.note_on_ref(NoteRef::new(12, 1, 4, 64), 100).unwrap().voice;
+        // Negative control: held and released voices have not ended.
+        assert!(drain(&mut a).is_empty());
+        a.note_off_ref(NoteRef::new(11, -1, -1, -1));
+        assert!(drain(&mut a).is_empty(), "a release tail has not ended");
+        a.free(x);
+        a.free(x);
+        assert_eq!(drain(&mut a), vec![NoteRef::new(11, 0, 3, 60)], "id, port, channel and key, once");
+        assert_eq!(a.voice(y).unwrap().phase(), VoicePhase::Held);
+        assert!(drain(&mut a).is_empty());
+        // reset forgets the list as well as the voices.
+        a.free(y);
+        a.reset();
+        assert_eq!(a.ended_len(), 0);
+    }
+
+    #[test]
+    fn a_stolen_or_retaken_voice_ends_the_note_it_played() {
+        let mut a = Alloc4::new(48_000.0);
+        for (id, key) in [(1, 60), (2, 62), (3, 64), (4, 65)] {
+            a.note_on_ref(NoteRef::new(id, 0, 0, key), 100);
+        }
+        a.note_on_ref(NoteRef::new(5, 0, 0, 67), 100);
+        assert_eq!(drain(&mut a), vec![NoteRef::new(1, 0, 0, 60)], "the oldest was stolen");
+        // The same key and channel again with a new id retriggers the voice: the old id ends.
+        a.note_on_ref(NoteRef::new(6, 0, 0, 67), 100);
+        assert_eq!(drain(&mut a), vec![NoteRef::new(5, 0, 0, 67)]);
+        // The same note again (no ids, same key): nothing ends.
+        a.note_on(40, 100);
+        drain(&mut a);
+        a.note_on(40, 100);
+        assert!(drain(&mut a).is_empty());
+        // Mono: a new key takes voice 0 from the old one.
+        let mut m = Alloc4::new(48_000.0);
+        m.set_mode(VoiceMode::Legato);
+        m.note_on_ref(NoteRef::new(7, 0, 0, 60), 100);
+        m.note_on_ref(NoteRef::new(8, 0, 0, 62), 100);
+        assert_eq!(drain(&mut m), vec![NoteRef::new(7, 0, 0, 60)]);
+        assert_eq!(m.voice_info(), VoiceInfo::new(1, 4));
+    }
+
+    #[test]
+    fn the_ended_list_is_bounded_and_voice_info_follows_the_limit() {
+        let mut a = Alloc4::new(48_000.0);
+        for n in 0..(ENDED_CAPACITY as i32 + 10) {
+            a.note_on_ref(NoteRef::new(n, 0, 0, 60), 100);
+            a.free(0);
+        }
+        assert_eq!(a.ended_len(), ENDED_CAPACITY);
+        assert_eq!(a.pop_ended(), Some(NoteRef::new(0, 0, 0, 60)), "oldest first; the newest are dropped");
+        assert_eq!(a.voice_info(), VoiceInfo::new(4, 4));
+        a.set_max_voices(2);
+        assert_eq!(a.voice_info(), VoiceInfo::new(2, 4));
     }
 }

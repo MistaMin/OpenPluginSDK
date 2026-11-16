@@ -46,6 +46,10 @@ pub const KIND_INSTRUMENT: u32 = 1;
 pub const KIND_NOTE_EFFECT: u32 = 2;
 pub const NOTE_PORT_INPUT: u32 = 1;
 pub const NOTE_PORT_OUTPUT: u32 = 2;
+/// The plugin takes MPE on its note input ([`Plugin::mpe_input`] is `Some`).
+/// Added with no new ABI version (on ABI 8): a library from before it leaves the bit clear, which
+/// is the right answer for it (no MPE), so a shell needs no version check.
+pub const NOTE_PORT_MPE: u32 = 4;
 /// Bus kinds in [`OpBus::kind`], the order of `PortKind`.
 pub const BUS_ABSENT: u32 = 0;
 pub const BUS_MONO: u32 = 1;
@@ -371,10 +375,13 @@ pub fn kind<P: Plugin + Default>() -> u32 {
     }
 }
 
-/// [`NOTE_PORT_INPUT`] and [`NOTE_PORT_OUTPUT`] bits.
+/// [`NOTE_PORT_INPUT`], [`NOTE_PORT_OUTPUT`] and [`NOTE_PORT_MPE`] bits. MPE
+/// needs a note input: a plugin with none never has the MPE bit.
 pub fn note_ports<P: Plugin + Default>() -> u32 {
-    let ports = plugin_note_ports::<P>();
-    u32::from(ports.input) * NOTE_PORT_INPUT + u32::from(ports.output) * NOTE_PORT_OUTPUT
+    let plugin = P::default();
+    let ports = plugin.note_ports();
+    let mpe = ports.input && plugin.mpe_input().is_some();
+    u32::from(ports.input) * NOTE_PORT_INPUT + u32::from(ports.output) * NOTE_PORT_OUTPUT + u32::from(mpe) * NOTE_PORT_MPE
 }
 
 pub fn layout_count<P: Plugin + Default>() -> u32 {
