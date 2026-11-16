@@ -226,7 +226,9 @@ int op_shell_param_parse(uint32_t index, const char* text, double* out_plain);
 
 // ---- ABI 4: the host's track ---------------------------------------------
 // What the host says about the track the plugin sits on: its name, colour and
-// kind (VST3 Vst::ChannelContext::IInfoListener, CLAP track-info). Delivered
+// kind (VST3 Vst::ChannelContext::IInfoListener, CLAP track-info; the name
+// alone from the Audio Unit's kAudioUnitProperty_ContextName and AAX's
+// AAX_eNotificationEvent_TrackNameChanged). Delivered
 // to Plugin::track_info_changed on the main thread, never on the audio thread.
 enum {
     OP_TRACK_RETURN = 1,        // a return (send) track

@@ -7,6 +7,9 @@
 #include "AAX_IEffectParameters.h"
 #include "AAX_IParameter.h"
 #include "AAX_IViewContainer.h"
+#ifndef OP_EDITOR_MENU
+#define OP_EDITOR_MENU 1  // op_editor_set_track_info
+#endif
 #include "op_editor.h"
 #include <string>
 #include <vector>
@@ -41,6 +44,9 @@ protected:
                 engine = nullptr;
         }
         op_editor_bind(editor_, engine);
+        // A track the host named before the view opened.
+        trackSerial_ = 0;
+        syncTrack();
         // The AAX host fixes the view at GetViewSize and never resizes it by
         // itself; the editor can only ask, through the view container.
         op_editor_get_size(editor_, &width_, &height_);
@@ -57,6 +63,23 @@ protected:
         size->vert = static_cast<float>(height);
         return AAX_SUCCESS;
     }
+    // The host's name for the track. The data model keeps it (it hears the notification
+    // whether or not a view is open); the view reads it on the main thread, when it opens
+    // and from the host's GUI timer, and tells the editor whenever it changed.
+    AAX_Result TimerWakeup() override {
+        syncTrack();
+        return AAX_CEffectGUI::TimerWakeup();
+    }
+    // Pro Tools may send a notification to the view, to the data model or to both. A track
+    // name that comes here is handed to the data model, which ignores one it already has.
+    // The editor is told from the timer: this call may be on any thread.
+    AAX_Result NotificationReceived(AAX_CTypeID type, const void* data, uint32_t size) override {
+        if (type == AAX_eNotificationEvent_TrackNameChanged) {
+            if (auto* parameters = GetEffectParameters()) return parameters->NotificationReceived(type, data, size);
+            return AAX_SUCCESS;
+        }
+        return AAX_CEffectGUI::NotificationReceived(type, data, size);
+    }
     AAX_Result ParameterUpdated(AAX_CParamID id) override {
         if (!editor_ || !id) return AAX_SUCCESS;
         for (uint32_t i = 0; i < ids_.size(); ++i) {
@@ -70,6 +93,16 @@ protected:
     }
 
 private:
+    void syncTrack() {
+        auto* parameters = GetEffectParameters();
+        if (!editor_ || !parameters) return;
+        TrackData track{};
+        uint32_t written = 0;
+        if (parameters->GetCustomData(kTrackData, sizeof(track), &track, &written) != AAX_SUCCESS || written != sizeof(track)) return;
+        if (track.serial == trackSerial_) return;
+        trackSerial_ = track.serial;
+        op_editor_set_track_info(editor_, track.name[0] ? track.name : nullptr, 0, 0);
+    }
     AAX_IParameter* find(uint32_t index) {
         AAX_IParameter* parameter = nullptr;
         auto* parameters = GetEffectParameters();
@@ -113,6 +146,7 @@ private:
         }
     }
     void* editor_ = nullptr;
+    uint32_t trackSerial_ = 0;  // the data model's count at the last op_editor_set_track_info
     uint32_t width_ = 0;
     uint32_t height_ = 0;
     std::vector<std::string> ids_;

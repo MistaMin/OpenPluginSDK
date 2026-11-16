@@ -2,7 +2,11 @@
 // Cocoa view for the Audio Unit shell. The host asks the factory class for a
 // view; the view owns the plugin's op_editor_* editor and keeps it in step
 // with the Audio Unit on a timer: the parameter values, and which engine is
-// live (the Audio Unit recreates its engine on Initialize).
+// live (the Audio Unit recreates its engine on Initialize), and the host's name
+// for the track.
+#ifndef OP_EDITOR_MENU
+#define OP_EDITOR_MENU 1  // op_editor_set_track_info
+#endif
 #include "op_editor.h"
 #include "OpenPluginAUBridge.h"
 #import <AudioToolbox/AudioToolbox.h>
@@ -16,6 +20,7 @@
     void* instance_;
     void* editor_;
     void* engine_;
+    uint32_t trackSerial_;
     NSTimer* timer_;
 }
 - (instancetype)initWithAudioUnit:(AudioUnit)unit;
@@ -117,6 +122,14 @@ static uint32_t requestResize(void* context, uint32_t width, uint32_t height) {
     for (uint32_t i = 0; i < count; ++i) {
         float value = 0.f;
         if (op_au_param(instance_, i, &value)) op_editor_set_plain(editor_, i, value);
+    }
+    // The track's name, when the host has given one and whenever it changes. The Audio
+    // Unit API carries no colour or kind.
+    char track[1024];
+    uint32_t serial = 0;
+    if (op_au_track(instance_, track, sizeof(track), &serial) && serial != trackSerial_) {
+        trackSerial_ = serial;
+        op_editor_set_track_info(editor_, track[0] ? track : nullptr, 0, 0);
     }
 }
 - (void)dealloc {
