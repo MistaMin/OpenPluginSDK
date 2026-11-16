@@ -20,7 +20,7 @@ static INFO: PluginInfo = PluginInfo {
     vendor: "OpenGrid",
     url: "https://github.com/MistaMin/OpenPluginSDK",
     email: "contact@mistamin.com",
-    version: "0.4.0-beta",
+    version: "1.0.0-beta",
     category: Category::Instrument,
     params: &PARAMS,
     is_instrument: true,

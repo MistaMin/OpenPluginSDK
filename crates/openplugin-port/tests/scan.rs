@@ -255,3 +255,67 @@ fn clap_bundle_scan_matches_the_bare_library() {
     assert_reproduces_table(&manifests[0]);
     assert_eq!(manifests[0].source.bundle_id.as_deref(), Some("com.opengrid.example"));
 }
+
+/// A pinned plugin scans back to its pins (porting toolkit task 2): the manifest
+/// holds the ids the plugin pinned, and the generated Rust writes the same pins.
+/// The bundles are the identity proof's (`examples/pinned`), built by the native
+/// build when the four libraries are there.
+#[test]
+fn a_pinned_vst3_scans_back_to_its_pins() {
+    let Some(dir) = fixtures() else {
+        eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
+        return;
+    };
+    let bundle = dir.join("Pinned B.vst3");
+    if !bundle.exists() {
+        eprintln!("skipped: no Pinned B.vst3 (build the example-pinned-* libraries before the shells)");
+        return;
+    }
+    let manifests = scan(&bundle, &options()).expect("scan");
+    let m = &manifests[0];
+    let v = m.plugin.ids.vst3.as_ref().expect("vst3 ids");
+    assert_eq!(v.class_id, "A1B2C3D4E5F60718293A4B5C6D7E8F90");
+    assert_eq!(v.controller_class_id.as_deref(), Some("0F1E2D3C4B5A69788796A5B4C3D2E1F0"));
+    let own: Vec<(u32, &str)> = m.plugin.params.iter().filter(|p| !p.has_flag("bypass")).map(|p| (p.id, p.name.as_str())).collect();
+    assert_eq!(own, [(0x696E_7672, "Invert"), (0x6472_6976, "Drive"), (0x6F66_6673, "Offset"), (0x6C65_766C, "Level")]);
+    let text = snippet::render(m);
+    for line in [
+        "ParamInfo::new(\"invert\", \"Invert\", 0.0, 1.0, 0.0, Unit::Toggle).with_vst3_id(0x696E7672),",
+        "ParamInfo::new(\"drive\", \"Drive\", 0.0, 1.0, 0.0, Unit::None).with_vst3_id(0x64726976),",
+        "ParamInfo::new(\"offset\", \"Offset\", -1.0, 1.0, 0.0, Unit::None).with_vst3_id(0x6F666673),",
+        "ParamInfo::new(\"level\", \"Level\", 0.0, 2.0, 1.0, Unit::None).with_vst3_id(0x6C65766C),",
+        "Vst3Ids::from_hex(\"A1B2C3D4E5F60718293A4B5C6D7E8F90\", \"0F1E2D3C4B5A69788796A5B4C3D2E1F0\")",
+    ] {
+        assert!(text.contains(line), "missing {line}\n{text}");
+    }
+}
+
+#[test]
+#[cfg_attr(windows, ignore = "Audio Units exist only on macOS")]
+fn a_pinned_audio_unit_scans_back_to_its_pins() {
+    let Some(dir) = fixtures() else {
+        eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
+        return;
+    };
+    let bundle = dir.join("Pinned A.component");
+    if !bundle.exists() {
+        eprintln!("skipped: no Pinned A.component (build the example-pinned-* libraries before the shells)");
+        return;
+    }
+    let manifests = scan(&bundle, &options()).expect("scan");
+    let m = &manifests[0];
+    let au = m.plugin.ids.au.as_ref().expect("au ids");
+    // The codes the plugin pins; the build was given none.
+    assert_eq!((au.component_type.as_str(), au.subtype.as_str(), au.manufacturer.as_str()), ("aufx", "PnEx", "OpTs"));
+    let own: Vec<(u32, &str)> = m.plugin.params.iter().map(|p| (p.id, p.name.as_str())).collect();
+    assert_eq!(own, [(7, "Level"), (0x6F66_6673, "Offset"), (0x696E_7672, "Invert")]);
+    let text = snippet::render(m);
+    for line in [
+        "ParamInfo::new(\"level\", \"Level\", 0.0, 2.0, 1.0, Unit::None).with_au_id(7),",
+        "ParamInfo::new(\"offset\", \"Offset\", -1.0, 1.0, 0.0, Unit::None).with_au_id(0x6F666673),",
+        "ParamInfo::new(\"invert\", \"Invert\", 0.0, 1.0, 0.0, Unit::Toggle).with_au_id(0x696E7672),",
+        "Some(AuIds { subtype: *b\"PnEx\", manufacturer: *b\"OpTs\" })",
+    ] {
+        assert!(text.contains(line), "missing {line}\n{text}");
+    }
+}

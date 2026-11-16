@@ -14,6 +14,7 @@
 // refused, as a plugin's load_state may refuse one. op_stub_* are test hooks.
 #include "op_shell.h"
 #include "proof_stub.h"
+#include "stub_identity.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -21,8 +22,10 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifndef OP_STUB_PARAMS
@@ -70,7 +73,9 @@ struct Stub {
     uint32_t midiCount = 0;
     std::vector<float> plain;
     std::vector<uint8_t> chunk;
-    uint32_t growOnQuery = 0;  // bytes the chunk grows by right after the next size query
+    uint32_t growOnQuery = 0;  // bytes the chunk grows by right after the next too-small answer
+    uint32_t saves = 0;        // op_shell_save_state calls
+    uint32_t sets = 0;         // op_shell_set_plain calls
     uint32_t loads = 0;
     // ABI 6: the latency now, what op_shell_latency last returned, and the changes not yet taken.
     std::atomic<uint32_t> latency{kLatency};
@@ -156,6 +161,7 @@ uint32_t op_shell_latency(void* instance) {
 uint32_t op_shell_set_plain(void* instance, uint32_t index, float plain) {
     if (!instance || index >= kParams) return 0;
     static_cast<Stub*>(instance)->plain[index] = plain;
+    ++static_cast<Stub*>(instance)->sets;
     return 1;
 }
 float op_shell_get_plain(void* instance, uint32_t index) {
@@ -176,10 +182,11 @@ uint32_t op_shell_process(void* instance, const float* in_left, const float* in_
 uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, uint32_t* needed) {
     if (!instance || (!out && capacity > 0)) return OP_STATE_FAILED;
     Stub& stub = *static_cast<Stub*>(instance);
+    ++stub.saves;
     const size_t size = blobSize(stub);
     if (needed) *needed = static_cast<uint32_t>(size);
     if (!out || capacity < size) {
-        if (!out && stub.growOnQuery) {
+        if (stub.growOnQuery) {
             stub.chunk.insert(stub.chunk.end(), stub.growOnQuery, 0x11);
             stub.growOnQuery = 0;
         }
@@ -242,6 +249,8 @@ uint32_t op_stub_chunk(void* instance, uint8_t* out, uint32_t capacity) {
     return static_cast<uint32_t>(stub.chunk.size());
 }
 uint32_t op_stub_loads(void* instance) { return instance ? static_cast<Stub*>(instance)->loads : 0; }
+uint32_t op_stub_saves(void* instance) { return instance ? static_cast<Stub*>(instance)->saves : 0; }
+uint32_t op_stub_sets(void* instance) { return instance ? static_cast<Stub*>(instance)->sets : 0; }
 void op_stub_grow_on_query(void* instance, uint32_t bytes) {
     if (instance) static_cast<Stub*>(instance)->growOnQuery = bytes;
 }
@@ -380,6 +389,39 @@ void op_stub_seen(void* instance, StubSeen* out) {
     if (instance && out) *out = static_cast<Stub*>(instance)->seen;
 }
 uint32_t op_stub_param_count(void) { return kParams; }
+// ---- ABI 4: the host's track. Every call is kept, with the thread it ran on. ----
+namespace {
+struct TrackCall {
+    StubTrack told;
+    std::thread::id thread;
+};
+std::mutex gTrackLock;
+std::vector<TrackCall> gTrackCalls;
+}
+uint32_t op_shell_set_track_info(void* instance, const char* name, uint32_t rgba, uint32_t flags) {
+    if (!instance) return 0;
+    TrackCall call{};
+    call.told.instance = instance;
+    call.told.hasName = name != nullptr;
+    if (name) std::strncpy(call.told.name, name, sizeof call.told.name - 1);
+    call.told.rgba = rgba;
+    call.told.flags = flags;
+    call.thread = std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(gTrackLock);
+    gTrackCalls.push_back(call);
+    return 1;
+}
+uint32_t op_stub_track_count(void) {
+    std::lock_guard<std::mutex> lock(gTrackLock);
+    return static_cast<uint32_t>(gTrackCalls.size());
+}
+uint32_t op_stub_track_call(uint32_t n, StubTrack* out) {
+    std::lock_guard<std::mutex> lock(gTrackLock);
+    if (n >= gTrackCalls.size() || !out) return 0;
+    *out = gTrackCalls[n].told;
+    out->onThisThread = gTrackCalls[n].thread == std::this_thread::get_id();
+    return 1;
+}
 // ---- ABI 3: parameter text. Plain text "%.1f" except in the text proof (see op_shell_param above). ----
 size_t op_shell_param_format(uint32_t index, double plain, char* buf, size_t cap) {
     if (index >= kParams) {

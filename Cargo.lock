@@ -171,14 +171,14 @@ dependencies = [
 
 [[package]]
 name = "example-console-eq"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin",
 ]
 
 [[package]]
 name = "example-cpp-bridge"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -188,14 +188,14 @@ dependencies = [
 
 [[package]]
 name = "example-design-editor"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin",
 ]
 
 [[package]]
 name = "example-editor"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin",
  "openplugin-core",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "example-expression-synth"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin",
  "openplugin-testing",
@@ -212,14 +212,14 @@ dependencies = [
 
 [[package]]
 name = "example-gain"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin",
 ]
 
 [[package]]
 name = "example-perf-guide"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin-core",
  "openplugin-dsp",
@@ -227,8 +227,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-pinned"
+version = "1.0.0-beta"
+dependencies = [
+ "openplugin",
+]
+
+[[package]]
+name = "example-pinned-a"
+version = "1.0.0-beta"
+dependencies = [
+ "example-pinned",
+ "openplugin",
+]
+
+[[package]]
+name = "example-pinned-b"
+version = "1.0.0-beta"
+dependencies = [
+ "example-pinned",
+ "openplugin",
+]
+
+[[package]]
+name = "example-pinned-plain-a"
+version = "1.0.0-beta"
+dependencies = [
+ "example-pinned",
+ "openplugin",
+]
+
+[[package]]
+name = "example-pinned-plain-b"
+version = "1.0.0-beta"
+dependencies = [
+ "example-pinned",
+ "openplugin",
+]
+
+[[package]]
+name = "example-porting-guides"
+version = "1.0.0-beta"
+dependencies = [
+ "openplugin",
+ "openplugin-testing",
+]
+
+[[package]]
 name = "example-role-tags"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin",
 ]
@@ -377,7 +424,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openplugin"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin-core",
  "openplugin-dri",
@@ -389,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin-core"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "serde",
  "serde_json",
@@ -397,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin-dri"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "goodlookindri",
  "goodlookindri-shell",
@@ -410,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin-dsp"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin-core",
  "openplugin-testing",
@@ -420,14 +467,14 @@ dependencies = [
 
 [[package]]
 name = "openplugin-ffi"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "openplugin-core",
 ]
 
 [[package]]
 name = "openplugin-port"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "example-editor",
  "openplugin-core",
@@ -439,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin-targets"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "log",
  "openplugin-core",
@@ -450,7 +497,7 @@ dependencies = [
 
 [[package]]
 name = "openplugin-testing"
-version = "0.4.0-beta"
+version = "1.0.0-beta"
 dependencies = [
  "example-design-editor",
  "example-editor",

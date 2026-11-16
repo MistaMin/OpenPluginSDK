@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "OpenPluginAAX.h"
 #include "OpenPluginAAXState.h"
+#include "main_thread.h"
 #include "AAX_CBinaryDisplayDelegate.h"
 #include "AAX_CBinaryTaperDelegate.h"
 #include "AAX_CEffectParameters.h"
@@ -8,6 +9,7 @@
 #include "AAX_CLogTaperDelegate.h"
 #include "AAX_CString.h"
 #include "AAX_IDisplayDelegate.h"
+#include "AAX_IString.h"
 #include <algorithm>
 #include <cmath>
 #include "AAX_CParameter.h"
@@ -15,6 +17,7 @@
 #include <atomic>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -112,7 +115,66 @@ class Parameters final : public AAX_CEffectParameters {
     mutable PacketBuffer posted_;
     bool dirty_ = true;
     std::atomic<bool> offline_{false};
+    // The host's track: Pro Tools names it (AAX_eNotificationEvent_TrackNameChanged) and
+    // says nothing else; AAX has no notification or call for a track's colour or kind.
+    // The notification may come on any thread. The name is kept at once (trackLock_), for
+    // the view to read, and the plugin is told on the main thread: at once when the
+    // notification came there, else from the main queue (main_thread.h).
+    mutable std::mutex trackLock_;
+    std::string trackName_;                  // UTF-8; empty for none
+    uint32_t trackSerial_ = 0;               // 0: the host has said nothing
+    std::atomic<bool> trackPending_{false};  // the engine has not heard the current name
+    std::mutex trackTelling_;                // one delivery at a time, so the last name told is the last one given
+    // What a block of work waiting on the main queue holds: this object, or null once it
+    // is gone. The lock is held while the work runs, so the destructor waits for it.
+    struct MainThreadLink {
+        std::mutex lock;
+        Parameters* owner;
+    };
+    std::shared_ptr<MainThreadLink> link_ = std::make_shared<MainThreadLink>();
+    // Any thread but the algorithm's. A name equal to the last one changes nothing.
+    void noteTrack(const char* text) {
+        std::string name(text ? text : "");
+        {
+            std::lock_guard<std::mutex> lock(trackLock_);
+            if (trackSerial_ != 0 && trackName_ == name) return;
+            trackName_ = std::move(name);
+            if (++trackSerial_ == 0) trackSerial_ = 1;
+            trackPending_.store(true, std::memory_order_release);
+        }
+        tellTrack();
+    }
+    // Tells the engine on the main thread: now, or from the main queue.
+    void tellTrack() {
+        if (!trackPending_.load(std::memory_order_acquire)) return;
+        if (onMainThread()) {
+            deliverTrack();
+            return;
+        }
+        postToMainThread(new std::shared_ptr<MainThreadLink>(link_), [](void* context) {
+            const std::unique_ptr<std::shared_ptr<MainThreadLink>> link(static_cast<std::shared_ptr<MainThreadLink>*>(context));
+            std::lock_guard<std::mutex> lock((*link)->lock);
+            if ((*link)->owner) (*link)->owner->deliverTrack();
+        });
+    }
+    // Main thread. Tells the engine what the host last said, once.
+    void deliverTrack() {
+        std::lock_guard<std::mutex> telling(trackTelling_);
+        if (!state_.engine || !trackPending_.exchange(false, std::memory_order_acq_rel)) return;
+        std::string name;
+        {
+            std::lock_guard<std::mutex> lock(trackLock_);
+            name = trackName_;
+        }
+        op_shell_set_track_info(state_.engine, name.empty() ? nullptr : name.c_str(), 0, 0);
+    }
 public:
+    Parameters() { link_->owner = this; }
+    ~Parameters() override {
+        // Work still waiting on the main queue finds no one.
+        std::lock_guard<std::mutex> lock(link_->lock);
+        link_->owner = nullptr;
+    }
     static AAX_CEffectParameters* AAX_CALLBACK create() { return new Parameters; }
     AAX_Result EffectInit() override {
         if (!Controller()) return AAX_ERROR_NOT_INITIALIZED;
@@ -142,12 +204,19 @@ public:
         AAX_Result result = AAX_SUCCESS;
         if (!state_.prepareStems(rate, input, output)) return AAX_ERROR_INVALID_ARGUMENT;
         op_shell_set_offline(state_.engine, offline_ ? 1u : 0u);
+        {
+            // A track named before there was an engine.
+            std::lock_guard<std::mutex> lock(trackLock_);
+            if (trackSerial_ != 0) trackPending_.store(true, std::memory_order_release);
+        }
+        tellTrack();
         ids_.assign(info.param_count, std::string());
         posted_ = PacketBuffer(info.param_count);
         for (uint32_t i = 0; i < info.param_count; ++i) {
             OpParamDesc desc{};
             if (!op_shell_param(i, &desc) || desc.id[0] == '\0') return AAX_ERROR_INVALID_PARAMETER_ID;
-            ids_[i] = desc.id;
+            ids_[i] = shellParamId(i);
+            if (ids_[i].empty()) return AAX_ERROR_INVALID_PARAMETER_ID;
             for (uint32_t earlier = 0; earlier < i; ++earlier) {
                 if (ids_[earlier] == ids_[i]) return AAX_ERROR_INVALID_PARAMETER_ID;
             }
@@ -224,6 +293,7 @@ public:
         if (op_shell_save_state(state_.engine, nullptr, 0, &needed) != OP_STATE_TOO_SMALL || needed == 0) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         const size_t bytes = state::encodedSize(needed);
         if (bytes == 0 || bytes > INT32_MAX) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        blobBytes_ = needed;  // the GetChunk that follows saves into a buffer of this size, once
         reserved_ = static_cast<uint32_t>(bytes);
         *size = reserved_;
         return AAX_SUCCESS;
@@ -233,8 +303,12 @@ public:
         if (id != state::kChunkId) return AAX_ERROR_INVALID_CHUNK_ID;
         state::Values values{};
         if (!collect(values)) return AAX_ERROR_INVALID_PARAMETER_ID;
+        // The engine first receives the parameter values this object holds, so the blob matches
+        // the values saved beside it even before any block has carried them.
+        for (uint32_t i = 0; state_.engine && i < values.count; ++i)
+            if (!op_shell_set_plain(state_.engine, i, values.plain[i])) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         std::vector<uint8_t> blob;
-        if (!saveBlob(values, blob)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        if (!saveBlob(blob)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         const size_t bytes = state::encodedSize(blob.size());
         if (bytes == 0 || bytes > reserved_) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         if (!state::encode(values, blob.data(), blob.size(), reinterpret_cast<uint8_t*>(chunk->fData), bytes)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
@@ -251,6 +325,10 @@ public:
         if (!parse(chunk, values)) return AAX_ERROR_MALFORMED_CHUNK;
         return apply(values);
     }
+    // Pro Tools calls this often, for its Compare light. The values are compared first and a
+    // difference ends the call; only equal values cost a save, one, and nothing is written to
+    // the engine. A value the engine has not yet received from a block shows as a difference
+    // until the next block carries it.
     AAX_Result CompareActiveChunk(const AAX_SPlugInChunk* chunk, AAX_CBoolean* equal) const override {
         if (!chunk || !equal) return AAX_ERROR_NULL_ARGUMENT;
         // An id we do not know must not light the compare indicator.
@@ -261,14 +339,14 @@ public:
         *equal = false;
         state::Values stored{}, current{};
         if (!parse(chunk, stored) || !collect(current)) return AAX_SUCCESS;
-        bool same = stored.bypass == current.bypass && stored.count == current.count;
-        for (uint32_t i = 0; same && i < current.count; ++i) same = stored.plain[i] == current.plain[i];
+        if (stored.bypass != current.bypass || stored.count != current.count) return AAX_SUCCESS;
+        // A chunk of another parameter layout holds its values in its blob alone.
+        for (uint32_t i = 0; !stored.byBlob && i < current.count; ++i)
+            if (stored.plain[i] != current.plain[i]) return AAX_SUCCESS;
         // A version 2 chunk also names the plugin's own state; a version 1 chunk has none to compare.
-        if (same && stored.version == state::kVersion) {
-            std::vector<uint8_t> blob;
-            same = saveBlob(current, blob) && blob.size() == stored.blobSize && std::memcmp(blob.data(), stored.blob, blob.size()) == 0;
-        }
-        *equal = same;
+        std::vector<uint8_t> blob;
+        *equal = stored.version != state::kVersion ||
+                 (saveBlob(blob) && blob.size() == stored.blobSize && std::memcmp(blob.data(), stored.blob, blob.size()) == 0);
         return AAX_SUCCESS;
     }
     // Hooks for the proofs, which have no AAX controller.
@@ -325,6 +403,14 @@ public:
             if (state_.engine) op_shell_set_offline(state_.engine, offline_ ? 1u : 0u);
             return AAX_SUCCESS;
         }
+        // The track's name (Pro Tools 11.2 and later; Media Composer does not send it). The
+        // payload is a const AAX_IString. The plugin hears it on the main thread (noteTrack);
+        // the view reads it from GetCustomData on the main thread.
+        if (type == AAX_eNotificationEvent_TrackNameChanged) {
+            if (!data) return AAX_ERROR_NULL_ARGUMENT;
+            noteTrack(static_cast<const AAX_IString*>(data)->Get());
+            return AAX_SUCCESS;
+        }
         return AAX_CEffectParameters::NotificationReceived(type, data, size);
     }
     void* engine() const { return state_.engine; }
@@ -366,6 +452,18 @@ public:
         return AAX_CEffectParameters::ResetFieldData(field, destination, size);
     }
     AAX_Result GetCustomData(AAX_CTypeID id, uint32_t size, void* data, uint32_t* written) const override {
+        if (id == kTrackData) {
+            if (!data || !written || size != sizeof(TrackData)) return AAX_ERROR_INVALID_ARGUMENT;
+            auto* out = static_cast<TrackData*>(data);
+            std::lock_guard<std::mutex> lock(trackLock_);
+            out->serial = trackSerial_;
+            size_t n = std::min(trackName_.size(), sizeof(out->name) - 1);
+            while (n > 0 && n < trackName_.size() && (static_cast<unsigned char>(trackName_[n]) & 0xC0) == 0x80) --n;  // never inside a sequence
+            std::memcpy(out->name, trackName_.data(), n);
+            out->name[n] = '\0';
+            *written = sizeof(TrackData);
+            return AAX_SUCCESS;
+        }
         if (id != kEngineData) return AAX_CEffectParameters::GetCustomData(id, size, data, written);
         if (!data || !written || size != sizeof(void*)) return AAX_ERROR_INVALID_ARGUMENT;
         *static_cast<void**>(data) = state_.engine;
@@ -374,28 +472,26 @@ public:
     }
 private:
     mutable std::atomic<uint32_t> reserved_{0};  // bytes the last GetChunkSize promised
-    // Saves the engine's state through the size-query protocol: ask for the size, allocate,
-    // save, and ask again if the state grew in between. The engine first receives the
-    // parameter values this object holds, so the blob matches the values saved beside it
-    // even before any block has carried them. Main thread only: it allocates.
-    bool saveBlob(const state::Values& values, std::vector<uint8_t>& blob) const {
+    mutable std::atomic<uint32_t> blobBytes_{0};  // the engine's state size at the last save or size answer
+    // Saves the engine's state in one call, into a buffer of the size the state had last
+    // time. Only a state that grew since costs another save, at the size the engine then
+    // asked for. Main thread only: it allocates.
+    bool saveBlob(std::vector<uint8_t>& blob) const {
         void* engine = state_.engine;
         if (!engine) return false;
-        for (uint32_t i = 0; i < values.count; ++i)
-            if (!op_shell_set_plain(engine, i, values.plain[i])) return false;
-        uint32_t needed = 0;
-        if (op_shell_save_state(engine, nullptr, 0, &needed) != OP_STATE_TOO_SMALL) return false;
-        for (int attempt = 0; attempt < 8 && needed > 0; ++attempt) {
-            blob.assign(needed, 0);
+        uint32_t size = blobBytes_;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            blob.assign(size, 0);
             uint32_t written = 0;
-            const uint32_t result = op_shell_save_state(engine, blob.data(), static_cast<uint32_t>(blob.size()), &written);
+            const uint32_t result = op_shell_save_state(engine, blob.data(), size, &written);
             if (result == OP_STATE_OK) {
                 if (written == 0 || written > blob.size()) return false;
                 blob.resize(written);
+                blobBytes_ = written;
                 return true;
             }
-            if (result != OP_STATE_TOO_SMALL) return false;
-            needed = written;
+            if (result != OP_STATE_TOO_SMALL || written == 0) return false;
+            size = written;
         }
         return false;
     }
@@ -447,6 +543,14 @@ private:
             if (!state_.engine || values.blobSize > UINT32_MAX ||
                 !op_shell_load_state(state_.engine, values.blob, static_cast<uint32_t>(values.blobSize)))
                 return AAX_ERROR_MALFORMED_CHUNK;
+            if (values.byBlob) {
+                // Written by a build with another parameter order: the blob names its values
+                // by parameter, so the engine now holds each one in its place. Read them back.
+                for (uint32_t i = 0; i < values.count; ++i) targets[i]->SetValueWithFloat(op_shell_get_plain(state_.engine, i));
+                bypass->SetValueWithBool(values.bypass);
+                dirty_ = true;
+                return AAX_SUCCESS;
+            }
             // The chunk's values are the ones the host sees; give them to the engine too.
             for (uint32_t i = 0; i < values.count; ++i) op_shell_set_plain(state_.engine, i, values.plain[i]);
         }
@@ -460,6 +564,7 @@ AAX_CEffectParameters* AAX_CALLBACK createParameters() { return Parameters::crea
 bool proofInit(AAX_CEffectParameters* p, double rate, uint32_t channels) { return static_cast<Parameters*>(p)->build(rate, channels) == AAX_SUCCESS; }
 bool proofInitStems(AAX_CEffectParameters* p, double rate, AAX_EStemFormat input, AAX_EStemFormat output) { return static_cast<Parameters*>(p)->buildStems(rate, input, output) == AAX_SUCCESS; }
 bool proofNotify(AAX_CEffectParameters* p, AAX_CTypeID event) { return static_cast<Parameters*>(p)->NotificationReceived(event, nullptr, 0) == AAX_SUCCESS; }
+AAX_Result proofNotifyData(AAX_CEffectParameters* p, AAX_CTypeID event, const void* data, uint32_t size) { return static_cast<Parameters*>(p)->NotificationReceived(event, data, size); }
 void* proofEngine(AAX_CEffectParameters* p) { return static_cast<Parameters*>(p)->engine(); }
 bool proofSetPlain(AAX_CEffectParameters* p, uint32_t index, float value) { return static_cast<Parameters*>(p)->proofSetPlain(index, value); }
 bool proofSetBypass(AAX_CEffectParameters* p, bool on) { return static_cast<Parameters*>(p)->proofSetBypass(on); }

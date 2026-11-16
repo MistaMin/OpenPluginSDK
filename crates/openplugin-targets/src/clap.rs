@@ -26,8 +26,8 @@ use std::time::{Duration, Instant as Clock};
 
 use openplugin_core::DenormalGuard;
 use openplugin_core::{
-    decode_params, encode_params, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
-    ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
+    decode_params, encode_params, identity::clap_id_valid, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
+    ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamIdMap, ParamInfo, ParamPlane, PinFormat, Plugin, PluginInfo, PortKind,
     Seqlock, SpeakerLayout, Tail, TrackInfo, Transport, MAX_AUDIO_CHANNELS,
 };
 
@@ -77,6 +77,12 @@ fn editor_factory() -> Option<EditorFactory> {
 /// Gestures an editor can have waiting before the host collects them.
 const GESTURE_CAPACITY: usize = 1024;
 
+/// The id in the CLAP descriptor: [`Plugin::clap_id`] when the plugin pins a
+/// usable one, else [`PluginInfo::id`].
+fn clap_plugin_id(plugin: &dyn Plugin) -> &'static str {
+    plugin.clap_id().filter(|id| clap_id_valid(id)).unwrap_or(plugin.info().id)
+}
+
 fn cstring(text: &str) -> CString {
     CString::new(text).unwrap_or_else(|_| CString::new("openplugin").expect("static cstring"))
 }
@@ -87,7 +93,7 @@ fn publish() -> Option<&'static Published> {
         let plugin = create();
         let info = plugin.info();
         let owned = vec![
-            cstring(info.id),
+            cstring(clap_plugin_id(plugin.as_ref())),
             cstring(info.name),
             cstring(info.vendor),
             cstring(info.url),
@@ -204,6 +210,10 @@ struct Instance {
     /// When false the state is the parameters alone and state calls never touch `inner`.
     has_chunk: bool,
     info: &'static PluginInfo,
+    /// The host's `param_id` of every parameter and back: the pins of the
+    /// table, or the positions (`openplugin_core::identity`). Everything
+    /// inside the instance addresses a parameter by its position.
+    ids: Arc<ParamIdMap>,
     cursor: ParamCursor,
     /// Editor gestures waiting to be reported to the host.
     gestures: Arc<GestureQueue>,
@@ -363,10 +373,12 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
                     continue;
                 }
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_value) };
+                // An id the plugin does not have is not a parameter of this build.
+                let Some(index) = instance.ids.index(event.param_id) else { continue };
                 push_sched(instance, Sched {
                     time: header.time,
                     kind: KIND_PARAM,
-                    param: event.param_id,
+                    param: index as u32,
                     value: event.value as f32,
                     ..Sched::empty()
                 });
@@ -425,7 +437,8 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
                     continue;
                 }
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_mod) };
-                let Some(param) = instance.info.params.get(event.param_id as usize) else { continue };
+                let Some(index) = instance.ids.index(event.param_id) else { continue };
+                let Some(param) = instance.info.params.get(index) else { continue };
                 let Some(target) = NoteRef::checked(event.note_id, event.port_index, event.channel, event.key) else {
                     continue;
                 };
@@ -443,7 +456,7 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
                 push_sched(instance, Sched {
                     time: header.time,
                     kind: KIND_MOD,
-                    param: event.param_id,
+                    param: index as u32,
                     value: (event.amount as f32).clamp(-span, span),
                     target,
                     ..Sched::empty()
@@ -788,7 +801,7 @@ fn pull_params(instance: &mut Instance) {
 /// The block a state call made the audio thread skip: parameter events still reach
 /// the plane, the input passes through (silence where it has no channel), and nothing
 /// touches the plugin object.
-unsafe fn skipped_block(plane: &ParamPlane, process: &clap_process) -> i32 {
+unsafe fn skipped_block(plane: &ParamPlane, ids: &ParamIdMap, process: &clap_process) -> i32 {
     if !process.in_events.is_null() {
         let events = unsafe { &*process.in_events };
         if let (Some(size), Some(get)) = (events.size, events.get) {
@@ -800,7 +813,9 @@ unsafe fn skipped_block(plane: &ParamPlane, process: &clap_process) -> i32 {
                 let header = unsafe { &*header };
                 if header.type_ == EVENT_PARAM_VALUE && header.space_id == 0 {
                     let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_value) };
-                    plane.store(event.param_id as usize, event.value as f32);
+                    if let Some(index) = ids.index(event.param_id) {
+                        plane.store(index, event.value as f32);
+                    }
                 }
             }
         }
@@ -853,8 +868,8 @@ unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const 
     // be inside the plugin object, and it never touches the rest.
     let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
     if gate.compare_exchange(0, GATE_AUDIO, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        let plane = unsafe { &*std::ptr::addr_of!((*raw).plane) };
-        return unsafe { skipped_block(plane, &*process) };
+        let (plane, ids) = unsafe { (&*std::ptr::addr_of!((*raw).plane), &*std::ptr::addr_of!((*raw).ids)) };
+        return unsafe { skipped_block(plane, ids, &*process) };
     }
     let _held = AudioGate(gate);
     // Flush-to-zero for the plugin, the host's mode back when this drops: after the block,
@@ -878,6 +893,7 @@ fn process_block(instance: &mut Instance, process: *const clap_process) -> i32 {
             let count = instance.sched_count;
             apply_group(instance, 0, count);
         }
+        drain_note_ends(instance, process.out_events, 0);
         watch_latency(instance);
         watch_tail(instance);
         return PROCESS_CONTINUE;
@@ -923,6 +939,7 @@ fn process_block(instance: &mut Instance, process: *const clap_process) -> i32 {
     if !process.out_events.is_null() {
         drain_midi(instance, process.out_events);
     }
+    drain_note_ends(instance, process.out_events, process.frames_count.saturating_sub(1));
     PROCESS_CONTINUE
 }
 
@@ -946,13 +963,20 @@ fn port_type_ptr(layout: SpeakerLayout) -> *const c_char {
     bytes.as_ptr() as *const c_char
 }
 
-fn write_audio_port(info: &mut clap_audio_port_info, id: u32, name: &str, layout: SpeakerLayout, main: bool) {
+/// `paired`: the main port on the other side exists, so the main ports are an in-place
+/// pair. An instrument (no audio input) has no pair for its output.
+fn write_audio_port(info: &mut clap_audio_port_info, id: u32, name: &str, layout: SpeakerLayout, main: bool, paired: bool) {
     info.id = id;
     copy_cstr(&mut info.name, name);
     info.flags = if main { AUDIO_PORT_IS_MAIN } else { 0 };
     info.channel_count = layout.channels().unwrap_or(0) as u32;
     info.port_type = port_type_ptr(layout);
-    info.in_place_pair = if main { id } else { CLAP_INVALID_ID };
+    info.in_place_pair = if main && paired { id } else { CLAP_INVALID_ID };
+}
+
+/// Whether the main port opposite a main port on `is_input`'s side exists.
+fn main_pair_exists(layout: IoConfig, is_input: bool) -> bool {
+    if is_input { layout.output != SpeakerLayout::Absent } else { layout.input != SpeakerLayout::Absent }
 }
 
 fn layout_port(layout: IoConfig, is_input: bool, index: u32) -> Option<(u32, &'static str, SpeakerLayout, bool)> {
@@ -998,12 +1022,13 @@ unsafe extern "C" fn audio_ports_get(plugin: *const clap_plugin, index: u32, is_
         if info.is_null() {
             return false;
         }
-        let Some((id, name, layout, main)) = layout_port(selected_layout(instance), is_input, index) else {
+        let selected = selected_layout(instance);
+        let Some((id, name, layout, main)) = layout_port(selected, is_input, index) else {
             return false;
         };
         unsafe {
             std::ptr::write_bytes(info, 0, 1);
-            write_audio_port(&mut *info, id, name, layout, main);
+            write_audio_port(&mut *info, id, name, layout, main, main_pair_exists(selected, is_input));
         }
         true
     })
@@ -1071,7 +1096,7 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
         unsafe {
             std::ptr::write_bytes(info, 0, 1);
             let info = &mut *info;
-            info.id = index;
+            info.id = instance.ids.id(index as usize).unwrap_or(index);
             info.flags = clap_param_flags(param);
             copy_cstr(&mut info.name, param.name);
             // The group path is CLAP's module path ("Filter/Envelope"); empty is the top level.
@@ -1087,7 +1112,7 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
 unsafe extern "C" fn params_get_value(plugin: *const clap_plugin, param_id: u32, out_value: *mut f64) -> bool {
     guarded(std::ptr::null(), false, || {
         let Some(instance) = instance(plugin) else { return false };
-        let Some(value) = instance.plane.load(param_id as usize) else { return false };
+        let Some(value) = instance.ids.index(param_id).and_then(|index| instance.plane.load(index)) else { return false };
         if out_value.is_null() {
             return false;
         }
@@ -1099,7 +1124,7 @@ unsafe extern "C" fn params_get_value(plugin: *const clap_plugin, param_id: u32,
 unsafe extern "C" fn params_value_to_text(plugin: *const clap_plugin, param_id: u32, value: f64, out_buffer: *mut c_char, capacity: u32) -> bool {
     guarded(std::ptr::null(), false, || {
         let Some(instance) = instance(plugin) else { return false };
-        let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
+        let Some(param) = instance.ids.index(param_id).and_then(|index| instance.inner.info().params.get(index)) else { return false };
         if out_buffer.is_null() || capacity == 0 {
             return false;
         }
@@ -1116,7 +1141,7 @@ unsafe extern "C" fn params_text_to_value(plugin: *const clap_plugin, param_id: 
             return false;
         }
         let Some(instance) = instance(plugin) else { return false };
-        let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
+        let Some(param) = instance.ids.index(param_id).and_then(|index| instance.inner.info().params.get(index)) else { return false };
         let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
         let Some(value) = param.parse(&text) else { return false };
         unsafe { *out_value = value as f64 };
@@ -1139,10 +1164,11 @@ fn report_gestures(instance: &Instance, out: *const clap_output_events) {
     while let Some(gesture) = instance.gestures.pop() {
         let Some(push) = push else { continue };
         match gesture {
-            Gesture::Begin(id) | Gesture::End(id) => {
-                if id as usize >= infos.len() {
+            Gesture::Begin(index) | Gesture::End(index) => {
+                if index as usize >= infos.len() {
                     continue;
                 }
+                let Some(id) = instance.ids.id(index as usize) else { continue };
                 let kind = if matches!(gesture, Gesture::Begin(_)) { EVENT_PARAM_GESTURE_BEGIN } else { EVENT_PARAM_GESTURE_END };
                 let event = clap_event_param_gesture {
                     header: event_header(kind, std::mem::size_of::<clap_event_param_gesture>()),
@@ -1150,8 +1176,9 @@ fn report_gestures(instance: &Instance, out: *const clap_output_events) {
                 };
                 unsafe { push(out, &event.header) };
             }
-            Gesture::Perform(id, value) => {
-                let Some(info) = infos.get(id as usize) else { continue };
+            Gesture::Perform(index, value) => {
+                let Some(info) = infos.get(index as usize) else { continue };
+                let Some(id) = instance.ids.id(index as usize) else { continue };
                 let event = clap_event_param_value {
                     header: event_header(EVENT_PARAM_VALUE, std::mem::size_of::<clap_event_param_value>()),
                     param_id: id,
@@ -1542,6 +1569,39 @@ fn drain_midi(instance: &mut Instance, out: *const clap_output_events) {
     }
 }
 
+/// The most `CLAP_EVENT_NOTE_END` events one block sends.
+const MAX_NOTE_ENDS: usize = 4096;
+
+/// Every voice the plugin says has ended ([`Plugin::pull_note_end`]) as a
+/// `CLAP_EVENT_NOTE_END` at `time`, the block's last sample, after its MIDI output so
+/// the events stay in time order. A plugin's queue is drained even with no output list
+/// or a full one, so a later block never reports a stale end (up to [`MAX_NOTE_ENDS`]).
+/// No allocation.
+fn drain_note_ends(instance: &mut Instance, out: *const clap_output_events, time: u32) {
+    let push = if out.is_null() { None } else { unsafe { (*out).try_push } };
+    let mut open = push.is_some();
+    // Bounded, so a plugin that never returns None cannot hold the audio thread.
+    for _ in 0..MAX_NOTE_ENDS {
+        let Some(note) = instance.inner.pull_note_end() else { break };
+        let Some(push) = push.filter(|_| open) else { continue };
+        let event = clap_event_note {
+            header: clap_event_header {
+                size: std::mem::size_of::<clap_event_note>() as u32,
+                time,
+                space_id: 0,
+                type_: EVENT_NOTE_END,
+                flags: 0,
+            },
+            note_id: note.id,
+            port_index: note.port,
+            channel: note.channel,
+            key: note.key,
+            velocity: 0.0,
+        };
+        open = unsafe { push(out, &event.header) };
+    }
+}
+
 fn release_offline_momentary(instance: &mut Instance, offline: bool) {
     if !offline {
         return;
@@ -1564,6 +1624,24 @@ unsafe extern "C" fn tail_get(plugin: *const clap_plugin) -> u32 {
 }
 
 static TAIL: clap_plugin_tail = clap_plugin_tail { get: Some(tail_get) };
+
+/// `voice-info.get` (main thread): [`Plugin::voice_info`], read each time the host asks.
+/// The capacity is never below the count.
+unsafe extern "C" fn voice_info_get(plugin: *const clap_plugin, info: *mut clap_voice_info) -> bool {
+    guarded(std::ptr::null(), false, || {
+        if info.is_null() {
+            return false;
+        }
+        let Some(voices) = instance(plugin).and_then(|item| item.inner.voice_info()) else { return false };
+        let flags = if voices.overlapping_notes { VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES } else { 0 };
+        unsafe {
+            info.write(clap_voice_info { voice_count: voices.count, voice_capacity: voices.capacity.max(voices.count), flags });
+        }
+        true
+    })
+}
+
+static VOICE_INFO: clap_plugin_voice_info = clap_plugin_voice_info { get: Some(voice_info_get) };
 
 /// Whether CLAP can describe every bus of `layout`: a surround bus must use only the
 /// `CLAP_SURROUND_*` channel ids (`SpeakerLayout::clap_expressible`). The beds with top side
@@ -1674,7 +1752,7 @@ unsafe extern "C" fn config_info_get(
         };
         unsafe {
             std::ptr::write_bytes(info, 0, 1);
-            write_audio_port(&mut *info, id, name, speakers, main);
+            write_audio_port(&mut *info, id, name, speakers, main, main_pair_exists(layout, is_input));
         }
         true
     })
@@ -1820,6 +1898,13 @@ unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_c
             }
             return &TAIL as *const clap_plugin_tail as *const c_void;
         }
+        if id == EXT_VOICE_INFO {
+            // Offered only to a plugin that describes its voices.
+            if instance(plugin).is_some_and(|item| item.inner.voice_info().is_some()) {
+                return &VOICE_INFO as *const clap_plugin_voice_info as *const c_void;
+            }
+            return std::ptr::null();
+        }
         if id == EXT_AUDIO_PORTS_CONFIG {
             return &AUDIO_PORTS_CONFIG as *const clap_plugin_audio_ports_config as *const c_void;
         }
@@ -1928,7 +2013,7 @@ unsafe extern "C" fn context_perform(_plugin: *const clap_plugin, _target: *cons
 
 static CONTEXT_MENU: clap_plugin_context_menu = clap_plugin_context_menu { populate: Some(context_populate), perform: Some(context_perform) };
 
-/// Ask the host to pop up its context menu for parameter `param` at (`x`, `y`), relative to
+/// Ask the host to pop up its context menu for the parameter it calls `param` (the CLAP id) at (`x`, `y`), relative to
 /// the plugin's window. False when the host has no such menu, cannot show one now, or declines.
 fn host_context_popup(host: *const clap_host, param: u32, x: i32, y: i32) -> bool {
     let ext = host_call(host, EXT_CONTEXT_MENU);
@@ -1985,7 +2070,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
     let reported_latency = inner.latency().min(u32::MAX as usize) as u32;
     let reported_tail = inner.tail().clap_samples();
     let mut strings = vec![
-        cstring(info.id),
+        cstring(clap_plugin_id(inner.as_ref())),
         cstring(info.name),
         cstring(info.vendor),
         cstring(info.url),
@@ -2044,6 +2129,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
         state_lock: Mutex::new(()),
         has_chunk,
         info,
+        ids: Arc::new(ParamIdMap::new(info.params, PinFormat::Clap)),
         plane,
         cursor,
         gestures: Arc::new(GestureQueue::new(GESTURE_CAPACITY)),
@@ -2246,7 +2332,8 @@ fn editor_host_for(instance: &Instance) -> openplugin_core::EditorHost {
     let queue = instance.gestures.clone();
     let host = instance.host;
     // A right click on a control asks the host for its menu on that parameter.
-    let menu = move |param: u32, x: i32, y: i32| host_context_popup(host, param, x, y);
+    let ids = instance.ids.clone();
+    let menu = move |param: u32, x: i32, y: i32| ids.id(param as usize).is_some_and(|id| host_context_popup(host, id, x, y));
     openplugin_core::EditorHost::new(move |gesture| {
         let link = link;
         if let Gesture::Perform(id, value) = gesture {
@@ -3371,6 +3458,26 @@ mod tests {
         let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
         let ext = unsafe { plugin_extension(adapter.as_plugin(), EXT_GUI.as_ptr() as *const c_char) };
         assert!(ext.is_null());
+    }
+
+    #[test]
+    fn an_effect_pairs_its_main_ports_in_place() {
+        let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
+        let plugin = adapter.as_plugin();
+        for is_input in [true, false] {
+            let mut info = unsafe { std::mem::zeroed::<clap_audio_port_info>() };
+            assert!(unsafe { audio_ports_get(plugin, 0, is_input, &mut info) });
+            assert_eq!(info.in_place_pair, 0);
+        }
+    }
+
+    #[test]
+    fn no_voice_info_for_a_plugin_that_does_not_describe_its_voices() {
+        let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
+        let ext = unsafe { plugin_extension(adapter.as_plugin(), EXT_VOICE_INFO.as_ptr() as *const c_char) };
+        assert!(ext.is_null());
+        // CLAP 1.2 `clap_voice_info`: two uint32 and a uint64.
+        assert_eq!(std::mem::size_of::<clap_voice_info>(), 16);
     }
 
     /// Sizes measured with clang on this aarch64 macOS host against CLAP 1.2.

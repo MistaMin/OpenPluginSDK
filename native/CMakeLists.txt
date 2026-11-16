@@ -21,8 +21,11 @@
 # OP_TAIL=ON is what makes vst3_proof and au_proof exercise the tail report.
 # The channel order proofs (vst3_roles_proof, au_roles_proof, aax_roles_proof) load
 # Role Tags (examples/role_tags) instead; without its library they are not built.
-# The per-note expression proof (vst3_expression_proof) loads Expression Synth
+# The per-note expression proofs (vst3_expression_proof, au_mpe_proof) load Expression Synth
 # (examples/expression_synth): cargo build --release --lib -p example-expression-synth.
+# The identity pinning proofs (vst3_identity_proof, au_identity_proof, aax_identity_proof)
+# load the four builds of Pinned (examples/pinned/builds): cargo build --release --lib
+# -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b.
 cmake_minimum_required(VERSION 3.20)
 # Windows has its own configuration, in its own files (docs/PLATFORMS.md): MSVC has no
 # Objective-C++, and nothing below this block is used there.
@@ -114,6 +117,28 @@ if(OP_EXPRESSION_LIB AND EXISTS "${OP_EXPRESSION_LIB}")
 else()
   set(OP_EXPRESSION_PROOFS OFF)
   message(STATUS "Expression proof not built: no libexample_expression_synth.a (cargo build --release --lib -p example-expression-synth)")
+endif()
+
+# The identity pinning proofs (porting toolkit task 2) link the four builds of Pinned
+# (examples/pinned/builds): cargo build --release --lib -p example-pinned-a
+# -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b. They are
+# looked for next to OP_RUST_LIB (or in OP_IDENTITY_LIB_DIR); without all four the
+# proofs are not built (and say so).
+set(OP_IDENTITY_LIB_DIR "" CACHE PATH "Folder with the static libraries of examples/pinned/builds, for the identity proofs")
+if(NOT OP_IDENTITY_LIB_DIR)
+  get_filename_component(OP_IDENTITY_LIB_DIR "${OP_RUST_LIB}" DIRECTORY)
+endif()
+set(OP_IDENTITY_PROOFS ON)
+foreach(build a b plain_a plain_b)
+  set(OP_IDENTITY_LIB_${build} "${OP_IDENTITY_LIB_DIR}/libexample_pinned_${build}.a")
+  if(NOT EXISTS "${OP_IDENTITY_LIB_${build}}")
+    set(OP_IDENTITY_PROOFS OFF)
+  endif()
+endforeach()
+if(OP_IDENTITY_PROOFS)
+  message(STATUS "Identity proofs over ${OP_IDENTITY_LIB_DIR}/libexample_pinned_{a,b,plain_a,plain_b}.a")
+else()
+  message(STATUS "Identity proofs not built: no libexample_pinned_*.a (cargo build --release --lib -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b)")
 endif()
 
 # Links the Rust library: OP_RUST_LIB, or the archive given as the second argument.
@@ -356,6 +381,40 @@ if(OP_BUILD_VST3)
       add_dependencies(VST3RolesProof OpenPluginVST3Roles)
       add_test(NAME vst3_roles_proof COMMAND VST3RolesProof "$<TARGET_BUNDLE_DIR:OpenPluginVST3Roles>")
     endif()
+    # Identity pinning proof (ABI 8): the shell over the four builds of Pinned. A project
+    # saved with one pinned build reopens in the reordered one; the builds without pins
+    # are the negative control.
+    if(OP_IDENTITY_PROOFS)
+      function(op_vst3_identity_build build product target)
+        set(OP_PRODUCT "${product}")
+        configure_file(vst3/Info.plist.in "${CMAKE_BINARY_DIR}/${target}-Info.plist" @ONLY)
+        add_library(${target} MODULE
+          vst3/OpenPluginVST3.cpp
+          "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
+        target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+        set_target_properties(${target} PROPERTIES
+          OUTPUT_NAME "${product}"
+          BUNDLE TRUE
+          BUNDLE_EXTENSION vst3
+          PREFIX ""
+          MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/${target}-Info.plist")
+        target_link_libraries(${target} PRIVATE sdk)
+        op_link_rust(${target} "${OP_IDENTITY_LIB_${build}}")
+      endfunction()
+      op_vst3_identity_build(a "Pinned A" OpenPluginVST3PinnedA)
+      op_vst3_identity_build(b "Pinned B" OpenPluginVST3PinnedB)
+      op_vst3_identity_build(plain_a "Plain A" OpenPluginVST3PlainA)
+      op_vst3_identity_build(plain_b "Plain B" OpenPluginVST3PlainB)
+      add_executable(VST3IdentityProof vst3/identity_host.cpp
+        "${OP_VST3_SDK}/public.sdk/source/common/memorystream.cpp"
+        "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp")
+      target_include_directories(VST3IdentityProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+      target_link_libraries(VST3IdentityProof PRIVATE sdk "-framework CoreFoundation")
+      add_dependencies(VST3IdentityProof OpenPluginVST3PinnedA OpenPluginVST3PinnedB OpenPluginVST3PlainA OpenPluginVST3PlainB)
+      add_test(NAME vst3_identity_proof COMMAND VST3IdentityProof
+        "$<TARGET_BUNDLE_DIR:OpenPluginVST3PinnedA>" "$<TARGET_BUNDLE_DIR:OpenPluginVST3PinnedB>"
+        "$<TARGET_BUNDLE_DIR:OpenPluginVST3PlainA>" "$<TARGET_BUNDLE_DIR:OpenPluginVST3PlainB>")
+    endif()
     # Per-note expression proof (ABI 7): the shell over Expression Synth, note ids and
     # kNoteExpressionValueEvent in, INoteExpressionController read back.
     if(OP_EXPRESSION_PROOFS)
@@ -448,6 +507,55 @@ if(OP_BUILD_AU)
     op_au_type_code(code "${type}")
     target_compile_definitions(${target} PRIVATE OP_AU_TYPE_CODE=${code})
   endfunction()
+  # The subtype and manufacturer. A plugin may pin them in its source (Plugin::au_ids,
+  # op_shell_au_code, ABI 8): au/kind_probe.c, linked with the plugin's library and run with
+  # "codes", asks it. op_au_pinned_codes sets <prefix>_SUBTYPE and <prefix>_MANUFACTURER to
+  # the pinned codes, or to "" when the plugin pins none or could not be asked.
+  function(op_au_pinned_codes rust_lib prefix)
+    string(MAKE_C_IDENTIFIER "${prefix}" probe_name)
+    unset(OP_AU_CODES_RUN CACHE)
+    unset(OP_AU_CODES_COMPILE CACHE)
+    try_run(OP_AU_CODES_RUN OP_AU_CODES_COMPILE
+      "${CMAKE_BINARY_DIR}/au-codes-probe-${probe_name}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/au/kind_probe.c"
+      CMAKE_FLAGS "-DINCLUDE_DIRECTORIES=${CMAKE_CURRENT_SOURCE_DIR}/include"
+      LINK_LIBRARIES "${rust_lib}" "-framework CoreFoundation" "-framework Foundation" "-framework Security"
+        "-framework SystemConfiguration" "-liconv" "-framework AppKit" "-framework CoreGraphics" "-lobjc"
+      RUN_OUTPUT_VARIABLE OP_AU_CODES_OUTPUT
+      ARGS codes)
+    string(STRIP "${OP_AU_CODES_OUTPUT}" OP_AU_CODES_OUTPUT)
+    set(${prefix}_SUBTYPE "" PARENT_SCOPE)
+    set(${prefix}_MANUFACTURER "" PARENT_SCOPE)
+    if(OP_AU_CODES_COMPILE AND "${OP_AU_CODES_RUN}" STREQUAL "0")
+      if(OP_AU_CODES_OUTPUT MATCHES "^pinned (....) (....)$")
+        set(${prefix}_SUBTYPE "${CMAKE_MATCH_1}" PARENT_SCOPE)
+        set(${prefix}_MANUFACTURER "${CMAKE_MATCH_2}" PARENT_SCOPE)
+      endif()
+    else()
+      message(STATUS "Audio Unit codes: could not ask ${rust_lib} for pinned codes; using the build's")
+    endif()
+  endfunction()
+  # Pinned codes are used when the build gives none (OP_AU_SUBTYPE / OP_AU_MANUFACTURER empty
+  # or left at "OPSh"); a build that gives other codes than the pinned ones stops, because
+  # the host would see a different plugin from the one the source names. A plugin without
+  # pins takes the build's, as always.
+  op_au_pinned_codes("${OP_RUST_LIB}" OP_AU_PINNED)
+  if(OP_AU_PINNED_SUBTYPE)
+    foreach(code SUBTYPE MANUFACTURER)
+      if("${OP_AU_${code}}" STREQUAL "" OR "${OP_AU_${code}}" STREQUAL "OPSh")
+        set(OP_AU_${code} "${OP_AU_PINNED_${code}}")
+      elseif(NOT "${OP_AU_${code}}" STREQUAL "${OP_AU_PINNED_${code}}")
+        message(FATAL_ERROR "OP_AU_${code}=${OP_AU_${code}}, but the plugin pins '${OP_AU_PINNED_${code}}' (Plugin::au_ids). Drop the build option or change the pin: a released Audio Unit keeps its codes.")
+      endif()
+    endforeach()
+    message(STATUS "Audio Unit codes pinned by the plugin: ${OP_AU_SUBTYPE} ${OP_AU_MANUFACTURER}")
+  endif()
+  foreach(code SUBTYPE MANUFACTURER)
+    string(LENGTH "${OP_AU_${code}}" OP_AU_CODE_LENGTH)
+    if(NOT OP_AU_CODE_LENGTH EQUAL 4)
+      message(FATAL_ERROR "OP_AU_${code} must be four characters: pass it (--au-subtype, --au-manufacturer) or pin the codes in the plugin (Plugin::au_ids)")
+    endif()
+  endforeach()
   configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-Info.plist" @ONLY)
   add_library(OpenPluginAU MODULE au/OpenPluginAU.cpp)
   op_au_set_type(OpenPluginAU "${OP_AU_TYPE}")
@@ -664,6 +772,57 @@ if(OP_BUILD_AU)
       "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeFx>" "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeInst>"
       "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeMidiFx>" "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeNewer>"
       "$<TARGET_BUNDLE_DIR:OpenPluginAUProbeOlder>")
+    # Identity pinning proof (ABI 8): the shell over the four builds of Pinned. The pinned
+    # builds are given no subtype or manufacturer: their Info.plist gets the codes the
+    # plugin pins, asked for as the main bundle's are. The builds without pins get codes
+    # from here, the same for both (they are one plugin in two versions).
+    if(OP_IDENTITY_PROOFS)
+      function(op_au_identity_build build product target subtype manufacturer)
+        op_au_pinned_codes("${OP_IDENTITY_LIB_${build}}" pinned)
+        if(pinned_SUBTYPE)
+          if(subtype)
+            message(FATAL_ERROR "${product}: the plugin pins Audio Unit codes; the proof must give none")
+          endif()
+          set(subtype "${pinned_SUBTYPE}")
+          set(manufacturer "${pinned_MANUFACTURER}")
+        endif()
+        if(NOT subtype)
+          message(FATAL_ERROR "${product}: no Audio Unit codes, pinned or given")
+        endif()
+        set(OP_PRODUCT "${product}")
+        string(MAKE_C_IDENTIFIER "${product}" product_id)
+        set(OP_BUNDLE_ID "com.opengrid.test.${product_id}")
+        set(OP_VERSION "1")
+        set(OP_MANUFACTURER "OpenPlugin")
+        set(OP_AU_SUBTYPE "${subtype}")
+        set(OP_AU_MANUFACTURER "${manufacturer}")
+        set(OP_AU_TYPE "aufx")
+        configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/${target}-Info.plist" @ONLY)
+        add_library(${target} MODULE au/OpenPluginAU.cpp)
+        op_au_set_type(${target} aufx)
+        target_compile_features(${target} PRIVATE cxx_std_23)
+        target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+        set_target_properties(${target} PROPERTIES
+          OUTPUT_NAME "${product}"
+          BUNDLE TRUE
+          BUNDLE_EXTENSION component
+          PREFIX ""
+          MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/${target}-Info.plist")
+        target_link_libraries(${target} PRIVATE openplugin_au_sdk)
+        op_link_rust(${target} "${OP_IDENTITY_LIB_${build}}")
+      endfunction()
+      op_au_identity_build(a "Pinned A" OpenPluginAUPinnedA "" "")
+      op_au_identity_build(b "Pinned B" OpenPluginAUPinnedB "" "")
+      op_au_identity_build(plain_a "Plain A" OpenPluginAUPlainA "Plan" "OpTs")
+      op_au_identity_build(plain_b "Plain B" OpenPluginAUPlainB "Plan" "OpTs")
+      add_executable(AUIdentityProof au/identity_host.cpp)
+      target_include_directories(AUIdentityProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+      target_link_libraries(AUIdentityProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+      add_dependencies(AUIdentityProof OpenPluginAUPinnedA OpenPluginAUPinnedB OpenPluginAUPlainA OpenPluginAUPlainB)
+      add_test(NAME au_identity_proof COMMAND AUIdentityProof
+        "$<TARGET_BUNDLE_DIR:OpenPluginAUPinnedA>" "$<TARGET_BUNDLE_DIR:OpenPluginAUPinnedB>"
+        "$<TARGET_BUNDLE_DIR:OpenPluginAUPlainA>" "$<TARGET_BUNDLE_DIR:OpenPluginAUPlainB>")
+    endif()
     # Channel order proof: the shell over Role Tags, every layout from mono to 9.1.6.
     if(OP_ROLE_PROOFS)
       function(op_au_roles_plist)
@@ -696,7 +855,85 @@ if(OP_BUILD_AU)
       add_dependencies(AURolesProof OpenPluginAURoles)
       add_test(NAME au_roles_proof COMMAND AURolesProof "$<TARGET_BUNDLE_DIR:OpenPluginAURoles>")
     endif()
+    # kAudioUnitProperty_SupportsMPE (0.7 task 4): 1 from the shell over Expression Synth,
+    # which asks for MPE; 0 from the shell over the example, which does not.
+    add_executable(AUMpeProof au/mpe_host.cpp)
+    target_compile_features(AUMpeProof PRIVATE cxx_std_23)
+    target_include_directories(AUMpeProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/au")
+    target_link_libraries(AUMpeProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+    add_dependencies(AUMpeProof OpenPluginAU)
+    add_test(NAME au_mpe_proof_off COMMAND AUMpeProof "$<TARGET_BUNDLE_DIR:OpenPluginAU>" 0)
+    if(OP_EXPRESSION_PROOFS)
+      function(op_au_expression_plist)
+        set(OP_PRODUCT "ExpressionSynth")
+        set(OP_BUNDLE_ID "com.opengrid.test.expression")
+        set(OP_VERSION "1")
+        set(OP_MANUFACTURER "OpenPlugin")
+        set(OP_AU_SUBTYPE "ExSy")
+        set(OP_AU_MANUFACTURER "OpTs")
+        set(OP_AU_TYPE "aumu")
+        configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-expression-Info.plist" @ONLY)
+      endfunction()
+      op_au_expression_plist()
+      add_library(OpenPluginAUExpression MODULE au/OpenPluginAU.cpp)
+      op_au_set_type(OpenPluginAUExpression aumu)
+      target_compile_features(OpenPluginAUExpression PRIVATE cxx_std_23)
+      target_include_directories(OpenPluginAUExpression PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+      set_target_properties(OpenPluginAUExpression PROPERTIES
+        OUTPUT_NAME "ExpressionSynth"
+        BUNDLE TRUE
+        BUNDLE_EXTENSION component
+        PREFIX ""
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-expression-Info.plist")
+      target_link_libraries(OpenPluginAUExpression PRIVATE openplugin_au_sdk)
+      op_link_rust(OpenPluginAUExpression "${OP_EXPRESSION_LIB}")
+      add_dependencies(AUMpeProof OpenPluginAUExpression)
+      add_test(NAME au_mpe_proof COMMAND AUMpeProof "$<TARGET_BUNDLE_DIR:OpenPluginAUExpression>" 1)
+    endif()
   endif()
+  # The host's track (kAudioUnitProperty_ContextName): the shell over the stand-in that records
+  # op_shell_set_track_info (vst3/track_stub.cpp, shared with the VST3 proof), because the example
+  # keeps no track to read back. Built with the editor off and on: with OP_EDITOR the component
+  # also has the shell's Cocoa view over a recording editor (include/stub_editor.h), so the proof
+  # reads back what the editor was told too.
+  function(op_au_track_plist)
+    set(OP_PRODUCT "TrackTest")
+    set(OP_BUNDLE_ID "com.opengrid.test.track")
+    set(OP_VERSION "1")
+    set(OP_MANUFACTURER "OpenPlugin")
+    set(OP_AU_SUBTYPE "TkTs")
+    set(OP_AU_MANUFACTURER "OpTs")
+    set(OP_AU_TYPE "aufx")
+    configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-track-Info.plist" @ONLY)
+  endfunction()
+  op_au_track_plist()
+  add_library(OpenPluginAUTrack MODULE au/OpenPluginAU.cpp vst3/track_stub.cpp)
+  op_au_set_type(OpenPluginAUTrack aufx)
+  target_compile_features(OpenPluginAUTrack PRIVATE cxx_std_23)
+  target_include_directories(OpenPluginAUTrack PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_AU_SDK}/include")
+  set_target_properties(OpenPluginAUTrack PROPERTIES
+    OUTPUT_NAME "TrackTest"
+    BUNDLE TRUE
+    BUNDLE_EXTENSION component
+    PREFIX ""
+    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-track-Info.plist")
+  target_link_libraries(OpenPluginAUTrack PRIVATE openplugin_au_sdk)
+  add_executable(AUTrackProof au/track_host.mm)
+  set_source_files_properties(au/track_host.mm PROPERTIES COMPILE_FLAGS "-fno-objc-arc")
+  target_include_directories(AUTrackProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+  target_link_libraries(AUTrackProof PRIVATE "-framework AudioToolbox" "-framework CoreFoundation")
+  if(OP_EDITOR)
+    target_sources(OpenPluginAUTrack PRIVATE au/OpenPluginAUView.mm au/track_editor_stub.cpp)
+    target_compile_definitions(OpenPluginAUTrack PRIVATE
+      "OP_AU_BUNDLE_ID=\"com.opengrid.test.track.au\""
+      "OP_AU_VIEW_CLASS=OpenPluginAUViewFactory_TrackTest"
+      "OP_AU_VIEW_CLASS_NAME=\"OpenPluginAUViewFactory_TrackTest\""
+      "OP_AU_CONTAINER_CLASS=OpenPluginAUView_TrackTest")
+    target_link_libraries(OpenPluginAUTrack PRIVATE "-framework Cocoa" "-framework AudioUnit")
+    target_link_libraries(AUTrackProof PRIVATE "-framework Cocoa" "-framework AudioUnit")
+  endif()
+  add_dependencies(AUTrackProof OpenPluginAUTrack)
+  add_test(NAME au_track_proof COMMAND AUTrackProof "$<TARGET_BUNDLE_DIR:OpenPluginAUTrack>")
 endif()
 
 if(OP_BUILD_AAX)
@@ -848,6 +1085,18 @@ if(OP_BUILD_AAX)
   target_include_directories(AAXChangesProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
   target_compile_definitions(AAXChangesProof PRIVATE OP_STUB_PARAMS=3 OP_STUB_LATENCY=0)
   target_link_libraries(AAXChangesProof PRIVATE openplugin_aax_sdk)
+  # AAXTrackProof: the host's track (AAX_eNotificationEvent_TrackNameChanged) through the real data
+  # model over the stand-in, which records op_shell_set_track_info. With OP_EDITOR the shell's real
+  # AAX_CEffectGUI runs over a recording editor (include/stub_editor.h), so the proof reads back what
+  # the editor was told too.
+  add_executable(AAXTrackProof aax/host_track.cpp aax/OpenPluginAAXParameters.cpp aax/OpenPluginAAXState.cpp
+    aax/OpenPluginAAXProcess.cpp aax/proof_stub.cpp)
+  target_include_directories(AAXTrackProof PRIVATE ${OP_AAX_PROOF_INCLUDES})
+  target_compile_definitions(AAXTrackProof PRIVATE OP_STUB_PARAMS=1 OP_STUB_LATENCY=0)
+  target_link_libraries(AAXTrackProof PRIVATE openplugin_aax_sdk "-framework CoreFoundation")
+  if(OP_EDITOR)
+    target_sources(AAXTrackProof PRIVATE aax/OpenPluginAAXGUI.cpp)
+  endif()
   add_executable(AAXBundleProof aax/host_bundle.cpp)
   target_link_libraries(AAXBundleProof PRIVATE "-framework CoreFoundation")
   add_dependencies(AAXBundleProof OpenPluginAAX)
@@ -857,6 +1106,32 @@ if(OP_BUILD_AAX)
   target_include_directories(AAXPagesProof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/aax")
   target_compile_definitions(AAXPagesProof PRIVATE OP_AAX_PAGES_NO_MAIN=1)
   op_link_rust(AAXPagesProof)
+  # Identity pinning proof (ABI 8): aax/host_identity.cpp once per build of Pinned, run as
+  # two processes by aax/identity_proof.cmake: a project saved with one pinned build opens
+  # in the reordered one; the builds without pins are the negative control.
+  if(OP_IDENTITY_PROOFS)
+    function(op_aax_identity_build build label target)
+      add_executable(${target} aax/host_identity.cpp aax/OpenPluginAAXParameters.cpp aax/OpenPluginAAXState.cpp aax/OpenPluginAAXProcess.cpp)
+      target_include_directories(${target} PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/aax"
+        "${OP_AAX_SDK}/Interfaces"
+        "${OP_AAX_SDK}/Interfaces/ACF"
+        "${OP_AAX_SDK}/Libs/AAXLibrary/include")
+      target_compile_definitions(${target} PRIVATE "OP_IDENTITY_BUILD=\"${label}\"")
+      target_link_libraries(${target} PRIVATE openplugin_aax_sdk)
+      op_link_rust(${target} "${OP_IDENTITY_LIB_${build}}")
+    endfunction()
+    op_aax_identity_build(a "Pinned A" AAXIdentityPinnedA)
+    op_aax_identity_build(b "Pinned B" AAXIdentityPinnedB)
+    op_aax_identity_build(plain_a "Plain A" AAXIdentityPlainA)
+    op_aax_identity_build(plain_b "Plain B" AAXIdentityPlainB)
+    add_test(NAME aax_identity_proof COMMAND ${CMAKE_COMMAND}
+      "-DPINNED_A=$<TARGET_FILE:AAXIdentityPinnedA>" "-DPINNED_B=$<TARGET_FILE:AAXIdentityPinnedB>"
+      "-DPLAIN_A=$<TARGET_FILE:AAXIdentityPlainA>" "-DPLAIN_B=$<TARGET_FILE:AAXIdentityPlainB>"
+      "-DWORK=${CMAKE_BINARY_DIR}/aax-identity-proof"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/aax/identity_proof.cmake")
+  endif()
   add_test(NAME aax_pages_proof COMMAND AAXPagesProof "${CMAKE_BINARY_DIR}/aax-pages-proof.xml")
   add_test(NAME aax_text_proof COMMAND AAXTextProof)
   add_test(NAME aax_text_stub_proof COMMAND AAXTextStubProof)
@@ -870,6 +1145,7 @@ if(OP_BUILD_AAX)
   add_test(NAME aax_events_proof COMMAND AAXEventsProof)
   add_test(NAME aax_describe_proof COMMAND AAXDescribeProof)
   add_test(NAME aax_changes_proof COMMAND AAXChangesProof)
+  add_test(NAME aax_track_proof COMMAND AAXTrackProof)
   add_test(NAME aax_bundle_proof COMMAND AAXBundleProof "$<TARGET_BUNDLE_DIR:OpenPluginAAX>")
 endif()
 

@@ -9,8 +9,9 @@ publish = false
 # staticlib: the VST3 expression proof in native/ links it (native/CMakeLists.txt
 # finds libexample_expression_synth.a next to OP_RUST_LIB, or takes
 # -DOP_EXPRESSION_LIB). rlib: the CLAP, LV2 and shell proofs in tests/ call its exports.
+# cdylib: the .clap that clap-validator checks in CI.
 [lib]
-crate-type = ["staticlib", "rlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 openplugin = { workspace = true }

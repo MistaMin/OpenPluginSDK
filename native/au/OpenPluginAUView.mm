@@ -2,7 +2,11 @@
 // Cocoa view for the Audio Unit shell. The host asks the factory class for a
 // view; the view owns the plugin's op_editor_* editor and keeps it in step
 // with the Audio Unit on a timer: the parameter values, and which engine is
-// live (the Audio Unit recreates its engine on Initialize).
+// live (the Audio Unit recreates its engine on Initialize), and the host's name
+// for the track.
+#ifndef OP_EDITOR_MENU
+#define OP_EDITOR_MENU 1  // op_editor_set_track_info
+#endif
 #include "op_editor.h"
 #include "OpenPluginAUBridge.h"
 #import <AudioToolbox/AudioToolbox.h>
@@ -16,17 +20,21 @@
     void* instance_;
     void* editor_;
     void* engine_;
+    uint32_t trackSerial_;
     NSTimer* timer_;
 }
 - (instancetype)initWithAudioUnit:(AudioUnit)unit;
 @end
 
 namespace {
+// The editor names a parameter by its index in the plugin's table; the host by its
+// AudioUnitParameterID, which is that index unless the plugin pins another (ABI 8).
+AudioUnitParameterID parameterId(uint32_t index) { return op_au_param_id(index); }
 void notify(AudioUnit unit, AudioUnitEventType type, uint32_t index) {
     AudioUnitEvent event{};
     event.mEventType = type;
     event.mArgument.mParameter.mAudioUnit = unit;
-    event.mArgument.mParameter.mParameterID = index;
+    event.mArgument.mParameter.mParameterID = parameterId(index);
     event.mArgument.mParameter.mScope = kAudioUnitScope_Global;
     event.mArgument.mParameter.mElement = 0;
     AUEventListenerNotify(nullptr, nullptr, &event);
@@ -35,7 +43,7 @@ void beginEdit(void* context, uint32_t index) {
     notify(static_cast<AudioUnit>(context), kAudioUnitEvent_BeginParameterChangeGesture, index);
 }
 void performEdit(void* context, uint32_t index, double plain) {
-    AudioUnitParameter parameter{static_cast<AudioUnit>(context), index, kAudioUnitScope_Global, 0};
+    AudioUnitParameter parameter{static_cast<AudioUnit>(context), parameterId(index), kAudioUnitScope_Global, 0};
     // Sets the value and tells every listener, the host's automation included.
     AUParameterSet(nullptr, nullptr, &parameter, static_cast<AudioUnitParameterValue>(plain), 0);
 }
@@ -110,10 +118,21 @@ static uint32_t requestResize(void* context, uint32_t width, uint32_t height) {
     // A failed render is silent in the host. Say so in the log.
     if (const int32_t error = op_au_take_error(instance_))
         NSLog(@"%s: the Audio Unit failed to initialize or render (status %d)", OP_AU_VIEW_CLASS_NAME, error);
+    UInt32 dropped = 0, droppedSize = sizeof(dropped);
+    if (AudioUnitGetProperty(unit_, kOpenPluginAUProperty_EventsDropped, kAudioUnitScope_Global, 0, &dropped, &droppedSize) == noErr && dropped)
+        NSLog(@"%s: the Audio Unit's event queue was full; %u events were dropped", OP_AU_VIEW_CLASS_NAME, static_cast<unsigned>(dropped));
     const uint32_t count = op_au_param_count(instance_);
     for (uint32_t i = 0; i < count; ++i) {
         float value = 0.f;
         if (op_au_param(instance_, i, &value)) op_editor_set_plain(editor_, i, value);
+    }
+    // The track's name, when the host has given one and whenever it changes. The Audio
+    // Unit API carries no colour or kind.
+    char track[1024];
+    uint32_t serial = 0;
+    if (op_au_track(instance_, track, sizeof(track), &serial) && serial != trackSerial_) {
+        trackSerial_ = serial;
+        op_editor_set_track_info(editor_, track[0] ? track : nullptr, 0, 0);
     }
 }
 - (void)dealloc {

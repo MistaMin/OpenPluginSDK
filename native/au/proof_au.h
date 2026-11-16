@@ -40,8 +40,11 @@ inline void* proof_bundle_symbol(const char* name) {
     return symbol;
 }
 
-/// Registers the factory named in the bundle's plist, in this process only.
-inline AudioComponent proof_register_component(const char* bundle_path) {
+/// Registers the factory named in the bundle's plist, in this process only. A second
+/// bundle with the type, subtype and manufacturer of one already registered (two builds
+/// of one plugin) needs another `version`: the system refuses the same description twice
+/// at one version.
+inline AudioComponent proof_register_component(const char* bundle_path, UInt32 version = 0) {
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(bundle_path), static_cast<CFIndex>(std::strlen(bundle_path)), true);
     CHECK(url);
     CFBundleRef bundle = CFBundleCreate(nullptr, url);
@@ -63,7 +66,7 @@ inline AudioComponent proof_register_component(const char* bundle_path) {
     CHECK(factoryName);
     auto factory = reinterpret_cast<AudioComponentFactoryFunction>(CFBundleGetFunctionPointerForName(bundle, factoryName));
     CHECK(factory);
-    AudioComponent component = AudioComponentRegister(&desc, CFSTR("OpenPlugin shell proof"), 0, factory);
+    AudioComponent component = AudioComponentRegister(&desc, CFSTR("OpenPlugin shell proof"), version, factory);
     CHECK(component);
     return component;
 }

@@ -23,12 +23,15 @@
 # -DOP_BUILD_VST3=OFF or -DOP_BUILD_AAX=OFF leaves a format out, and its SDK is then
 # not needed.
 #
-# The Rust library is `<name>.lib`, built for the MSVC target against the release C
-# runtime (Rust has no build against the debug one). So every configuration of the
-# shells links the release C runtime too, Debug included: `--config Debug` gives
-# unoptimized code with debug information and the SDKs' own checks, without the
-# debug heap and the checked iterators of the debug runtime, and it links and runs
-# with the same Rust library as Release. The bundles in the build folder are those
+# The C and C++ runtime is linked statically (/MT), so no plug-in imports
+# vcruntime140.dll or msvcp140.dll and none needs the Visual C++ Redistributable; the
+# Universal CRT is part of Windows 10 and 11. The Rust library is `<name>.lib`, built
+# for the MSVC target with +crt-static (.cargo/config.toml) against the release
+# static runtime (Rust has no build against the debug one). So every configuration
+# of the shells links the release static runtime too, Debug included: `--config
+# Debug` gives unoptimized code with debug information and the SDKs' own checks,
+# without the debug heap and the checked iterators of the debug runtime, and it
+# links and runs with the same Rust library as Release. The bundles in the build folder are those
 # of the configuration built last. OP_RUST_NATIVE_LIBS
 # lists the system libraries the Rust library needs; take the list from
 #   cargo rustc --release --lib -p <crate> --crate-type staticlib -- --print native-static-libs
@@ -39,9 +42,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT MSVC)
   message(FATAL_ERROR "The Windows shells are built with MSVC (Visual Studio or its Build Tools)")
 endif()
-# The release C runtime (/MD) in every configuration: one process cannot mix it with
-# the debug runtime (/MDd), and the Rust library brings the release one.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+# The release C runtime, linked statically (/MT), in every configuration: the Rust
+# library brings the release static runtime (+crt-static), and one image cannot mix
+# it with the debug one (/MTd). The VST3 and AAX SDK libraries get the same
+# (vst3/win/vst3.cmake, aax/win/aax.cmake). scripts/windows/check_imports.ps1 fails
+# on a binary that imports vcruntime*, msvcp* or concrt*.
+set(OP_MSVC_RUNTIME "MultiThreaded")
+set(CMAKE_MSVC_RUNTIME_LIBRARY "${OP_MSVC_RUNTIME}")
 get_property(OP_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 if(NOT OP_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -99,6 +106,25 @@ if(OP_EXPRESSION_LIB AND EXISTS "${OP_EXPRESSION_LIB}")
 else()
   set(OP_EXPRESSION_PROOFS OFF)
   message(STATUS "Expression proof not built: no example_expression_synth.lib (cargo build --release --lib -p example-expression-synth)")
+endif()
+
+# The four builds of Pinned (examples/pinned/builds) for the identity pinning proof,
+# found next to OP_RUST_LIB (or in OP_IDENTITY_LIB_DIR).
+set(OP_IDENTITY_LIB_DIR "" CACHE PATH "Folder with the static libraries of examples/pinned/builds, for the identity proofs")
+if(NOT OP_IDENTITY_LIB_DIR)
+  get_filename_component(OP_IDENTITY_LIB_DIR "${OP_RUST_LIB}" DIRECTORY)
+endif()
+set(OP_IDENTITY_PROOFS ON)
+foreach(build a b plain_a plain_b)
+  set(OP_IDENTITY_LIB_${build} "${OP_IDENTITY_LIB_DIR}/example_pinned_${build}.lib")
+  if(NOT EXISTS "${OP_IDENTITY_LIB_${build}}")
+    set(OP_IDENTITY_PROOFS OFF)
+  endif()
+endforeach()
+if(OP_IDENTITY_PROOFS)
+  message(STATUS "Identity proofs over ${OP_IDENTITY_LIB_DIR}/example_pinned_{a,b,plain_a,plain_b}.lib")
+else()
+  message(STATUS "Identity proofs not built: no example_pinned_*.lib (cargo build --release --lib -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b)")
 endif()
 
 # Links the Rust library: OP_RUST_LIB, or the library given as the second argument.

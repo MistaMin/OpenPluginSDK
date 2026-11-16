@@ -6,6 +6,7 @@
 #pragma once
 // Define OP_STUB_HAS_PARAM_TEXT before including to bring your own op_shell_param_format/parse.
 #include "op_shell.h"
+#include "stub_identity.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -44,6 +45,8 @@ uint32_t op_shell_layout_selected(void*) { return 0; }
 void op_shell_set_offline(void*, uint32_t) {}
 uint32_t op_shell_midi_out(void*, OpMidiEvent*, uint32_t) { return 0; }
 uint32_t op_shell_midi_dropped(const void*) { return 0; }
+// ABI 4: these stand-ins keep no track.
+uint32_t op_shell_set_track_info(void*, const char*, uint32_t, uint32_t) { return 1; }
 #ifndef OP_STUB_OWN_CHANGES
 // ABI 6: these stand-ins never change their latency or parameter info.
 uint32_t op_shell_take_changes(void*) { return 0; }

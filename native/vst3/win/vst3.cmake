@@ -36,9 +36,10 @@ set(SMTG_CREATE_PLUGIN_LINK OFF CACHE BOOL "" FORCE)
 set(SMTG_RUN_VST_VALIDATOR OFF CACHE BOOL "" FORCE)
 set(SMTG_CREATE_MODULE_INFO OFF CACHE BOOL "" FORCE)
 add_subdirectory("${OP_VST3_SDK}" vst3-sdk EXCLUDE_FROM_ALL)
-# The SDK's own CMake names the C runtime per configuration (/MDd for Debug). Its
-# libraries are linked into the shells, which use the release runtime in every
-# configuration (native/cmake/windows.cmake), so that choice is taken off them.
+# The SDK's own CMake names the C runtime per configuration (/MDd for Debug, /MD
+# otherwise). Its libraries are linked into the shells, which use the release static
+# runtime (/MT) in every configuration (native/cmake/windows.cmake), so that choice
+# is taken off them and they get the shells' runtime.
 foreach(sdk_target IN ITEMS base pluginterfaces sdk sdk_common sdk_hosting)
   if(TARGET ${sdk_target})
     get_target_property(sdk_options ${sdk_target} COMPILE_OPTIONS)
@@ -48,7 +49,7 @@ foreach(sdk_target IN ITEMS base pluginterfaces sdk sdk_common sdk_hosting)
     endif()
     get_target_property(sdk_type ${sdk_target} TYPE)
     if(NOT sdk_type STREQUAL "INTERFACE_LIBRARY")
-      set_property(TARGET ${sdk_target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+      set_property(TARGET ${sdk_target} PROPERTY MSVC_RUNTIME_LIBRARY "${OP_MSVC_RUNTIME}")
     endif()
   endif()
 endforeach()
@@ -218,6 +219,27 @@ if(NOT OP_EDITOR)
       "${OP_SDK_SOURCE}/vst/hosting/eventlist.cpp")
     add_dependencies(VST3ExpressionProof OpenPluginVST3Expression)
     add_test(NAME vst3_expression_proof COMMAND VST3ExpressionProof "${OP_VST3_DIR_OpenPluginVST3Expression}")
+  endif()
+
+  # Identity pinning proof (ABI 8): the shell over the four builds of Pinned. A project
+  # saved with one pinned build reopens in the reordered one; the builds without pins are
+  # the negative control.
+  if(OP_IDENTITY_PROOFS)
+    op_vst3_module(OpenPluginVST3PinnedA "Pinned A")
+    op_link_rust(OpenPluginVST3PinnedA "${OP_IDENTITY_LIB_a}")
+    op_vst3_module(OpenPluginVST3PinnedB "Pinned B")
+    op_link_rust(OpenPluginVST3PinnedB "${OP_IDENTITY_LIB_b}")
+    op_vst3_module(OpenPluginVST3PlainA "Plain A")
+    op_link_rust(OpenPluginVST3PlainA "${OP_IDENTITY_LIB_plain_a}")
+    op_vst3_module(OpenPluginVST3PlainB "Plain B")
+    op_link_rust(OpenPluginVST3PlainB "${OP_IDENTITY_LIB_plain_b}")
+    op_vst3_proof(VST3IdentityProof identity_host.cpp
+      "${OP_SDK_SOURCE}/common/memorystream.cpp"
+      "${OP_SDK_SOURCE}/vst/hosting/parameterchanges.cpp")
+    add_dependencies(VST3IdentityProof OpenPluginVST3PinnedA OpenPluginVST3PinnedB OpenPluginVST3PlainA OpenPluginVST3PlainB)
+    add_test(NAME vst3_identity_proof COMMAND VST3IdentityProof
+      "${OP_VST3_DIR_OpenPluginVST3PinnedA}" "${OP_VST3_DIR_OpenPluginVST3PinnedB}"
+      "${OP_VST3_DIR_OpenPluginVST3PlainA}" "${OP_VST3_DIR_OpenPluginVST3PlainB}")
   endif()
 
   # Channel order proof: the shell over Role Tags, every layout from mono to 9.1.6.

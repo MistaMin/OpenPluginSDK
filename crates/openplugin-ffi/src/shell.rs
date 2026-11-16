@@ -7,15 +7,16 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::{Mutex, OnceLock};
 
+use openplugin_core::identity::{param_aax_ids, state_is_keyed};
 use openplugin_core::{
-    sample_rate_supported, AaxIds, Category, EditorState, Expression, IoConfig, NotePorts, ParamFlags,
-    ParamInfo, PluginInfo, PortKind, SpeakerLayout, Taper, Unit,
+    sample_rate_supported, AaxIds, AuIds, Category, EditorState, Expression, IoConfig, NotePorts, ParamFlags,
+    ParamIdMap, ParamInfo, PinFormat, PluginInfo, PortKind, SpeakerLayout, Taper, Unit, Vst3Ids,
 };
 
 use crate::{FfiInstance, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
-pub const ABI: u32 = 7;
+pub const ABI: u32 = 8;
 pub use crate::block::{
     OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
     EVENT_NOTE_EXPRESSION, EVENT_NOTE_OFF_ID, EVENT_NOTE_ON_ID, NOTE_ANY,
@@ -45,6 +46,10 @@ pub const KIND_INSTRUMENT: u32 = 1;
 pub const KIND_NOTE_EFFECT: u32 = 2;
 pub const NOTE_PORT_INPUT: u32 = 1;
 pub const NOTE_PORT_OUTPUT: u32 = 2;
+/// The plugin takes MPE on its note input ([`Plugin::mpe_input`] is `Some`).
+/// Added with no new ABI version (on ABI 8): a library from before it leaves the bit clear, which
+/// is the right answer for it (no MPE), so a shell needs no version check.
+pub const NOTE_PORT_MPE: u32 = 4;
 /// Bus kinds in [`OpBus::kind`], the order of `PortKind`.
 pub const BUS_ABSENT: u32 = 0;
 pub const BUS_MONO: u32 = 1;
@@ -164,6 +169,140 @@ fn plugin_aax_ids<P: Plugin + Default>() -> Option<AaxIds> {
     *SLOT.get_or_init(|| P::default().aax_ids().filter(AaxIds::is_valid))
 }
 
+// ---- ABI 8: identity pins ----
+/// [`param_host_id`] format: the VST3 `ParamID`.
+pub const HOST_VST3: u32 = 1;
+/// [`param_host_id`] format: the `AudioUnitParameterID`.
+pub const HOST_AU: u32 = 2;
+/// What [`param_host_id`] returns for an unknown format or index.
+pub const NO_HOST_ID: u32 = u32::MAX;
+/// [`au_code`] argument: the Audio Unit subtype.
+pub const AU_SUBTYPE: u32 = 0;
+/// [`au_code`] argument: the Audio Unit manufacturer.
+pub const AU_MANUFACTURER: u32 = 1;
+/// [`identity`] bit: the state blob names its values by parameter id (the
+/// table has pins), so it loads into a build with another parameter order.
+pub const IDENTITY_KEYED_STATE: u32 = 1;
+/// [`identity`] bit: the VST3 class ids are pinned ([`Plugin::vst3_ids`]).
+pub const IDENTITY_VST3_CLASS: u32 = 2;
+/// [`identity`] bit: the Audio Unit codes are pinned ([`Plugin::au_ids`]).
+pub const IDENTITY_AU_CODES: u32 = 4;
+/// [`identity`] bit: the AAX codes are pinned ([`Plugin::aax_ids`]).
+pub const IDENTITY_AAX_CODES: u32 = 8;
+/// [`identity`] bit: VST3 parameter ids are pinned (not all positions).
+pub const IDENTITY_VST3_PARAMS: u32 = 16;
+/// [`identity`] bit: Audio Unit parameter ids are pinned.
+pub const IDENTITY_AU_PARAMS: u32 = 32;
+/// [`identity`] bit: AAX parameter ids are pinned.
+pub const IDENTITY_AAX_PARAMS: u32 = 64;
+
+/// [`Plugin::vst3_ids`], when the plugin sets valid ones.
+fn plugin_vst3_ids<P: Plugin + Default>() -> Option<Vst3Ids> {
+    static SLOT: OnceLock<Option<Vst3Ids>> = OnceLock::new();
+    *SLOT.get_or_init(|| P::default().vst3_ids().filter(Vst3Ids::is_valid))
+}
+
+/// [`Plugin::au_ids`], when the plugin sets valid ones.
+fn plugin_au_ids<P: Plugin + Default>() -> Option<AuIds> {
+    static SLOT: OnceLock<Option<AuIds>> = OnceLock::new();
+    *SLOT.get_or_init(|| P::default().au_ids().filter(AuIds::is_valid))
+}
+
+/// The parameter ids of the formats behind the shells, built once.
+struct HostIds {
+    vst3: ParamIdMap,
+    au: ParamIdMap,
+    /// The AAX id of each parameter where the table pins any; empty when
+    /// every AAX id is the parameter's string id.
+    aax: Vec<&'static str>,
+}
+
+fn host_ids<P: Plugin + Default>() -> &'static HostIds {
+    static SLOT: OnceLock<HostIds> = OnceLock::new();
+    SLOT.get_or_init(|| {
+        let params = plugin_info::<P>().params;
+        let pinned = params.iter().any(|param| param.pins.aax.is_some());
+        HostIds {
+            vst3: ParamIdMap::new(params, PinFormat::Vst3),
+            au: ParamIdMap::new(params, PinFormat::Au),
+            aax: param_aax_ids(params).ok().filter(|_| pinned).unwrap_or_default(),
+        }
+    })
+}
+
+/// The number the host of `format` ([`HOST_VST3`], [`HOST_AU`]) stores for
+/// parameter `index`: the pin ([`ParamInfo::with_host_id`]), or `index`
+/// itself for a table without pins. [`NO_HOST_ID`] for an unknown format or
+/// index, or a panic. The ABI itself keeps addressing parameters by `index`;
+/// only a shell's edge to its host uses this number. Does not allocate after
+/// the first call; any thread.
+pub fn param_host_id<P: Plugin + Default>(format: u32, index: u32) -> u32 {
+    std::panic::catch_unwind(|| {
+        let ids = host_ids::<P>();
+        let map = match format {
+            HOST_VST3 => &ids.vst3,
+            HOST_AU => &ids.au,
+            _ => return NO_HOST_ID,
+        };
+        map.id(index as usize).unwrap_or(NO_HOST_ID)
+    })
+    .unwrap_or(NO_HOST_ID)
+}
+
+/// The AAX id of parameter `index` (the pin of [`ParamInfo::with_aax_id`], or
+/// the parameter's string id, which is also `OpParamDesc::id`) as UTF-8 plus a
+/// NUL in `buf`, with the length rules of [`param_group`]. An unknown `index`
+/// (or a panic) returns 0 and writes an empty string.
+///
+/// # Safety
+/// `buf` is null or points to `cap` writable bytes.
+pub unsafe fn param_aax_id<P: Plugin + Default>(index: u32, buf: *mut u8, cap: usize) -> usize {
+    let id = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let pinned = host_ids::<P>().aax.get(index as usize).copied();
+        pinned.or_else(|| plugin_info::<P>().params.get(index as usize).map(|param| param.id)).unwrap_or("")
+    }))
+    .unwrap_or("");
+    unsafe { copy_text(id, buf, cap) }
+}
+
+/// A pinned Audio Unit code ([`Plugin::au_ids`]) the way a four-character
+/// code is read (`'ExGn'`, first byte highest): [`AU_SUBTYPE`] or
+/// [`AU_MANUFACTURER`]. 0 when the plugin pins none, and for any other
+/// `which`. Message thread (it builds a plugin to ask it).
+pub fn au_code<P: Plugin + Default>(which: u32) -> u32 {
+    std::panic::catch_unwind(|| match (plugin_au_ids::<P>(), which) {
+        (Some(ids), AU_SUBTYPE) => code(ids.subtype),
+        (Some(ids), AU_MANUFACTURER) => code(ids.manufacturer),
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
+/// Which identifiers the plugin pins, as `IDENTITY_*` bits; 0 for a plugin
+/// without pins. Message thread.
+pub fn identity<P: Plugin + Default>() -> u32 {
+    std::panic::catch_unwind(|| {
+        let params = plugin_info::<P>().params;
+        let ids = host_ids::<P>();
+        let mut flags = 0;
+        for (set, bit) in [
+            (state_is_keyed(params), IDENTITY_KEYED_STATE),
+            (plugin_vst3_ids::<P>().is_some(), IDENTITY_VST3_CLASS),
+            (plugin_au_ids::<P>().is_some(), IDENTITY_AU_CODES),
+            (plugin_aax_ids::<P>().is_some(), IDENTITY_AAX_CODES),
+            (!ids.vst3.is_identity(), IDENTITY_VST3_PARAMS),
+            (!ids.au.is_identity(), IDENTITY_AU_PARAMS),
+            (!ids.aax.is_empty(), IDENTITY_AAX_PARAMS),
+        ] {
+            if set {
+                flags |= bit;
+            }
+        }
+        flags
+    })
+    .unwrap_or(0)
+}
+
 /// A four-character code the way AAX reads one (`'OpGd'`, first byte highest).
 fn code(bytes: [u8; 4]) -> u32 {
     u32::from_be_bytes(bytes)
@@ -236,10 +375,13 @@ pub fn kind<P: Plugin + Default>() -> u32 {
     }
 }
 
-/// [`NOTE_PORT_INPUT`] and [`NOTE_PORT_OUTPUT`] bits.
+/// [`NOTE_PORT_INPUT`], [`NOTE_PORT_OUTPUT`] and [`NOTE_PORT_MPE`] bits. MPE
+/// needs a note input: a plugin with none never has the MPE bit.
 pub fn note_ports<P: Plugin + Default>() -> u32 {
-    let ports = plugin_note_ports::<P>();
-    u32::from(ports.input) * NOTE_PORT_INPUT + u32::from(ports.output) * NOTE_PORT_OUTPUT
+    let plugin = P::default();
+    let ports = plugin.note_ports();
+    let mpe = ports.input && plugin.mpe_input().is_some();
+    u32::from(ports.input) * NOTE_PORT_INPUT + u32::from(ports.output) * NOTE_PORT_OUTPUT + u32::from(mpe) * NOTE_PORT_MPE
 }
 
 pub fn layout_count<P: Plugin + Default>() -> u32 {
@@ -518,11 +660,14 @@ pub unsafe fn write_info<P: Plugin + Default>(out: *mut OpShellInfo) -> u32 {
             Some(ids) => (code(ids.manufacturer), code(ids.product), code(ids.mono), code(ids.stereo)),
             None => (fourcc(&mix(info.vendor, 3)), fourcc(&mix(info.id, 4)), mono, stereo),
         };
+        // The pinned class ids replace the derived ones only here: the
+        // development AAX codes above stay derived from the plugin id.
+        let pinned = plugin_vst3_ids::<P>();
         let header = OpShellInfo {
             abi: ABI,
             param_count: info.params.len().min(u32::MAX as usize) as u32,
-            processor_cid: processor,
-            controller_cid: controller,
+            processor_cid: pinned.map_or(processor, |ids| ids.processor),
+            controller_cid: pinned.and_then(|ids| ids.controller).unwrap_or(controller),
             manufacturer_id,
             product_id,
             plugin_id_mono,

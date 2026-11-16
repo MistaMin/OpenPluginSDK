@@ -37,7 +37,9 @@ Two host integrations that work from the editor and the host's own services, per
 |---|---|---|
 | CLAP | `clap.context-menu` host `popup` for the parameter; the plugin side offers no items | `clap.track-info`, read at init and on `changed`; name, colour, return, bus and master flags |
 | VST3 | `IComponentHandler3::createContextMenu` then `IContextMenu::popup`, through `op_editor_set_context_menu` | `IInfoListener::setChannelContextInfos`: name and colour (no kind), through `op_shell_set_track_info` (ABI 4) |
-| LV2, AU, AAX | The SDK's own menu: Reset to default, Copy value, Paste value, Type value | Not delivered |
+| Audio Unit | The SDK's own menu: Reset to default, Copy value, Paste value, Type value | `kAudioUnitProperty_ContextName`: the name only (the format has no colour or kind), through `op_shell_set_track_info` |
+| AAX | The SDK's own menu | `AAX_eNotificationEvent_TrackNameChanged`: the name only (the format has no colour or kind), through `op_shell_set_track_info` |
+| LV2 | The SDK's own menu | Not delivered: no published LV2 extension carries a track's name or colour |
 
 Where the host shows no menu (or declines), the SDK shows its own in every format. The CLAP entry also no longer offers layouts CLAP cannot name: `audio-ports-config` skips any layout whose buses use a role without a `CLAP_SURROUND_*` id (5.1.2, 7.1.2 and 9.1.6, `SpeakerLayout::clap_expressible`), and the `surround` channel map is `SpeakerLayout::clap_map`. Config ids stay the layout's index, so the ids a host sees can skip numbers.
 
@@ -98,9 +100,23 @@ The adapter links an AAX SDK that stays outside this repository. The SDK is not 
 - Each plug-in parameter is an `AAX_CParameter`. Plain values travel in one packet of a header and one float per parameter, posted by the shell; the shell takes up to 4096 parameters (the AAX SDK sets no limit). A parameter id must be shorter than 32 characters. Log parameters use `AAX_CLogTaperDelegate`.
 - Master bypass outputs the input delayed by the reported latency, crossfaded over 10 ms on switching. There is no tail report: AAX has no mechanism for one (see [SHELL.md](SHELL.md)).
 - Without `-DOP_EDITOR=ON` the view is an empty rectangle. With it, the view hosts the plugin's editor ([EDITOR.md](EDITOR.md)).
-- Manufacturer, product, and plug-in IDs are a hash of the plugin id, documented in [SHELL.md](SHELL.md). Set fixed codes with `Plugin::aax_ids` before a release. A page table (`-DOP_AAX_PAGES=ON`) needs them.
+- Manufacturer, product, and plug-in IDs are a hash of the plugin id, documented in [SHELL.md](SHELL.md). Set fixed codes with `Plugin::aax_ids` before a release. A page table (`-DOP_AAX_PAGES=ON`) needs them. A parameter's AAX id is its string id, or `ParamInfo::with_aax_id` (see Identity below).
 - State is one versioned chunk (payload version 2) holding every parameter value, the master bypass and the plugin's own state from `op_shell_save_state`, so `Plugin::save_state` reaches the session. Version 1 chunks, with parameters and bypass only, still load. A malformed or wrong-length chunk, a damaged blob, or a blob the plugin refuses is rejected and changes nothing. See [SHELL.md](SHELL.md).
 - `aax_process_proof` calls the process callback. `aax_state_proof` saves and loads the chunk on the example, and `aax_state_blob_proof` does so for a plugin that owns a chunk. `aax_alloc_proof` and `aax_alloc_latency_proof` check that the callback does not allocate, with bypass. `aax_bypass_proof` checks the delayed, crossfaded bypass against a latency stub, and `aax_params_proof` checks 200 parameters through the packet, the process callback and the chunk. `aax_bundle_proof` checks the seven ACF exports and `ACFGetSDKVersion`. None is a Pro Tools session, and none runs in CI because the Avid SDK is not redistributable.
+
+## Identity
+
+What a host stores to find a plugin and its parameters again, and where each comes from. Every one can be pinned ([PORTING.md](PORTING.md#identity-pinning)); without a pin it is derived, exactly as before pins existed.
+
+| Format | Plugin | Parameter |
+|---|---|---|
+| CLAP | the descriptor id: `Plugin::clap_id`, else `PluginInfo::id` | `clap_param_info.id`: `ParamInfo::with_clap_id` (or `with_host_id`), else the position in the table |
+| VST3 | processor and controller class ids: `Plugin::vst3_ids`, else derived from `PluginInfo::id` | `ParamID`: `with_vst3_id` (or `with_host_id`), else the position. The shell's own bypass is `0x42595053` |
+| Audio Unit | type from the plugin's kind (or `OP_AU_TYPE`); subtype and manufacturer: `Plugin::au_ids`, else the build's options | `AudioUnitParameterID`: `with_au_id` (or `with_host_id`), else the position |
+| AAX | manufacturer, product, plug-in ids: `Plugin::aax_ids`, else development ids derived from the vendor and `PluginInfo::id` | the parameter id string: `with_aax_id`, else `ParamInfo::id` |
+| LV2 | the URI: `Plugin::lv2_uri`, else `PluginInfo::id` | the port symbol, from `ParamInfo::id`, and the port index (four audio ports, then the parameters in table order) |
+
+In the CLAP entry every event (`CLAP_EVENT_PARAM_VALUE`, `PARAM_MOD`, the gestures an editor reports, the context menu target) and every `clap.params` call goes through one table from the host's id to the position (`openplugin_core::ParamIdMap`: a binary search, no allocation on the audio thread). An event for an id the plugin does not have is skipped. A table with pins saves its parameters by id, so a project survives a reordered or extended table in every format; `examples/pinned/tests/session.rs` and the native identity proofs show it, with the unpinned builds as the negative control. LV2 has no pins of its own: a saved LV2 session maps ports by symbol, which is the string id.
 
 ## LV2 ports
 

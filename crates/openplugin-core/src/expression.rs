@@ -362,6 +362,29 @@ impl ExpressionSet {
     }
 }
 
+/// What a plugin tells a host about its voices (CLAP `voice-info`). A host
+/// reads it on the main thread from [`Plugin::voice_info`](crate::Plugin::voice_info),
+/// each time it asks, and uses it to decide how many voices to model (for
+/// polyphonic modulation, for instance). Finished voices are reported one by
+/// one through [`Plugin::pull_note_end`](crate::Plugin::pull_note_end).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct VoiceInfo {
+    /// The voices the plugin plays now (a polyphony setting, for instance).
+    pub count: u32,
+    /// The most voices it could ever play; at least `count`.
+    pub capacity: u32,
+    /// Two held notes on the same key and channel with different note ids
+    /// sound as two voices (CLAP `CLAP_VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES`).
+    pub overlapping_notes: bool,
+}
+
+impl VoiceInfo {
+    /// `count` voices out of `capacity`, without overlapping notes.
+    pub const fn new(count: u32, capacity: u32) -> Self {
+        Self { count, capacity, overlapping_notes: false }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

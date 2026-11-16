@@ -93,6 +93,15 @@ jobs:
       - name: SIMD kernels in release, with the speed-up report
         working-directory: OpenPluginSDK
         run: cargo test -p openplugin-dsp --release --lib simd -- --include-ignored --nocapture
+      # The test binaries built above link the C runtime statically
+      # (.cargo/config.toml): none may import vcruntime*, msvcp* or concrt*.
+      - name: No Visual C++ runtime imports (dumpbin /dependents)
+        if: runner.os == 'Windows'
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -Path target\debug, target\release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
   # W1 on Linux: build the whole workspace and run every test that needs no
   # window or display (core, DSP, DRI, the CLAP and LV2 targets, the shell ABI in
@@ -130,6 +139,7 @@ jobs:
           -p openplugin-core -p openplugin-dsp -p openplugin-dri
           -p openplugin-targets -p openplugin-ffi -p openplugin-port
           -p openplugin-testing -p openplugin
+          -p example-porting-guides
       - name: Clippy, warnings as errors
         working-directory: OpenPluginSDK
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -225,6 +235,25 @@ jobs:
         run: |
           & (Join-Path $env:RUNNER_TEMP 'clap-validator\clap-validator.exe') validate (Join-Path $env:RUNNER_TEMP 'bundle\Editor.clap')
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # No Visual C++ Redistributable: the C runtime is linked statically
+      # (.cargo/config.toml), so no binary may import vcruntime*, msvcp* or
+      # concrt*. The self-test first: a DLL built with /MD must be caught and
+      # one built with /MT must pass, or the check proves nothing.
+      - name: Import check self-test (a /MD build is caught)
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -SelfTest
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # Every binary built above: the workspace's examples, standalones, tests,
+      # build scripts and proc macros (debug), examples/editor (release), and
+      # the CLAP bundle.
+      - name: No Visual C++ runtime imports (dumpbin /dependents)
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -Path target\debug, target\release, (Join-Path $env:RUNNER_TEMP 'bundle\Editor.clap')
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
   # The VST3 shell on Windows (native/cmake/windows.cmake, native/vst3/win): the
   # same proofs as the macOS vst3-shell job, built with MSVC. AAX is not built
@@ -256,11 +285,12 @@ jobs:
           path: vst3sdk
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      # The proofs load the example ("Example Gain"); the role proof loads Role Tags and
-      # the per-note expression proof Expression Synth, found next to it.
-      - name: Build the example, Role Tags and Expression Synth as static libraries
+      # The proofs load the example ("Example Gain"); the role proof loads Role Tags, the
+      # per-note expression proof Expression Synth and the identity pinning proof the four
+      # builds of Pinned (examples/pinned/builds), found next to it.
+      - name: Build the example, Role Tags, Expression Synth and Pinned as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b
       # Only the VST3 shell, no editor. The Rust library has the release C
       # runtime, so the shell is built as Release. Each -D is quoted: PowerShell
       # splits an unquoted -DOP_VERSION=0.3.1 at the first dot.
@@ -279,7 +309,7 @@ jobs:
       - name: Build the VST3 shell and its proofs
         working-directory: OpenPluginSDK
         run: cmake --build build-shell --config Release -j 4
-      # The twelve vst3_* proofs. vst3_noalloc_events_proof prepares a point per
+      # The thirteen vst3_* proofs. vst3_noalloc_events_proof prepares a point per
       # sample for 2081 parameters and takes a few minutes.
       - name: Run the VST3 proofs
         working-directory: OpenPluginSDK
@@ -293,6 +323,23 @@ jobs:
         run: |
           $env:OPENPLUGIN_PORT_FIXTURES = "$PWD\build-shell"
           cargo test -p openplugin-port --no-fail-fast
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # The shells, the VST3 SDK's libraries and the Rust library are linked
+      # against the static C runtime (MultiThreaded, +crt-static). The self-test
+      # shows the check catches a /MD build; then every binary of this job: the
+      # VST3 bundles, the proofs and their stand-in plug-ins (build-shell), and
+      # openplugin-port with its tests (target).
+      - name: Import check self-test (a /MD build is caught)
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -SelfTest
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: No Visual C++ runtime imports (dumpbin /dependents)
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -Path build-shell, target\debug, target\release
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
   # The VST3 shell on Linux (native/cmake/linux.cmake, native/vst3/linux): the same
@@ -458,7 +505,7 @@ jobs:
         run: cargo +1.85.0 check --workspace --all-targets --locked
 
   clap-validator:
-    name: CLAP validator (examples/editor)
+    name: CLAP validator (examples/editor, examples/expression_synth)
     runs-on: macos-latest
     timeout-minutes: 30
     env:
@@ -495,28 +542,31 @@ jobs:
           tar -xzf clap-validator-*.tar.gz clap-validator
           chmod +x clap-validator
           ./clap-validator --version
-      - name: Build examples/editor
+      # Expression Synth offers voice-info and sends CLAP_EVENT_NOTE_END.
+      - name: Build examples/editor and examples/expression_synth
         working-directory: OpenPluginSDK
-        run: cargo build --release -p example-editor
-      - name: Bundle the example as a .clap
+        run: cargo build --release -p example-editor -p example-expression-synth
+      - name: Bundle the examples as .clap
         working-directory: OpenPluginSDK
         run: |
           set -euo pipefail
-          bundle="$RUNNER_TEMP/bundle/Editor.clap"
           rm -rf "$RUNNER_TEMP/bundle"
-          mkdir -p "$bundle/Contents/MacOS"
-          cp target/release/libexample_editor.dylib "$bundle/Contents/MacOS/Editor"
-          cat > "$bundle/Contents/Info.plist" <<'PLIST'
+          for pair in "Editor:example_editor:editor" "ExpressionSynth:example_expression_synth:expression-synth"; do
+            IFS=: read -r name lib id <<< "$pair"
+            bundle="$RUNNER_TEMP/bundle/$name.clap"
+            mkdir -p "$bundle/Contents/MacOS"
+            cp "target/release/lib$lib.dylib" "$bundle/Contents/MacOS/$name"
+            cat > "$bundle/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
             <key>CFBundleExecutable</key>
-            <string>Editor</string>
+            <string>$name</string>
             <key>CFBundleIdentifier</key>
-            <string>com.opengrid.example.editor</string>
+            <string>com.opengrid.example.$id</string>
             <key>CFBundleName</key>
-            <string>Editor</string>
+            <string>$name</string>
             <key>CFBundlePackageType</key>
             <string>BNDL</string>
             <key>CFBundleVersion</key>
@@ -524,13 +574,15 @@ jobs:
           </dict>
           </plist>
           PLIST
-          codesign --force --sign - "$bundle"
-          codesign --verify --verbose "$bundle"
+            codesign --force --sign - "$bundle"
+            codesign --verify --verbose "$bundle"
+          done
       # clap-validator exits non-zero when any test fails.
-      - name: Validate the bundle
+      - name: Validate the bundles
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/clap-validator/clap-validator" validate "$RUNNER_TEMP/bundle/Editor.clap"
+          "$RUNNER_TEMP/clap-validator/clap-validator" validate "$RUNNER_TEMP/bundle/ExpressionSynth.clap"
 
   vst3-shell:
     name: VST3 shell proofs
@@ -565,9 +617,11 @@ jobs:
       # The proofs load the SDK example (examples/editor, "Example Gain"); the role proof
       # (vst3_roles_proof) loads Role Tags (examples/role_tags) and the expression proof
       # (vst3_expression_proof) Expression Synth (examples/expression_synth), found next to it.
-      - name: Build the example, Role Tags and Expression Synth as static libraries
+      # The identity pinning proof (vst3_identity_proof) loads the four builds of Pinned
+      # (examples/pinned/builds).
+      - name: Build the example, Role Tags, Expression Synth and Pinned as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b
       # Only the VST3 shell: no Audio Unit or AAX SDK, no editor.
       - name: Configure the VST3 shell
         working-directory: OpenPluginSDK
@@ -615,10 +669,12 @@ jobs:
           path: AudioUnitSDK
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      # au_roles_proof links Role Tags (examples/role_tags), found next to the example.
-      - name: Build the example plugin and Role Tags as static libraries
+      # au_roles_proof links Role Tags (examples/role_tags) and au_mpe_proof Expression
+      # Synth (examples/expression_synth), found next to the example; au_identity_proof
+      # links the four builds of Pinned (examples/pinned/builds).
+      - name: Build the example plugin, Role Tags, Expression Synth and Pinned as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b
       - name: Configure the Audio Unit shell only
         working-directory: OpenPluginSDK
         run: >

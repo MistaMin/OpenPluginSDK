@@ -22,10 +22,26 @@ inline constexpr uint32_t kMaxBlock = 2048;
 inline constexpr uint32_t kMaxChannels = 16;
 // The library must be at least as new as this header (docs/SHELL.md, Versioning).
 inline bool abiOk() { return op_shell_abi_version() >= static_cast<uint32_t>(OP_SHELL_ABI); }
+// The AAX parameter ID of the parameter at `index` (ABI 8): the plugin's pin, or the
+// parameter's string id, which is what the shell always used. Pro Tools stores
+// automation and control surface assignments by it.
+inline std::string shellParamId(uint32_t index) {
+    char id[64] = {};
+    const size_t length = op_shell_param_aax_id(index, id, sizeof id);
+    return std::string(id, length < sizeof id ? length : sizeof id - 1);
+}
 // Length of the switch between processed and bypassed audio.
 inline constexpr double kBypassFadeSeconds = 0.010;
 // GetCustomData block the view reads: the engine pointer, valid in this process.
 inline constexpr AAX_CTypeID kEngineData = 'OpEn';
+// GetCustomData block the view reads: what the host last said about the track
+// (AAX_eNotificationEvent_TrackNameChanged). `serial` is 0 until the host has said
+// anything and moves with every change; `name` is UTF-8 with a NUL, empty for none.
+inline constexpr AAX_CTypeID kTrackData = 'OpTk';
+struct TrackData {
+    uint32_t serial;
+    char name[1024];
+};
 // The controls packet is a header followed by `count` plain values, so its size
 // follows the plug-in's parameter count (packetBytes). The data port is declared
 // with that size in Describe and the packet is posted by the shell itself.
@@ -165,6 +181,9 @@ bool proofInit(AAX_CEffectParameters* parameters, double rate, uint32_t channels
 bool proofInitStems(AAX_CEffectParameters* parameters, double rate, AAX_EStemFormat input, AAX_EStemFormat output);
 // The offline notifications the host sends the data model (AAX_eNotificationEvent_Entering/ExitingOfflineMode).
 bool proofNotify(AAX_CEffectParameters* parameters, AAX_CTypeID event);
+// A notification with a payload, as the host sends it (AAX_eNotificationEvent_TrackNameChanged
+// with a const AAX_IString).
+AAX_Result proofNotifyData(AAX_CEffectParameters* parameters, AAX_CTypeID event, const void* data, uint32_t size);
 // The pointer to the engine the process state holds (what GetCustomData(kEngineData) returns).
 void* proofEngine(AAX_CEffectParameters* parameters);
 bool proofSetPlain(AAX_CEffectParameters* parameters, uint32_t index, float value);

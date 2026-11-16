@@ -13,7 +13,7 @@ Versions are `0.MINOR.PATCH`, with a pre-release suffix while the SDK is in beta
 - Any release may contain a breaking change. There is no compatibility promise between two `0.x` releases.
 - A breaking change goes into a **minor** release (`0.3` to `0.4`), never into a patch release (`0.3.1` to `0.3.2`). A patch release fixes bugs and adds nothing a plugin must adapt to.
 - Every breaking change is listed in the changelog under Changed or Removed and marked **Breaking**, with what a plugin must do. This is how 0.3.1 recorded `write_info`/`write_param` becoming `unsafe`, the sample-rate range and the knob sweep.
-- The `-beta` suffix stays until 1.0. Cargo treats `0.3.1-beta` as older than `0.3.1`, so the release that drops the suffix is the first stable one.
+- The `-beta` suffix stays until 1.0. Cargo treats `1.0.0-beta` as older than `1.0.0`, so the release that drops the suffix is the first stable one.
 
 ### From 1.0
 
@@ -61,7 +61,8 @@ Anything a host stores for a plugin and hands back later, possibly years later, 
 
 | Format | Where | Current version |
 |---|---|---|
-| OPST parameter snapshot | `encode_params` / `decode_params`, CLAP and LV2 state, shell parameter state | magic `OPST`, version 1 (`SNAPSHOT_VERSION`) |
+| OPST parameter snapshot | `encode_params` / `decode_params`, CLAP and LV2 state, shell parameter state | magic `OPST`; version 1 (`SNAPSHOT_VERSION`, positional) for a table without identity pins, version 2 (`SNAPSHOT_VERSION_KEYED`, each value under its parameter's string id) for a table with pins. Both are read |
+| VST3 component state head | `native/vst3` `getState` / `setState` / `setComponentState` | version 1 (positional) without pinned parameter ids, version 2 (by `ParamID`) with them; a pinned shell reads both |
 | OPCH session chunk | `encode_session` / `decode_session`, `op_shell_save_state`, `FfiInstance::save_bytes` | magic `OPCH`, version 1 (`SESSION_VERSION`) |
 | AAX state chunk | `native/aax` | version 1 (version 2 is planned in [ROADMAP.md](ROADMAP.md)) |
 | Preset text | `key = value` files read by `PresetBank` and `preset::parse` | the format of the `openplugin_core::preset` module (unversioned: see [API_REVIEW.md](API_REVIEW.md)) |
@@ -72,25 +73,26 @@ Rules:
 - A state written by a newer version must be refused cleanly (all or nothing, parameters untouched) by an older reader, never half-loaded. This is already the rule for `decode_params`, `decode_session` and `op_shell_load_state`.
 - The version number is bumped whenever the byte layout changes, never reused.
 - A plugin's own chunk (`Plugin::save_state` / `load_state`) is the plugin's format, not the SDK's. The SDK promises only to carry it unchanged.
-- The OPST snapshot is positional: it stores one value per parameter in descriptor order and requires the count to match. So the parameter order of a released plugin is part of its state format (see parameter ids below).
+- The OPST snapshot of a plugin without identity pins is positional: it stores one value per parameter in descriptor order and requires the count to match. So the parameter order of a released, unpinned plugin is part of its state format (see parameter ids below). A plugin with pins writes version 2, which names each value by `ParamInfo::id`: a later build takes each value by id, gives a parameter the state does not name its default, and drops a value it has no parameter for. Which of the two a table writes (`identity::state_is_keyed`: any pin, and unique string ids) is part of the contract, as is the rule for a version 1 snapshot read by a pinned table: value `i` goes to the parameter whose CLAP id is `i`, because in the unpinned build that wrote it the position was the id.
 
 ### 4. Plug-in identity
 
 Hosts and sessions find a plugin by identifiers. Changing one makes the host treat the plugin as a different one, and sessions lose it. For a plugin built with the SDK these identifiers come from the plugin's descriptor, and the SDK must derive them identically in every release:
 
-- **CLAP:** `PluginInfo::id` is the CLAP plugin id. The SDK passes it through unchanged.
+- **CLAP:** `PluginInfo::id` is the CLAP plugin id. The SDK passes it through unchanged. `Plugin::clap_id` replaces it.
 - **LV2:** the URI is `Plugin::lv2_uri` or, when that is `None`, `PluginInfo::id` (`openplugin_targets::lv2::plugin_uri`). The `.ttl` writer, the port layout (ports 0 and 1 in, 2 and 3 out, one control port per parameter after them) and symbol names derived from parameter ids are part of the URI's contract: a saved LV2 session maps ports by index and symbol.
-- **VST3:** the processor and controller class ids are 16 bytes from a 128-bit mix of the plugin id (`mix` in `openplugin-ffi/src/shell.rs`). The mix, its constants and the salt per id must never change.
+- **VST3:** the processor and controller class ids are 16 bytes from a 128-bit mix of the plugin id (`mix` in `openplugin-ffi/src/shell.rs`). The mix, its constants and the salt per id must never change. `Plugin::vst3_ids` replaces them with fixed ids.
 - **AAX:** the manufacturer, product, mono and stereo codes are four-byte values from the same mix, with bit `0x20` set in each byte. `Plugin::aax_ids` replaces them with fixed codes. The derivation must never change. A released plugin should set `aax_ids` and `lv2_uri` explicitly, so that renaming `PluginInfo::id` cannot change them.
-- **Audio Unit:** the type, subtype and manufacturer codes are build options of `native/CMakeLists.txt` (`OP_AU_SUBTYPE`, `OP_AU_MANUFACTURER`), not derived from the id. Their defaults and names are part of the build contract; a released plugin sets its own and keeps them.
+- **Audio Unit:** the type, subtype and manufacturer codes are build options of `native/CMakeLists.txt` (`OP_AU_SUBTYPE`, `OP_AU_MANUFACTURER`), not derived from the id. Their defaults and names are part of the build contract; a released plugin sets its own and keeps them. `Plugin::au_ids` puts the subtype and manufacturer in the source: the build takes them when it is given none, and stops when it is given others.
 - **The id itself:** the SDK cannot stop a plugin author from renaming `PluginInfo::id`, but it must say in the documentation that doing so is a different plugin in every format.
 
-A change to any derivation above is breaking, and in practice is not allowed after 1.0 except as an opt-in alternative.
+A change to any derivation above is breaking, and in practice is not allowed after 1.0 except as an opt-in alternative. The identity pins (`openplugin_core::identity`, [PORTING.md](PORTING.md#identity-pinning)) are such alternatives: each is `None` by default, and a plugin without one has the derived identifier, bit for bit (the examples' are held as literals in their `tests/identity.rs`). How a pin is turned into what the host sees (the bytes of `Vst3Ids`, the four characters of a code, a parameter pin used as the id unchanged) is itself part of the contract, as are the rules for which pins are usable (`identity::check_pins`): relaxing one would change the ids of a plugin whose unusable pins are ignored today.
 
 ### 5. Parameter ids and order
 
 - `ParamInfo::id` is the stable name of a parameter: presets (`preset::parse` matches it, then the display name), `Plugin::set_param` and the LV2 port symbols use it. The SDK never changes how an id is read.
-- The **host-facing numeric id** is the parameter's index in `PluginInfo::params`: CLAP uses it as `param_id`, the shell ABI addresses parameters by that index, LV2 puts control ports after the four audio ports in that order, and OPST stores values in that order. So inserting, removing or reordering parameters of a released plugin breaks automation and saved sessions. This is the plugin author's responsibility; the SDK documents it, and a future stable-id mechanism (a numeric id per parameter in `ParamInfo`) would be an addition, not a change of the index rule.
+- The **host-facing numeric id** of a parameter without a pin is its index in `PluginInfo::params`: CLAP uses it as `param_id`, VST3 as `ParamID`, the Audio Unit as `AudioUnitParameterID`, LV2 puts control ports after the four audio ports in that order, and OPST version 1 stores values in that order. So inserting, removing or reordering parameters of a released plugin without pins breaks automation and saved sessions. This is the plugin author's responsibility.
+- **Pinned ids** (`ParamInfo::with_host_id`, `with_clap_id`, `with_vst3_id`, `with_au_id`, `with_aax_id`) are the stable-id mechanism: a pinned parameter keeps its id wherever it is in the table, and a pinned table saves its state by parameter. It is an addition, not a change of the index rule: a parameter without a pin still has its index as its id, and the shell ABI still addresses every parameter by index. A released plugin moves to pins by pinning each parameter at its released index; after that the table may be reordered and extended, and removing a parameter only drops its saved value.
 - The maths that turns a stored value into a normalised one (`ParamInfo::to_normalized` / `from_normalized`, the tapers, the clamping) is part of the contract: hosts store normalised values for automation, so changing it changes what a saved value means. Such a change is breaking. The text from `ParamInfo::format` and `parse` is display only and may be improved in a minor release.
 
 ## Deprecation
