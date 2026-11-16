@@ -150,6 +150,8 @@ const KIND_NOTE_OFF: u8 = 2;
 const KIND_MIDI: u8 = 3;
 const KIND_EXPRESSION: u8 = 4;
 const KIND_MOD: u8 = 5;
+/// A queued note start withdrawn by `push_sched`; `apply_event` skips it.
+const KIND_CANCELLED: u8 = 6;
 
 #[derive(Clone, Copy)]
 struct Sched {
@@ -345,10 +347,54 @@ fn push_sched(instance: &mut Instance, event: Sched) {
         instance.sched_count += 1;
         return;
     }
-    // The queue is full. Keep the value for the next pull so it is not dropped.
-    if event.kind == KIND_PARAM {
-        instance.plane.store(event.param as usize, event.value);
+    // The queue is full. A parameter keeps its value for the next pull; a note-off
+    // or MIDI event applies now, out of order, so nothing that ends a note is dropped.
+    match event.kind {
+        KIND_PARAM => {
+            instance.plane.store(event.param as usize, event.value);
+        }
+        KIND_NOTE_OFF => {
+            cancel_queued_start(instance, |queued| queued.kind == KIND_NOTE_ON && queued.target == event.target, |queued| {
+                queued.kind == KIND_NOTE_OFF && queued.target == event.target
+            });
+            apply_event(instance, &event);
+        }
+        KIND_MIDI => {
+            if let Some(note) = midi_note_off(event.midi) {
+                cancel_queued_start(
+                    instance,
+                    |queued| queued.kind == KIND_MIDI && midi_note_on(queued.midi) == Some(note),
+                    |queued| queued.kind == KIND_MIDI && midi_note_off(queued.midi) == Some(note),
+                );
+            }
+            apply_event(instance, &event);
+        }
+        _ => {}
     }
+}
+
+/// An end applied ahead of the queue must not leave the queued start of the same
+/// note to sound after it: the latest queued start, unless an end follows it, is cancelled.
+fn cancel_queued_start(instance: &mut Instance, start: impl Fn(&Sched) -> bool, end: impl Fn(&Sched) -> bool) {
+    for queued in instance.sched[..instance.sched_count].iter_mut().rev() {
+        if end(queued) {
+            return;
+        }
+        if start(queued) {
+            queued.kind = KIND_CANCELLED;
+            return;
+        }
+    }
+}
+
+/// (channel, key) of a MIDI note-on with a non-zero velocity.
+fn midi_note_on(midi: [u8; 3]) -> Option<(u8, u8)> {
+    (midi[0] & 0xF0 == 0x90 && midi[2] > 0).then_some((midi[0] & 0x0F, midi[1]))
+}
+
+/// (channel, key) of a MIDI note-off, or of a note-on with velocity 0.
+fn midi_note_off(midi: [u8; 3]) -> Option<(u8, u8)> {
+    (midi[0] & 0xF0 == 0x80 || (midi[0] & 0xF0 == 0x90 && midi[2] == 0)).then_some((midi[0] & 0x0F, midi[1]))
 }
 
 fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
@@ -484,34 +530,68 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
     }
 }
 
+fn apply_event(instance: &mut Instance, event: &Sched) {
+    match event.kind {
+        KIND_PARAM => {
+            instance.plane.store(event.param as usize, event.value);
+        }
+        KIND_NOTE_ON => instance.inner.note_on_ref(0, event.target, event.velocity),
+        KIND_NOTE_OFF => instance.inner.note_off_ref(0, event.target, event.velocity),
+        KIND_MIDI => match instance.mpe.as_mut() {
+            Some(receiver) => mpe::receive_into(receiver, instance.inner.as_mut(), 0, event.midi),
+            None => instance.inner.midi(0, event.midi),
+        },
+        KIND_EXPRESSION => {
+            if let Some(expression) = Expression::from_id(i64::from(event.expression)) {
+                instance.inner.note_expression(0, event.target, expression, event.value);
+            }
+        }
+        KIND_MOD => instance.inner.param_modulation(0, event.param as usize, event.target, event.value),
+        _ => {}
+    }
+}
+
 fn apply_group(instance: &mut Instance, start: usize, end: usize) {
-    let mut dirty = false;
     for index in start..end {
         let event = instance.sched[index];
-        match event.kind {
-            KIND_PARAM => {
-                instance.plane.store(event.param as usize, event.value);
-                dirty = true;
-            }
-            KIND_NOTE_ON => instance.inner.note_on_ref(0, event.target, event.velocity),
-            KIND_NOTE_OFF => instance.inner.note_off_ref(0, event.target, event.velocity),
-            KIND_MIDI => match instance.mpe.as_mut() {
-                Some(receiver) => mpe::receive_into(receiver, instance.inner.as_mut(), 0, event.midi),
-                None => instance.inner.midi(0, event.midi),
-            },
-            KIND_EXPRESSION => {
-                if let Some(expression) = Expression::from_id(i64::from(event.expression)) {
-                    instance.inner.note_expression(0, event.target, expression, event.value);
-                }
-            }
-            KIND_MOD => instance.inner.param_modulation(0, event.param as usize, event.target, event.value),
-            _ => {}
+        apply_event(instance, &event);
+    }
+    let group = &mut instance.sched[start..end];
+    if !group.iter().any(|event| event.kind == KIND_PARAM) {
+        return;
+    }
+    // Parameters reach the plugin after the group's other events and in index order, as
+    // a full pull would apply them; only the group's own slots are visited. Stable
+    // insertion sort: no allocation, and the other events keep their order.
+    let key = |event: &Sched| if event.kind == KIND_PARAM { u64::from(event.param) + 1 } else { 0 };
+    for index in 1..group.len() {
+        let mut cursor = index;
+        while cursor > 0 && key(&group[cursor]) < key(&group[cursor - 1]) {
+            group.swap(cursor, cursor - 1);
+            cursor -= 1;
         }
     }
-    if dirty {
-        pull_params(instance);
-        sync_bypass(instance);
+    // The same epoch rule as `pull_params`: no slot is applied while a state load writes the plane.
+    let before = instance.plane_epoch.load(Ordering::Acquire);
+    if before & 1 == 0 {
+        for index in start..end {
+            let event = instance.sched[index];
+            if event.kind == KIND_PARAM {
+                let slot = event.param as usize;
+                instance.snapshot.store(slot, instance.plane.load(slot).unwrap_or(0.0));
+            }
+        }
+        fence(Ordering::Acquire);
+        if instance.plane_epoch.load(Ordering::Relaxed) == before {
+            for index in start..end {
+                let event = instance.sched[index];
+                if event.kind == KIND_PARAM {
+                    instance.cursor.pull_index(&instance.snapshot, event.param as usize, instance.inner.as_mut());
+                }
+            }
+        }
     }
+    sync_bypass(instance);
 }
 
 fn copy_bus(buffers: &mut [Vec<f32>], input: &clap_audio_buffer, start: usize, frames: usize) {
@@ -788,6 +868,11 @@ fn pull_params(instance: &mut Instance) {
     if before & 1 == 1 {
         return;
     }
+    // Read before the copy: a store during it moves the revision past this one.
+    let revision = instance.plane.revision();
+    if instance.cursor.pulled(revision) {
+        return;
+    }
     for index in 0..instance.plane.len() {
         instance.snapshot.store(index, instance.plane.load(index).unwrap_or(0.0));
     }
@@ -796,6 +881,7 @@ fn pull_params(instance: &mut Instance) {
         return;
     }
     instance.cursor.pull(&instance.snapshot, instance.inner.as_mut());
+    instance.cursor.mark_pulled(revision);
 }
 
 /// The block a state call made the audio thread skip: parameter events still reach

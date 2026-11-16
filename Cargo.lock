@@ -494,6 +494,7 @@ dependencies = [
  "openplugin-dri",
  "openplugin-dsp",
  "openplugin-ffi",
+ "openplugin-testing",
 ]
 
 [[package]]

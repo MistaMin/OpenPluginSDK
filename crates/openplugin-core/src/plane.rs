@@ -106,12 +106,15 @@ impl ParamPlane {
 /// applies every slot, because the seen bits start at `u32::MAX`.
 pub struct ParamCursor {
     seen: Box<[u32]>,
+    /// Plane revision of the last full pull ([`Self::mark_pulled`]); 0, which no plane has, after `invalidate`.
+    revision: u64,
 }
 
 impl ParamCursor {
     pub fn new(count: usize) -> Self {
         Self {
             seen: vec![u32::MAX; count].into_boxed_slice(),
+            revision: 0,
         }
     }
 
@@ -119,6 +122,30 @@ impl ParamCursor {
     /// Use this after `prepare`, which may rebuild DSP from the parameter values.
     pub fn invalidate(&mut self) {
         self.seen.fill(u32::MAX);
+        self.revision = 0;
+    }
+
+    /// True when the last full pull recorded `revision` and nothing invalidated it since.
+    pub fn pulled(&self, revision: u64) -> bool {
+        self.revision == revision
+    }
+
+    /// Record that a full pull saw the plane at `revision` ([`ParamPlane::revision`], read before the pull).
+    pub fn mark_pulled(&mut self, revision: u64) {
+        self.revision = revision;
+    }
+
+    /// Apply one slot if its bits differ from the last pull, like [`Self::pull`] for that slot alone.
+    pub fn pull_index(&mut self, plane: &ParamPlane, index: usize, plugin: &mut dyn Plugin) -> bool {
+        let (Some(seen), Some(bits)) = (self.seen.get_mut(index), plane.bits(index)) else {
+            return false;
+        };
+        if *seen == bits {
+            return false;
+        }
+        let _ = plugin.set_param_index(index, f32::from_bits(bits));
+        *seen = bits;
+        true
     }
 
     /// Apply slots whose bits differ from the last pull.
