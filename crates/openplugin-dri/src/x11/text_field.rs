@@ -217,6 +217,9 @@ impl EditorView {
             // The focus goes back where the field took it from, unless the editor keeps the keys.
             if let Some(from) = field.focus_from.filter(|_| self.focused && !self.editor.wants_keys()) {
                 x!(self, self.conn.set_input_focus(InputFocus::PARENT, from, self.last_time));
+                // Unfocused now: the FocusOut this sends must not close a menu the same right click opens.
+                self.focused = false;
+                self.guarded(|v| v.editor.focus_changed(false));
             }
             self.drop_window(field.window);
         }

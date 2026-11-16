@@ -14,10 +14,9 @@
 
 use openplugin_core::editor::{DamageRect, Key, Modifiers, ParamMenu, ParamMenuAction, TextEdit, Tooltip};
 use openplugin_core::{Editor, Frame};
-use openplugin_dri::x11::{EditorView, CLIPBOARD_WAIT_MS, PARAM_MENU_ITEMS, TOOLTIP_DELAY_MS};
+use openplugin_dri::x11::{EditorView, CLIPBOARD_WAIT_MS, DOUBLE_CLICK_MS, PARAM_MENU_ITEMS, TOOLTIP_DELAY_MS};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
@@ -180,8 +179,6 @@ struct Host {
     conn: RustConnection,
     root: u32,
     parent: u32,
-    /// Event times: every event is later than the one before.
-    clock: AtomicU32,
 }
 
 impl Host {
@@ -199,7 +196,7 @@ impl Host {
         let x = 40 + slot as i16 * 420;
         conn.create_window(0, parent, root, x, 40, 400, 300, 0, WindowClass::INPUT_OUTPUT, 0, &aux).unwrap().check().unwrap();
         conn.map_window(parent).unwrap().check().unwrap();
-        Some(Host { conn, root, parent, clock: AtomicU32::new(100_000) })
+        Some(Host { conn, root, parent })
     }
 
     fn sync(&self) {
@@ -208,7 +205,7 @@ impl Host {
 
     /// A time well after the last one: no press continues an earlier click.
     fn later(&self) -> u32 {
-        self.clock.fetch_add(5_000, Ordering::Relaxed) + 5_000
+        event_time(DOUBLE_CLICK_MS + 100)
     }
 
     /// One row of a window as it is on screen, `None` while it cannot be read.
@@ -289,7 +286,7 @@ impl Host {
             response_type: xproto::MOTION_NOTIFY_EVENT,
             detail: xproto::Motion::NORMAL,
             sequence: 0,
-            time: self.later(),
+            time: event_time(1),
             root: self.root,
             event: window,
             child: 0,
@@ -309,7 +306,7 @@ impl Host {
             response_type: xproto::KEY_PRESS_EVENT,
             detail: code,
             sequence: 0,
-            time: self.later(),
+            time: event_time(1),
             root: self.root,
             event: window,
             child: 0,
@@ -355,6 +352,55 @@ impl Drop for Host {
         let _ = self.conn.destroy_window(self.parent);
         let _ = self.conn.flush();
     }
+}
+
+/// The server's clock, read from a `PropertyNotify` on a window of its own.
+struct Clock {
+    conn: RustConnection,
+    window: u32,
+    last: u32,
+}
+
+impl Clock {
+    fn new() -> Clock {
+        let (conn, screen) = RustConnection::connect(None).expect("the clock's connection");
+        let root = conn.setup().roots[screen].root;
+        let window = conn.generate_id().unwrap();
+        let aux = CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE);
+        conn.create_window(0, window, root, 0, 0, 1, 1, 0, WindowClass::INPUT_ONLY, 0, &aux).unwrap().check().unwrap();
+        let mut clock = Clock { conn, window, last: 0 };
+        clock.last = clock.server_time();
+        clock
+    }
+
+    fn server_time(&self) -> u32 {
+        self.conn.change_property8(PropMode::APPEND, self.window, AtomEnum::WM_NAME, AtomEnum::STRING, &[]).unwrap();
+        self.conn.flush().unwrap();
+        loop {
+            if let Event::PropertyNotify(e) = self.conn.wait_for_event().unwrap() {
+                return e.time;
+            }
+        }
+    }
+}
+
+/// An event time `gap` after the last, from one clock for every test. The view
+/// hands event times to `SetInputFocus`, which the server ignores when they are
+/// ahead of its clock or behind the last focus change, so times follow the
+/// server's clock and never run ahead of it (made-up times made the focus
+/// depend on how long the machine had been up).
+fn event_time(gap: u32) -> u32 {
+    static CLOCK: Mutex<Option<Clock>> = Mutex::new(None);
+    let mut guard = CLOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let clock = guard.get_or_insert_with(Clock::new);
+    clock.last = clock.last.wrapping_add(gap);
+    // Room for a release or a second press a little after this time.
+    let start = Instant::now();
+    while (clock.server_time().wrapping_sub(clock.last) as i32) < 100 {
+        assert!(start.elapsed() < DEADLINE, "the server's clock stands still");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    clock.last
 }
 
 /// Pump the views until `done`, or fail at the deadline.
@@ -605,7 +651,10 @@ fn clipboard_round_trips_between_views_and_plain_clients() {
     assert_eq!(read_selection(&host_b, &mut [&mut a], selection, host_b.atom("image/png")), None);
 
     // Ctrl+V in B's field, on another connection, pastes it over the selected text.
+    // B's field takes the focus: A's field drops its text, which is no value.
     open_field(&host_b, &mut b, &shared_b);
+    until_all(&mut [&mut a, &mut b], "A's field gone with the focus", |views| views[0].text_field().is_none());
+    assert_eq!(taken(&shared_a), [Call::Commit("3.25 \u{b5}s".into(), false), Call::Cancel]);
     host_b.key(b.raw(), host_b.keycode(0x76).0, control);
     until_all(&mut [&mut a, &mut b], "the paste from the other view", |views| views[1].text_field_text().as_deref() == Some("3.25 \u{b5}s"));
 
@@ -628,6 +677,10 @@ fn clipboard_round_trips_between_views_and_plain_clients() {
         serve_selection(&host_a, "9.5", utf8);
         v.text_field_text().as_deref() == Some("9.5")
     });
+    // A's field again: B's commits its text as it loses the focus.
+    open_field(&host_a, &mut a, &shared_a);
+    until_all(&mut [&mut a, &mut b], "B's field gone with the focus", |views| views[1].text_field().is_none());
+    assert_eq!(taken(&shared_b), [Call::Commit("9.5".into(), true)]);
     host_a.key(a.raw(), host_a.keycode(0x76).0, control);
     until(&mut a, "the paste from a plain client", |v| {
         serve_selection(&host_a, "9.5", utf8);
