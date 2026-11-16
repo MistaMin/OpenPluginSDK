@@ -603,6 +603,10 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
         self.engines[0].plugin.state_is_parameters_only()
     }
 
+    fn flush_denormals(&self) -> bool {
+        self.engines[0].plugin.flush_denormals()
+    }
+
     fn save_state(&mut self) -> Option<Vec<u8>> {
         self.engines[0].plugin.save_state()
     }

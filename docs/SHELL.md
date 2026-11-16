@@ -32,6 +32,8 @@ The crate type includes `staticlib`. The native build links that archive. It doe
 | `op_shell_process` | audio | no |
 | `op_shell_save_state`, `op_shell_load_state` | message, any time | yes (the blob) |
 
+Denormals: `op_shell_process`, `op_shell_process_events`, `op_shell_reset` and `op_shell_midi_out` set flush-to-zero (`FPCR.FZ` on arm64, `MXCSR` FTZ and DAZ on x86_64) while they are inside the plugin and put the caller's floating-point control word back before they return, also after a panic; a shell needs no mode handling of its own. A plugin opts out with `Plugin::flush_denormals`. Tests: `crates/openplugin-ffi/tests/shell_denormals.rs`.
+
 `process` copies through scratch allocated in `create`, so an input pointer may be the output pointer. A null right pointer is mono. A block longer than the size passed to `create` fails. The adapters split a host block into that size. The prepared size is at most 65536 frames, and the AAX callback uses 2048.
 
 Class IDs are 16 bytes from a 128-bit mix of the plugin id. VST3 prints them with `FUID::toString`, 32 hex digits. The processor id and the controller id differ. AAX manufacturer, product, mono, and stereo ids are four-byte values from that mix with bit `0x20` set in each byte so none is zero.

@@ -594,7 +594,8 @@ impl MyPlugin {
     }
 
     fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
-        // Flush denormals for this call only; the host's mode comes back on drop.
+        // The format entries already flush around this call; a guard of your own
+        // is for code run outside them (tests, the kit) and is harmless inside.
         let _guard = DenormalGuard::new();
         stereo_width_in_place(left, right, self.width);   // 0 = mono, 1 = unchanged, 2 = double side
         ms_encode_in_place(left, right);                  // left = mid, right = side
@@ -611,7 +612,7 @@ Choices:
 - Mid/side is `M = (L + R) / 2`, `S = (L - R) / 2`; decode is `L = M + S`, `R = M - S`. Mono has `S = 0` and keeps its level. The round trip is bit-exact when the sums are exact, which is almost always.
 - Pan laws (`PanLaw`): `ConstantPower` (-3.01 dB at centre, `cos`/`sin`), `Minus4p5` (centre exactly -4.5 dB), `Linear` and `Minus6` (centre -6.02 dB, `1 - x` and `x`). All are 0 dB on the side the signal is panned to. `pan_mono` takes a mono source to two outputs; `balance` takes a stereo source, leaves the near channel at unity and turns the far one down, so centre does nothing.
 - `Gain` and `Panner` smooth with the core one-pole. Call `set_db` / `set_pan` from the parameter, never recompute coefficients per sample yourself. `db_to_gain(-120.0)` and below is exactly zero.
-- `DenormalGuard` sets flush-to-zero (aarch64 `FPCR.FZ`; x86_64 `MXCSR` FTZ and DAZ) with a few instructions and restores the previous setting when dropped. Make one at the top of `process`. It is `!Send` on purpose: the setting belongs to one thread. On other targets it does nothing (`guard.active()` says so). A feedback loop that decays into denormals returns exactly zero with the guard and keeps the denormal slow path without it.
+- `DenormalGuard` sets flush-to-zero (aarch64 `FPCR.FZ`; x86_64 `MXCSR` FTZ and DAZ) with a few instructions and restores the previous setting when dropped. Every format entry (CLAP, LV2, the VST3, Audio Unit and AAX shells) already holds one around each audio-thread call into the plugin, unless the plugin returns `false` from `Plugin::flush_denormals`; make your own where your code runs outside an entry. It lives in `openplugin-core` and is re-exported here. It is `!Send` on purpose: the setting belongs to one thread. On other targets it does nothing (`guard.active()` says so). A feedback loop that decays into denormals returns exactly zero with the guard and keeps the denormal slow path without it.
 
 ## Metering
 

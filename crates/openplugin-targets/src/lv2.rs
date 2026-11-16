@@ -67,6 +67,7 @@ use openplugin_core::worker::{self, Executor, Step, Task, Waker};
 
 use openplugin_core::midi::{self, Message, Parser};
 use openplugin_core::mpe::{self, MpeReceiver};
+use openplugin_core::DenormalGuard;
 use openplugin_core::{
     sample_rate_supported, Category, EditorFactory, IoConfig, MeterFrame, ParamCursor, ParamInfo, ParamPlane,
     Plugin, Seqlock, Taper, Transport, Unit,
@@ -753,6 +754,9 @@ struct Instance {
     poisoned: bool,
     /// The MPE receiver of a plugin that asked for MPE ([`Plugin::mpe_input`]).
     mpe: Option<MpeReceiver>,
+    /// [`Plugin::flush_denormals`], read once at instantiation: `run` holds a
+    /// [`DenormalGuard`] while it is inside the plugin.
+    flush_denormals: bool,
 }
 
 const PREPARED: usize = 8192;
@@ -829,6 +833,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
     cursor.pull(&plane, inner.as_mut());
     let editor_state = inner.editor_state();
     let mpe = MpeReceiver::for_plugin(inner.as_ref());
+    let flush_denormals = inner.flush_denormals();
     let controls = vec![std::ptr::null(); plane.len()];
     let sidechain = map.sidechain as usize;
     Some(Box::new(Instance {
@@ -859,6 +864,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
         schedule,
         handle_key: 0,
         mpe,
+        flush_denormals,
     }))
 }
 
@@ -1124,7 +1130,11 @@ extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
         silence_outputs(instance as *mut Instance, sample_count as usize);
         return;
     }
+    // Flush-to-zero for the plugin; the host's mode comes back when this drops, after the
+    // block and after a panic, which `catch_unwind` stops inside.
+    let flush = DenormalGuard::new_if(unsafe { &*(instance as *const Instance) }.flush_denormals);
     let ran = catch_unwind(AssertUnwindSafe(|| run_block(instance as *mut Instance, sample_count as usize)));
+    drop(flush);
     if ran.is_err() {
         if let Some(instance) = unsafe { (instance as *mut Instance).as_mut() } {
             instance.poisoned = true;

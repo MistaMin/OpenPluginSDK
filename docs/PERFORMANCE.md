@@ -167,24 +167,50 @@ reverb tail that decays toward zero passes through that range on its way, and so
 arithmetic on subnormals through a slow microcode path. The rule: never let state or output sit in
 the subnormal range.
 
-The SDK's DSP flushes state in its filters, envelope followers and convolvers
+**The format entries run your plugin with the CPU's flush mode on.** CLAP `process`,
+`params.flush` and `reset`, LV2 `run`, and the shell ABI's `process`, `process_events`, `reset` and
+`midi_out` (which the VST3, Audio Unit and AAX shells call) each hold a
+[`DenormalGuard`](../crates/openplugin-core/src/denormal.rs) for the duration of the call:
+flush-to-zero (`FPCR.FZ` on arm64; `MXCSR` FTZ and DAZ on x86_64, and on 32-bit x86 with SSE),
+two control-register writes per call, no allocation, lock or system call. The host's own mode comes
+back when the call returns, also when your plugin panics (the guard drops while the panic is
+caught), so the host's arithmetic is never changed by the plugin. A plugin that really needs
+subnormal numbers (very unusual) returns `false` from `Plugin::flush_denormals`; the entries then
+leave the host's mode as it is. Tests: [`clap_denormals.rs`](../crates/openplugin-targets/tests/clap_denormals.rs),
+[`lv2_denormals.rs`](../crates/openplugin-targets/tests/lv2_denormals.rs) and
+[`shell_denormals.rs`](../crates/openplugin-ffi/tests/shell_denormals.rs) set several host modes
+(flush off, already on, only FTZ on x86, each with a non-default rounding mode), record the mode
+inside the plugin's callbacks and check it afterwards, after a panic and with the opt-out; the
+guard's own tests are in [`denormal.rs`](../crates/openplugin-core/src/denormal.rs). They pass on
+arm64 and on x86_64 under Rosetta (`cargo test --target x86_64-apple-darwin`): Rosetta keeps
+`MXCSR` and honours FTZ and DAZ.
+
+Why the entries do it: `clap-validator` 0.4.1's `process-audio-denormals` check on Linux x86_64
+(`examples/editor`) found the plugin's `process` 1.3 to 5.6 times slower with denormal input,
+because no entry set the mode. It passed on Apple Silicon, which has no subnormal penalty (below).
+
+The SDK's DSP also flushes state in its filters, envelope followers and convolvers
 (`flush`: `|x| < 1e-30` becomes `0.0`, see
 [`svf.rs`](../crates/openplugin-dsp/src/svf.rs) and the test `tails_flush_to_zero_without_denormals`
-in [`filters.rs`](../crates/openplugin-dsp/tests/filters.rs)). For your own state there are two ways:
+in [`filters.rs`](../crates/openplugin-dsp/tests/filters.rs)), so a tail reaches exact zero even
+where the mode is off: the conformance kit calls your plugin directly, without an entry, and a
+plugin that opts out runs with the host's mode. For your own state there are two ways:
 
 ```rust
 // 1. Flush in the loop, before a value reaches the subnormal range.
 y *= 0.97;
 if y.abs() < 1.0e-30 { y = 0.0; }
 
-// 2. Let the CPU flush for the whole process call: flush-to-zero (FPCR.FZ on arm64,
-//    MXCSR FTZ and DAZ on x86_64), restored when the guard drops.
+// 2. Let the CPU flush, as the format entries already do around every call. A guard of your own
+//    (in a test, or in code called from outside an entry) is restored when it drops.
 let _ftz = openplugin_dsp::DenormalGuard::new();
 ```
 
-`DenormalGuard` ([`utility.rs`](../crates/openplugin-dsp/src/utility.rs)) is free on the loop
-itself, unlike the per-sample flush measured below; keep it on the stack of `process` only, since
-it changes the floating-point mode of the calling thread until it drops.
+`DenormalGuard` (in `openplugin-core`, re-exported as `openplugin_dsp::DenormalGuard` and
+`openplugin_dsp::utility::DenormalGuard`) is free on the loop itself, unlike the per-sample flush
+measured below; keep it on the stack only, since it changes the floating-point mode of the calling
+thread until it drops. Inside an entry a second guard is harmless: it finds the mode already set and
+puts the same mode back.
 
 Note that `Biquad` guards NaN but does **not** flush; use `Svf`, `MatchedBiquad` or flush yourself
 if a `Biquad` tail must reach exact zero.
@@ -215,9 +241,17 @@ What follows from that, honestly:
   once per sub-block instead of once per sample.
 - Do keep the kit's `no_denormals` check in your tests. A plugin that is fast on an M1 can be the
   slow one on a Windows laptop, and the check is how you find out without owning the laptop.
-- Hardware flush-to-zero (an FPCR or MXCSR mode bit) is a process-wide setting that belongs to the
-  host's thread. The SDK does not set it, and a plugin should not: it changes the arithmetic of
-  everything else on that thread. State and output flushed in code travels with the plugin.
+- Hardware flush-to-zero (an FPCR or MXCSR mode bit) is a per-thread setting that belongs to the
+  host's thread. The format entries set it only while the plugin runs and restore the host's own
+  value afterwards, so nothing else on that thread sees a change; do not set it yourself and leave
+  it set. State and output flushed in code still travels with the plugin, to the kit and to a plugin
+  that opts out.
+- A rough timing of the guard on this machine is the report-only test `report_subnormal_timing` in
+  [`denormal.rs`](../crates/openplugin-core/src/denormal.rs)
+  (`cargo test -p openplugin-core --release -- --ignored --nocapture`). On Apple Silicon, native
+  and under Rosetta, the three cases (normal, subnormal, subnormal with the guard) are within noise
+  of each other (about 14 to 16 ms each), as above; it is ignored by default and asserts nothing,
+  because on a shared runner it is a measurement, not a check.
 
 ## 4. Block-rate work against sample-rate work
 

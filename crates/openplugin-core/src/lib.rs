@@ -12,6 +12,7 @@
 
 pub mod automation;
 pub mod build;
+pub mod denormal;
 pub mod editor;
 pub mod expression;
 pub mod foreign_state;
@@ -28,6 +29,7 @@ pub mod spsc;
 pub mod state;
 pub mod worker;
 
+pub use denormal::DenormalGuard;
 pub use automation::{
     AutomationInterpolation, AutomationLane, AutomationMode, CurveInterpolation, LaneMode,
 };
@@ -797,6 +799,21 @@ pub trait Plugin: Send + 'static {
     /// the parameter's range either way. Modulation is not saved and does not
     /// move the parameter's value.
     fn param_modulation(&mut self, _offset: usize, _index: usize, _note: NoteRef, _amount: f32) {}
+
+    /// Whether the format entries run the plugin with denormals flushed. The
+    /// default `true` sets flush-to-zero (FZ on Arm, FTZ and DAZ on x86) for
+    /// the duration of every audio-thread call into the plugin (CLAP
+    /// `process`, `params.flush` and `reset`; LV2 `run`; the shell ABI's
+    /// `process`, `process_events`, `reset` and `midi_out`, which the VST3,
+    /// Audio Unit and AAX shells call) and restores the host's own mode
+    /// afterwards, also after a panic ([`DenormalGuard`]). Return `false`
+    /// only for a plugin whose arithmetic needs subnormal numbers, which is
+    /// very unusual: the entries then leave the host's mode as it is, and
+    /// the plugin's state can decay through the slow subnormal range on x86.
+    /// Read once, when an instance is made.
+    fn flush_denormals(&self) -> bool {
+        true
+    }
 
     /// Factory programs. `0` means the host shows no program list.
     /// [`Self::preset_values`] is plain values in descriptor order and must

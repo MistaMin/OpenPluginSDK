@@ -1,12 +1,21 @@
 //! The virtual analog blocks must not allocate on the audio path, including
-//! with NaN and infinite input and parameters. Single test so no other thread
-//! allocates while the counters are armed.
+//! with NaN and infinite input and parameters. The counters are armed per
+//! thread, so no other thread can add to them.
 
 use openplugin_dsp::*;
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    // Armed per thread: the test harness's own threads (output capture, the
+    // "running for over 60 seconds" notice) never add to the count. `const`
+    // initialisation, so reading it inside the allocator never allocates.
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn armed() -> bool {
+    ARMED.try_with(|a| a.get()).unwrap_or(false)
+}
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static DEALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -14,25 +23,25 @@ struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             DEALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -45,9 +54,9 @@ static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
 #[test]
 fn virtual_analog_does_not_allocate() {
     // The probe proves the hook sees allocations in this binary.
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     drop(std::hint::black_box(Box::new([0u8; 64])));
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     assert!(ALLOCATIONS.load(Ordering::SeqCst) >= 1 && DEALLOCATIONS.load(Ordering::SeqCst) >= 1);
 
     let mut tl = TransistorLadder::new(48_000.0);
@@ -67,7 +76,7 @@ fn virtual_analog_does_not_allocate() {
 
     ALLOCATIONS.store(0, Ordering::SeqCst);
     DEALLOCATIONS.store(0, Ordering::SeqCst);
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     for n in 0..20_000usize {
         let t = n as f32;
         let x = match n % 997 {
@@ -95,7 +104,7 @@ fn virtual_analog_does_not_allocate() {
         tree.b.b.set_voltage(f64::from(x));
         sink += root.process(&mut tree) as f32;
     }
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     std::hint::black_box(sink);
     assert!(sink.is_finite());
     assert_eq!(ALLOCATIONS.load(Ordering::SeqCst), 0, "allocated");

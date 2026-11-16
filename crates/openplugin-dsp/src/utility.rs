@@ -53,7 +53,9 @@
 //! # Denormal guard
 //!
 //! [`DenormalGuard`] sets flush-to-zero (and denormals-are-zero where the CPU
-//! has it) for the scope of a process call. See its documentation.
+//! has it) for the scope of a process call. It lives in `openplugin-core`
+//! (`openplugin_core::DenormalGuard`), where the format entries use it, and
+//! is re-exported here. See its documentation.
 
 use openplugin_core::OnePole;
 
@@ -289,152 +291,11 @@ impl Panner {
 
 /// Flush-to-zero for the lifetime of the value, on the current thread.
 ///
-/// Denormal (subnormal) floats make some CPUs take a slow path, tens to
-/// hundreds of cycles per operation, which shows up as sudden CPU spikes in
-/// recursive filters and reverb tails. Create one at the top of `process` and
-/// let it drop at the end:
-///
-/// ```
-/// use openplugin_dsp::utility::DenormalGuard;
-/// let _guard = DenormalGuard::new();
-/// // ... process ...
-/// ```
-///
-/// On drop the previous mode is restored, so the host's own setting is not
-/// disturbed. The guard is `!Send` because the register belongs to one thread.
-///
-/// # What is used
-///
-/// - `aarch64`: reads and writes `FPCR` with `mrs` / `msr` inline assembly
-///   and sets bit 24 (`FZ`). On AArch64 `FZ` flushes denormal inputs and
-///   results together (Arm ARM, FPCR; there is no separate DAZ bit).
-/// - `x86_64`: `stmxcsr` / `ldmxcsr` inline assembly on `MXCSR`, setting bit
-///   15 (`FTZ`, flush results) and bit 6 (`DAZ`, treat inputs as zero)
-///   (Intel SDM vol. 1, section 10.2.3). Inline assembly is used because the
-///   `_mm_getcsr` / `_mm_setcsr` intrinsics are deprecated since Rust 1.75.
-/// - Elsewhere: nothing happens and [`DenormalGuard::active`] is `false`.
-///
-/// # Why the `unsafe` is sound
-///
-/// `asm!` is `unsafe` because it can do anything. These blocks only read or
-/// write the thread's floating-point control register: they touch no memory
-/// other than a local 4-byte slot (x86 `stmxcsr`/`ldmxcsr`) and preserve
-/// flags. A changed denormal mode cannot cause memory unsafety; it changes
-/// only the numeric results of float operations on this thread, and `Drop`
-/// restores it. The value written is the old value with defined bits set, so
-/// no reserved bit changes (an invalid MXCSR value would fault, and cannot
-/// occur).
-pub struct DenormalGuard {
-    previous: u64,
-    active: bool,
-    _not_send: std::marker::PhantomData<*const ()>,
-}
-
-impl Default for DenormalGuard {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-mod fp_env {
-    pub const AVAILABLE: bool = true;
-    const FZ: u64 = 1 << 24;
-
-    #[allow(unsafe_code)]
-    pub fn read() -> u64 {
-        let value: u64;
-        // SAFETY: reads FPCR, no memory access.
-        unsafe {
-            core::arch::asm!("mrs {}, fpcr", out(reg) value, options(nomem, nostack, preserves_flags));
-        }
-        value
-    }
-
-    #[allow(unsafe_code)]
-    pub fn write(value: u64) {
-        // SAFETY: writes FPCR; only float behaviour of this thread changes.
-        unsafe {
-            core::arch::asm!("msr fpcr, {}", in(reg) value, options(nomem, nostack, preserves_flags));
-        }
-    }
-
-    pub fn flush_bits() -> u64 {
-        FZ
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-mod fp_env {
-    pub const AVAILABLE: bool = true;
-    const FTZ: u64 = 1 << 15;
-    const DAZ: u64 = 1 << 6;
-
-    #[allow(unsafe_code)]
-    pub fn read() -> u64 {
-        let mut slot: u32 = 0;
-        // SAFETY: stores MXCSR into a local 4-byte slot.
-        unsafe {
-            core::arch::asm!("stmxcsr [{}]", in(reg) &mut slot, options(nostack, preserves_flags));
-        }
-        u64::from(slot)
-    }
-
-    #[allow(unsafe_code)]
-    pub fn write(value: u64) {
-        let slot = value as u32;
-        // SAFETY: loads MXCSR from a local slot; the value is the old one
-        // with FTZ/DAZ set, so no reserved bit is touched.
-        unsafe {
-            core::arch::asm!("ldmxcsr [{}]", in(reg) &slot, options(nostack, preserves_flags, readonly));
-        }
-    }
-
-    pub fn flush_bits() -> u64 {
-        FTZ | DAZ
-    }
-}
-
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-mod fp_env {
-    pub const AVAILABLE: bool = false;
-    pub fn read() -> u64 {
-        0
-    }
-    pub fn write(_: u64) {}
-    pub fn flush_bits() -> u64 {
-        0
-    }
-}
-
-impl DenormalGuard {
-    /// Turn flushing on, remembering the old mode.
-    pub fn new() -> Self {
-        let previous = fp_env::read();
-        if fp_env::AVAILABLE {
-            fp_env::write(previous | fp_env::flush_bits());
-        }
-        Self { previous, active: fp_env::AVAILABLE, _not_send: std::marker::PhantomData }
-    }
-
-    /// Whether this platform has a flush mode to set.
-    pub fn active(&self) -> bool {
-        self.active
-    }
-
-    /// The raw control word seen right now (FPCR or MXCSR), for tests.
-    pub fn raw_control() -> u64 {
-        fp_env::read()
-    }
-}
-
-impl Drop for DenormalGuard {
-    fn drop(&mut self) {
-        if self.active {
-            fp_env::write(self.previous);
-        }
-    }
-}
+/// This is [`openplugin_core::DenormalGuard`], re-exported here where it
+/// first lived; see its documentation. The format entries already hold one
+/// around every audio-thread call into a plugin, unless the plugin opts out
+/// with `Plugin::flush_denormals`.
+pub use openplugin_core::DenormalGuard;
 
 #[cfg(test)]
 mod tests {
