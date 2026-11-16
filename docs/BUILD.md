@@ -186,3 +186,29 @@ On 15 November 2026, on Arch Linux (x86_64, Intel Core i7-2630QM, Rust 1.100), `
 - `clap-validator` 0.4.1, built with `cargo install` from commit `152b982` (the one the `universal` job builds), on `Example Gain.clap`: 44 tests run, 0 failed, 10 skipped, and 34 passed or 33 passed with 1 warning depending on timing (seven full runs: 34 passed in four, 33 passed and 1 warning in three). The skips are the ones seen on macOS: no preset discovery factory (3), no 64-bit audio (2), no note input port (3), no `audio-ports-activation` (1), no `configurable-audio-ports` (1). The warning is `process-audio-denormals`, which compares the time to process denormal input with normal input: 1.28 to 2.45 times longer in the full runs, and 4.6 to 5.6 times longer in 15 runs of that test alone (`--include process-audio-denormals`), each of which warned. No format entry sets flush-to-zero around `process` (`openplugin_dsp::utility::DenormalGuard` exists but is not used there). The machine was shared with other builds during these runs. On macOS (arm64, and x86_64 under Rosetta) the test passes.
 
 CI runs the same commands in the `linux-package` job on `ubuntu-latest`. Its `apt-get install lv2-dev sordi` step has not run on GitHub yet; everything after it was run on the Arch machine.
+
+## Windows: CLAP
+
+On Windows a `.clap` is the plug-in DLL under another name, with no bundle folder. `scripts/windows/bundle_clap.ps1` builds examples in release and copies `target\release\<lib>.dll` to `<Out>\<Name>.clap` (default `target\clap`; nothing is installed in a plug-in folder):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\bundle_clap.ps1                      # editor, design_editor, cpp_bridge, role_tags
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\bundle_clap.ps1 -Example editor -Out dist
+```
+
+A crate whose `[lib]` has no `cdylib` (`examples/role_tags`: `staticlib` and `rlib`) is built with `cargo rustc --lib --crate-type cdylib`. The product name is the example's folder in CamelCase (`design_editor` becomes `DesignEditor.clap`). The CLAP `gui` extension is offered on macOS only for now, so a Windows `.clap` has no editor.
+
+On 15 November 2026, on Windows 11 x64 (Rust 1.100.0 MSVC), `clap-validator` 0.4.1 `validate`, out of process and with `--in-process` (the same counts, warnings aside):
+
+| Plug-in | Run | Passed (or warning) | Failed | Skipped |
+|---|---|---|---|---|
+| `Editor.clap` | 44 | 33 | 0 | 11 |
+| `DesignEditor.clap` | 44 | 33 | 0 | 11 |
+| `CppBridge.clap` | 44 | 33 | 0 | 11 |
+| `RoleTags.clap` | 44 | 31 | 2 | 11 |
+
+- One more skip than on macOS: `scan-rtld-now` runs on Unix only.
+- `process-audio-denormals` could end with a warning on these runs (denormal input took 1.3 to 3.4 times longer on x86_64). Since the CLAP wrapper flushes denormals around every call into the plug-in (`openplugin_core::denormal`), `Editor.clap` passes it with no warning: on 16 November 2026, after the rebase onto that change, `clap-validator validate` gave 44 run, 33 passed, 0 failed, 0 warnings, 11 skipped.
+- `RoleTags.clap` fails `param-set-events` and `param-set-no-cookies` on every platform: its one parameter is a toggle whose default is 0, and the validator's fixed-seed value for it is also 0, so the test sees no change. With the default set to 1 for a trial build, both pass; `openplugin-port capture --set Spare=1` reads 1 back through `clap_plugin_params::flush`. The example is a test plug-in for the channel order proof and is not changed for this.
+
+REAPER 7.80 (a portable copy with its own `-cfgfile` and the Dummy Audio device) scans all four, instantiates each, and renders a project with `Editor.clap` (Gain 6 dB, Warm on, set from ReaScript) with `reaper.exe -renderproject`, from an SSH session as well as in the desktop session. The 32-bit float render is bit-identical to `openplugin-port null --save` (the SDK's own offline render of the same input and settings), and the state REAPER saved in the `.rpp` reopens to Gain 6 dB and Warm on.
