@@ -9,6 +9,8 @@
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
+use openplugin_core::identity::VST3_BYPASS_PARAM_ID;
+
 use crate::manifest::{Manifest, SCHEMA_VERSION};
 use crate::snippet::{self, Layouts};
 
@@ -122,6 +124,7 @@ pub fn generate(m: &Manifest, opts: &NewOptions) -> Result<Vec<File>, String> {
     }
     let ty = type_name(&name);
     let lib = name.replace('-', "_");
+    let m = &without_shell_bypass(m);
     let inferred = snippet::infer(&m.plugin);
     Ok(vec![
         File { path: "Cargo.toml", text: cargo_toml(m, &name, opts) },
@@ -132,6 +135,22 @@ pub fn generate(m: &Manifest, opts: &NewOptions) -> Result<Vec<File>, String> {
         File { path: "src/state_import.rs", text: state_import_rs(m, &inferred) },
         File { path: "tests/null.rs", text: null_rs(m, &lib, opts) },
     ])
+}
+
+/// The manifest without the VST3 bypass parameter the SDK's VST3 shell adds by
+/// itself (a scan of an SDK-built VST3 lists it): the port's shell adds it
+/// again, under the same id, so the table must not hold a second one. A
+/// bypass of the original's own, under another id, stays.
+fn without_shell_bypass(m: &Manifest) -> Manifest {
+    let mut m = m.clone();
+    if m.source.format == "vst3" {
+        let before = m.plugin.params.len();
+        m.plugin.params.retain(|p| !(p.id == VST3_BYPASS_PARAM_ID && p.has_flag("bypass")));
+        if m.plugin.params.len() != before {
+            m.plugin.warnings.push(format!("the VST3 bypass parameter (id {VST3_BYPASS_PARAM_ID:#010X}) is left out of the table: the SDK's VST3 shell adds it under the same id"));
+        }
+    }
+    m
 }
 
 /// Write the crate into `dir`, which must not exist or must be empty.
@@ -663,6 +682,20 @@ mod tests {
     fn a_bad_crate_name_is_refused() {
         let opts = NewOptions { sdk: SdkSource::Version("0.4.0".into()), crate_name: Some("9 lives".into()), tool: PathBuf::from("openplugin-port") };
         assert!(generate(&named("X"), &opts).is_err());
+    }
+
+    #[test]
+    fn the_vst3_shells_own_bypass_is_left_out() {
+        let mut m = named("Gain");
+        m.source.format = "vst3".into();
+        let param = |id: u32, name: &str, flags: &[&str]| crate::manifest::Param { id, name: name.into(), max: 1.0, flags: flags.iter().map(|f| f.to_string()).collect(), ..Default::default() };
+        m.plugin.params = vec![param(0, "Gain", &["automatable"]), param(VST3_BYPASS_PARAM_ID, "Bypass", &["automatable", "bypass"]), param(7, "Mute", &["bypass"])];
+        let opts = NewOptions { sdk: SdkSource::Version("0.4.0".into()), crate_name: None, tool: PathBuf::from("openplugin-port") };
+        let files = generate(&m, &opts).unwrap();
+        let params = &files.iter().find(|f| f.path == "src/params.rs").unwrap().text;
+        assert!(params.contains("pub static PARAMS: [ParamInfo; 2]"), "{params}");
+        assert!(params.contains("\"Mute\"") && !params.contains("\"Bypass\""), "{params}");
+        assert!(params.contains("scan warning: the VST3 bypass parameter"), "{params}");
     }
 
     #[test]
