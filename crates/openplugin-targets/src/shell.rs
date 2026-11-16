@@ -27,6 +27,8 @@ pub use openplugin_host::shell::{
     au_code, identity, param_aax_id, param_host_id,
     // ABI 9: the instance's own parameter table, and its largest latency.
     instance_param, instance_param_format, instance_param_parse, latency_now, max_latency,
+    // The parameter table, for the editor bridge's host values.
+    params,
 };
 
 #[cfg(any(target_os = "macos", windows))]
@@ -38,7 +40,7 @@ pub use editor::OpEditorHost;
 #[cfg(any(target_os = "macos", windows))]
 pub mod editor {
     use super::ShellInstance;
-    use openplugin_core::{EditorFactory, EditorHost, Gesture};
+    use openplugin_core::{EditorFactory, EditorHost, Gesture, HostSpace, ParamInfo};
     #[cfg(target_os = "macos")]
     use openplugin_dri::cocoa::EditorView;
     #[cfg(windows)]
@@ -76,6 +78,22 @@ pub mod editor {
         pub end_edit: Option<unsafe extern "C" fn(context: *mut c_void, index: u32)>,
     }
 
+    /// The binary's parameter table: the shells speak host values ([`HostSpace::SHELLS`]), the editor
+    /// plain ones. Set by `export_shell!` before the first editor exists (one plugin per binary).
+    static PARAMS: std::sync::OnceLock<&'static [ParamInfo]> = std::sync::OnceLock::new();
+
+    pub fn use_params(params: &'static [ParamInfo]) {
+        let _ = PARAMS.set(params);
+    }
+
+    fn to_host(index: u32, plain: f32) -> f32 {
+        PARAMS.get().and_then(|p| p.get(index as usize)).map_or(plain, |p| p.to_host(HostSpace::SHELLS, plain))
+    }
+
+    fn from_host(index: u32, value: f32) -> f32 {
+        PARAMS.get().and_then(|p| p.get(index as usize)).map_or(value, |p| p.from_host(HostSpace::SHELLS, value))
+    }
+
     /// The gestures of an editor, sent to an `OpEditorHost`.
     pub fn host_for(callbacks: OpEditorHost) -> EditorHost {
         EditorHost::new(move |gesture| unsafe {
@@ -88,7 +106,7 @@ pub mod editor {
                 }
                 Gesture::Perform(i, v) => {
                     if let Some(f) = c.perform_edit {
-                        f(c.context, i, f64::from(v));
+                        f(c.context, i, f64::from(to_host(i, v)));
                     }
                 }
                 Gesture::End(i) => {
@@ -303,7 +321,7 @@ pub mod editor {
         }
         super::trace::write("host");
         if let Some(e) = unsafe { view(editor) }.and_then(|v| v.editor()) {
-            e.param_changed(index as usize, plain);
+            e.param_changed(index as usize, from_host(index, plain));
         }
     }
 
@@ -377,6 +395,7 @@ macro_rules! export_shell {
         #[cfg(any(target_os = "macos", windows))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_create(host: *const $crate::shell::OpEditorHost) -> *mut ::std::ffi::c_void {
+            $crate::shell::editor::use_params($crate::shell::params::<$plugin>());
             $crate::shell::editor::create($editor, host)
         }
 

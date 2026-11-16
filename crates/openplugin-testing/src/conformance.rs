@@ -362,6 +362,10 @@ struct Session<'s, P: Plugin> {
     frames_done: u64,
     blocks: u64,
     latency: usize,
+    /// `latency()` right after `prepare`, before any parameter moved.
+    prepared_latency: usize,
+    /// A parameter was written since the last latency check (between blocks counts too).
+    params_moved: bool,
     parity: bool,
     pos: i64,
     note_ports: openplugin_core::NotePorts,
@@ -414,6 +418,8 @@ impl<'s, P: Plugin> Session<'s, P> {
             frames_done: 0,
             blocks: 0,
             latency: 0,
+            prepared_latency: 0,
+            params_moved: false,
             parity: false,
             pos: 0,
             note_ports: openplugin_core::NotePorts { input: false, output: false },
@@ -447,6 +453,7 @@ impl<'s, P: Plugin> Session<'s, P> {
         s.catching("prepare_layout", |p| p.prepare_layout(rate, max_block, layout))?;
         s.catching("reset", |p| p.reset())?;
         s.latency = s.catching("latency", |p| p.latency())?;
+        s.prepared_latency = s.latency;
         if s.latency as f64 > f64::from(rate) * 10.0 {
             let l = s.latency;
             s.fail(Check::Latency, format!("latency of {l} samples is more than ten seconds"));
@@ -524,6 +531,7 @@ impl<'s, P: Plugin> Session<'s, P> {
         }
         let info = self.info;
         let p = &info.params[index];
+        self.params_moved = true;
         let by_index = self.rng.chance(0.5);
         let ok = self.guarded("set_param", |pl| if by_index { pl.set_param_index(index, value) } else { pl.set_param(p.id, value) });
         match ok {
@@ -753,7 +761,8 @@ impl<'s, P: Plugin> Session<'s, P> {
         }
         self.frames_done += frames as u64;
         self.blocks += 1;
-        self.check_latency(had_params);
+        let moved = std::mem::take(&mut self.params_moved);
+        self.check_latency(had_params || moved);
         self.inspect(frames, inspect)
     }
 
@@ -1081,7 +1090,9 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
         );
         let Some(mut s) = self.open(label.clone(), rate, max_block, layout, offline) else { return };
         s.run(cfg);
-        let (lay, lat, seed) = (s.layout, s.latency, s.seed);
+        // The latency at prepare: a session's fuzzed parameters may move it later
+        // (`latency_depends_on_params`), and only the block size differs between sessions here.
+        let (lay, lat, seed) = (s.layout, s.prepared_latency, s.seed);
         drop(s);
         self.note_latency(rate, lay, max_block, lat, &label, seed);
     }
@@ -1379,6 +1390,8 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
 
         let Some(mut b) = Session::open(&mut self.rec, opts, alloc_on, &|| make(), format!("{a_label} restore"), rate, 512, None, false) else { return };
         let restored = restore_params(&mut b.plugin, &saved);
+        // Restored values are parameter writes; a latency that follows them may move.
+        b.params_moved = true;
         let has_read_only = info.params.iter().any(|p| p.flags.contains(ParamFlags::READ_ONLY));
         if !restored && !has_read_only {
             b.fail(Check::State, "restore_params refused values the plugin itself reported".to_string());
@@ -1396,6 +1409,7 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
         }
         if let Some(chunk) = &chunk1 {
             if !params_only {
+                b.params_moved = true;
                 match b.catching("load_state", |p| p.load_state(chunk)) {
                     Some(true) => {
                         b.rec.pass(Check::State);
@@ -1428,6 +1442,7 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
             if b.dead {
                 break;
             }
+            b.params_moved = true;
             b.catching("load_state (hostile bytes)", |p| p.load_state(&blob));
             b.run(Cfg::new(Stimulus::Noise, 1024, Plan::Fixed(256)));
         }

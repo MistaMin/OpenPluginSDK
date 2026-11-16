@@ -14,6 +14,6 @@
 <key>type</key><string>@OP_AU_TYPE@</string>
 <key>subtype</key><string>@OP_AU_SUBTYPE@</string>
 <key>factoryFunction</key><string>OpenPluginAUFactory</string>
-<key>version</key><integer>1</integer>
+<key>version</key><integer>@OP_AU_VERSION@</integer>
 </dict></array>
 </dict></plist>

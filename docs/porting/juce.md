@@ -43,11 +43,12 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 |---|---|---|
 | `AudioProcessorValueTreeState` with a `ParameterLayout` | `static PARAMS: [ParamInfo; N]` | The position in the table is the parameter's index in every format, so keep the old order |
 | `AudioParameterFloat` with a `ParameterID`, a name, a `NormalisableRange` and a default | `ParamInfo::new(id, name, min, max, default, unit)` | Keep the id string |
-| The skew of a `NormalisableRange`, `setSkewForCentre` | `.with_taper(Taper::Log)` | Only linear and logarithmic travel exist; see the list at the end |
+| The skew of a `NormalisableRange`, `setSkewForCentre` | `.with_taper(Taper::Skew(Skew::new(skew)))`, or `Taper::Log` for a range made with an exponential mapping | `Skew` is the `NormalisableRange` skew factor: travel is the proportion raised to it |
+| A JUCE parameter's host value (0 to 1 for every `AudioParameterFloat`; in CLAP also for choices and switches) | `.with_normalized_in(HostSpace::CLAP.union(HostSpace::SHELLS))` (floats), `HostSpace::CLAP` (choices and switches) | Saved automation stores those 0 to 1 values; the port shows hosts the same space so it replays. The plugin keeps plain units |
 | The interval of a `NormalisableRange`, `AudioParameterInt` | `.with_steps(n)` | `n` positions including both ends |
 | `AudioParameterBool` | `Unit::Toggle` | |
 | `AudioParameterChoice` | `.with_choices(&[...])` | The value is the index |
-| `withLabel`, `withStringFromValueFunction`, `withValueFromStringFunction` | `Unit::Db`, `Unit::Hz`, `Unit::Ms`, ... | The unit prints and parses the value. No custom text function; see the list at the end |
+| `withLabel`, `withStringFromValueFunction`, `withValueFromStringFunction` | `Unit::Db`, `Unit::Hz`, `Unit::Ms`, ...; or `.with_text(format, parse)` | The unit prints and parses the value, or the plugin's own functions do |
 | `withAutomatable(false)` | `.with_flag(ParamFlags::NOT_REALTIME)` | |
 | `AudioProcessorParameterGroup` | `.with_group("Filter/Envelope")` | |
 | `getRawParameterValue(id)` read in `processBlock` | A field of the plugin, written in `set_param` | Plain units, clamped by `ParamInfo::clamp` |
@@ -411,8 +412,6 @@ Keep the captured blobs in the port's repository and load each one in a test, co
 
 ## What has no counterpart yet
 
-- **Skewed ranges.** `Taper` is linear or logarithmic. A parameter with a skew factor keeps its range and plain values, but a host knob travels differently from the old plugin's, and normalised automation recorded against the old skew plays back at different plain values.
-- **Custom value text.** A parameter prints and parses by its `Unit` and its choice names.
 - **64-bit audio buffers.** `process` is `f32`.
 - **More than one output bus, or more than one sidechain.** An `IoConfig` is one main input, one main output and one optional sidechain.
 - **SysEx.** MIDI reaches the plugin as messages of up to three bytes.

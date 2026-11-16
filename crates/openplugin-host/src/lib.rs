@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use openplugin_core::{
     decode_session, encode_session, has_state_chunk, release_momentary, sample_rate_supported, AudioHold, BusMeters, Channels,
-    ChannelsMut, DenormalGuard, EditorState, HostNotifier, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane,
+    ChannelsMut, DenormalGuard, EditorState, HostNotifier, HostSpace, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane,
     PluginGate, PluginInfo, Seqlock, Tail, MAX_AUDIO_CHANNELS,
 };
 
@@ -348,6 +348,21 @@ impl HostSession {
 
     pub fn load_param(&self, index: usize) -> f32 {
         self.plane.load(index).unwrap_or(0.0)
+    }
+
+    /// Stores the value a VST3, Audio Unit or AAX host sees ([`HostSpace::SHELLS`]): plain units,
+    /// or normalized travel for a parameter shown normalized there. Does not allocate.
+    pub fn store_host(&self, index: usize, value: f32) -> bool {
+        let Some(param) = self.info.params.get(index) else {
+            return false;
+        };
+        self.plane.store(index, param.from_host(HostSpace::SHELLS, value))
+    }
+
+    /// The value a VST3, Audio Unit or AAX host sees ([`FfiInstance::store_host`]).
+    pub fn load_host(&self, index: usize) -> f32 {
+        let value = self.load_param(index);
+        self.info.params.get(index).map_or(value, |param| param.to_host(HostSpace::SHELLS, value))
     }
 
     /// Plain value from normalized 0..1 travel, using the parameter taper.
