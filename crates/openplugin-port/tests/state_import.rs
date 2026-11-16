@@ -391,6 +391,7 @@ fn clap_capture_loads_into_the_port() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "needs the Windows VST3 shell (native/vst3/win)")]
 fn vst3_capture_loads_into_the_port() {
     let Some(f) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
@@ -413,6 +414,7 @@ fn vst3_capture_loads_into_the_port() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Audio Units exist only on macOS")]
 fn audio_unit_capture_loads_into_the_port() {
     let Some(f) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");

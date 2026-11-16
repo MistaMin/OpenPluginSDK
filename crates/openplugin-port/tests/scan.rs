@@ -189,6 +189,7 @@ fn things_that_are_not_plugins_are_errors() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "needs the Windows VST3 shell (native/vst3/win)")]
 fn vst3_scan_reproduces_the_example() {
     let Some(dir) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
@@ -208,6 +209,7 @@ fn vst3_scan_reproduces_the_example() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "Audio Units exist only on macOS")]
 fn au_scan_reproduces_the_example() {
     let Some(dir) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
@@ -223,6 +225,7 @@ fn au_scan_reproduces_the_example() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "needs a Windows AAX bundle")]
 fn aax_scan_reads_the_page_table_ids() {
     let Some(dir) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
@@ -238,6 +241,7 @@ fn aax_scan_reads_the_page_table_ids() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "reads a macOS .clap bundle; tests/windows_probe.rs scans the Windows form")]
 fn clap_bundle_scan_matches_the_bare_library() {
     let Some(dir) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
