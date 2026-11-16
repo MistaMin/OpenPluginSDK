@@ -22,7 +22,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::*;
-use openplugin_ffi::shell::{self, ShellInstance};
+use openplugin_host::shell::{self, ShellInstance};
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static FREES: AtomicUsize = AtomicUsize::new(0);

@@ -1,4 +1,4 @@
-//! Sample-rate boundaries through the shell create path and `FfiInstance`.
+//! Sample-rate boundaries through the shell create path and `HostSession`.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -6,22 +6,18 @@ use std::sync::Arc;
 use openplugin_core::{
     Category, ParamInfo, Plugin, PluginInfo, MAX_SAMPLE_RATE, MIN_SAMPLE_RATE,
 };
-use openplugin_ffi::{shell, FfiInstance};
+use openplugin_host::{shell, HostSession};
 
 static PARAMS: [ParamInfo; 0] = [];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.sample-rate",
-    name: "Sample Rate Probe",
-    vendor: "OpenGrid",
-    url: "",
-    email: "",
-    version: "0.0.1",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.sample-rate",
+    "Sample Rate Probe",
+    "OpenGrid",
+    "0.0.1",
+    Category::Utility,
+    &PARAMS,
+);
 
 struct RateProbe {
     prepared: Arc<AtomicU32>,
@@ -47,7 +43,7 @@ impl Plugin for RateProbe {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
 }
 
 #[test]
@@ -74,12 +70,12 @@ fn shell_create_accepts_the_shared_range_and_rejects_just_outside_it() {
 #[test]
 fn ffi_new_keeps_an_accepted_rate_and_prepare_rejects_the_rest() {
     let shared = Arc::new(AtomicU32::new(0));
-    let instance = FfiInstance::new(
+    let instance = HostSession::new(
         Box::new(RateProbe { prepared: shared.clone() }),
         f64::from(MIN_SAMPLE_RATE),
         64,
         2,
-    );
+    ).unwrap();
     assert_eq!(
         f32::from_bits(shared.load(Ordering::Relaxed)),
         MIN_SAMPLE_RATE,

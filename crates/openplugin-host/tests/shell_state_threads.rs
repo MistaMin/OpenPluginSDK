@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::*;
-use openplugin_ffi::shell::{self, ShellInstance};
+use openplugin_host::shell::{self, ShellInstance};
 
 /// The tests share the hold flags of the plugin, so they run one at a time.
 static SERIAL: Mutex<()> = Mutex::new(());

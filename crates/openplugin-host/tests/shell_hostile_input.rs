@@ -2,7 +2,7 @@
 //!
 //! A deterministic LCG (the fixed seed is [`SEED`]) drives hundreds of boundary
 //! `create` calls and thousands of generated parameter and process calls into
-//! `openplugin_ffi::shell`, with garbage sample rates, block sizes, channel
+//! `openplugin_host::shell`, with garbage sample rates, block sizes, channel
 //! counts, parameter indices and values, and audio buffers full of NaN,
 //! infinities, denormals and arbitrary bit patterns. The test binary dying is
 //! the failure signal: a panic, an abort or a null dereference fails the run.
@@ -26,7 +26,7 @@
 //! Seed and iteration counts are fixed, so a failure reproduces exactly.
 
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Tail, Unit};
-use openplugin_ffi::shell::{self, OpParamDesc, OpShellInfo, ShellInstance, ABI, PARAM_DISCRETE};
+use openplugin_host::shell::{self, OpParamDesc, OpShellInfo, ShellInstance, ABI, PARAM_DISCRETE};
 
 fn write_info(out: *mut OpShellInfo) -> u32 {
     unsafe { shell::write_info::<FuzzGain>(out) }
@@ -53,18 +53,14 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("mute", "Mute", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.shell-fuzz",
-    name: "Shell Fuzz",
-    vendor: "OpenGrid",
-    url: "",
-    email: "",
-    version: "0.3.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.shell-fuzz",
+    "Shell Fuzz",
+    "OpenGrid",
+    "0.3.0",
+    Category::Utility,
+    &PARAMS,
+);
 
 /// Two parameters and two states: a gain path and a mute switch. `tail` is one
 /// second at every accepted rate, so the host property can be checked before
@@ -122,7 +118,7 @@ impl Plugin for FuzzGain {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io {
             let samples = &mut channel[..frames];
             if self.mute {
@@ -634,7 +630,7 @@ fn shell_parameter_surface_survives_generated_junk() {
             1 => {
                 let value = junk_value(&mut rng);
                 // Documented: only a missing parameter is rejected. Non-finite
-                // travel falls back to the default (FfiInstance::store_normalized).
+                // travel falls back to the default (HostSession::store_normalized).
                 let accepted = u32::from(valid);
                 assert_eq!(
                     unsafe { shell::set_normalized(ptr, index, value) },

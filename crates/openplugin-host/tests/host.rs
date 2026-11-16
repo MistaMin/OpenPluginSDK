@@ -1,4 +1,4 @@
-//! A Rust host drives one plugin through `FfiInstance`.
+//! A Rust host drives one plugin through `HostSession`.
 //! The counting allocator is the realtime check: after prepare, process
 //! and `store_param` must not allocate.
 
@@ -6,7 +6,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use openplugin_core::{Category, ParamInfo, PluginInfo, Unit};
-use openplugin_ffi::{FfiInstance, Plugin};
+use openplugin_host::{HostSession, Plugin};
 
 static ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -52,18 +52,16 @@ static PARAMS: [ParamInfo; 2] = [
 static PRESET_FLAT: [f32; 2] = [0.0, 0.0];
 static PRESET_HOT: [f32; 2] = [6.0, 2.0];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.wire",
-    name: "Wire",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.wire",
+    "Wire",
+    "Test",
+    "0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 impl Plugin for Wire {
     fn info(&self) -> &'static PluginInfo {
@@ -98,14 +96,13 @@ impl Plugin for Wire {
         }
     }
     fn meters(&self) -> openplugin_core::MeterFrame {
-        openplugin_core::MeterFrame {
-            input_db: [self.db, self.db],
-            output_db: [self.linear, self.linear],
-            reduction_db: if self.offline { 1.0 } else { 0.0 },
-            ..openplugin_core::MeterFrame::SILENT
-        }
+        let mut frame = openplugin_core::MeterFrame::SILENT;
+        frame.input_db = [self.db, self.db];
+        frame.output_db = [self.linear, self.linear];
+        frame.reduction_db = if self.offline { 1.0 } else { 0.0 };
+        frame
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = if self.offline { 0.0 } else { self.linear };
         for channel in io {
             for sample in &mut channel[..frames] {
@@ -134,15 +131,14 @@ fn db_to_linear(db: f32) -> f32 {
 
 #[test]
 fn host_drives_the_session_and_process_does_not_allocate() {
-    let plugin = FfiInstance::new(Box::new(Wire::default()), 48_000.0, 8, 2);
+    let plugin = HostSession::new(Box::new(Wire::default()), 48_000.0, 8, 2).unwrap();
     assert_eq!(plugin.param_count(), 2);
-    assert!(plugin.param_spec(9).is_none());
-    let spec = plugin.param_spec(0).unwrap();
+    assert!(plugin.param_info(9).is_none());
+    let spec = plugin.param_info(0).unwrap();
     assert_eq!(spec.unit, Unit::Db);
-    assert!(!spec.is_discrete);
-    let spec = plugin.param_spec(1).unwrap();
+    assert_eq!(spec.steps, 0);
+    let spec = plugin.param_info(1).unwrap();
     assert_eq!(spec.steps, 3);
-    assert!(spec.is_discrete);
     assert!(spec.name.starts_with("Mode"));
     assert_eq!(plugin.name(), "Wire");
     assert_eq!(plugin.preset_count(), 2);
@@ -178,13 +174,13 @@ fn host_drives_the_session_and_process_does_not_allocate() {
     assert!(plugin.apply_preset(1));
     assert_eq!(plugin.preset_index(), 1);
     assert!((plugin.load_param(1) - 2.0).abs() < 1e-4);
-    let bytes = plugin.save_bytes();
+    let bytes = plugin.save_bytes().unwrap();
     assert!(!bytes.is_empty());
     assert!(plugin.store_param(0, -12.0));
     assert!(plugin.load_bytes(&bytes));
     assert!((plugin.load_param(0) - 6.0).abs() < 1e-4);
 
-    plugin.set_offline_flag(true);
+    plugin.set_offline(true);
     left = [0.5; 4];
     right = [0.5; 4];
     assert!(plugin.process_stereo(&mut left, &mut right));
@@ -192,7 +188,7 @@ fn host_drives_the_session_and_process_does_not_allocate() {
     let meters = plugin.meters();
     assert!((meters.reduction_db - 1.0).abs() < 1e-6);
 
-    plugin.set_offline_flag(false);
+    plugin.set_offline(false);
     assert!(plugin.prepare(44_100.0, 8, 2));
     plugin.reset();
     left = [0.5; 4];

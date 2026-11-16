@@ -15,7 +15,7 @@ categories.workspace = true
 
 [dependencies]
 openplugin-core = { workspace = true }
-openplugin-ffi = { workspace = true }
+openplugin-host = { workspace = true }
 log = { workspace = true }
 
 # The Cocoa editor view is the only user of the DRI shell.

@@ -1,5 +1,5 @@
 [package]
-name = "openplugin-ffi"
+name = "openplugin-host"
 description = "Rust host session for one OpenPluginSDK plugin"
 version.workspace = true
 edition.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/openplugin-ffi"
+documentation = "https://docs.rs/openplugin-host"
 readme = "README.md"
 authors.workspace = true
 keywords.workspace = true

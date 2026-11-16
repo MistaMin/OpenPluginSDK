@@ -10,8 +10,8 @@ mod shift;
 use std::sync::Arc;
 
 use openplugin_core::HostNotifier;
-use openplugin_ffi::shell::{self, ShellInstance, CHANGE_LATENCY, CHANGE_PARAM_INFO};
-use openplugin_ffi::FfiInstance;
+use openplugin_host::shell::{self, ShellInstance, CHANGE_LATENCY, CHANGE_PARAM_INFO};
+use openplugin_host::HostSession;
 use shift::{Calls, Shift, AFTER_LATENCY};
 
 const LOOKAHEAD: u32 = 0;
@@ -90,7 +90,7 @@ fn new_parameter_names_are_reported_once() {
 #[test]
 fn a_latency_that_moves_by_itself_is_reported() {
     let calls = Arc::new(Calls::default());
-    let ffi = FfiInstance::new(Box::new(Shift::new(calls.clone()).after_blocks(3)), 48_000.0, FRAMES, 2);
+    let ffi = HostSession::new(Box::new(Shift::new(calls.clone()).after_blocks(3)), 48_000.0, FRAMES, 2).unwrap();
     let (mut left, mut right) = (vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]);
     assert!(ffi.process_stereo(&mut left, &mut right));
     assert!(ffi.process_stereo(&mut left, &mut right));

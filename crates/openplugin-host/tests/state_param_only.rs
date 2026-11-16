@@ -7,25 +7,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
-use openplugin_ffi::FfiInstance;
+use openplugin_host::HostSession;
 
 static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("gain", "Gain", -24.0, 24.0, -6.0, Unit::Db),
     ParamInfo::new("mix", "Mix", 0.0, 1.0, 1.0, Unit::None),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.param-only",
-    name: "Param Only",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.param-only",
+    "Param Only",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 /// Gain and mix. With `chunk` set it also owns a tag the parameters do not
 /// hold, saved through `save_state`.
@@ -66,7 +64,7 @@ impl Plugin for Tone {
             _ => None,
         }
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = self.mix * 10f32.powf(self.gain_db / 20.0) + (1.0 - self.mix);
         for channel in io {
             for sample in &mut channel[..frames] {
@@ -108,7 +106,7 @@ fn input(block: usize) -> ([f32; BLOCK], [f32; BLOCK]) {
     (left, right)
 }
 
-fn render(instance: &FfiInstance) -> Vec<u32> {
+fn render(instance: &HostSession) -> Vec<u32> {
     let mut out = Vec::with_capacity(BLOCKS * BLOCK * 2);
     for block in 0..BLOCKS {
         let (mut left, mut right) = input(block);
@@ -118,8 +116,8 @@ fn render(instance: &FfiInstance) -> Vec<u32> {
     out
 }
 
-fn fresh(plugin: Tone) -> FfiInstance {
-    FfiInstance::new(Box::new(plugin), 48_000.0, BLOCK, 2)
+fn fresh(plugin: Tone) -> HostSession {
+    HostSession::new(Box::new(plugin), 48_000.0, BLOCK, 2).unwrap()
 }
 
 #[test]
@@ -135,7 +133,7 @@ fn saves_and_loads_during_playback_never_skip_a_block() {
         let worker = scope.spawn(|| {
             let mut count = 0u64;
             while !stop.load(Ordering::Acquire) {
-                let bytes = instance.save_bytes();
+                let bytes = instance.save_bytes().unwrap();
                 assert!(instance.load_bytes(&bytes));
                 count += 1;
             }
@@ -154,7 +152,7 @@ fn parameter_only_round_trip_applies_on_the_next_block() {
     let a = fresh(Tone::params_only());
     assert!(a.store_param(0, 9.5));
     assert!(a.store_param(1, 0.25));
-    let bytes = a.save_bytes();
+    let bytes = a.save_bytes().unwrap();
 
     let b = fresh(Tone::params_only());
     assert!(b.load_bytes(&bytes));
@@ -166,34 +164,34 @@ fn parameter_only_round_trip_applies_on_the_next_block() {
     assert!(b.process_stereo(&mut l2, &mut r2));
     assert_eq!(l1.map(f32::to_bits), l2.map(f32::to_bits));
     assert_eq!(r1.map(f32::to_bits), r2.map(f32::to_bits));
-    assert_eq!(b.save_bytes(), bytes);
+    assert_eq!(b.save_bytes().unwrap(), bytes);
 }
 
 #[test]
 fn chunk_plugin_keeps_its_chunk() {
     let a = fresh(Tone::with_chunk(0x00C0_FFEE));
     assert!(a.store_param(0, -12.0));
-    let bytes = a.save_bytes();
+    let bytes = a.save_bytes().unwrap();
 
     let b = fresh(Tone::with_chunk(1));
     assert!(b.load_bytes(&bytes));
     assert_eq!(b.load_param(0), -12.0);
-    assert_eq!(b.save_bytes(), bytes, "the chunk did not survive the round trip");
+    assert_eq!(b.save_bytes().unwrap(), bytes, "the chunk did not survive the round trip");
 
     // A parameter-only build ignores the chunk, keeps the values, and its
     // own save carries no chunk.
     let c = fresh(Tone::params_only());
     assert!(c.load_bytes(&bytes));
     assert_eq!(c.load_param(0), -12.0);
-    assert!(c.save_bytes().len() < bytes.len());
+    assert!(c.save_bytes().unwrap().len() < bytes.len());
 
     // A chunk the plugin refuses stops the load before any value changes.
     let mut bad = bytes.clone();
     bad.pop();
     let d = fresh(Tone::with_chunk(1));
-    let before = d.save_bytes();
+    let before = d.save_bytes().unwrap();
     assert!(!d.load_bytes(&bad));
-    assert_eq!(d.save_bytes(), before);
+    assert_eq!(d.save_bytes().unwrap(), before);
 }
 
 #[test]
@@ -205,7 +203,7 @@ fn chunk_plugin_state_calls_during_playback_stay_sound() {
     thread::scope(|scope| {
         let worker = scope.spawn(|| {
             while !stop.load(Ordering::Acquire) {
-                let bytes = instance.save_bytes();
+                let bytes = instance.save_bytes().unwrap();
                 assert!(instance.load_bytes(&bytes));
             }
         });
@@ -215,7 +213,7 @@ fn chunk_plugin_state_calls_during_playback_stay_sound() {
         stop.store(true, Ordering::Release);
         worker.join().unwrap();
     });
-    assert_eq!(fresh(Tone::with_chunk(7)).save_bytes(), instance.save_bytes());
+    assert_eq!(fresh(Tone::with_chunk(7)).save_bytes().unwrap(), instance.save_bytes().unwrap());
 }
 
 /// Small deterministic generator; no dependency.
@@ -229,8 +227,8 @@ fn next(state: &mut u64) -> u64 {
 fn hostile(make: fn() -> Tone) {
     let instance = fresh(make());
     assert!(instance.store_param(0, 3.0));
-    let valid = instance.save_bytes();
-    let snapshot = |i: &FfiInstance| (i.load_param(0).to_bits(), i.load_param(1).to_bits());
+    let valid = instance.save_bytes().unwrap();
+    let snapshot = |i: &HostSession| (i.load_param(0).to_bits(), i.load_param(1).to_bits());
     let before = snapshot(&instance);
 
     assert!(!instance.load_bytes(&[]));

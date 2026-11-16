@@ -13,7 +13,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
-use openplugin_ffi::shell;
+use openplugin_host::shell;
 
 #[path = "../../openplugin-targets/tests/common/shift.rs"]
 mod shift;
@@ -124,18 +124,16 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("on", "On", 0.0, 1.0, 1.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.shell-no-alloc",
-    name: "Shell No Alloc",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.shell-no-alloc",
+    "Shell No Alloc",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 /// Gain in dB plus an on/off toggle. Neither `prepare`, `reset`, `set_param`
 /// nor `process` allocates.
@@ -189,7 +187,7 @@ impl Plugin for GainToggle {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = if self.on { self.linear } else { 0.0 };
         for channel in io.iter_mut() {
             for sample in channel[..frames].iter_mut() {
@@ -241,14 +239,14 @@ impl Plugin for Echo {
     fn pull_midi(&mut self) -> Option<(u32, [u8; 3])> {
         self.queue.iter_mut().find_map(|s| s.take())
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             for sample in channel[..frames].iter_mut() {
                 *sample *= self.gain;
             }
         }
     }
-    fn process_buses(&mut self, io: &mut [Vec<f32>], side: Option<&[Vec<f32>]>, frames: usize) {
+    fn process_buses(&mut self, io: &mut [&mut [f32]], side: Option<&[&[f32]]>, frames: usize) {
         self.process(io, frames);
         if let Some(side) = side {
             for channel in io.iter_mut() {

@@ -5,7 +5,7 @@
 
 use openplugin_core::identity::{check_pins, AuIds, Vst3Ids};
 use openplugin_core::{decode_session, Category, ParamInfo, Plugin, PluginInfo, Unit};
-use openplugin_ffi::shell::{self, OpParamDesc, OpShellInfo};
+use openplugin_host::shell::{self, OpParamDesc, OpShellInfo};
 
 /// Three parameters with different numbers per format, as a port has when the
 /// old plugin's formats did not agree; `c` is left to its position in VST3.
@@ -15,18 +15,14 @@ static PARAMS: [ParamInfo; 3] = [
     ParamInfo::new("c", "C", 0.0, 1.0, 0.75, Unit::None).with_au_id(0xFFFF_FFFE).with_clap_id(9),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.ids",
-    name: "Ids",
-    vendor: "Test",
-    url: "",
-    email: "",
-    version: "1.0.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.ids",
+    "Ids",
+    "Test",
+    "1.0.0",
+    Category::Utility,
+    &PARAMS,
+);
 
 const PROCESSOR: &str = "00112233445566778899AABBCCDDEEFF";
 
@@ -49,7 +45,7 @@ impl Plugin for Ids {
     fn param(&self, id: &str) -> Option<f32> {
         PARAMS.iter().position(|p| p.id == id).map(|index| self.values[index])
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     fn state_is_parameters_only(&self) -> bool {
         true
     }

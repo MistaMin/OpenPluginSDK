@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use openplugin_core::layout::{IoConfig, NotePorts, SpeakerLayout};
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Transport, Unit};
-use openplugin_ffi::shell::{self, *};
+use openplugin_host::shell::{self, *};
 
 static LOCK: Mutex<()> = Mutex::new(());
 static LOG: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -25,18 +25,14 @@ fn take_log() -> Vec<String> {
 
 static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, Unit::None)];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.shell-events",
-    name: "Shell Events",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+const fn info(is_instrument: bool) -> PluginInfo {
+    PluginInfo::new("com.example.shell-events", "Shell Events", "Test", "0.1.0", Category::Utility, &PARAMS)
+        .with_url("https://example.com")
+        .with_email("a@b.c")
+        .with_instrument(is_instrument)
+}
+
+static INFO: PluginInfo = info(false);
 
 static LAYOUTS: [IoConfig; 3] = [
     IoConfig {
@@ -116,7 +112,7 @@ impl Plugin for Probe {
     fn pull_midi(&mut self) -> Option<(u32, [u8; 3])> {
         self.queue.iter_mut().find_map(|s| s.take())
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         log(format!("block {frames}"));
         for channel in io.iter_mut() {
             for s in channel[..frames].iter_mut() {
@@ -124,7 +120,7 @@ impl Plugin for Probe {
             }
         }
     }
-    fn process_buses(&mut self, io: &mut [Vec<f32>], sidechain: Option<&[Vec<f32>]>, frames: usize) {
+    fn process_buses(&mut self, io: &mut [&mut [f32]], sidechain: Option<&[&[f32]]>, frames: usize) {
         self.process(io, frames);
         if let Some(side) = sidechain {
             for channel in io.iter_mut() {
@@ -138,7 +134,7 @@ impl Plugin for Probe {
 
 #[derive(Default)]
 struct Inst;
-static INST_INFO: PluginInfo = PluginInfo { is_instrument: true, ..INFO };
+static INST_INFO: PluginInfo = info(true);
 impl Plugin for Inst {
     fn info(&self) -> &'static PluginInfo {
         &INST_INFO
@@ -154,7 +150,7 @@ impl Plugin for Inst {
     fn note_ports(&self) -> NotePorts {
         NotePorts { input: true, output: false }
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             channel[..frames].fill(0.5);
         }
@@ -186,7 +182,7 @@ impl Plugin for NoteFx {
     fn note_ports(&self) -> NotePorts {
         NotePorts { input: true, output: true }
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
 }
 
 fn ev(kind: u32, offset: u32) -> OpEvent {

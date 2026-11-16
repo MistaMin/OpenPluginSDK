@@ -5,7 +5,7 @@
 
 use openplugin_core::identity::{check_pins, AuIds, PinError, PinFormat, Vst3Ids, VST3_BYPASS_PARAM_ID};
 use openplugin_core::{AaxIds, Category, ParamInfo, Plugin, PluginInfo, Unit};
-use openplugin_ffi::shell::{self, OpShellInfo};
+use openplugin_host::shell::{self, OpShellInfo};
 
 static PARAMS: [ParamInfo; 3] = [
     // The VST3 shell's own bypass id; the same Audio Unit id as the next parameter.
@@ -15,18 +15,14 @@ static PARAMS: [ParamInfo; 3] = [
     ParamInfo::new("c", "C", 0.0, 1.0, 0.0, Unit::None).with_aax_id("an-id-of-more-than-thirty-one-characters"),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.ids",
-    name: "Bad Ids",
-    vendor: "Test",
-    url: "",
-    email: "",
-    version: "1.0.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.ids",
+    "Bad Ids",
+    "Test",
+    "1.0.0",
+    Category::Utility,
+    &PARAMS,
+);
 
 #[derive(Default)]
 struct BadIds;
@@ -43,7 +39,7 @@ impl Plugin for BadIds {
     fn param(&self, id: &str) -> Option<f32> {
         PARAMS.iter().any(|p| p.id == id).then_some(0.0)
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     fn clap_id(&self) -> Option<&'static str> {
         Some("")
     }

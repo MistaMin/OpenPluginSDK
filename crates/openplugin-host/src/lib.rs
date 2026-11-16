@@ -1,9 +1,9 @@
 //! Rust host session for one [`Plugin`].
 //!
-//! A host builds its parameter list from [`ParamSpec`], writes the plane with
-//! [`FfiInstance::store_param`], and renders with [`FfiInstance::process_stereo`],
-//! [`FfiInstance::process_planar`], or [`FfiInstance::process_interleaved`].
-//! Those calls copy through scratch allocated in [`FfiInstance::prepare`], so
+//! A host builds its parameter list from [`HostSession::param_info`], writes the plane with
+//! [`HostSession::store_param`], and renders with [`HostSession::process_stereo`],
+//! [`HostSession::process_planar`], or [`HostSession::process_interleaved`].
+//! Those calls copy through scratch allocated in [`HostSession::prepare`], so
 //! the same slices may be the input and the output.
 //!
 //! `store_param`, `load_param`, `apply_preset`, and `meters` do not enter the
@@ -12,8 +12,7 @@
 //!
 //! # Session state and the audio thread
 //!
-//! [`FfiInstance::save_bytes`] and [`FfiInstance::load_bytes`] (and their
-//! `try_` forms) need `&mut` access to the plugin object, which the audio
+//! [`HostSession::save_bytes`] and [`HostSession::load_bytes`] need `&mut` access to the plugin object, which the audio
 //! thread uses inside `process_*`. A one-word gate arbitrates, and the audio
 //! thread never waits on it:
 //!
@@ -40,61 +39,39 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use openplugin_core::{
-    decode_session, encode_session, release_momentary, sample_rate_supported, BusMeters,
-    DenormalGuard, EditorState, HostNotifier, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane,
-    PluginInfo, Seqlock, Tail, Taper, Unit, MAX_AUDIO_CHANNELS,
+    decode_session, encode_session, release_momentary, sample_rate_supported, BusMeters, Channels,
+    ChannelsMut, DenormalGuard, EditorState, HostNotifier, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane,
+    PluginInfo, Seqlock, Tail, MAX_AUDIO_CHANNELS,
 };
 
 pub use openplugin_core::Plugin;
 
+#[doc(hidden)]
 pub mod block;
+/// The Rust side of the `op_shell_*` C ABI, for `export_shell!`. The C ABI
+/// (`native/include/op_shell.h`, versioned by `OP_SHELL_ABI`) is the
+/// contract; these Rust items are not part of the frozen API.
+#[doc(hidden)]
 pub mod shell;
-
-/// One parameter, the way a host builds its control.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ParamSpec {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub min: f32,
-    pub max: f32,
-    pub default_value: f32,
-    pub is_discrete: bool,
-    pub steps: u32,
-    pub is_log: bool,
-    pub unit: Unit,
-    /// [`ParamFlags::bits`].
-    pub flags: u32,
-}
 
 struct PresetEntry {
     name: &'static str,
     values: &'static [f32],
 }
 
-/// Steps, discrete, and log skew for one descriptor.
-pub fn spec_from(param: &ParamInfo) -> ParamSpec {
-    let steps = if param.steps > 1 {
-        param.steps
-    } else if param.unit == Unit::Choice && !param.choices.is_empty() {
-        param.choices.len() as u32
-    } else if param.unit == Unit::Toggle {
-        2
-    } else {
-        0
-    };
-    ParamSpec {
-        id: param.id,
-        name: param.name,
-        min: param.min,
-        max: param.max,
-        default_value: param.default,
-        is_discrete: steps > 1 || param.flags.contains(ParamFlags::STEPPED),
-        steps,
-        is_log: param.taper == Taper::Log,
-        unit: param.unit,
-        flags: param.flags.bits(),
+/// [`HostSession::new`] was given a sample rate outside
+/// [`openplugin_core::MIN_SAMPLE_RATE`]..=[`openplugin_core::MAX_SAMPLE_RATE`],
+/// or one the plugin refuses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnsupportedRate(pub f64);
+
+impl std::fmt::Display for UnsupportedRate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sample rate {} Hz is not supported", self.0)
     }
 }
+
+impl std::error::Error for UnsupportedRate {}
 
 fn collect_presets(plugin: &dyn Plugin) -> Vec<PresetEntry> {
     (0..plugin.preset_count())
@@ -142,11 +119,12 @@ fn tail_seconds_of(tail: Tail, rate: f32) -> f64 {
     match tail {
         Tail::Infinite => f64::INFINITY,
         Tail::Finite(samples) => f64::from(samples) / f64::from(rate.max(1.0)),
-        Tail::None | Tail::Unknown => 0.0,
+        _ => 0.0,
     }
 }
 
-/// Longest a state call waits for a block in flight before it gives up.
+/// Longest a state call waits for a block in flight before it gives up. Two
+/// seconds, and part of the API: the native shells document the same bound.
 pub const STATE_WAIT: Duration = Duration::from_secs(2);
 
 const GATE_AUDIO: u32 = 1;
@@ -181,13 +159,13 @@ impl Drop for StateGuard<'_> {
 
 /// One host instance. Message-thread calls use the plane and the atomics.
 /// The audio thread is the only caller that enters `audio`.
-pub struct FfiInstance {
+pub struct HostSession {
     audio: UnsafeCell<Audio>,
     plane: ParamPlane,
     meters: Seqlock<MeterFrame>,
     bus_meters: Seqlock<BusMeters>,
     latency: AtomicU32,
-    /// The latency [`FfiInstance::latency`] last returned: what the host knows.
+    /// The latency [`HostSession::latency`] last returned: what the host knows.
     told_latency: AtomicU32,
     /// Set when a block, a reset or a state call saw [`Plugin::latency`] move.
     latency_moved: AtomicBool,
@@ -231,21 +209,22 @@ pub struct FfiInstance {
     flush_denormals: bool,
 }
 
-unsafe impl Send for FfiInstance {}
-unsafe impl Sync for FfiInstance {}
+unsafe impl Send for HostSession {}
+unsafe impl Sync for HostSession {}
 
-impl FfiInstance {
-    /// Builds a host instance.
-    ///
-    /// This constructor cannot fail, so an invalid or out-of-range
-    /// `sample_rate` is replaced with 48 kHz. [`FfiInstance::prepare`]
-    /// rejects such a rate instead.
+impl HostSession {
+    /// Builds a host session. The rate is checked as [`HostSession::prepare`]
+    /// checks it; `max_block` and `channels` are clamped to 1..=65536 and
+    /// 1..=[`MAX_AUDIO_CHANNELS`].
     pub fn new(
         mut plugin: Box<dyn Plugin>,
         sample_rate: f64,
         max_block: usize,
         channels: usize,
-    ) -> Self {
+    ) -> Result<Self, UnsupportedRate> {
+        if !sample_rate_supported(sample_rate) || !plugin.accepts_sample_rate(sample_rate as f32) {
+            return Err(UnsupportedRate(sample_rate));
+        }
         let notifier = HostNotifier::new();
         plugin.set_host_notifier(notifier.clone());
         let info = plugin.info();
@@ -264,7 +243,7 @@ impl FfiInstance {
             .max()
             .unwrap_or(0)
             .min(MAX_AUDIO_CHANNELS);
-        let rate = finite_rate(sample_rate);
+        let rate = sample_rate as f32;
         plugin.prepare(rate, max_block, channels);
         let mut cursor = ParamCursor::new(plane.len());
         cursor.pull(&plane, plugin.as_mut());
@@ -273,7 +252,7 @@ impl FfiInstance {
         let tail = tail_seconds_of(plugin.tail(), rate);
         let expressions = plugin.note_expressions();
         let mpe = openplugin_core::MpeReceiver::for_plugin(plugin.as_ref());
-        Self {
+        Ok(Self {
             audio: UnsafeCell::new(Audio {
                 inner: plugin,
                 buffers: (0..channels).map(|_| vec![0.0; max_block]).collect(),
@@ -313,7 +292,7 @@ impl FfiInstance {
             reset_pending: AtomicBool::new(false),
             midi_dropped: AtomicU32::new(0),
             flush_denormals,
-        }
+        })
     }
 
     /// Audio side of the gate. `None` when a state call holds or wants the
@@ -376,8 +355,9 @@ impl FfiInstance {
         self.info.params.len()
     }
 
-    pub fn param_spec(&self, index: usize) -> Option<ParamSpec> {
-        self.info.params.get(index).map(spec_from)
+    /// The descriptor of parameter `index`.
+    pub fn param_info(&self, index: usize) -> Option<&'static ParamInfo> {
+        self.info.params.get(index)
     }
 
     pub fn preset_count(&self) -> usize {
@@ -391,6 +371,9 @@ impl FfiInstance {
             .unwrap_or("")
     }
 
+    /// Write a plain value onto the parameter plane ([`ParamPlane::store`]);
+    /// the audio thread applies it on the next `process_*`. `store`/`load`
+    /// name the plane, where [`Plugin::set_param`]/`param` name the plugin.
     pub fn store_param(&self, index: usize, value: f32) -> bool {
         self.plane.store(index, value)
     }
@@ -422,7 +405,7 @@ impl FfiInstance {
 
     /// The latency as of the last block (or `prepare`, `reset`, a state
     /// load). This is the host's read: the value is remembered as the one the
-    /// host knows, so [`FfiInstance::take_changes`] does not report it again.
+    /// host knows, so [`HostSession::take_changes`] does not report it again.
     /// Any thread; never blocks.
     pub fn latency(&self) -> u32 {
         let now = self.latency.load(Ordering::Acquire);
@@ -433,7 +416,7 @@ impl FfiInstance {
     /// What changed since the last call, as [`HostNotifier`] bits: the
     /// plugin's own [`HostNotifier`] calls, plus [`HostNotifier::LATENCY`]
     /// when a block saw [`Plugin::latency`] move. A latency equal to the one
-    /// the host last read through [`FfiInstance::latency`] is not reported,
+    /// the host last read through [`HostSession::latency`] is not reported,
     /// so a new engine that comes up with the latency the host already
     /// knows is quiet. Each change is reported once. Any thread (the shells
     /// call it on their main thread); never blocks, never allocates.
@@ -585,7 +568,9 @@ impl FfiInstance {
         .unwrap_or(false)
     }
 
-    pub fn set_offline_flag(&self, offline: bool) {
+    /// Offline rendering on or off ([`Plugin::set_offline`]); the audio
+    /// thread applies it at the start of the next block.
+    pub fn set_offline(&self, offline: bool) {
         self.offline
             .store(if offline { 2 } else { 1 }, Ordering::Release);
     }
@@ -658,17 +643,11 @@ impl FfiInstance {
     /// OPCH session: the parameter plane plus `Plugin::save_state` when the plugin has one.
     /// A bare OPST plane still loads.
     ///
-    /// Empty when the plugin object could not be reached (see
-    /// [`FfiInstance::try_save_bytes`]); an empty vector is never a valid session.
-    pub fn save_bytes(&self) -> Vec<u8> {
-        self.try_save_bytes().unwrap_or_default()
-    }
-
-    /// [`FfiInstance::save_bytes`], or `None` when a block did not finish within
-    /// [`STATE_WAIT`] or the plugin's `save_state` panicked. Message thread;
-    /// allocates; blocks at most [`STATE_WAIT`]. Safe beside the audio thread:
-    /// blocks that start meanwhile are skipped (dry).
-    pub fn try_save_bytes(&self) -> Option<Vec<u8>> {
+    /// `None` when a block did not finish within [`STATE_WAIT`] or the
+    /// plugin's `save_state` panicked. Message thread; allocates; blocks at
+    /// most [`STATE_WAIT`]. Safe beside the audio thread: blocks that start
+    /// meanwhile are skipped (dry).
+    pub fn save_bytes(&self) -> Option<Vec<u8>> {
         if self.state_in_params {
             // The whole state is the plane, which the audio thread only reads:
             // no gate, so no block is skipped.
@@ -730,7 +709,8 @@ impl FfiInstance {
         .unwrap_or(false)
     }
 
-    /// In-place stereo. Copies through scratch, so `left` and `right` are both the input and the output.
+    /// In-place stereo: [`HostSession::process_planar`] for two slices.
+    /// Copies through scratch, so `left` and `right` are both the input and the output.
     pub fn process_stereo(&self, left: &mut [f32], right: &mut [f32]) -> bool {
         if left.len() != right.len() {
             return false;
@@ -758,61 +738,7 @@ impl FfiInstance {
         true
     }
 
-    /// Planar raw pointers. Copies every input into scratch before writing any output,
-    /// so an input pointer may alias an output pointer. A null right pointer is mono.
-    ///
-    /// # Safety
-    /// Each non-null pointer addresses `frames` floats. `frames` is at most the
-    /// block size passed to [`FfiInstance::new`] or [`FfiInstance::prepare`].
-    pub unsafe fn process_io(
-        &self,
-        in_left: *const f32,
-        in_right: *const f32,
-        out_left: *mut f32,
-        out_right: *mut f32,
-        frames: usize,
-    ) -> bool {
-        if frames == 0 {
-            return true;
-        }
-        if in_left.is_null() || out_left.is_null() {
-            return false;
-        }
-        let Some(_gate) = self.enter_audio() else {
-            // A state call holds the plugin: pass the block through dry.
-            unsafe {
-                dry_copy(in_left, out_left, frames);
-                if !out_right.is_null() {
-                    let source = if in_right.is_null() { in_left } else { in_right };
-                    dry_copy(source, out_right, frames);
-                }
-            }
-            return true;
-        };
-        let audio = unsafe { &mut *self.audio.get() };
-        if frames > audio.max_block || audio.channels == 0 {
-            return false;
-        }
-        unsafe {
-            copy_ptr(in_left, &mut audio.buffers[0][..frames]);
-            if audio.channels > 1 {
-                let source = if in_right.is_null() { in_left } else { in_right };
-                copy_ptr(source, &mut audio.buffers[1][..frames]);
-            }
-        }
-        let width = audio.channels.min(2);
-        self.render(audio, width, frames, false);
-        unsafe {
-            copy_out(&audio.buffers[0][..frames], out_left);
-            if !out_right.is_null() {
-                let index = if audio.channels > 1 { 1 } else { 0 };
-                copy_out(&audio.buffers[index][..frames], out_right);
-            }
-        }
-        true
-    }
-
-    /// In-place planar audio. Each channel slice is the same length.
+    /// In-place planar audio, the main form. Each channel slice is the same length.
     pub fn process_planar(&self, channels: &mut [&mut [f32]]) -> bool {
         if channels.is_empty()
             || channels
@@ -843,7 +769,8 @@ impl FfiInstance {
         true
     }
 
-    /// In-place interleaved audio, frame-major. `samples.len()` is `channels * frames`.
+    /// [`HostSession::process_planar`] for interleaved audio, frame-major.
+    /// `samples.len()` is `channels * frames`.
     pub fn process_interleaved(&self, samples: &mut [f32], channels: usize) -> bool {
         if channels == 0 || samples.len() % channels != 0 {
             return false;
@@ -959,54 +886,17 @@ impl FfiInstance {
                 sidechain,
                 ..
             } = audio;
-            let side = if with_sidechain && !sidechain.is_empty() {
-                Some(sidechain.as_slice())
-            } else {
-                None
-            };
-            inner.process_buses(&mut buffers[..channels], side, frames);
+            let side = Channels::new(sidechain);
+            let side = (with_sidechain && !side.is_empty()).then_some(&*side);
+            inner.process_buses(&mut ChannelsMut::new(&mut buffers[..channels]), side, frames);
         }
         self.publish(audio);
-    }
-}
-
-fn finite_rate(sample_rate: f64) -> f32 {
-    if sample_rate_supported(sample_rate) {
-        sample_rate as f32
-    } else {
-        48_000.0
     }
 }
 
 fn copy_in(src: &[f32], dst: &mut [f32]) {
     for (out, sample) in dst.iter_mut().zip(src) {
         *out = if sample.is_finite() { *sample } else { 0.0 };
-    }
-}
-
-/// # Safety
-/// `src` and `dst` address `frames` floats; they may be the same buffer.
-unsafe fn dry_copy(src: *const f32, dst: *mut f32, frames: usize) {
-    for index in 0..frames {
-        let sample = unsafe { *src.add(index) };
-        unsafe { *dst.add(index) = if sample.is_finite() { sample } else { 0.0 } };
-    }
-}
-
-/// # Safety
-/// `src` addresses `dst.len()` floats.
-unsafe fn copy_ptr(src: *const f32, dst: &mut [f32]) {
-    for (index, out) in dst.iter_mut().enumerate() {
-        let sample = unsafe { *src.add(index) };
-        *out = if sample.is_finite() { sample } else { 0.0 };
-    }
-}
-
-/// # Safety
-/// `dst` addresses `src.len()` floats.
-unsafe fn copy_out(src: &[f32], dst: *mut f32) {
-    for (index, sample) in src.iter().enumerate() {
-        unsafe { *dst.add(index) = *sample };
     }
 }
 
@@ -1028,18 +918,16 @@ mod tests {
     static PRESET_FLAT: [f32; 2] = [0.0, 0.0];
     static PRESET_HOT: [f32; 2] = [6.0, 2.0];
 
-    static INFO: PluginInfo = PluginInfo {
-        id: "com.example.ffi-gain",
-        name: "FFI Gain",
-        vendor: "Test",
-        url: "https://example.com",
-        email: "a@b.c",
-        version: "0",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    };
+    static INFO: PluginInfo = PluginInfo::new(
+        "com.example.ffi-gain",
+        "FFI Gain",
+        "Test",
+        "0",
+        Category::Utility,
+        &PARAMS,
+    )
+    .with_url("https://example.com")
+    .with_email("a@b.c");
 
     impl Plugin for Gain {
         fn info(&self) -> &'static PluginInfo {
@@ -1073,7 +961,7 @@ mod tests {
                 _ => None,
             }
         }
-        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
             for channel in io {
                 for sample in &mut channel[..frames] {
                     *sample *= self.linear;
@@ -1105,14 +993,13 @@ mod tests {
 
     #[test]
     fn spec_reports_steps_and_log_for_the_host() {
-        let instance = FfiInstance::new(gain(), 48_000.0, 8, 2);
+        let instance = HostSession::new(gain(), 48_000.0, 8, 2).unwrap();
         assert_eq!(instance.param_count(), 2);
-        let spec = instance.param_spec(0).unwrap();
-        assert!(!spec.is_log);
+        let spec = instance.param_info(0).unwrap();
+        assert_eq!(spec.taper, openplugin_core::Taper::Linear);
         assert_eq!(spec.unit, Unit::Db);
-        let spec = instance.param_spec(1).unwrap();
+        let spec = instance.param_info(1).unwrap();
         assert_eq!(spec.steps, 3);
-        assert!(spec.is_discrete);
         assert!(spec.name.starts_with("Mode"));
         assert_eq!(instance.name(), "FFI Gain");
         assert_eq!(instance.preset_count(), 2);
@@ -1121,7 +1008,7 @@ mod tests {
 
     #[test]
     fn inplace_stereo_uses_the_plane_and_rejects_an_oversized_block() {
-        let instance = FfiInstance::new(gain(), 48_000.0, 8, 2);
+        let instance = HostSession::new(gain(), 48_000.0, 8, 2).unwrap();
         assert!(instance.store_param(0, 6.0));
         assert!((instance.load_param(0) - 6.0).abs() < 1e-6);
         let mut left = [0.5f32; 4];
@@ -1140,16 +1027,16 @@ mod tests {
 
     #[test]
     fn preset_and_state_round_trip_without_touching_audio_early() {
-        let instance = FfiInstance::new(gain(), 48_000.0, 16, 2);
+        let instance = HostSession::new(gain(), 48_000.0, 16, 2).unwrap();
         assert!(instance.apply_preset(1));
         assert_eq!(instance.preset_index(), 1);
         assert!((instance.load_param(0) - 6.0).abs() < 1e-4);
         assert!((instance.load_param(1) - 2.0).abs() < 1e-4);
-        let bytes = instance.save_bytes();
+        let bytes = instance.save_bytes().unwrap();
         assert!(instance.store_param(0, -3.0));
         assert!(instance.load_bytes(&bytes));
         assert!((instance.load_param(0) - 6.0).abs() < 1e-4);
-        instance.set_offline_flag(true);
+        instance.set_offline(true);
         let mut left = [0.2f32; 4];
         let mut right = [0.2f32; 4];
         assert!(instance.process_stereo(&mut left, &mut right));
@@ -1159,7 +1046,7 @@ mod tests {
 
     #[test]
     fn prepare_accepts_twelve_channels_and_rejects_sixty_five() {
-        let instance = FfiInstance::new(gain(), 48_000.0, 32, 2);
+        let instance = HostSession::new(gain(), 48_000.0, 32, 2).unwrap();
         assert!(instance.prepare(48_000.0, 32, 12));
         assert!(!instance.prepare(48_000.0, 32, 65));
         assert!(!instance.prepare(48_000.0, 32, 0));
@@ -1167,12 +1054,12 @@ mod tests {
 
     #[test]
     fn an_old_opst_plane_still_loads() {
-        let instance = FfiInstance::new(gain(), 48_000.0, 8, 2);
+        let instance = HostSession::new(gain(), 48_000.0, 8, 2).unwrap();
         let bytes = openplugin_core::encode_params(&INFO, &[6.0, 1.0]);
         assert!(bytes.starts_with(b"OPST"));
         assert!(instance.load_bytes(&bytes));
         assert!((instance.load_param(0) - 6.0).abs() < 1e-4);
-        let saved = instance.save_bytes();
+        let saved = instance.save_bytes().unwrap();
         assert!(saved.starts_with(b"OPCH"));
     }
 }
