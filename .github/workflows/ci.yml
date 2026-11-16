@@ -915,7 +915,9 @@ jobs:
   # view (openplugin-dri), its services and the editor through CLAP and LV2
   # (examples/editor) run here instead of skipping. A test that prints
   # "skipped" for any reason other than "macOS only" fails the job: a skip
-  # must not pass for coverage.
+  # must not pass for coverage. -noreset: an X server resets when its last
+  # client leaves and refuses connections meanwhile, which the tests that run
+  # one at a time would meet between two tests.
   linux-editor:
     name: Linux editor on a virtual X display (Xvfb)
     runs-on: ubuntu-latest
@@ -943,10 +945,78 @@ jobs:
         working-directory: OpenPluginSDK
         run: |
           set -euo pipefail
-          xvfb-run -a -s "-screen 0 1280x1024x24" \
+          xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" \
             cargo test --locked -p openplugin-dri -p example-editor -- --nocapture 2>&1 \
             | tee "$RUNNER_TEMP/x11.log"
           if grep -n "skipped" "$RUNNER_TEMP/x11.log" | grep -v "macOS only"; then
             echo "An X11 test skipped on a runner that has a display." >&2
             exit 1
           fi
+
+  # The Linux LV2 bundle in a host library: lilv (what Ardour, Carla and jalv
+  # load plug-ins with) finds the bundle, loads the .so, instantiates the
+  # plug-in and runs audio through it. Gain +6 dB must roughly double a sine,
+  # which shows the audio went through. The Linux counterpart of the lv2apply
+  # step in lv2-validate.
+  linux-lv2-host:
+    name: Linux LV2 in lilv (lv2ls and lv2apply, examples/editor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      # lilv-utils has lv2ls and lv2apply.
+      - name: Install the lilv tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends lilv-utils
+          command -v lv2ls lv2apply
+      - name: Package the example
+        working-directory: OpenPluginSDK
+        run: >
+          scripts/build_plugin_linux.sh
+          --manifest-path examples/editor/Cargo.toml --version 0.4.0
+          --name "Example Gain" --ttl-bin lv2_ttl --formats lv2
+          --out "$RUNNER_TEMP/linux-dist" --work-dir "$RUNNER_TEMP/linux-work"
+      - name: lv2ls and lv2apply
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/lv2-audio"
+          cd "$RUNNER_TEMP/lv2-audio"
+          python3 -I - <<'PY'
+          import math, struct, wave
+          w = wave.open("in.wav", "wb")
+          w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
+          w.writeframes(b"".join(struct.pack("<hh", *(int(8000 * math.sin(i * 0.05)),) * 2) for i in range(4800)))
+          w.close()
+          PY
+          export LV2_PATH="$RUNNER_TEMP/linux-dist"
+          lv2ls
+          uri="$(lv2ls | grep 'examples/editor-gain$')"
+          test -n "$uri"
+          echo "plugin: $uri"
+          lv2apply -i in.wav -o out.wav -c gain 6 "$uri"
+          python3 -I - <<'PY'
+          import struct, wave
+          def peak(name):
+              w = wave.open(name)
+              frames = w.getnframes()
+              data = struct.unpack("<%dh" % (frames * w.getnchannels()), w.readframes(frames))
+              return frames, max(abs(s) for s in data)
+          frames_in, peak_in = peak("in.wav")
+          frames_out, peak_out = peak("out.wav")
+          print("in", frames_in, peak_in, "out", frames_out, peak_out)
+          assert frames_out == frames_in, "frame count changed"
+          assert 1.9 * peak_in <= peak_out <= 2.1 * peak_in, "+6 dB did not double the peak"
+          PY

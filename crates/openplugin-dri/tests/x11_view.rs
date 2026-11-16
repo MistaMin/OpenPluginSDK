@@ -1,8 +1,9 @@
 //! The X11 editor view against a real X server: pixels read back with
 //! `GetImage`, input sent with `SendEvent`, sizes read with `GetGeometry`.
 //!
-//! Every test passes without doing anything when no X server answers on
-//! `DISPLAY` (CI has none) and says so. On a desktop the windows are small,
+//! Every test passes without doing anything when `DISPLAY` is not set, and
+//! says so. With `DISPLAY` set, a server that does not answer fails the test
+//! (the Xvfb job in CI relies on that: a skip must not pass for coverage). On a desktop the windows are small,
 //! unmanaged (override-redirect) and gone when the test ends.
 
 #![cfg(target_os = "linux")]
@@ -23,6 +24,28 @@ use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 
 const DEADLINE: Duration = Duration::from_secs(10);
+
+/// The test's connection to the display. `None` (the test skips) only when
+/// `DISPLAY` is not set. With `DISPLAY` set, a refused connection is tried
+/// again until the deadline (an X server with no client left resets, and
+/// refuses connections meanwhile) and then fails the test: a display that is
+/// named must be there.
+fn connect(test: &str) -> Option<(RustConnection, usize)> {
+    if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+        println!("{test}: skipped, DISPLAY is not set");
+        return None;
+    }
+    let start = Instant::now();
+    loop {
+        match RustConnection::connect(None) {
+            Ok(connection) => return Some(connection),
+            Err(error) => {
+                assert!(start.elapsed() < DEADLINE, "{test}: DISPLAY is set, but no X server answered: {error}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
 
 /// The screen space one test's parent window has to itself (the window is 10 less each way).
 const CELL: (u32, u32) = (340, 280);
@@ -172,10 +195,7 @@ struct Host {
 impl Host {
     /// `None`, with a note, when there is no X server.
     fn new(test: &str) -> Option<Host> {
-        let Ok((conn, screen)) = RustConnection::connect(None) else {
-            println!("{test}: skipped, no X server on DISPLAY");
-            return None;
-        };
+        let (conn, screen) = connect(test)?;
         let root = conn.setup().roots[screen].root;
         // Hyprland remembers the id and geometry of any window it saw made on
         // the root and never saw destroyed (one reparented into a host, as
@@ -340,10 +360,7 @@ fn parent_now() -> String {
 fn attached(test: &str, size: (u32, u32), range: SizeRange) -> Option<(Host, EditorView, Rc<RefCell<Shared>>)> {
     let host = Host::new(test)?;
     let (ed, shared) = editor(size, range);
-    let Some(mut view) = EditorView::new(ed, None) else {
-        println!("{test}: skipped, the view found no X server");
-        return None;
-    };
+    let mut view = EditorView::new(ed, None).unwrap_or_else(|| panic!("{test}: the test connected to the display, but the view did not"));
     assert_ne!(view.raw(), 0);
     assert!(view.fd() >= 0);
     assert!(view.attach(host.parent), "attach");
@@ -695,7 +712,7 @@ fn parent_destroyed_first_is_survived() {
 fn refused_parents_and_a_lost_connection_are_survived() {
     let Some(host) = Host::new("refused_parents_and_a_lost_connection_are_survived") else { return };
     let (ed, shared) = editor((64, 48), SizeRange::between((40, 30), (100, 80)));
-    let Some(mut view) = EditorView::new(ed, None) else { return };
+    let mut view = EditorView::new(ed, None).expect("the test connected to the display, but the view did not");
     assert!(!view.attach(0));
     assert!(!view.attach(0x7f00_0001), "a window that does not exist is refused");
     // Unattached: pump ticks, resize works, nothing is presented.
@@ -783,10 +800,7 @@ fn find_titled(conn: &RustConnection, root: u32, title: &str) -> Option<u32> {
 #[test]
 fn run_window_opens_titles_and_closes() {
     let test = "run_window_opens_titles_and_closes";
-    let Ok((conn, screen)) = RustConnection::connect(None) else {
-        println!("{test}: skipped, no X server on DISPLAY");
-        return;
-    };
+    let Some((conn, screen)) = connect(test) else { return };
     let root = conn.setup().roots[screen].root;
     let title = format!("OpenPlugin x11 test \u{e9} {}", std::process::id());
     let (done, result) = std::sync::mpsc::channel();

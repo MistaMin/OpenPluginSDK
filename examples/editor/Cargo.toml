@@ -42,6 +42,10 @@ harness = false
 name = "x11"
 harness = false
 
+[[test]]
+name = "x11_typing_menu"
+harness = false
+
 # The test's own X connection: it plays the host.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.13", default-features = false }
