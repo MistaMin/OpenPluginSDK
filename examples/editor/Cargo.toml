@@ -50,3 +50,8 @@ x11rb = { version = "0.13", default-features = false }
 [[test]]
 name = "win32_system_ui"
 harness = false
+
+# The editor's UI Automation tree, walked with the system's client (Windows; a stub elsewhere).
+[[test]]
+name = "win32_a11y"
+harness = false

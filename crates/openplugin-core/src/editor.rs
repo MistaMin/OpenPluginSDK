@@ -438,6 +438,18 @@ pub struct AccessNode {
     pub enabled: bool,
 }
 
+/// The numbers behind a [`AccessRole::Slider`] node, for a screen reader that
+/// reads and sets a value along a range (UI Automation's range value). What
+/// [`Editor::accessibility_range`] returns. Plain values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AccessRange {
+    pub min: f64,
+    pub max: f64,
+    pub value: f64,
+    /// One step: what a screen reader's "increase" adds.
+    pub step: f64,
+}
+
 /// A small native text field the editor asks the view to open over a control
 /// (see [`Editor::take_text_edit`]).
 #[derive(Clone, Debug, PartialEq)]
@@ -594,6 +606,22 @@ pub trait Editor {
     /// would do with the mouse, as gestures through its [`EditorHost`], and
     /// returns whether it did anything. The default does nothing.
     fn accessibility_action(&mut self, _node: usize, _action: AccessAction) -> bool {
+        false
+    }
+
+    /// The range and the plain value of node `node`, when it is a value along
+    /// a range. A view whose platform reads numbers (Windows) offers them to
+    /// the screen reader; one whose platform reads the value as text (macOS)
+    /// never asks. The default is none: the node has its text value only.
+    fn accessibility_range(&self, _node: usize) -> Option<AccessRange> {
+        None
+    }
+
+    /// A screen reader sets node `node` to a plain value. The editor brings it
+    /// into the range and sends it as one whole gesture, as
+    /// [`Self::accessibility_action`] does for a step, and returns whether the
+    /// value changed. The default does nothing.
+    fn accessibility_set_value(&mut self, _node: usize, _value: f64) -> bool {
         false
     }
 
@@ -943,6 +971,8 @@ mod tests {
         assert!(probe.accessibility_nodes().is_empty());
         assert!(!probe.accessibility_action(0, AccessAction::Increment));
         assert!(!probe.accessibility_focus(0));
+        assert!(probe.accessibility_range(0).is_none());
+        assert!(!probe.accessibility_set_value(0, 1.0));
     }
 
     #[test]

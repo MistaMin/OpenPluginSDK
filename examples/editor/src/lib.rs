@@ -459,6 +459,14 @@ impl Editor for GainEditor {
         self.controls.accessibility_action(node, action)
     }
 
+    fn accessibility_range(&self, node: usize) -> Option<openplugin::core::editor::AccessRange> {
+        self.controls.accessibility_range(node)
+    }
+
+    fn accessibility_set_value(&mut self, node: usize, value: f64) -> bool {
+        self.controls.accessibility_set_value(node, value)
+    }
+
     fn accessibility_focus(&mut self, node: usize) -> bool {
         self.controls.accessibility_focus(node)
     }
