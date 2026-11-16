@@ -11,10 +11,9 @@
 //! host's side, the editor is resized, and the view goes while an element is
 //! still held. No harness, as the other editor tests.
 
+// Windows only; the other systems have their own accessibility tests (a11y.rs on macOS).
 #[cfg(not(windows))]
-fn main() {
-    println!("editor a11y (win32): skipped: Windows only (0 tests run)");
-}
+fn main() {}
 
 #[cfg(windows)]
 fn main() {
