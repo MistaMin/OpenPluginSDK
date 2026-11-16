@@ -1,7 +1,8 @@
 //! The editor in real X11 windows, through the plugin formats, on the X
 //! display `DISPLAY` names (this test has no harness: everything runs on the
-//! main thread, one part after the other). Without a display it prints
-//! `skipped: no X display` and passes.
+//! main thread, one part after the other). When `DISPLAY` is not set it prints
+//! `skipped: DISPLAY is not set` and passes; with `DISPLAY` set, a server that
+//! does not answer fails the test.
 //!
 //! The test is the host. It has an X connection of its own, makes the parent
 //! window, reads the screen back with `GetImage`, sends input with `SendEvent`
@@ -55,11 +56,30 @@ mod linux {
 
     const DEADLINE: Duration = Duration::from_secs(10);
 
+    /// The test's connection to the display. `None` (the test skips) only when
+    /// `DISPLAY` is not set. With `DISPLAY` set, a refused connection is tried
+    /// again until the deadline (an X server with no client left resets, and
+    /// refuses connections meanwhile) and then fails the test: a display that is
+    /// named must be there.
+    fn connect(test: &str) -> Option<(RustConnection, usize)> {
+        if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+            println!("{test}: skipped: DISPLAY is not set");
+            return None;
+        }
+        let start = Instant::now();
+        loop {
+            match RustConnection::connect(None) {
+                Ok(connection) => return Some(connection),
+                Err(error) => {
+                    assert!(start.elapsed() < DEADLINE, "{test}: DISPLAY is set, but no X server answered: {error}");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
     pub fn run() {
-        let Some(desk) = Desk::open() else {
-            println!("editor x11: skipped: no X display");
-            return;
-        };
+        let Some(desk) = Desk::open() else { return };
         clap_gui_lifecycle(&desk);
         clap_gui_resizes(&desk);
         lv2_ui_lifecycle(&desk);
@@ -129,15 +149,15 @@ mod linux {
 
     impl Desk {
         fn open() -> Option<Desk> {
-            let (conn, screen) = RustConnection::connect(None).ok()?;
-            let scale = EditorView::new(Box::new(GainEditor::new(EditorHost::detached())), None)?.scale();
+            let (conn, screen) = connect("editor x11")?;
+            let scale = EditorView::new(Box::new(GainEditor::new(EditorHost::detached())), None).expect("the test connected to the display, but the view did not").scale();
             let (root, size) = {
                 let s = &conn.setup().roots[screen];
                 (s.root, (u32::from(s.width_in_pixels), u32::from(s.height_in_pixels)))
             };
             // See the module notes: the first ids are the ones Hyprland may remember.
             for _ in 0..16 {
-                conn.generate_id().ok()?;
+                conn.generate_id().expect("an id from the server");
             }
             Some(Desk { conn, root, screen: size, scale, slot: Cell::new(0), clock: Cell::new(10_000) })
         }

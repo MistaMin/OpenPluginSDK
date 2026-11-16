@@ -1,8 +1,9 @@
 //! Typing a value, tooltips and the parameter menu on Linux, with the example
 //! editor in the X11 view on the display `DISPLAY` names: the counterpart of
 //! `typing.rs` and `menu.rs` (this test has no harness: everything runs on the
-//! process's main thread, as the view needs). With no X server it prints
-//! `skipped: no X display` and passes.
+//! process's main thread, as the view needs). When `DISPLAY` is not set it
+//! prints `skipped: DISPLAY is not set` and passes; with `DISPLAY` set, a
+//! server that does not answer fails the test.
 //!
 //! The test plays the host on a connection of its own: it makes the parent
 //! window, sends the clicks and keys as X events, and pumps the view.
@@ -61,13 +62,34 @@ mod linux {
     const BACKSPACE: u32 = 0xff08;
     const UP: u32 = 0xff52;
 
+    /// The test's connection to the display. `None` (the test skips) only when
+    /// `DISPLAY` is not set. With `DISPLAY` set, a refused connection is tried
+    /// again until the deadline (an X server with no client left resets, and
+    /// refuses connections meanwhile) and then fails the test: a display that is
+    /// named must be there.
+    fn connect(test: &str) -> Option<(RustConnection, usize)> {
+        if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+            println!("{test}: skipped: DISPLAY is not set");
+            return None;
+        }
+        let start = Instant::now();
+        loop {
+            match RustConnection::connect(None) {
+                Ok(connection) => return Some(connection),
+                Err(error) => {
+                    assert!(start.elapsed() < DEADLINE, "{test}: DISPLAY is set, but no X server answered: {error}");
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+    }
+
+    const NAME: &str = "editor x11 typing and menu";
+
     pub fn run() {
-        let Ok((probe, _)) = RustConnection::connect(None) else {
-            println!("editor x11 typing and menu: skipped: no X display");
-            return;
-        };
-        drop(probe);
-        if let Some(missing) = Host::open(0).and_then(|host| host.missing_key()) {
+        // Held to the end: an X server with no client left resets between the tests.
+        let Some(_display) = connect(NAME) else { return };
+        if let Some(missing) = Host::open(0).missing_key() {
             println!("editor x11 typing and menu: skipped: the keyboard has no key for keysym {missing:#x}");
             return;
         }
@@ -89,18 +111,18 @@ mod linux {
     }
 
     impl Host {
-        fn open(slot: i16) -> Option<Host> {
-            let (conn, screen) = RustConnection::connect(None).ok()?;
+        fn open(slot: i16) -> Host {
+            let (conn, screen) = connect(NAME).expect("DISPLAY was set when the test began");
             let root = conn.setup().roots[screen].root;
             for _ in 0..16 {
-                conn.generate_id().ok()?;
+                conn.generate_id().expect("an id from the server");
             }
-            let parent = conn.generate_id().ok()?;
+            let parent = conn.generate_id().expect("an id from the server");
             // Unmanaged, so the window manager neither tiles nor decorates it.
             let aux = CreateWindowAux::new().override_redirect(1).background_pixel(0).event_mask(EventMask::KEY_PRESS | EventMask::KEY_RELEASE);
-            conn.create_window(0, parent, root, 40 + slot * 420, 380, 400, 300, 0, WindowClass::INPUT_OUTPUT, 0, &aux).ok()?.check().ok()?;
-            conn.map_window(parent).ok()?.check().ok()?;
-            Some(Host { conn, root, parent, clock: Cell::new(100_000) })
+            conn.create_window(0, parent, root, 40 + slot * 420, 380, 400, 300, 0, WindowClass::INPUT_OUTPUT, 0, &aux).unwrap().check().expect("the parent window");
+            conn.map_window(parent).unwrap().check().expect("the parent window on screen");
+            Host { conn, root, parent, clock: Cell::new(100_000) }
         }
 
         /// A round trip: the server has handled everything sent before it.
@@ -216,11 +238,11 @@ mod linux {
 
     impl Rig {
         fn new(slot: i16, make: impl FnOnce(EditorHost) -> Option<Box<dyn Editor>>) -> Rig {
-            let host = Host::open(slot).expect("the host's window");
+            let host = Host::open(slot);
             let log: Rc<RefCell<Vec<Gesture>>> = Rc::new(RefCell::new(Vec::new()));
             let sink = log.clone();
             let editor = make(EditorHost::new(move |g| sink.borrow_mut().push(g))).expect("editor");
-            let mut view = EditorView::new(editor, None).expect("the view connects to the display");
+            let mut view = EditorView::new(editor, None).expect("the test connected to the display, but the view did not");
             assert!(view.attach(host.parent), "attach");
             // The clipboard items must never touch the user's clipboard.
             assert!(view.set_clipboard_selection("OPENPLUGIN_TEST_TYPING_MENU"));

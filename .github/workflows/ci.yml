@@ -854,7 +854,9 @@ jobs:
   # view (openplugin-dri), its services and the editor through CLAP and LV2
   # (examples/editor) run here instead of skipping. A test that prints
   # "skipped" for any reason other than "macOS only" fails the job: a skip
-  # must not pass for coverage.
+  # must not pass for coverage. -noreset: an X server resets when its last
+  # client leaves and refuses connections meanwhile, which the tests that run
+  # one at a time would meet between two tests.
   linux-editor:
     name: Linux editor on a virtual X display (Xvfb)
     runs-on: ubuntu-latest
@@ -882,7 +884,7 @@ jobs:
         working-directory: OpenPluginSDK
         run: |
           set -euo pipefail
-          xvfb-run -a -s "-screen 0 1280x1024x24" \
+          xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" \
             cargo test --locked -p openplugin-dri -p example-editor -- --nocapture 2>&1 \
             | tee "$RUNNER_TEMP/x11.log"
           if grep -n "skipped" "$RUNNER_TEMP/x11.log" | grep -v "macOS only"; then

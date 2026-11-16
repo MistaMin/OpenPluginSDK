@@ -3,8 +3,9 @@
 //! `SendEvent` from a second connection and read back with `GetImage`,
 //! `QueryTree` and `GetWindowAttributes`.
 //!
-//! Every test passes without doing anything when no X server answers on
-//! `DISPLAY` (CI has none) and says so. The tests run one at a time (they
+//! Every test passes without doing anything when `DISPLAY` is not set, and
+//! says so. With `DISPLAY` set, a server that does not answer fails the test
+//! (the Xvfb job in CI relies on that: a skip must not pass for coverage). The tests run one at a time (they
 //! share the pointer grab and the screen), in small unmanaged windows that
 //! are gone when the test ends. The clipboard tests use a selection of their
 //! own, not `CLIPBOARD`, so they leave the user's clipboard alone.
@@ -29,6 +30,28 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 
 const DEADLINE: Duration = Duration::from_secs(10);
+
+/// The test's connection to the display. `None` (the test skips) only when
+/// `DISPLAY` is not set. With `DISPLAY` set, a refused connection is tried
+/// again until the deadline (an X server with no client left resets, and
+/// refuses connections meanwhile) and then fails the test: a display that is
+/// named must be there.
+fn connect(test: &str) -> Option<(RustConnection, usize)> {
+    if std::env::var_os("DISPLAY").is_none_or(|d| d.is_empty()) {
+        println!("{test}: skipped, DISPLAY is not set");
+        return None;
+    }
+    let start = Instant::now();
+    loop {
+        match RustConnection::connect(None) {
+            Ok(connection) => return Some(connection),
+            Err(error) => {
+                assert!(start.elapsed() < DEADLINE, "{test}: DISPLAY is set, but no X server answered: {error}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
 const SIZE: (u32, u32) = (300, 200);
 const BACKGROUND: u32 = 0x0020_3040;
 /// The control the field opens over, and the tooltip's rectangle.
@@ -164,10 +187,7 @@ struct Host {
 impl Host {
     /// `None`, with a note, when there is no X server.
     fn new(test: &str, slot: u32) -> Option<Host> {
-        let Ok((conn, screen)) = RustConnection::connect(None) else {
-            println!("{test}: skipped, no X server on DISPLAY");
-            return None;
-        };
+        let (conn, screen) = connect(test)?;
         let root = conn.setup().roots[screen].root;
         // See x11_view.rs: Hyprland may hold stale geometry for a connection's first ids.
         for _ in 0..16 {
@@ -361,10 +381,7 @@ fn attached(test: &str, slot: u32) -> Option<(Host, EditorView, Rc<RefCell<Share
     let host = Host::new(test, slot)?;
     let shared = Rc::new(RefCell::new(Shared { calls: Vec::new(), value: "1.5".into(), edit: None, menu: None, tips: Vec::new(), tip_asks: 0, ticks: 0, size: SIZE }));
     let editor = Box::new(TestEditor { shared: shared.clone(), pixels: Vec::new() });
-    let Some(mut view) = EditorView::new(editor, None) else {
-        println!("{test}: skipped, the view found no X server");
-        return None;
-    };
+    let mut view = EditorView::new(editor, None).unwrap_or_else(|| panic!("{test}: the test connected to the display, but the view did not"));
     assert!(view.attach(host.parent), "attach");
     let window = view.raw();
     until(&mut view, "the first frame", |_| host.pixel(window, 1, 1) == Some(BACKGROUND));
