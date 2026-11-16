@@ -13,7 +13,8 @@
 #include "AAX_IEffectParameters.h"
 #include "AAX_IParameter.h"
 #include "AAX_IViewContainer.h"
-#include "op_editor.h"
+// op_editor.h and the Windows calls (op_editor_scale: pixels per point in use).
+#include "op_editor_win.h"
 #include <cmath>
 #include <string>
 #include <vector>
@@ -21,12 +22,6 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
-
-extern "C" {
-// Windows part of the editor ABI (crates/openplugin-targets/src/shell.rs): pixels per
-// point in use, the host window's DPI over 96 once the view is attached. 0 for no editor.
-double op_editor_scale(void* editor);
-}
 
 namespace openplugin_aax {
 namespace {
