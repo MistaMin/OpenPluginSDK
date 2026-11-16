@@ -31,3 +31,8 @@ harness = false
 [[test]]
 name = "menu"
 harness = false
+
+# The editor in real HWNDs (Windows; a stub elsewhere). One thread pumps the messages.
+[[test]]
+name = "win32"
+harness = false
