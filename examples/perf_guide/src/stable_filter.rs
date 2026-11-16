@@ -26,18 +26,16 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("q", "Resonance", 0.1, 20.0, 0.707, Unit::None).with_taper(Taper::Log),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.example.stable-filter",
-    name: "Stable filter",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "1.0.0-beta",
-    category: Category::Eq,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.example.stable-filter",
+    "Stable filter",
+    "OpenGrid",
+    "1.0.0-beta",
+    Category::Eq,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 /// Samples between coefficient updates.
 const CONTROL: usize = 32;
@@ -123,15 +121,17 @@ impl Plugin for StableFilter {
             _ => None,
         }
     }
-    fn tail_samples(&self) -> usize {
-        // The ring-down of a resonator: time constant 2 Q / w0, to -95 dB (about 11 time constants).
-        let w0 = TAU * f64::from(self.cutoff.max(20.0));
-        let seconds = (11.0 * 2.0 * f64::from(self.q) / w0).min(10.0);
-        (seconds * f64::from(self.rate)).ceil() as usize
+    fn tail(&self) -> openplugin_core::Tail {
+        openplugin_core::Tail::from_samples({
+            // The ring-down of a resonator: time constant 2 Q / w0, to -95 dB (about 11 time constants).
+            let w0 = TAU * f64::from(self.cutoff.max(20.0));
+            let seconds = (11.0 * 2.0 * f64::from(self.q) / w0).min(10.0);
+            (seconds * f64::from(self.rate)).ceil() as usize
+        })
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let channels = io.len().min(MAX_AUDIO_CHANNELS);
-        let frames = io.iter().map(Vec::len).fold(frames, usize::min);
+        let frames = io.iter().map(|c| c.len()).fold(frames, usize::min);
         let mut done = 0;
         while done < frames {
             let n = CONTROL.min(frames - done);
@@ -139,8 +139,8 @@ impl Plugin for StableFilter {
             let mut cutoff = self.cutoff_smooth.current();
             let mut q = self.q_smooth.current();
             for _ in 0..n {
-                cutoff = self.cutoff_smooth.next(self.cutoff);
-                q = self.q_smooth.next(self.q);
+                cutoff = self.cutoff_smooth.next_value(self.cutoff);
+                q = self.q_smooth.next_value(self.q);
             }
             self.update(cutoff, q);
             for (channel, z) in io[..channels].iter_mut().zip(self.z.iter_mut()) {

@@ -1,3 +1,4 @@
+use openplugin::dsp::{saturate_sample, SaturationMode};
 use openplugin::prelude::*;
 
 static PARAMS: [ParamInfo; 2] = [
@@ -5,18 +6,16 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("drive", "Drive", 1.0, 10.0, 1.0, Unit::None).with_taper(Taper::Log),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.example.gain",
-    name: "OpenPlugin Gain",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "1.0.0-beta",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.example.gain",
+    "OpenPlugin Gain",
+    "OpenGrid",
+    "1.0.0-beta",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 pub struct GainPlugin {
     gain_db: f32,
@@ -74,7 +73,7 @@ impl Plugin for GainPlugin {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             let slice = &mut channel[..frames];
             for sample in slice {
@@ -91,7 +90,7 @@ fn main() {
     plugin.prepare(44100.0, 512, 2);
     plugin.set_param("gain", 6.0);
     let mut buffer = vec![vec![0.5; 512], vec![0.5; 512]];
-    plugin.process(&mut buffer, 512);
+    plugin.process(&mut openplugin::core::ChannelsMut::new(&mut buffer), 512);
     println!("Processed 512 frames, output sample 0 = {:.4}", buffer[0][0]);
 }
 
@@ -106,7 +105,7 @@ mod tests {
         plugin.set_param("gain", 0.0);
         plugin.set_param("drive", 1.0);
         let mut buffer = vec![vec![0.2; 64], vec![0.2; 64]];
-        plugin.process(&mut buffer, 64);
+        plugin.process(&mut openplugin::core::ChannelsMut::new(&mut buffer), 64);
         assert!((buffer[0][0] - 0.2_f32.tanh()).abs() < 1e-4);
     }
 }

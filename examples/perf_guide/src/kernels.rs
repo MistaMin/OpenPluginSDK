@@ -1,6 +1,7 @@
 //! The before/after kernel pairs of `docs/PERFORMANCE.md`. Each section says which section of the
 //! guide quotes it. Every kernel is stereo-agnostic (any channel count) and allocation-free in
 //! `process`; the first pair is the exception on purpose.
+#![allow(deprecated)] // `Oversampler2x` is measured here beside its replacements
 
 use std::f32::consts::TAU;
 
@@ -18,7 +19,7 @@ pub struct AllocPerBlock;
 
 impl Kernel for AllocPerBlock {
     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             let copy: Vec<f32> = channel[..frames].to_vec();
             for (d, s) in channel[..frames].iter_mut().zip(&copy) {
@@ -38,7 +39,7 @@ impl Kernel for Preallocated {
     fn prepare(&mut self, _: f32, max_block: usize, _: usize) {
         self.scratch = vec![0.0; max_block];
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             let copy = &mut self.scratch[..frames];
             copy.copy_from_slice(&channel[..frames]);
@@ -63,7 +64,7 @@ pub struct Decay {
 
 impl Kernel for Decay {
     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             // A new excitation every 512 samples, however long the host's block is.
             for chunk in channel[..frames].chunks_mut(512) {
@@ -123,7 +124,7 @@ impl Kernel for SweptLowpass {
     fn reset(&mut self) {
         self.z.iter_mut().for_each(|z| *z = 0.0);
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let inc = TAU * 3.0 / self.rate;
         let start_phase = self.phase;
         let count = io.len();
@@ -186,13 +187,13 @@ impl Kernel for SmoothedGain {
         self.gain = 0.5;
         self.ramp = vec![0.0; max_block];
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let target = if self.moving && self.block % 2 == 1 { 1.0 } else if self.moving { 0.25 } else { 0.5 };
         self.block += 1;
         match self.mode {
             SmoothMode::PerSample => {
                 for g in &mut self.ramp[..frames] {
-                    *g = self.pole.next(target);
+                    *g = self.pole.next_value(target);
                 }
                 apply_curve(io, &self.ramp, frames);
             }
@@ -206,7 +207,7 @@ impl Kernel for SmoothedGain {
                     }
                 } else {
                     for g in &mut self.ramp[..frames] {
-                        *g = self.pole.next(target);
+                        *g = self.pole.next_value(target);
                     }
                     apply_curve(io, &self.ramp, frames);
                 }
@@ -225,7 +226,7 @@ impl Kernel for SmoothedGain {
     }
 }
 
-fn apply_curve(io: &mut [Vec<f32>], curve: &[f32], frames: usize) {
+fn apply_curve(io: &mut [&mut [f32]], curve: &[f32], frames: usize) {
     for channel in io.iter_mut() {
         for (s, g) in channel[..frames].iter_mut().zip(&curve[..frames]) {
             *s *= *g;
@@ -275,7 +276,7 @@ impl Default for PartialsAos {
 
 impl Kernel for PartialsAos {
     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
-    fn process(&mut self, io: &mut [Vec<f32>], _frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], _frames: usize) {
         for p in &mut self.parts {
             p.amp = p.amp * p.decay + p.gain * 1.0e-6;
         }
@@ -308,7 +309,7 @@ impl Default for PartialsSoa {
 
 impl Kernel for PartialsSoa {
     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
-    fn process(&mut self, io: &mut [Vec<f32>], _frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], _frames: usize) {
         for ((a, d), g) in self.amp.iter_mut().zip(&self.decay).zip(&self.gain) {
             *a = *a * *d + *g * 1.0e-6;
         }
@@ -348,7 +349,7 @@ impl Kernel for CurveIndexed {
     fn prepare(&mut self, _: f32, max_block: usize, _: usize) {
         self.curve = curve(max_block);
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for c in 0..io.len() {
             for i in 0..frames {
                 io[c][i] = (io[c][i] * self.curve[i] + 0.1).clamp(-1.0, 1.0);
@@ -367,7 +368,7 @@ impl Kernel for CurveZip {
     fn prepare(&mut self, _: f32, max_block: usize, _: usize) {
         self.curve = curve(max_block);
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let curve = &self.curve[..frames];
         for channel in io.iter_mut() {
             for (s, c) in channel[..frames].iter_mut().zip(curve) {
@@ -388,7 +389,7 @@ impl Kernel for CurveChunks {
     fn prepare(&mut self, _: f32, max_block: usize, _: usize) {
         self.curve = curve(max_block);
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let curve = &self.curve[..frames];
         for channel in io.iter_mut() {
             let data = &mut channel[..frames];
@@ -417,7 +418,7 @@ impl Kernel for CurveZipF64 {
     fn prepare(&mut self, _: f32, max_block: usize, _: usize) {
         self.curve = curve(max_block);
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let curve = &self.curve[..frames];
         for channel in io.iter_mut() {
             for (s, c) in channel[..frames].iter_mut().zip(curve) {
@@ -440,7 +441,7 @@ pub struct Map<F: Fn(f32) -> f32 + Send + 'static> {
 
 impl<F: Fn(f32) -> f32 + Send + 'static> Kernel for Map<F> {
     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             for s in &mut channel[..frames] {
                 *s = (self.f)(*s * self.pre);
@@ -463,7 +464,7 @@ pub struct Sat1x;
 
 impl Kernel for Sat1x {
     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             for s in &mut channel[..frames] {
                 *s = drive(*s);
@@ -498,7 +499,7 @@ impl Kernel for SatIir2x {
     fn reset(&mut self) {
         self.os.iter_mut().for_each(Oversampler2x::reset);
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for (channel, os) in io.iter_mut().zip(&mut self.os) {
             let up = &mut self.up[..2 * frames];
             os.upsample_2x(&channel[..frames], up);
@@ -534,7 +535,7 @@ impl Kernel for SatLinearPhase {
             os.reset();
         }
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let Some(os) = &mut self.os else { return };
         if io.len() < 2 {
             return;
@@ -587,7 +588,7 @@ macro_rules! tdf2_lowpass {
             fn reset(&mut self) {
                 self.z.iter_mut().for_each(|z| *z = [0.0; 2]);
             }
-            fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
                 for (channel, z) in io.iter_mut().zip(&mut self.z) {
                     let [mut z1, mut z2] = *z;
                     for s in &mut channel[..frames] {
@@ -647,7 +648,7 @@ impl Kernel for BiquadLowpass {
             f.configure(self.rate, 1_000.0, 0.707);
         }
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         use crate::stability::Lowpass;
         for (c, channel) in io.iter_mut().enumerate() {
             for s in &mut channel[..frames] {
@@ -680,7 +681,7 @@ impl Kernel for ToneFilter {
     fn reset(&mut self) {
         self.low.iter_mut().for_each(|l| *l = 0.0);
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for (channel, state) in io.iter_mut().zip(&mut self.low) {
             let mut low = *state;
             for s in &mut channel[..frames] {

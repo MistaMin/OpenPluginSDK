@@ -9,7 +9,7 @@ use std::ffi::CStr;
 
 use openplugin::core::identity::{check_pins, params_pinned, state_is_keyed};
 use openplugin::core::{encode_params, Plugin};
-use openplugin::ffi::shell::{self, OpParamDesc, OpShellInfo};
+use openplugin::host::shell::{self, OpParamDesc, OpShellInfo};
 use openplugin::targets::clap_abi::{clap_param_info, clap_plugin_params};
 use openplugin::targets::ClapAdapter;
 

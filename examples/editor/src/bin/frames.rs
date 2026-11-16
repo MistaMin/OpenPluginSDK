@@ -59,6 +59,6 @@ fn main() {
     run("meter", scale, frames, |_, engine, i| {
         let level = 0.02 + 0.9 * ((i as f32) * 0.37).sin().abs();
         let mut io = vec![vec![level; 64]; 2];
-        engine.process(&mut io, 64);
+        engine.process(&mut openplugin::core::ChannelsMut::new(&mut io), 64);
     });
 }

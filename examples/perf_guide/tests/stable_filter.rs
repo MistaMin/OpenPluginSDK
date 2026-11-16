@@ -30,7 +30,7 @@ fn passes_the_conformance_kit() {
 fn process_before_prepare_is_defined() {
     let mut f = StableFilter::default();
     let mut io = vec![sine(256, 0), sine(256, 0)];
-    f.process(&mut io, 256);
+    f.process(&mut openplugin_core::ChannelsMut::new(&mut io), 256);
     finite_and_bounded(&io);
     // A low-pass at 1 kHz passes 440 Hz nearly unchanged.
     assert!(io[0].iter().any(|v| v.abs() > 0.3));
@@ -41,11 +41,11 @@ fn a_rate_change_without_a_reset_keeps_working() {
     let mut f = StableFilter::default();
     f.prepare(44_100.0, 512, 2);
     let mut io = vec![sine(512, 0), sine(512, 0)];
-    f.process(&mut io, 512);
+    f.process(&mut openplugin_core::ChannelsMut::new(&mut io), 512);
     for rate in [96_000.0, 22_050.0, 384_000.0, 48_000.0] {
         f.prepare(rate, 512, 2);
         let mut io = vec![sine(512, 512), sine(512, 512)];
-        f.process(&mut io, 512);
+        f.process(&mut openplugin_core::ChannelsMut::new(&mut io), 512);
         finite_and_bounded(&io);
     }
 }
@@ -57,7 +57,7 @@ fn block_sizes_that_change_on_every_call_are_fine() {
     let mut at = 0;
     for frames in [1, 7, 4096, 2, 333, 64, 1, 1000, 3, 4096] {
         let mut io = vec![sine(frames, at), sine(frames, at)];
-        f.process(&mut io, frames);
+        f.process(&mut openplugin_core::ChannelsMut::new(&mut io), frames);
         finite_and_bounded(&io);
         at += frames;
     }
@@ -68,10 +68,10 @@ fn a_frame_count_larger_than_the_buffers_is_clamped_not_indexed() {
     let mut f = StableFilter::default();
     f.prepare(48_000.0, 64, 2);
     let mut io = vec![sine(64, 0), sine(64, 0)];
-    f.process(&mut io, 100_000);
+    f.process(&mut openplugin_core::ChannelsMut::new(&mut io), 100_000);
     finite_and_bounded(&io);
     let mut none: Vec<Vec<f32>> = Vec::new();
-    f.process(&mut none, 64);
+    f.process(&mut openplugin_core::ChannelsMut::new(&mut none), 64);
 }
 
 #[test]
@@ -82,10 +82,10 @@ fn nan_and_infinity_at_the_input_do_not_reach_the_state() {
     dirty[0][10] = f32::NAN;
     dirty[0][11] = f32::INFINITY;
     dirty[0][12] = f32::NEG_INFINITY;
-    f.process(&mut dirty, 512);
+    f.process(&mut openplugin_core::ChannelsMut::new(&mut dirty), 512);
     finite_and_bounded(&dirty);
     let mut clean = vec![sine(512, 512)];
-    f.process(&mut clean, 512);
+    f.process(&mut openplugin_core::ChannelsMut::new(&mut clean), 512);
     finite_and_bounded(&clean);
     assert!(clean[0].iter().any(|v| v.abs() > 0.3), "the filter went silent after the burst");
 }
@@ -96,12 +96,12 @@ fn a_tail_decays_to_exact_zero_without_subnormals() {
     f.prepare(48_000.0, 512, 1);
     f.set_param("q", 5.0);
     let mut io = vec![vec![1.0f32; 512]];
-    f.process(&mut io, 512);
+    f.process(&mut openplugin_core::ChannelsMut::new(&mut io), 512);
     let mut subnormal = 0;
     let mut last = 1.0f32;
     for _ in 0..2000 {
         let mut silent = vec![vec![0.0f32; 512]];
-        f.process(&mut silent, 512);
+        f.process(&mut openplugin_core::ChannelsMut::new(&mut silent), 512);
         subnormal += silent[0].iter().filter(|v| v.is_subnormal()).count();
         last = silent[0][511];
     }
@@ -117,7 +117,7 @@ fn hostile_parameters_are_clamped() {
         assert!(f.set_param("cutoff", v));
         assert!(f.set_param("q", v));
         let mut io = vec![sine(512, 0)];
-        f.process(&mut io, 512);
+        f.process(&mut openplugin_core::ChannelsMut::new(&mut io), 512);
         finite_and_bounded(&io);
         assert!(f.param("cutoff").unwrap().is_finite());
     }

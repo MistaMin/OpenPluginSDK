@@ -1,3 +1,5 @@
+use openplugin::dri::{draw_faceplate, draw_knob, draw_vu_meter, Color, DrawList, MeterStyle};
+use openplugin::dsp::{Biquad, FilterType};
 use openplugin::prelude::*;
 
 static PARAMS: [ParamInfo; 4] = [
@@ -7,18 +9,17 @@ static PARAMS: [ParamInfo; 4] = [
     ParamInfo::new("high_freq", "High Freq", 1500.0, 16000.0, 8000.0, Unit::Hz).with_taper(Taper::Log),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.example.console_eq",
-    name: "Console EQ 70",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "1.0.0-beta",
-    category: Category::Eq,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: true,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.example.console_eq",
+    "Console EQ 70",
+    "OpenGrid",
+    "1.0.0-beta",
+    Category::Eq,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com")
+.with_editor(true);
 
 pub struct ConsoleEqPlugin {
     low_shelf: [Biquad; 2],
@@ -57,15 +58,15 @@ impl ConsoleEqPlugin {
     /// Renders the GoodLookin DRI hardware faceplate and knobs.
     pub fn render_gui(&self, dl: &mut DrawList) {
         // 1. British Console olive/slate faceplate
-        draw_faceplate(dl, 420.0, 220.0, FaceplateStyle::BritishConsole);
+        draw_faceplate(dl, 420.0, 220.0, "Navy");
 
         // 2. Low band knob (British Red cap)
         let norm_lg = PARAMS[0].to_normalized(self.low_gain);
-        draw_knob(dl, 110.0, 90.0, 36.0, norm_lg, "LOW GAIN", &PARAMS[0].format(self.low_gain), KnobStyle::Brit, Color::BRIT_RED);
+        draw_knob(dl, 110.0, 90.0, 36.0, norm_lg, "LOW GAIN", &PARAMS[0].format(self.low_gain), "Brit", Color::RED);
 
         // 3. High band knob (British Blue cap)
         let norm_hg = PARAMS[2].to_normalized(self.high_gain);
-        draw_knob(dl, 310.0, 90.0, 36.0, norm_hg, "HIGH GAIN", &PARAMS[2].format(self.high_gain), KnobStyle::Brit, Color::BRIT_BLUE);
+        draw_knob(dl, 310.0, 90.0, 36.0, norm_hg, "HIGH GAIN", &PARAMS[2].format(self.high_gain), "Brit", Color::BLUE);
 
         // 4. Center VU Meter
         draw_vu_meter(dl, 180.0, 50.0, 60.0, 45.0, -6.0, MeterStyle::AnalogVu);
@@ -133,7 +134,7 @@ impl Plugin for ConsoleEqPlugin {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for (ch, channel_vec) in io.iter_mut().enumerate() {
             let slice = &mut channel_vec[..frames];
             let ch_idx = ch.min(1);
@@ -155,5 +156,5 @@ fn main() {
 
     let mut dl = DrawList::new();
     eq.render_gui(&mut dl);
-    println!("GUI DrawList generated: {} drawing commands rendered.", dl.commands.len());
+    println!("GUI DrawList generated: {} drawing commands rendered.", dl.commands().len());
 }

@@ -316,7 +316,7 @@ fn the_plugin_flags_a_wrong_tag() {
     let roles = layout.input.roles();
     let mut io: Vec<Vec<f32>> = roles.iter().map(|&r| vec![in_tag(r); 8]).collect();
     io[3][5] = in_tag(roles[4]);
-    plugin.process(&mut io, 8);
+    plugin.process(&mut openplugin::core::ChannelsMut::new(&mut io), 8);
     for (i, channel) in io.iter().enumerate() {
         for (n, &v) in channel.iter().enumerate() {
             if (i, n) == (3, 5) {
@@ -329,7 +329,7 @@ fn the_plugin_flags_a_wrong_tag() {
     // Mono has no role and its own code.
     assert!(plugin.set_layout(LAYOUTS[0]));
     let mut mono = vec![vec![in_tag(MONO_CODE); 4]];
-    plugin.process(&mut mono, 4);
+    plugin.process(&mut openplugin::core::ChannelsMut::new(&mut mono), 4);
     assert!(mono[0].iter().all(|&v| v == out_tag(MONO_CODE)));
 }
 

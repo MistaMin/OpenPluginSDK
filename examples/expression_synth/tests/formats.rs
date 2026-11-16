@@ -21,7 +21,7 @@ use example_expression_synth::{ExpressionSynth, VoiceSnapshot, VoiceView, TONE};
 use openplugin::core::NoteRef;
 use openplugin::targets::clap_abi::*;
 use openplugin::targets::lv2::{self, Lv2Feature, PortMap};
-use openplugin::ffi::shell::{self, OpEvent, OpExpressionInfo, OpProcess, ShellInstance};
+use openplugin::host::shell::{self, OpEvent, OpExpressionInfo, OpProcess, ShellInstance};
 use openplugin::targets::ClapAdapter;
 
 openplugin_testing::install_allocator!();

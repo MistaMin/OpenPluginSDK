@@ -51,18 +51,16 @@ static PARAMS: [ParamInfo; 2] = [
 
 static LAYOUTS: [IoConfig; 1] = [IoConfig { input: SpeakerLayout::Absent, output: SpeakerLayout::Stereo, sidechain: None }];
 
-pub static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.example.expression-synth",
-    name: "Expression Synth",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "",
-    version: "1.0.0",
-    category: Category::Instrument,
-    params: &PARAMS,
-    is_instrument: true,
-    has_editor: false,
-};
+pub static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.example.expression-synth",
+    "Expression Synth",
+    "OpenGrid",
+    "1.0.0",
+    Category::Instrument,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_instrument(true);
 
 /// What one voice is playing, as the last block left it.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -259,8 +257,8 @@ impl Plugin for ExpressionSynth {
     }
 
     /// The release.
-    fn tail_samples(&self) -> usize {
-        (RELEASE_S * self.rate).ceil() as usize + 1
+    fn tail(&self) -> openplugin::core::Tail {
+        openplugin::core::Tail::from_samples((RELEASE_S * self.rate).ceil() as usize + 1)
     }
 
     fn supported_layouts(&self) -> &'static [IoConfig] {
@@ -349,7 +347,7 @@ impl Plugin for ExpressionSynth {
         self.voices.all_notes_off(|_| {});
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let tau = std::f32::consts::TAU;
         let attack = 1.0 / (ATTACK_S * self.rate);
         let release = 1.0 / (RELEASE_S * self.rate);

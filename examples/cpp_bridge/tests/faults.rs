@@ -38,8 +38,8 @@ macro_rules! forward {
         fn reset(&mut self) { self.0.reset() }
         fn set_param(&mut self, id: &str, v: f32) -> bool { self.0.set_param(id, v) }
         fn param(&self, id: &str) -> Option<f32> { self.0.param(id) }
-        fn process(&mut self, io: &mut [Vec<f32>], n: usize) { self.0.process(io, n) }
-        fn tail_samples(&self) -> usize { self.0.tail_samples() }
+        fn process(&mut self, io: &mut [&mut [f32]], n: usize) { self.0.process(io, n) }
+        fn tail(&self) -> Tail { self.0.tail() }
         fn note_ports(&self) -> NotePorts { self.0.note_ports() }
         fn save_state(&mut self) -> Option<Vec<u8>> { self.0.save_state() }
         fn load_state(&mut self, d: &[u8]) -> bool { self.0.load_state(d) }

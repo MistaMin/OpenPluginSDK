@@ -9,7 +9,7 @@
 #![allow(unsafe_code, dead_code)]
 
 use openplugin::core::{Editor, EditorHost, Gesture};
-use openplugin::dri::cocoa::{EditorView, Id};
+use openplugin::dri::cocoa::{EditorView, NSViewPtr as Id};
 use std::cell::RefCell;
 use std::ffi::{c_char, c_void, CStr};
 use std::rc::Rc;
@@ -137,6 +137,7 @@ pub fn gesture_text(g: &Gesture) -> String {
         Gesture::Begin(i) => format!("begin {i}"),
         Gesture::Perform(i, v) => format!("perform {i} {v:.3}"),
         Gesture::End(i) => format!("end {i}"),
+        other => format!("{other:?}"),
     }
 }
 
