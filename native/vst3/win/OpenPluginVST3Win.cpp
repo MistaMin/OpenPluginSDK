@@ -3,6 +3,12 @@
 // a Windows host. Nothing in that file is changed; this one sets up what differs
 // before including it.
 //
+//   - Class ids. op_shell_info gives each class id as the 16 bytes of its FUID
+//     string, and on macOS a TUID is those bytes. On Windows the VST3 SDK is COM
+//     compatible: a TUID is a GUID, whose first 32-bit field and next two 16-bit
+//     fields are little-endian (INLINE_UID in funknown.h). The shell gets the ids
+//     in that order here, so a host reads the same FUID on both systems and a
+//     project made on one finds the plug-in on the other.
 //   - The window type. The shell's IPlugView (EditorView) hands the host's parent
 //     to op_editor_attach; the one thing in it that names a platform is the type
 //     it accepts. Here that is kPlatformTypeHWND, and the parent is an HWND, which
@@ -11,10 +17,30 @@
 //     calls go through editor_pixels.h, which converts at the view's scale.
 //   - The entry points come from the VST3 SDK's dllmain.cpp (InitDll, ExitDll,
 //     DllMain) in place of macmain.cpp; native/vst3/win/vst3.cmake adds it.
-//
-// Not here: IPlugViewContentScaleSupport. The view takes its scale from the DPI of
-// the host's window, which is what a host passes to setContentScaleFactor.
+#include "op_shell.h"
 #include "pluginterfaces/gui/iplugview.h"
+#include <utility>
+
+namespace openplugin_vst_win {
+// The bytes of a FUID string as a COM GUID, and back: the same swaps both ways.
+inline void com_order(uint8_t* id) {
+    std::swap(id[0], id[3]);
+    std::swap(id[1], id[2]);
+    std::swap(id[4], id[5]);
+    std::swap(id[6], id[7]);
+}
+// op_shell_info with the class ids in the order a TUID has on Windows.
+inline uint32_t shell_info(OpShellInfo* info) {
+    const uint32_t ok = op_shell_info(info);
+    if (ok && info) {
+        com_order(info->processor_cid);
+        com_order(info->controller_cid);
+    }
+    return ok;
+}
+}
+// op_shell.h is included above, so this renames only the shell's calls.
+#define op_shell_info ::openplugin_vst_win::shell_info
 
 // iplugview.h is included above, so this renames only the shell's use of the name.
 #define kPlatformTypeNSView kPlatformTypeHWND

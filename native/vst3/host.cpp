@@ -685,8 +685,23 @@ int main(int argc, char** argv) {
     }
     CHECK(found && foundOther);
     CHECK(std::strcmp(ids[0], ids[1]) != 0);
-    CHECK(std::memcmp(effect.cid, info.processor_cid, 16) == 0);
-    CHECK(std::memcmp(other.cid, info.controller_cid, 16) == 0);
+    // The class ids are the ABI's 16 bytes, read as the FUID string a host stores in its
+    // projects: the same string on every system. (On macOS the TUID holds those bytes in
+    // order; on Windows it is a COM GUID, whose first three fields are little-endian.)
+    const auto same_id = [](const TUID cid, const uint8_t* abi) {
+        char got[33] = {};
+        char want[33] = {};
+        FUID uid = FUID::fromTUID(cid);
+        uid.toString(got);
+        for (int b = 0; b < 16; ++b) std::snprintf(want + 2 * b, 3, "%02X", static_cast<unsigned>(abi[b]));
+        for (int c = 0; c < 32; ++c) {
+            if (got[c] >= 'a' && got[c] <= 'f') got[c] = static_cast<char>(got[c] - 'a' + 'A');
+        }
+        if (std::strcmp(got, want) != 0) std::fprintf(stderr, "class id %s, the ABI says %s\n", got, want);
+        return std::strcmp(got, want) == 0;
+    };
+    CHECK(same_id(effect.cid, info.processor_cid));
+    CHECK(same_id(other.cid, info.controller_cid));
     const uint32_t gain = find_shell_param("Gain");
     const uint32_t warm = find_shell_param("Warm");
     OpParamDesc gainDesc{};

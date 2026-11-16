@@ -143,8 +143,25 @@ pub const fn vst3_iid(a: u32, b: u32, c: u32, d: u32) -> [u8; 16] {
     [a[0], a[1], a[2], a[3], b1[0], b1[1], b2[0], b2[1], c[0], c[1], c[2], c[3], d[0], d[1], d[2], d[3]]
 }
 
+/// A class id from a Windows module (a COM `GUID`) as the 16 bytes its FUID string
+/// shows, which are the bytes the same class has on the other systems: the first
+/// 32-bit field and the next two 16-bit fields turned round.
+pub const fn vst3_fuid_bytes(id: &[u8; 16]) -> [u8; 16] {
+    [id[3], id[2], id[1], id[0], id[5], id[4], id[7], id[6], id[8], id[9], id[10], id[11], id[12], id[13], id[14], id[15]]
+}
+
 #[cfg(test)]
 mod tests {
+    /// Turning an id round twice gives it back, and an id laid out by `vst3_iid` reads
+    /// as the words it was written with.
+    #[test]
+    fn a_class_id_reads_the_same_as_on_the_other_systems() {
+        let com = super::vst3_iid(0x0011_2233, 0x4455_6677, 0x8899_AABB, 0xCCDD_EEFF);
+        let read = super::vst3_fuid_bytes(&com);
+        assert_eq!(read, [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        assert_eq!(super::vst3_fuid_bytes(&read), com);
+    }
+
     /// FUnknown is COM's IUnknown, `00000000-0000-0000-C000-000000000046`; the
     /// second id has no byte that repeats, so every position is checked.
     #[test]

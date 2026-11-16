@@ -189,7 +189,6 @@ fn things_that_are_not_plugins_are_errors() {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "needs the Windows VST3 shell (native/vst3/win)")]
 fn vst3_scan_reproduces_the_example() {
     let Some(dir) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
@@ -203,6 +202,11 @@ fn vst3_scan_reproduces_the_example() {
     let v = m.plugin.ids.vst3.as_ref().expect("vst3 ids");
     assert_eq!(v.class_id, hex16(&info.processor_cid));
     assert_eq!(v.controller_class_id.as_deref(), Some(hex16(&info.controller_cid).as_str()));
+    // The ids a host stores in its projects, as FUID strings. They are the same on
+    // macOS and Windows (where the module holds them as COM GUIDs), so a project moves
+    // between the two; a change here breaks every saved project.
+    assert_eq!(v.class_id, "34D4F20CA96548A2CCF8B6568B816BBE");
+    assert_eq!(v.controller_class_id.as_deref(), Some("4F46AB32F25718AE0303BABE150A0BDF"));
     assert!(!v.single_component);
     // The host bypass parameter is reported and flagged.
     assert!(m.plugin.params.iter().any(|p| p.has_flag("bypass")));

@@ -34,6 +34,17 @@ const fn iid(a: u32, b: u32, c: u32, d: u32) -> Tuid {
     sys::vst3_iid(a, b, c, d)
 }
 
+/// A class id as the 16 bytes its FUID string shows, which is what a host stores
+/// and is the same on every system. Here the id is those bytes already.
+#[cfg(not(windows))]
+fn fuid_bytes(id: &Tuid) -> Tuid {
+    *id
+}
+#[cfg(windows)]
+fn fuid_bytes(id: &Tuid) -> Tuid {
+    sys::vst3_fuid_bytes(id)
+}
+
 /// An interface id written as the four 32-bit words of `DECLARE_CLASS_IID`
 /// (big-endian byte order, as on macOS).
 #[cfg(not(windows))]
@@ -619,7 +630,7 @@ pub fn probe(bundle: &Path) -> Result<ProbeResult, String> {
         };
         plugin.is_instrument = plugin.categories.iter().any(|c| c == "Instrument");
         plugin.ids.vst3 = Some(Vst3Ids {
-            class_id: hex16(&cl.cid),
+            class_id: hex16(&fuid_bytes(&cl.cid)),
             controller_class_id: None,
             category: cl.category.clone(),
             sub_categories: cl.sub_categories.clone(),
@@ -733,7 +744,7 @@ fn describe(factory: *mut c_void, cl: &Class, plugin: &mut Plugin) -> Result<(),
     if let Some(ids) = plugin.ids.vst3.as_mut() {
         ids.single_component = single;
         if has_cid {
-            ids.controller_class_id = Some(hex16(&cid));
+            ids.controller_class_id = Some(hex16(&fuid_bytes(&cid)));
         }
     }
     if controller.is_null() {
