@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: MIT
+# The native shells on Windows (MSVC). native/CMakeLists.txt includes this before its
+# own project() when the build machine is Windows and then stops; nothing of the macOS
+# configuration there is used (docs/PLATFORMS.md). This file holds what every Windows
+# shell needs (the options, the Rust library and how to link it); each format has a
+# file of its own next to its Windows sources (aax/win/aax.cmake).
+#
+# From the repository root, in PowerShell (the SDK stays outside this tree):
+#
+#   cargo build --release --lib -p example-editor -p example-role-tags
+#   cmake -S native -B build-shell -A x64 `
+#     -DOP_RUST_LIB="$PWD\target\release\example_editor.lib" `
+#     -DOP_AAX_SDK=C:\path\to\aax-sdk `
+#     -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example `
+#     -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid `
+#     -DOP_TAIL=ON -DOP_EDITOR=OFF
+#   cmake --build build-shell --config Release -j 2
+#   ctest --test-dir build-shell -C Release --output-on-failure
+#
+# The Rust library is `<name>.lib`, built for the MSVC target against the release C
+# runtime, so build the shells as Release (or RelWithDebInfo). OP_RUST_NATIVE_LIBS
+# lists the system libraries it needs; take the list from
+#   cargo rustc --release --lib -p <crate> --crate-type staticlib -- --print native-static-libs
+# when a plugin needs more.
+project(OpenPluginShell LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT MSVC)
+  message(FATAL_ERROR "The Windows shells are built with MSVC (Visual Studio or its Build Tools)")
+endif()
+get_property(OP_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT OP_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
+set(OP_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+
+set(OP_RUST_LIB "" CACHE FILEPATH "Rust static library exporting op_shell_*")
+set(OP_AAX_SDK "" CACHE PATH "Existing AAX SDK checkout")
+set(OP_PRODUCT "Plugin" CACHE STRING "Module file and display name")
+set(OP_BUNDLE_ID "com.example.openplugin" CACHE STRING "Bundle identifier prefix (not used on Windows)")
+set(OP_VERSION "0.1.0" CACHE STRING "Version")
+set(OP_MANUFACTURER "OpenPlugin" CACHE STRING "Manufacturer display name")
+set(OP_RUST_NATIVE_LIBS "user32;gdi32;kernel32;ntdll;userenv;ws2_32;dbghelp;synchronization;bcrypt;advapi32"
+  CACHE STRING "System libraries the Rust static library needs (rustc --print native-static-libs)")
+option(OP_BUILD_AAX "Build the unsigned AAX shell" ON)
+option(OP_EDITOR "The plugin exports op_editor_* (include/op_editor.h); host its view" OFF)
+option(OP_TAIL "The plugin exports op_shell_tail_seconds; report its tail to the host" OFF)
+option(OP_AAX_PAGES "Write an AAX page table into the bundle; needs four-character AAX IDs" OFF)
+
+if(NOT EXISTS "${OP_RUST_LIB}")
+  message(FATAL_ERROR "OP_RUST_LIB must be the built static library (target\\release\\<name>.lib)")
+endif()
+
+# Role Tags (examples/role_tags) for the channel order proofs, found next to OP_RUST_LIB.
+set(OP_ROLE_LIB "" CACHE FILEPATH "Rust static library of examples/role_tags, for the role proofs")
+if(NOT OP_ROLE_LIB)
+  get_filename_component(OP_RUST_LIB_DIR "${OP_RUST_LIB}" DIRECTORY)
+  if(EXISTS "${OP_RUST_LIB_DIR}/example_role_tags.lib")
+    set(OP_ROLE_LIB "${OP_RUST_LIB_DIR}/example_role_tags.lib")
+  endif()
+endif()
+if(OP_ROLE_LIB AND EXISTS "${OP_ROLE_LIB}")
+  set(OP_ROLE_PROOFS ON)
+  message(STATUS "Role proofs over ${OP_ROLE_LIB}")
+else()
+  set(OP_ROLE_PROOFS OFF)
+  message(STATUS "Role proofs not built: no example_role_tags.lib (cargo build --release --lib -p example-role-tags)")
+endif()
+
+# Links the Rust library: OP_RUST_LIB, or the library given as the second argument.
+function(op_link_rust target_name)
+  set(rust_lib "${OP_RUST_LIB}")
+  if(ARGC GREATER 1)
+    set(rust_lib "${ARGV1}")
+  endif()
+  target_link_libraries(${target_name} PRIVATE "${rust_lib}" ${OP_RUST_NATIVE_LIBS})
+endfunction()
+
+enable_testing()
+
+if(OP_BUILD_AAX)
+  include("${OP_NATIVE_DIR}/aax/win/aax.cmake")
+endif()

@@ -24,6 +24,12 @@
 # The per-note expression proof (vst3_expression_proof) loads Expression Synth
 # (examples/expression_synth): cargo build --release --lib -p example-expression-synth.
 cmake_minimum_required(VERSION 3.20)
+# Windows has its own configuration, in its own files (docs/PLATFORMS.md): MSVC has no
+# Objective-C++, and nothing below this block is used there.
+if(CMAKE_HOST_WIN32)
+  include("${CMAKE_CURRENT_LIST_DIR}/cmake/windows.cmake")
+  return()
+endif()
 project(OpenPluginShell LANGUAGES C CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
