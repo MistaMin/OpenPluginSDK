@@ -117,7 +117,7 @@ int main() {
     ProcessState probe;
     require(probe.prepare(kRate, 2), "prepare");
     require(probe.latency == kLatency && op_shell_latency(probe.engine) == kLatency, "the stub reports its latency to the process state");
-    require(probe.dry[0].size() == kMaxBlock && probe.line[0].size() == kLatency, "bypass buffers are sized in prepare");
+    require(probe.dry[0].size() == kMaxBlock && probe.delayCap == kLatency && probe.line[0].size() == kLatency + 1, "bypass buffers are sized in prepare, for the largest latency (the stub declares none: its latency)");
     unsigned long samples = 0, checks = 0;
 
     const std::vector<Step> fromStart = {{1, true},   {7, true},    {33, true},   {100, true},  {511, true}, {512, true},

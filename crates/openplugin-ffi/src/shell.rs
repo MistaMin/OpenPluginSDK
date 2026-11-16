@@ -16,7 +16,7 @@ use openplugin_core::{
 use crate::{FfiInstance, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
-pub const ABI: u32 = 8;
+pub const ABI: u32 = 9;
 pub use crate::block::{
     OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
     EVENT_NOTE_EXPRESSION, EVENT_NOTE_OFF_ID, EVENT_NOTE_ON_ID, NOTE_ANY,
@@ -704,7 +704,18 @@ pub unsafe fn write_param<P: Plugin + Default>(index: u32, out: *mut OpParamDesc
     if out.is_null() {
         return 0;
     }
-    let Some(param) = plugin_info::<P>().params.get(index as usize) else {
+    unsafe { write_param_of(plugin_info::<P>(), index, out) }
+}
+
+/// [`write_param`] from the table `info`.
+///
+/// # Safety
+/// `out` is null or points to writable memory for one [`OpParamDesc`].
+unsafe fn write_param_of(info: &PluginInfo, index: u32, out: *mut OpParamDesc) -> u32 {
+    if out.is_null() {
+        return 0;
+    }
+    let Some(param) = info.params.get(index as usize) else {
         return 0;
     };
     unsafe { fill_desc(param, &mut *out) };
@@ -750,8 +761,16 @@ fn display_value(param: &ParamInfo, plain: f64) -> f32 {
 /// # Safety
 /// `buf` is null or points to `cap` writable bytes.
 pub unsafe fn param_format<P: Plugin + Default>(index: u32, plain: f64, buf: *mut u8, cap: usize) -> usize {
+    unsafe { param_format_of(plugin_info::<P>(), index, plain, buf, cap) }
+}
+
+/// [`param_format`] from the table `info`.
+///
+/// # Safety
+/// `buf` is null or points to `cap` writable bytes.
+unsafe fn param_format_of(info: &PluginInfo, index: u32, plain: f64, buf: *mut u8, cap: usize) -> usize {
     let text = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        plugin_info::<P>().params.get(index as usize).map(|param| param.format(display_value(param, plain)))
+        info.params.get(index as usize).map(|param| param.format(display_value(param, plain)))
     }))
     .ok()
     .flatten()
@@ -811,6 +830,14 @@ pub unsafe fn param_group<P: Plugin + Default>(index: u32, buf: *mut u8, cap: us
 /// # Safety
 /// `text` is null or a NUL-terminated string; `out_plain` is null or writable.
 pub unsafe fn param_parse<P: Plugin + Default>(index: u32, text: *const std::ffi::c_char, out_plain: *mut f64) -> i32 {
+    unsafe { param_parse_of(plugin_info::<P>(), index, text, out_plain) }
+}
+
+/// [`param_parse`] from the table `info`.
+///
+/// # Safety
+/// `text` is null or a NUL-terminated string; `out_plain` is null or writable.
+unsafe fn param_parse_of(info: &PluginInfo, index: u32, text: *const std::ffi::c_char, out_plain: *mut f64) -> i32 {
     if text.is_null() || out_plain.is_null() {
         return 0;
     }
@@ -822,7 +849,7 @@ pub unsafe fn param_parse<P: Plugin + Default>(index: u32, text: *const std::ffi
         return 0;
     };
     let parsed = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        plugin_info::<P>().params.get(index as usize).and_then(|param| param.parse(text))
+        info.params.get(index as usize).and_then(|param| param.parse(text))
     }));
     match parsed {
         Ok(Some(value)) if value.is_finite() => {
@@ -933,6 +960,87 @@ pub unsafe fn expression_parse(id: u32, text: *const std::ffi::c_char, out_value
             1
         }
         None => 0,
+    }
+}
+
+// ---- ABI 9: the instance's own parameter table, and its largest latency ----
+
+/// The table the host should show for the instance at `ptr`: the one its
+/// plugin returned last ([`FfiInstance::current_info`]), or the plugin type's
+/// first table when `ptr` is null or not a live instance. Message thread.
+fn table_of<P: Plugin + Default>(ptr: *const ShellInstance) -> &'static PluginInfo {
+    with_live(ptr, |instance| instance.ffi.current_info()).unwrap_or_else(plugin_info::<P>)
+}
+
+/// `op_shell_instance_param`: [`write_param`] from the instance's own table,
+/// so a renamed parameter shows its new name and unit. Ids, ranges, steps and
+/// flags are those of the first table. Main thread.
+///
+/// # Safety
+/// `out` is null or points to writable memory for one [`OpParamDesc`]. Any
+/// `ptr` is accepted: it is only read once found in the live table.
+pub unsafe fn instance_param<P: Plugin + Default>(ptr: *const ShellInstance, index: u32, out: *mut OpParamDesc) -> u32 {
+    if out.is_null() {
+        return 0;
+    }
+    let first = plugin_info::<P>();
+    let Some(base) = first.params.get(index as usize) else {
+        return 0;
+    };
+    let shown = table_of::<P>(ptr).params.get(index as usize).unwrap_or(base);
+    unsafe {
+        fill_desc(base, &mut *out);
+        put(&mut (*out).name, shown.name);
+        put(&mut (*out).unit, unit_name(shown.unit));
+    }
+    1
+}
+
+/// `op_shell_instance_param_format`: [`param_format`] from the instance's own
+/// table. Main thread; allocates.
+///
+/// # Safety
+/// `buf` is null or points to `cap` writable bytes. Any `ptr` is accepted.
+pub unsafe fn instance_param_format<P: Plugin + Default>(ptr: *const ShellInstance, index: u32, plain: f64, buf: *mut u8, cap: usize) -> usize {
+    unsafe { param_format_of(table_of::<P>(ptr), index, plain, buf, cap) }
+}
+
+/// `op_shell_instance_param_parse`: [`param_parse`] from the instance's own
+/// table. Main thread.
+///
+/// # Safety
+/// `text` is null or a NUL-terminated string; `out_plain` is null or writable.
+/// Any `ptr` is accepted.
+pub unsafe fn instance_param_parse<P: Plugin + Default>(ptr: *const ShellInstance, index: u32, text: *const std::ffi::c_char, out_plain: *mut f64) -> i32 {
+    unsafe { param_parse_of(table_of::<P>(ptr), index, text, out_plain) }
+}
+
+/// `op_shell_max_latency`: the largest latency the instance may report until
+/// it is prepared again ([`FfiInstance::max_latency`]); 0 for a null
+/// instance. Any thread; never blocks, never allocates.
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`].
+pub unsafe fn max_latency(ptr: *const ShellInstance) -> u32 {
+    if ptr.is_null() {
+        0
+    } else {
+        unsafe { (*ptr).ffi.max_latency() }
+    }
+}
+
+/// `op_shell_latency_now`: the latency as of the last block, without counting
+/// as the host's read, so it changes nothing [`take_changes`] reports. 0 for a
+/// null instance. Any thread, the audio thread included; never blocks, never
+/// allocates.
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`].
+pub unsafe fn latency_now(ptr: *const ShellInstance) -> u32 {
+    if ptr.is_null() {
+        0
+    } else {
+        unsafe { (*ptr).ffi.latency_now() }
     }
 }
 

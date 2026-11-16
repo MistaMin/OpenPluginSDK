@@ -12,6 +12,8 @@
 //!   itself once that many blocks have run, without a parameter and without a
 //!   notifier call, so the adapters' own comparison after every block is seen.
 //!
+//! - [`Plugin::max_latency`] is [`MAX_LOOKAHEAD`].
+//!
 //! Nothing allocates after `prepare`.
 #![allow(dead_code)]
 
@@ -30,9 +32,10 @@ pub static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("names", "Names", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-/// The same parameters (ids, ranges, order) under other names.
+/// The same parameters (ids, ranges, order) under other names; the lookahead
+/// also shows its value in another unit, so its value text changes too.
 pub static RENAMED: [ParamInfo; 2] = [
-    ParamInfo::new("lookahead", "Look Ahead (renamed)", 0.0, MAX_LOOKAHEAD as f32, 0.0, Unit::None).with_steps(MAX_LOOKAHEAD as u32 + 1),
+    ParamInfo::new("lookahead", "Look Ahead (renamed)", 0.0, MAX_LOOKAHEAD as f32, 0.0, Unit::Ms).with_steps(MAX_LOOKAHEAD as u32 + 1),
     ParamInfo::new("names", "Names (renamed)", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
@@ -174,6 +177,10 @@ impl Plugin for Shift {
 
     fn latency(&self) -> usize {
         self.current()
+    }
+
+    fn max_latency(&self) -> Option<usize> {
+        Some(MAX_LOOKAHEAD)
     }
 
     fn note_ports(&self) -> NotePorts {

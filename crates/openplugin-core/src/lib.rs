@@ -697,6 +697,18 @@ pub trait Plugin: Send + 'static {
         0
     }
 
+    /// The largest latency, in samples, this plugin may report through
+    /// [`Self::latency`] at the sample rate and block size of the last
+    /// `prepare`. Read on the message thread after `prepare`, never on the
+    /// audio thread. The Audio Unit and AAX shells size their bypass delay
+    /// for it, so their bypassed signal follows a latency that changes at run
+    /// time without allocating on the render thread. `None` (the default):
+    /// the latency right after `prepare` is the largest; a later, larger
+    /// latency then delays the bypassed signal by that first value only.
+    fn max_latency(&self) -> Option<usize> {
+        None
+    }
+
     /// Tail duration in samples after input ceases (e.g. reverb decay).
     fn tail_samples(&self) -> usize {
         0

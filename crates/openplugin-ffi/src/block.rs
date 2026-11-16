@@ -512,6 +512,8 @@ impl FfiInstance {
             audio.cursor.pull(&self.plane, audio.inner.as_mut());
             self.latency
                 .store(audio.inner.latency() as u32, Ordering::Release);
+            self.declared_max_latency
+                .store(crate::declared_max(audio.inner.as_ref()), Ordering::Release);
             true
         })
         .unwrap_or(false)

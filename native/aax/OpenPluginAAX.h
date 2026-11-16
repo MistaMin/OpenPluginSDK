@@ -32,6 +32,9 @@ inline std::string shellParamId(uint32_t index) {
 }
 // Length of the switch between processed and bypassed audio.
 inline constexpr double kBypassFadeSeconds = 0.010;
+// The longest bypass delay the shell keeps, in samples (about 87 s at 48 kHz). A plugin that
+// declares more gets this much: past it the bypassed signal is delayed by the cap.
+inline constexpr uint32_t kMaxBypassDelay = 1u << 22;
 // GetCustomData block the view reads: the engine pointer, valid in this process.
 inline constexpr AAX_CTypeID kEngineData = 'OpEn';
 // GetCustomData block the view reads: what the host last said about the track
@@ -111,10 +114,14 @@ struct ProcessState {
     // The plugin's note ports (op_shell_note_ports), so process() reads the MIDI node fields only
     // when Describe registered them: AAX leaves an unregistered context field undefined, not null.
     uint32_t notePorts = 0;
-    // Bypass: the input delayed by the reported latency, crossfaded with the
-    // engine output. All of it is allocated in prepare(); process() only reads
-    // and writes it.
+    // Bypass: the input delayed by the latency now, crossfaded with the engine
+    // output. All of it is allocated in prepare(); process() only reads and
+    // writes it. The line holds delayCap + 1 samples per channel, delayCap the
+    // largest latency the plugin may report (op_shell_max_latency, ABI 9), so a
+    // latency that changes at run time moves the read point alone. `latency` is
+    // the delay of the current block (op_shell_latency_now, at most delayCap).
     uint32_t latency = 0;
+    uint32_t delayCap = 0;
     std::vector<std::vector<float>> dry;
     std::vector<std::vector<float>> line;
     size_t linePos = 0;
@@ -203,6 +210,8 @@ bool proofTakePacket(AAX_CEffectParameters* parameters, PacketBuffer* out);
 // (op_shell_param_format). fitText shortens it for a host that asks for at most
 // maxChars bytes (see OpenPluginAAXParameters.cpp); false for a negative limit.
 std::string shellText(uint32_t index, double plain);
+// The same from the table of `engine` (ABI 9: a renamed table), the first table when null.
+std::string shellText(const void* engine, uint32_t index, double plain);
 bool fitText(const std::string& text, int32_t maxChars, std::string* out);
 // Text through the host entry points of the data model: the text of a normalized value
 // (maxChars as the host passes it) and a typed text read back as a normalized value.

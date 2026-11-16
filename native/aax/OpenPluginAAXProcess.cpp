@@ -341,11 +341,13 @@ bool ProcessState::prepareStems(double rate, AAX_EStemFormat inputStem, AAX_ESte
     sampleRate = static_cast<uint32_t>(rate);
     paramCount = info.param_count;
     latency = op_shell_latency(engine);
+    delayCap = std::min(op_shell_max_latency(engine), kMaxBypassDelay);
+    latency = std::min(latency, delayCap);
     dry.assign(out.aax, std::vector<float>());
     line.assign(out.aax, std::vector<float>());
     for (uint32_t c = 0; c < out.aax; ++c) {
         dry[c].assign(kMaxBlock, 0.f);
-        line[c].assign(latency, 0.f);
+        if (delayCap > 0) line[c].assign(static_cast<size_t>(delayCap) + 1, 0.f);
     }
     events.assign(OP_MAX_EVENTS, OpEvent{});
     pieceEvents.assign(OP_MAX_EVENTS, OpEvent{});
@@ -371,27 +373,33 @@ const float* inputChannel(const ProcessState& state, const Context* context, uin
     return context->input && c < state.in.aax ? context->input[c] : nullptr;
 }
 // Pushes the input through the latency delay into state.dry. The line always
-// runs, so switching bypass on never starts from stale audio. Taken before the
-// engine runs because the host may give the same buffer for input and output.
+// runs, so switching bypass on, or a new latency, never starts from stale
+// audio: a new latency only moves the read point. Taken before the engine runs
+// because the host may give the same buffer for input and output.
 void captureDry(ProcessState& state, Context* context, unsigned offset, unsigned count) {
+    // The latency now (ABI 9; not the host's read), within the line sized in prepare().
+    state.latency = std::min(op_shell_latency_now(state.engine), state.delayCap);
+    const size_t size = static_cast<size_t>(state.delayCap) + 1;
     for (uint32_t c = 0; c < state.out.aax; ++c) {
         const float* in = inputChannel(state, context, c);
         if (in) in += offset;
         float* dry = state.dry[c].data();
-        if (state.latency == 0) {
+        if (state.delayCap == 0) {
             if (in) std::memcpy(dry, in, count * sizeof(float));
             else std::fill_n(dry, count, 0.f);
             continue;
         }
         float* line = state.line[c].data();
         size_t pos = state.linePos;
+        size_t read = pos >= state.latency ? pos - state.latency : pos + size - state.latency;
         for (unsigned i = 0; i < count; ++i) {
-            dry[i] = line[pos];
             line[pos] = in ? in[i] : 0.f;
-            if (++pos == state.latency) pos = 0;
+            dry[i] = line[read];
+            if (++pos == size) pos = 0;
+            if (++read == size) read = 0;
         }
     }
-    if (state.latency != 0) state.linePos = (state.linePos + count) % state.latency;
+    if (state.delayCap != 0) state.linePos = (state.linePos + count) % size;
 }
 // Moves the engine output towards the dry signal (or back). Fully bypassed
 // output is the dry signal exactly.

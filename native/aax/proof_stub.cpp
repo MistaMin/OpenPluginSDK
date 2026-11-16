@@ -12,8 +12,14 @@
 // blob is: u32 'STUB', u32 parameter count, f32 x count, u32 chunk length,
 // chunk bytes. A load checks all of it first; a chunk starting with 0xFF is
 // refused, as a plugin's load_state may refuse one. op_stub_* are test hooks.
+//
+// ABI 9: op_stub_rename renames an engine's table ("Param 0 (renamed)", text
+// "0.500 renamed"), which the instance calls show and the calls without an
+// instance do not; op_stub_set_max_latency makes the engines made after it
+// declare a largest latency (default: none, so the largest is the latency).
 #include "op_shell.h"
 #include "proof_stub.h"
+#define OP_STUB_OWN_ABI9 1
 #include "stub_identity.h"
 #include <algorithm>
 #include <atomic>
@@ -82,6 +88,9 @@ struct Stub {
     std::atomic<uint32_t> latency{kLatency};
     std::atomic<uint32_t> told{kLatency};
     std::atomic<uint32_t> changes{0};
+    // ABI 9: the renamed table, and the largest latency declared at creation (0: none).
+    std::atomic<bool> renamed{false};
+    uint32_t maxLatency = 0;
     Stub() : plain(kParams) {}
 };
 void put(char* dst, size_t size, const char* src) {
@@ -142,10 +151,12 @@ double op_shell_to_normalized(uint32_t index, double plain) { return index == 0 
 double op_shell_to_plain(uint32_t, double normalized) { return normalized; }
 double op_shell_to_normalized(uint32_t, double plain) { return plain; }
 #endif
+std::atomic<uint32_t> gMaxLatency{0};
 void* op_shell_create(double, uint32_t, uint32_t channels) {
     auto* stub = new (std::nothrow) Stub;
     if (stub) {
         stub->channels = channels;
+        stub->maxLatency = gMaxLatency.load();
         for (uint32_t i = 0; i < kParams; ++i) stub->plain[i] = static_cast<float>(defaultFor(i));
     }
     return stub;
@@ -239,6 +250,12 @@ void op_stub_raise_changes(void* instance, uint32_t flags) {
     if (instance) static_cast<Stub*>(instance)->changes.fetch_or(flags);
 }
 uint32_t op_stub_takes(void) { return gTakes.load(); }
+void op_stub_rename(void* instance) {
+    if (!instance) return;
+    static_cast<Stub*>(instance)->renamed.store(true);
+    static_cast<Stub*>(instance)->changes.fetch_or(OP_CHANGE_PARAM_INFO);
+}
+void op_stub_set_max_latency(uint32_t samples) { gMaxLatency.store(samples); }
 uint32_t op_stub_set_chunk(void* instance, const uint8_t* data, uint32_t length) {
     if (!instance || (!data && length)) return 0;
     static_cast<Stub*>(instance)->chunk.assign(data, data + length);
@@ -477,6 +494,38 @@ int op_shell_param_parse(uint32_t index, const char* text, double* out_plain) {
 #endif
     return 1;
 }
+// ---- ABI 9: the instance's table, and its largest latency. ----
+static bool stubRenamed(const void* instance) { return instance && static_cast<const Stub*>(instance)->renamed.load(); }
+uint32_t op_shell_instance_param(const void* instance, uint32_t index, OpParamDesc* out) {
+    if (!op_shell_param(index, out)) return 0;
+    if (stubRenamed(instance)) std::snprintf(out->name, sizeof(out->name), "Param %u (renamed)", index);
+    return 1;
+}
+size_t op_shell_instance_param_format(const void* instance, uint32_t index, double plain, char* buf, size_t cap) {
+    if (!stubRenamed(instance) || index >= kParams) return op_shell_param_format(index, plain, buf, cap);
+    char text[64];
+    std::snprintf(text, sizeof text, "%.3f renamed", std::isfinite(plain) ? plain : defaultFor(index));
+    const size_t length = std::strlen(text);
+    if (buf && cap) {
+        const size_t n = std::min(length, cap - 1);
+        std::memcpy(buf, text, n);
+        buf[n] = '\0';
+    }
+    return length;
+}
+int op_shell_instance_param_parse(const void* instance, uint32_t index, const char* text, double* out_plain) {
+    if (!stubRenamed(instance) || !text) return op_shell_param_parse(index, text, out_plain);
+    std::string plain(text);
+    const std::string suffix = " renamed";
+    if (plain.size() > suffix.size() && plain.compare(plain.size() - suffix.size(), suffix.size(), suffix) == 0) plain.resize(plain.size() - suffix.size());
+    return op_shell_param_parse(index, plain.c_str(), out_plain);
+}
+uint32_t op_shell_max_latency(const void* instance) {
+    if (!instance) return 0;
+    const Stub& stub = *static_cast<const Stub*>(instance);
+    return std::max(stub.maxLatency, stub.latency.load());
+}
+uint32_t op_shell_latency_now(const void* instance) { return instance ? static_cast<const Stub*>(instance)->latency.load() : 0; }
 // ---- ABI 5: parameter groups. None: every parameter is top level. ----
 size_t op_shell_param_group(uint32_t, char* buf, size_t cap) {
     if (buf && cap) buf[0] = '\0';
