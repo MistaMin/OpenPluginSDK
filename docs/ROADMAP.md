@@ -8,15 +8,15 @@ This is the macOS roadmap, from 0.4 to 1.0 and what comes after. Windows and Lin
 
 The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin/GoodLookinDri), which the SDK draws with: 0.3 interaction, 0.4 host polish, 0.5 qualification.
 
-## Where 0.3.1 Beta stands
+## Where 1.0 Beta stands
 
 | Area | State |
 |---|---|
-| Formats | CLAP and LV2 are Rust entries. VST3, Audio Unit and AAX are C++ shells over the Rust `op_shell_*` ABI. macOS only for the shells. |
-| Editor | One Rust `Editor` in every format, hosted in a Rust `NSView`. macOS only. Fixed size. |
-| Drawing | GoodLookin DRI 0.2: lit knobs by default, `SceneCanvas` with a cached plate layer. |
-| Proofs | Unit tests, hostile-input and no-allocation suites, a main-thread editor test through CLAP, LV2 and the shell ABI, generic VST3, AU and AAX shell proofs, `VST3EditorProof`, `lv2_validate`, a render through lilv's `lv2apply`, and `clap-validator` with no failures (34 passed, 10 skipped). |
-| Not claimed | Any session in Logic, Cubase, Pro Tools, Bitwig or REAPER. Windows and Linux. |
+| Formats | CLAP and LV2 are Rust entries on macOS, Windows and Linux. VST3, Audio Unit and AAX are C++ shells over the Rust `op_shell_*` ABI (version 7): VST3 and AAX on macOS and Windows, the Audio Unit on macOS. Every format carries notes, MIDI out, transport, sidechain, layouts in one channel order, offline, parameter groups, state, latency and tail, and tells the host about changes (0.6). |
+| Editor | One Rust `Editor` in every format, resizable, with hit-testing, keyboard focus, damage-only repaint, design-file editors, the host parameter menu, typing a value, tooltips, file drops and accessibility (0.5, 0.7). Views: `NSView` on macOS, HWND with UI Automation on Windows, X11 on Linux (X11 under XWayland on Wayland). |
+| Drawing | GoodLookin DRI 0.2: lit knobs by default, `SceneCanvas` with a cached plate layer and damaged-rectangle repaint. |
+| Proofs | Unit, hostile-input and no-allocation suites in every format; the native VST3, AU and AAX shell proofs; format parity sample for sample across all five formats; `clap-validator`, `lv2_validate`, lilv, `auval -strict`, pluginval at strictness 10 and Avid's AAX Validator (locally). CI runs the workspace and the headless proofs on macOS, Linux and Windows. Host runs: REAPER and OpenGrid9 on macOS, Pro Tools with AAX on macOS, REAPER on Windows ([HOST_TESTS.md](HOST_TESTS.md)). |
+| Not claimed | The API is not frozen yet. The VST3 shell on Linux; a Linux DAW; PACE signing and Pro Tools on Windows; Logic, Cubase and Bitwig sessions. Track info reaches only CLAP and VST3. |
 
 ## Minimum Rust version
 
@@ -143,6 +143,18 @@ Then **0.7.0**.
 8. **Universal binaries, proven.** `--archs universal` already joins arm64 and x86_64 with `lipo`, but only the CLAP and LV2 were checked. Build every format universal, the AAX SDK library included, run the x86_64 slice of every proof, the format-parity test and `clap-validator` under Rosetta, and add a CI job that does the same. Owns `scripts/build_plugin.sh`, `native/CMakeLists.txt` architecture settings, CI. Proof: `lipo -archs` lists both slices in every bundle, and every proof passes on each slice.
 
 Status: tasks 1, 2, 4, 5, 6, 7 and 8 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls; 8: every format builds universal and every proof passes on both slices, x86_64 under Rosetta) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
+
+Remaining 1.0 work, open:
+
+- **API documentation** (task 3): `missing_docs` on every public item, compiled doc examples, docs.rs metadata.
+- **The API freeze**, applied from the decisions in [API_REVIEW.md](API_REVIEW.md): renames, hidden items and removals as decided there.
+- **Identity pinning** (porting toolkit task 2): every ID a host stores set explicitly.
+- **Track info in LV2, the Audio Unit and AAX**, which today reaches only CLAP and VST3.
+- **CLAP `voice-info` and `NOTE_END`**, so a CLAP host knows the voice count and when a note ends.
+- **The Audio Unit's `SupportsMPE`**, so an AU host knows the plugin takes MPE.
+- **The shell follow-ups**: the shells read a renamed parameter table, and the Audio Unit and AAX bypass delay follows a run-time latency change.
+- **Porting scaffolding and guides** (porting toolkit tasks 5 and 8).
+- **No C++ runtime dependency on Windows**: the shells link the C and C++ runtime statically, so no VC++ redistributable is needed.
 
 The freeze itself and the crates.io publish are the owner's decisions.
 
