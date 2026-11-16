@@ -24,3 +24,4 @@ serde_json = "1"
 [dev-dependencies]
 openplugin-ffi = { workspace = true }
 example-editor = { path = "../../examples/editor" }
+example-pinned = { path = "../../examples/pinned" }

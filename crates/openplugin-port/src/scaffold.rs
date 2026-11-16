@@ -191,8 +191,8 @@ fn readme(m: &Manifest, name: &str) -> String {
     let _ = writeln!(s);
     let _ = writeln!(s, "| File | What it holds |");
     let _ = writeln!(s, "|---|---|");
-    let _ = writeln!(s, "| `src/params.rs` | The parameter table and `PluginInfo` inferred from the scan, with every guess explained, and the identity the SDK cannot pin yet as `TODO(porting task 2)` lines. |");
-    let _ = writeln!(s, "| `src/lib.rs` | The plugin: parameter storage, state, identity, and a `process` that passes the input through until the DSP is written. |");
+    let _ = writeln!(s, "| `src/params.rs` | The parameter table and `PluginInfo` inferred from the scan, with every guess explained; each parameter is pinned to the original's id where that is not its position (`openplugin::core::identity`). |");
+    let _ = writeln!(s, "| `src/lib.rs` | The plugin: parameter storage, state, the original's VST3 class ids and Audio Unit and AAX codes where the scan read them, and a `process` that passes the input through until the DSP is written. |");
     let _ = writeln!(s, "| `src/state_import.rs` | The stub that reads the original's saved state (`openplugin_core::foreign_state`), with the map from the original's parameter ids to the port's. |");
     let _ = writeln!(s, "| `tests/null.rs` | The null test: renders the original and this port through the same input with `openplugin-port null` and fails when they differ. |");
     let _ = writeln!(s);
@@ -305,6 +305,39 @@ fn lib_rs(m: &Manifest, ty: &str) -> String {
         Layouts::NoBuses => {}
     }
     let _ = writeln!(s);
+    // ----- identity pins (openplugin::core::identity) -----
+    // The CLAP id is PluginInfo::id and the parameter ids are pinned in the
+    // table (src/params.rs); the class ids and codes are Plugin methods.
+    match &p.ids.vst3 {
+        Some(v) => {
+            let _ = writeln!(s, "    // The original's VST3 class ids: a VST3 host finds the plugin in a project by the processor's.");
+            if v.controller_class_id.is_none() {
+                let _ = writeln!(s, "    // The original is a single-component VST3; the controller's id stays derived from PluginInfo::id.");
+            }
+            let _ = writeln!(s, "    fn vst3_ids(&self) -> Option<Vst3Ids> {{");
+            let _ = writeln!(s, "        {}", snippet::vst3_ids_expr(v));
+            let _ = writeln!(s, "    }}");
+        }
+        None => {
+            let _ = writeln!(s, "    // TODO(porting): no VST3 class ids in the scan. If the original ships as VST3, scan its .vst3 and pin them with `fn vst3_ids`.");
+        }
+    }
+    let _ = writeln!(s);
+    match snippet::au_ids_expr(p) {
+        Some(expr) => {
+            let _ = writeln!(s, "    // The original's Audio Unit subtype and manufacturer codes.");
+            let _ = writeln!(s, "    fn au_ids(&self) -> Option<AuIds> {{");
+            let _ = writeln!(s, "        {expr}");
+            let _ = writeln!(s, "    }}");
+        }
+        None if p.ids.au.is_some() => {
+            let _ = writeln!(s, "    // TODO(porting): the original's Audio Unit codes are not four printable characters each (see src/params.rs); pass them to the build by hand.");
+        }
+        None => {
+            let _ = writeln!(s, "    // TODO(porting): no Audio Unit codes in the scan. If the original ships as an Audio Unit, scan its .component and pin them with `fn au_ids`.");
+        }
+    }
+    let _ = writeln!(s);
     match snippet::aax_ids_expr(p) {
         Some(expr) => {
             let _ = writeln!(s, "    // The original's AAX ids, from its bundle (the first two plug-in types as mono and stereo: check the page table).");
@@ -365,6 +398,22 @@ fn lib_rs(m: &Manifest, ty: &str) -> String {
     let _ = writeln!(s, "        let mut b = {ty}::default();");
     let _ = writeln!(s, "        assert!(b.load_state(&blob));");
     let _ = writeln!(s, "        assert_eq!(a.values(), b.values());");
+    let _ = writeln!(s, "    }}");
+    let _ = writeln!(s);
+    let _ = writeln!(s, "    #[test]");
+    let _ = writeln!(s, "    fn every_pin_is_usable() {{");
+    let _ = writeln!(s, "        let plugin = {ty}::default();");
+    let _ = writeln!(s, "        let errors = openplugin::core::identity::check_pins(&plugin);");
+    let _ = writeln!(s, "        assert!(errors.is_empty(), \"{{errors:?}}\");");
+    if p.ids.vst3.is_some() {
+        let _ = writeln!(s, "        assert!(plugin.vst3_ids().is_some_and(|ids| ids.is_valid()), \"the VST3 class ids do not parse\");");
+    }
+    if snippet::au_ids_expr(p).is_some() {
+        let _ = writeln!(s, "        assert!(plugin.au_ids().is_some_and(|ids| ids.is_valid()));");
+    }
+    if snippet::aax_ids_expr(p).is_some() {
+        let _ = writeln!(s, "        assert!(plugin.aax_ids().is_some_and(|ids| ids.is_valid()));");
+    }
     let _ = writeln!(s, "    }}");
     let _ = writeln!(s);
     let _ = writeln!(s, "    #[test]");

@@ -456,6 +456,23 @@ pub fn aax_ids_expr(p: &Plugin) -> Option<String> {
     }
 }
 
+/// The expression for `Plugin::vst3_ids`: both class ids, or the processor's
+/// alone for a single-component source (its controller id stays derived).
+pub fn vst3_ids_expr(v: &Vst3Ids) -> String {
+    match &v.controller_class_id {
+        Some(c) => format!("Vst3Ids::from_hex({:?}, {c:?})", v.class_id),
+        None => format!("Vst3Ids::processor_from_hex({:?})", v.class_id),
+    }
+}
+
+/// The `Some(AuIds { .. })` expression for `Plugin::au_ids`, when the scan
+/// found a subtype and a manufacturer of four printable characters each.
+pub fn au_ids_expr(p: &Plugin) -> Option<String> {
+    let au = p.ids.au.as_ref()?;
+    let code = |x: &str| x.len() == 4 && x.bytes().all(|b| (0x21..0x7f).contains(&b));
+    (code(&au.subtype) && code(&au.manufacturer)).then(|| format!("Some(AuIds {{ subtype: *b{:?}, manufacturer: *b{:?} }})", au.subtype, au.manufacturer))
+}
+
 /// What the scan says about `Plugin::supported_layouts`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Layouts {
@@ -594,12 +611,11 @@ pub fn render(m: &Manifest) -> String {
         let _ = write!(args, " --bundle-id {prefix:?}");
     }
     if let Some(au) = &ids.au {
-        let codes = au.subtype.len() == 4 && au.manufacturer.len() == 4 && au.subtype.is_ascii() && au.manufacturer.is_ascii();
-        if codes {
+        if let Some(expr) = au_ids_expr(p) {
             let _ = writeln!(s, "// Audio Unit codes, pinned in the Plugin impl (the shell build reads them; --au-subtype and");
             let _ = writeln!(s, "// --au-manufacturer are then left out, or must say the same):");
             let _ = writeln!(s, "//   fn au_ids(&self) -> Option<AuIds> {{");
-            let _ = writeln!(s, "//       Some(AuIds {{ subtype: *b{:?}, manufacturer: *b{:?} }})", au.subtype, au.manufacturer);
+            let _ = writeln!(s, "//       {expr}");
             let _ = writeln!(s, "//   }}");
         } else {
             let _ = write!(args, " --au-subtype {} --au-manufacturer {}", au.subtype, au.manufacturer);
@@ -641,14 +657,11 @@ pub fn render(m: &Manifest) -> String {
     if let Some(v) = &ids.vst3 {
         let _ = writeln!(s, "// VST3 class ids, in the Plugin impl: a host finds the plugin in a project by the processor's.");
         let _ = writeln!(s, "//   fn vst3_ids(&self) -> Option<Vst3Ids> {{");
+        let _ = writeln!(s, "//       {}", vst3_ids_expr(v));
+        let _ = writeln!(s, "//   }}");
         match &v.controller_class_id {
-            Some(c) => {
-                let _ = writeln!(s, "//       Vst3Ids::from_hex({:?}, {c:?})", v.class_id);
-                let _ = writeln!(s, "//   }}");
-            }
+            Some(_) => {}
             None => {
-                let _ = writeln!(s, "//       Vst3Ids::processor_from_hex({:?})", v.class_id);
-                let _ = writeln!(s, "//   }}");
                 let _ = writeln!(s, "// The source is a single-component VST3 (no separate controller class); the SDK always writes two classes,");
                 let _ = writeln!(s, "// and the controller's id stays derived from PluginInfo::id.");
             }
