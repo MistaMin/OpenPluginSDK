@@ -66,7 +66,9 @@
 //! false: add the audio input to the output, `y = net(x) + x`), `layers`
 //! (at least one; sizes must chain; the last layer outputs exactly 1 value).
 //! Limits: every size at most 512, a conv1d kernel at most 64 and dilation at
-//! most 4096, at most 4 million weights in total, the text at most 64 MiB.
+//! most 4096, at most 256 layers, at most 4 million weights in total (the
+//! history a conv1d layer keeps, `((kernel - 1) * dilation + 1) * in` values,
+//! counts as weights), the text at most 64 MiB.
 //! Exporters should write `f32` values with the shortest round-trip text.
 //!
 //! # Sample rate
@@ -109,7 +111,8 @@
 //! Matrix-vector products use contiguous rows and eight independent
 //! accumulators so the compiler can vectorise them (`docs/PERFORMANCE.md`).
 //! Recurrent states and the output are flushed to zero below 1e-30, so
-//! decaying states never reach denormals.
+//! decaying states never reach denormals. A recurrent state that overflows
+//! (one huge input sample) is zeroed too, so the model recovers.
 //!
 //! A model with non-zero biases outputs a (usually tiny) DC level for silent
 //! input, as the trained amp does; zero biases give silence for silence.
@@ -118,8 +121,10 @@ use std::fmt;
 
 /// Largest layer width accepted.
 pub const MAX_SIZE: usize = 512;
-/// Largest total number of weights accepted.
+/// Largest total number of weights accepted; conv1d history values count too.
 pub const MAX_WEIGHTS: usize = 4_000_000;
+/// Largest number of layers accepted.
+pub const MAX_LAYERS: usize = 256;
 /// Largest conv1d kernel.
 pub const MAX_KERNEL: usize = 64;
 /// Largest conv1d dilation.
@@ -226,13 +231,14 @@ fn tanh_fast(x: f32) -> f32 {
     num / den
 }
 
-/// Zero values too small to matter (below 1e-30), so state never goes denormal.
+/// Zero values too small to matter (below 1e-30), so state never goes
+/// denormal, and non-finite ones, so state never stays NaN.
 #[inline(always)]
 fn flush(x: f32) -> f32 {
-    if x.abs() < 1e-30 {
-        0.0
-    } else {
+    if x.is_finite() && x.abs() >= 1e-30 {
         x
+    } else {
+        0.0
     }
 }
 
@@ -606,12 +612,13 @@ impl Layer {
         }
     }
 
+    /// Weights plus conv history: what the layer costs in memory.
     fn weight_count(&self) -> usize {
         match self {
             Self::Dense(l) => l.w.len() + l.b.len(),
             Self::Gru(l) => l.wx.len() + l.wh.len() + l.b.len(),
             Self::Lstm(l) => l.wx.len() + l.wh.len() + l.b.len(),
-            Self::Conv1d(l) => l.w.len() + l.b.len(),
+            Self::Conv1d(l) => l.w.len() + l.b.len() + l.hist.len(),
         }
     }
 
@@ -651,7 +658,8 @@ pub struct Model {
 impl Model {
     /// Build from layers. The first layer must take `input_size` values, each
     /// layer's output must match the next layer's input, and the last layer
-    /// must output exactly one value.
+    /// must output exactly one value. At most [`MAX_LAYERS`] layers and
+    /// [`MAX_WEIGHTS`] weights.
     pub fn new(
         input_size: usize,
         sample_rate: f32,
@@ -668,6 +676,13 @@ impl Model {
         }
         if layers.is_empty() {
             return Err(ModelError::Chain("no layers".into()));
+        }
+        if layers.len() > MAX_LAYERS {
+            return Err(ModelError::Size(format!("{} layers (limit {MAX_LAYERS})", layers.len())));
+        }
+        let total = layers.iter().fold(0usize, |t, l| t.saturating_add(l.weight_count()));
+        if total > MAX_WEIGHTS {
+            return Err(ModelError::Size(format!("more than {MAX_WEIGHTS} weights")));
         }
         let mut width = input_size;
         for (k, l) in layers.iter().enumerate() {
@@ -699,6 +714,12 @@ impl Model {
     pub fn from_json(text: &str) -> Result<Self, ModelError> {
         if text.len() > MAX_JSON_BYTES {
             return Err(ModelError::Json(format!("{} bytes (limit {MAX_JSON_BYTES})", text.len())));
+        }
+        // Every parsed array element costs memory, wanted or not: refuse more
+        // than a model can hold (its weights and a few fields a layer) unparsed.
+        let commas = text.bytes().filter(|&b| b == b',').count();
+        if commas > MAX_WEIGHTS + 16 * MAX_LAYERS {
+            return Err(ModelError::Json(format!("{commas} values (limit {MAX_WEIGHTS})")));
         }
         let v: serde_json::Value =
             serde_json::from_str(text).map_err(|e| ModelError::Json(e.to_string()))?;

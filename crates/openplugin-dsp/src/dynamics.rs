@@ -59,7 +59,10 @@ impl Compressor {
             for ch in 0..num_channels {
                 if let Some(c) = io.get(ch) {
                     if let Some(&s) = c.get(i) {
-                        max_abs = max_abs.max(s.abs());
+                        // An infinite sample would leave the envelope NaN for good.
+                        if s.is_finite() {
+                            max_abs = max_abs.max(s.abs());
+                        }
                     }
                 }
             }
@@ -95,5 +98,26 @@ impl Compressor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_infinite_sample_does_not_stop_the_compressor() {
+        let mut c = Compressor::new();
+        c.set_sample_rate(48_000.0);
+        let run = |c: &mut Compressor, first: f32| {
+            let mut io = vec![vec![1.0_f32; 48_000]];
+            io[0][0] = first;
+            c.process_block(&mut io, 48_000, -30.0, 4.0, 5.0, 50.0, 0.0, 0.0);
+            c.current_gain_reduction_db()
+        };
+        let before = run(&mut c, 1.0);
+        assert!(before > 10.0, "{before}");
+        let after = run(&mut c, f32::INFINITY);
+        assert!((after - before).abs() < 0.01, "{after} after +inf, {before} before");
     }
 }

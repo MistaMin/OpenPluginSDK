@@ -146,8 +146,10 @@ impl DynamicEqParams {
             excess.max(0.0)
         };
         let slope = if self.ratio.is_infinite() { 1.0 } else { 1.0 - 1.0 / self.ratio };
-        let mag = (slope * over).clamp(0.0, self.range_db.abs());
-        mag.copysign(self.range_db)
+        // A NaN range is no dynamic gain (`clamp` panics on a NaN bound).
+        let range = if self.range_db.is_nan() { 0.0 } else { self.range_db };
+        let mag = (slope * over).clamp(0.0, range.abs());
+        mag.copysign(range)
     }
 
     /// Total gain in dB of the band for a steady detected level (the static
@@ -305,5 +307,17 @@ impl DynamicEqBand {
                 channels[c][i] = self.audio[c].process_sample(channels[c][i]);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nan_range_is_no_dynamic_gain() {
+        let p = DynamicEqParams { range_db: f32::NAN, ..Default::default() };
+        assert_eq!(p.static_delta_db(0.0), 0.0);
+        assert_eq!(p.static_gain_db(0.0), p.gain_db);
     }
 }

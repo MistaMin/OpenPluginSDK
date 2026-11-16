@@ -3,7 +3,7 @@
 //! Provides first-order Residual ADAA (ADAA1) and second-order ADAA (ADAA2)
 //! to suppress non-linear harmonic foldover without requiring extreme oversampling.
 
-use std::f32;
+use std::f32::consts::LN_2;
 
 /// First-order Residual ADAA processor.
 ///
@@ -42,8 +42,12 @@ impl ResidualAdaa1 {
     ///
     /// - `f(x) = tanh(k*x)`
     /// - Antiderivative `F(x) = ln(cosh(k*x)) / k`
+    ///
+    /// A non-finite `x` or `k` is treated as 0.
     #[inline]
     pub fn process_tanh(&mut self, x: f32, k: f32) -> f32 {
+        let x = if x.is_finite() { x } else { 0.0 };
+        let k = if k.is_finite() { k } else { 0.0 };
         let slope = k; // small-signal slope at x=0
         let delta = x - self.x_prev;
 
@@ -57,8 +61,8 @@ impl ResidualAdaa1 {
         let r_curr = (k * x).tanh() - lin_in;
         let r_prev = (k * self.x_prev).tanh() - slope * self.x_prev;
 
-        let mean_r = if delta.abs() <= 1e-5 {
-            // Small-step fallback to avoid 0/0 division
+        let mean_r = if delta.abs() <= 1e-5 || k == 0.0 {
+            // Small-step (and zero-gain) fallback to avoid 0/0 division
             r_curr
         } else {
             let f_curr = log_cosh(k * x) / k;
@@ -90,8 +94,10 @@ impl ResidualAdaa1 {
 
     /// Evaluates ADAA1 on a polynomial soft saturator:
     /// `f(x) = x - x^3 / 6.75` for `|x| <= 1.5`, clamped to `±1.0` outside.
+    /// A non-finite `x` is treated as 0.
     #[inline]
     pub fn process_soft_clip(&mut self, x: f32) -> f32 {
+        let x = if x.is_finite() { x } else { 0.0 };
         let delta = x - self.x_prev;
         let y = if delta.abs() <= 1e-5 {
             soft_clip_f(x)
@@ -112,7 +118,7 @@ pub fn log_cosh(x: f32) -> f32 {
     if ax < 1e-4 {
         0.5 * x * x
     } else if ax > 12.0 {
-        ax - f32::consts::LN_2
+        ax - LN_2
     } else {
         x.cosh().ln()
     }
@@ -162,12 +168,14 @@ impl Adaa2Taylor {
         self.x2 = 0.0;
     }
 
-    /// Evaluates ADAA2 for a hard-clipping stage (-1.0 .. +1.0).
+    /// Evaluates ADAA2 for the cubic soft clipper `1.5u - 0.5u^3` for
+    /// `|u| <= 1`, `±1` outside (the name is historical: it is not a hard
+    /// clip). The output stays within ±1.
     #[inline]
     pub fn process_hard_clip(&mut self, x: f32) -> f32 {
-        let a = x;
-        let b = self.x1;
-        let c = self.x2;
+        let a = f64::from(x);
+        let b = f64::from(self.x1);
+        let c = f64::from(self.x2);
 
         let j_ab = evaluate_j(a, b);
         let j_cb = evaluate_j(c, b);
@@ -175,12 +183,12 @@ impl Adaa2Taylor {
         self.x2 = self.x1;
         self.x1 = x;
 
-        j_ab + j_cb
+        (j_ab + j_cb) as f32
     }
 }
 
 #[inline]
-fn q1_clip(u: f32) -> f32 {
+fn q1_clip(u: f64) -> f64 {
     let au = u.abs();
     if au <= 1.0 {
         0.75 * u * u - 0.125 * u.powi(4)
@@ -190,7 +198,7 @@ fn q1_clip(u: f32) -> f32 {
 }
 
 #[inline]
-fn q2_clip(u: f32) -> f32 {
+fn q2_clip(u: f64) -> f64 {
     let au = u.abs();
     if au <= 1.0 {
         0.25 * u.powi(3) - 0.025 * u.powi(5)
@@ -199,8 +207,9 @@ fn q2_clip(u: f32) -> f32 {
     }
 }
 
+// In f64: the divided difference loses its digits in f32 once |d| is below about 1e-2.
 #[inline]
-fn evaluate_j(a: f32, b: f32) -> f32 {
+fn evaluate_j(a: f64, b: f64) -> f64 {
     let d = a - b;
     if d.abs() < 1e-4 {
         // Taylor expansion about b to eliminate 0/0 cancellation
@@ -241,5 +250,40 @@ mod tests {
         let y2 = adaa2.process_hard_clip(1.5);
         assert!(!y1.is_nan());
         assert!(!y2.is_nan());
+    }
+
+    #[test]
+    fn adaa1_recovers_from_nan() {
+        let fresh = ResidualAdaa1::new().process_tanh(0.1, 2.0);
+        let mut a = ResidualAdaa1::new();
+        a.process_tanh(f32::NAN, 2.0);
+        a.process_tanh(f32::NAN, 2.0);
+        assert_eq!(a.process_tanh(0.1, 2.0), fresh);
+        for k in [f32::NAN, f32::INFINITY, 0.0] {
+            assert!(a.process_tanh(0.2, k).is_finite());
+            assert!(a.process_tanh(0.3, 2.0).is_finite());
+        }
+
+        let fresh = ResidualAdaa1::new().process_soft_clip(0.1);
+        let mut a = ResidualAdaa1::new();
+        a.process_soft_clip(f32::NAN);
+        a.process_soft_clip(f32::INFINITY);
+        assert_eq!(a.process_soft_clip(0.1), fresh);
+    }
+
+    #[test]
+    fn adaa2_stays_inside_the_clip_level_on_slow_sines() {
+        for rate in [48_000.0_f64, 96_000.0, 192_000.0] {
+            for freq in [50.0, 100.0, 440.0] {
+                for amp in [0.9, 2.0] {
+                    let mut adaa2 = Adaa2Taylor::new();
+                    for n in 0..rate as usize {
+                        let x = amp * (std::f64::consts::TAU * freq * n as f64 / rate).sin();
+                        let y = adaa2.process_hard_clip(x as f32);
+                        assert!(y.abs() <= 1.0, "{y} at {freq} Hz, {rate} Hz, amplitude {amp}");
+                    }
+                }
+            }
+        }
     }
 }

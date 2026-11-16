@@ -41,8 +41,11 @@ impl VuMeter {
     pub fn process_samples(&mut self, samples: &[f32]) -> f32 {
         let coef = (-1.0 / (0.300 * self.sample_rate)).exp();
         for &s in samples {
-            let rect = s.abs();
-            self.envelope = rect + coef * (self.envelope - rect);
+            // A non-finite sample would leave the envelope NaN for good.
+            if s.is_finite() {
+                let rect = s.abs();
+                self.envelope = rect + coef * (self.envelope - rect);
+            }
         }
         self.envelope
     }
@@ -54,6 +57,21 @@ impl VuMeter {
         } else {
             20.0 * self.envelope.log10()
         }
+    }
+}
+
+#[cfg(test)]
+mod vu_meter_tests {
+    use super::*;
+
+    #[test]
+    fn non_finite_samples_do_not_latch() {
+        let mut m = VuMeter::new();
+        m.process_samples(&[0.5, f32::NAN, f32::INFINITY, 0.5]);
+        assert!(m.level_db().is_finite());
+        let mut clean = VuMeter::new();
+        clean.process_samples(&[0.5, 0.5]);
+        assert_eq!(m.level_db(), clean.level_db());
     }
 }
 
