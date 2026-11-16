@@ -295,6 +295,121 @@ jobs:
           cargo test -p openplugin-port --no-fail-fast
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
+  # The VST3 shell on Linux (native/cmake/linux.cmake, native/vst3/linux): the same
+  # proofs as the macOS vst3-shell job, built with GCC, then Steinberg's own
+  # validator on the module. The editor proof runs too: Xvfb gives the runner an X
+  # display, and the proof is the host whose run loop drives the view. Last, the
+  # Linux packager builds the example as a VST3 bundle and the validator takes that.
+  vst3-shell-linux:
+    name: VST3 shell proofs on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # VST3 SDK v3.8.0_build_66, as in the vst3-shell job.
+      VST3_SDK_REF: v3.8.0_build_66
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Check out the public VST3 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: steinbergmedia/vst3sdk
+          ref: ${{ env.VST3_SDK_REF }}
+          submodules: recursive
+          path: vst3sdk
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      # Xvfb for the editor proof, libxcb's headers for the proof's own X client.
+      - name: Install Xvfb and libxcb
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxcb1-dev
+          command -v xvfb-run
+      # The proofs load the example ("Example Gain"); the role proof loads Role Tags and
+      # the per-note expression proof Expression Synth, found next to it.
+      - name: Build the example, Role Tags and Expression Synth as static libraries
+        working-directory: OpenPluginSDK
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+      - name: Configure the VST3 shell
+        working-directory: OpenPluginSDK
+        run: |
+          cmake -S native -B build-shell -DCMAKE_BUILD_TYPE=Release \
+            -DOP_RUST_LIB="$PWD/target/release/libexample_editor.a" \
+            -DOP_VST3_SDK="$GITHUB_WORKSPACE/vst3sdk" \
+            -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
+            -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid \
+            -DOP_TAIL=ON -DOP_EDITOR=OFF
+      - name: Build the VST3 shell and its proofs
+        working-directory: OpenPluginSDK
+        run: cmake --build build-shell -j 4
+      # The twelve vst3_* proofs. vst3_noalloc_events_proof prepares a point per
+      # sample for 2081 parameters and takes a while.
+      - name: Run the VST3 proofs
+        working-directory: OpenPluginSDK
+        run: ctest --test-dir build-shell --output-on-failure
+      # The validator of the VST3 SDK itself, built from the same checkout, on the
+      # three modules that hold a real plugin. It prints "N tests passed, M tests
+      # failed" and exits non-zero when one fails; the count is checked as well, so
+      # a run that tested nothing does not pass.
+      - name: Steinberg's validator on the modules
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          cmake --build build-shell -j 4 --target validator
+          VALIDATOR="$(find build-shell -type f -name validator -perm -u+x | head -1)"
+          test -n "$VALIDATOR"
+          for module in "Example Gain" "Expression Synth" "Role Tags"; do
+            "$VALIDATOR" "$PWD/build-shell/$module.vst3" | tee "$RUNNER_TEMP/validator.log"
+            grep -Eq "Result: [1-9][0-9]* tests passed, 0 tests failed" "$RUNNER_TEMP/validator.log"
+          done
+      # The same shell with the editor (-DOP_EDITOR=ON), in a build folder of its own.
+      # vst3_editor_proof opens the X11 view in a window on Xvfb's display.
+      # -noreset: see the linux-editor job.
+      - name: Build the VST3 shell with the editor
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          cmake -S native -B build-shell-editor -DCMAKE_BUILD_TYPE=Release \
+            -DOP_RUST_LIB="$PWD/target/release/libexample_editor.a" \
+            -DOP_VST3_SDK="$GITHUB_WORKSPACE/vst3sdk" \
+            -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
+            -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid \
+            -DOP_TAIL=ON -DOP_EDITOR=ON "-DOP_EDITOR_PROOF_CLICK=135;68;1"
+          cmake --build build-shell-editor -j 4
+      - name: Run the VST3 proofs with the editor on Xvfb
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" \
+            ctest --test-dir build-shell-editor --output-on-failure
+      # scripts/build_plugin_linux.sh on examples/editor: the VST3 bundle a user
+      # would ship, with the editor, stripped, checked by the script (exports,
+      # linked libraries, no build path), then by the validator with its
+      # extensive tests.
+      - name: Package the example as a VST3 bundle and validate it
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          scripts/build_plugin_linux.sh \
+            --manifest-path examples/editor/Cargo.toml \
+            --name "Example Gain" --version 0.3.1 --manufacturer OpenGrid \
+            --formats vst3 --vst3-sdk "$GITHUB_WORKSPACE/vst3sdk" \
+            --editor --tail --strip \
+            --out "$RUNNER_TEMP/linux-vst3" --work-dir "$RUNNER_TEMP/linux-vst3-build"
+          VALIDATOR="$(find build-shell -type f -name validator -perm -u+x | head -1)"
+          xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" \
+            "$VALIDATOR" -e "$RUNNER_TEMP/linux-vst3/Example Gain.vst3" | tee "$RUNNER_TEMP/validator.log"
+          grep -Eq "Result: [1-9][0-9]* tests passed, 0 tests failed" "$RUNNER_TEMP/validator.log"
+
   # The minimum Rust version on Windows: the Windows-only code (cfg(windows))
   # must build with 1.85 too, which the macOS msrv job cannot see.
   msrv-windows:
