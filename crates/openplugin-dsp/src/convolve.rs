@@ -4,15 +4,22 @@
 //! butterflies use Neon on Apple Silicon. The inverse transform is divided by
 //! 2048 here. `rustfft` leaves that scale to the caller.
 //!
+//! A call shorter than [`DIRECT_BELOW`] samples convolves directly against a
+//! time-domain copy of the impulse instead, because the two transforms cost the
+//! same whatever the call length: per-sample or split-block calls stay cheap.
+//!
 //! `new` and `set_kernel` allocate. `process` does not.
 
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
+use crate::simd::Kernels;
 use std::sync::Arc;
 
 const FFT: usize = 2048;
 const IMPULSE: usize = 1024;
 const SCALE: f32 = 1.0 / FFT as f32;
+/// Calls shorter than this run the direct form (measured crossover, Apple Silicon, 1024 taps).
+const DIRECT_BELOW: usize = 48;
 
 impl std::fmt::Debug for BlockConvolver {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -35,6 +42,11 @@ pub struct BlockConvolver {
     forward: Arc<dyn Fft<f32>>,
     inverse: Arc<dyn Fft<f32>>,
     kernel: Vec<Complex<f32>>,
+    /// The impulse reversed, for the direct form.
+    taps_rev: Vec<f32>,
+    /// Impulse-length history then the call's samples, for the direct form.
+    line: Vec<f32>,
+    kernels: Kernels,
     channels: Vec<Channel>,
     scratch: Vec<Complex<f32>>,
 }
@@ -57,6 +69,9 @@ impl BlockConvolver {
             forward,
             inverse,
             kernel: vec![Complex::default(); FFT],
+            taps_rev: Vec::new(),
+            line: vec![0.0; IMPULSE + DIRECT_BELOW],
+            kernels: Kernels::detect(),
             channels,
             scratch: vec![Complex::default(); scratch_len],
         }
@@ -80,6 +95,7 @@ impl BlockConvolver {
         for (index, coeff) in fir.iter().take(IMPULSE).enumerate() {
             self.kernel[index].re = *coeff;
         }
+        self.taps_rev = fir.iter().take(IMPULSE).rev().copied().collect();
         self.forward
             .process_with_scratch(&mut self.kernel, &mut self.scratch);
     }
@@ -92,9 +108,25 @@ impl BlockConvolver {
         let mut offset = 0;
         while offset < samples.len() {
             let count = (samples.len() - offset).min(IMPULSE);
-            self.chunk(channel, &mut samples[offset..offset + count]);
+            if count < DIRECT_BELOW {
+                self.direct(channel, &mut samples[offset..offset + count]);
+            } else {
+                self.chunk(channel, &mut samples[offset..offset + count]);
+            }
             offset += count;
         }
+    }
+
+    fn direct(&mut self, channel: usize, samples: &mut [f32]) {
+        let count = samples.len();
+        let state = &mut self.channels[channel];
+        let history = self.taps_rev.len().saturating_sub(1);
+        self.line[..IMPULSE].copy_from_slice(&state.overlap);
+        self.line[IMPULSE..IMPULSE + count].copy_from_slice(samples);
+        state.overlap.copy_within(count..IMPULSE, 0);
+        state.overlap[IMPULSE - count..].copy_from_slice(samples);
+        let x = &self.line[IMPULSE - history..IMPULSE + count];
+        self.kernels.fir(samples, x, &self.taps_rev);
     }
 
     fn chunk(&mut self, channel: usize, samples: &mut [f32]) {
@@ -190,5 +222,32 @@ mod tests {
             worst = worst.max((got - want).abs());
         }
         assert!(worst < 2.0e-4, "overlap-save drifted by {worst}");
+    }
+
+    #[test]
+    fn short_calls_take_the_direct_form_and_agree() {
+        let fir: Vec<f32> = (0..1024).map(|i| ((i * 37 % 101) as f32 - 50.0) * 1e-3).collect();
+        let input: Vec<f32> = (0..6000).map(|i| (i as f32 * 0.31).sin() * 0.7).collect();
+        let expected = direct(&fir, &input);
+        let mut convolver = BlockConvolver::new(1);
+        convolver.set_kernel(&fir);
+        let mut blocks = input.clone();
+        // Mixed short (direct) and long (FFT) calls share one history.
+        let sizes = [1, 16, 47, 48, 1, 1024, 3, 600, 2000];
+        let (mut offset, mut i) = (0, 0);
+        while offset < blocks.len() {
+            let end = (offset + sizes[i % sizes.len()]).min(blocks.len());
+            convolver.process(0, &mut blocks[offset..end]);
+            offset = end;
+            i += 1;
+        }
+        let worst = blocks.iter().zip(&expected).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+        assert!(worst < 2.0e-4, "direct and overlap-save disagree by {worst}");
+        // A short kernel: the direct form only reads the history it needs.
+        let mut short = BlockConvolver::new(1);
+        short.set_kernel(&[0.5, -0.25]);
+        let mut x = [1.0, 0.0, 0.0];
+        short.process(0, &mut x);
+        assert_eq!(x, [0.5, -0.25, 0.0]);
     }
 }

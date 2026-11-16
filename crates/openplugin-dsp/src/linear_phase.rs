@@ -23,8 +23,15 @@ pub struct LinearPhaseOversampler {
     channels: usize,
     max_block: usize,
     taps: Vec<f64>,
+    /// `phases[p]` = `taps[p], taps[p + factor], ...` times `factor`: the up
+    /// side only meets the non-zero (every `factor`-th) samples of the stuffed signal.
+    phases: Vec<Vec<f64>>,
+    /// Base-rate input per channel, twice the polyphase length so the newest
+    /// `phases[0].len()` samples are one slice.
     up: Vec<Vec<f64>>,
+    /// Oversampled output per channel, twice the tap count, same layout.
     down: Vec<Vec<f64>>,
+    up_position: usize,
     position: usize,
     frame: Vec<f64>,
     frame_f32: Vec<f32>,
@@ -48,14 +55,24 @@ impl LinearPhaseOversampler {
             return Err(OversampleError::BlockSize);
         }
         let taps = coefficients(factor)?;
-        let rings = vec![vec![0.0; taps.len()]; channels];
+        let phases: Vec<Vec<f64>> = (0..factor)
+            .map(|phase| {
+                taps.iter()
+                    .skip(phase)
+                    .step_by(factor)
+                    .map(|tap| tap * factor as f64)
+                    .collect()
+            })
+            .collect();
         Ok(Self {
             factor,
             channels,
             max_block,
+            up: vec![vec![0.0; 2 * phases[0].len()]; channels],
+            down: vec![vec![0.0; 2 * taps.len()]; channels],
             taps,
-            up: rings.clone(),
-            down: rings,
+            phases,
+            up_position: 0,
             position: 0,
             frame: vec![0.0; channels],
             frame_f32: vec![0.0; channels],
@@ -80,6 +97,7 @@ impl LinearPhaseOversampler {
         }
         self.frame.fill(0.0);
         self.frame_f32.fill(0.0);
+        self.up_position = 0;
         self.position = 0;
     }
 
@@ -104,52 +122,60 @@ impl LinearPhaseOversampler {
         {
             return Err(OversampleError::BufferShape);
         }
+        if self.factor == 1 {
+            for index in 0..frames {
+                for (slot, source) in self.frame_f32.iter_mut().zip(input.iter()) {
+                    *slot = source[index];
+                }
+                processor(&mut self.frame_f32);
+                for (slot, dest) in self.frame_f32.iter().zip(output.iter_mut()) {
+                    dest[index] = *slot;
+                }
+            }
+            return Ok(());
+        }
+        let span = self.phases[0].len();
         let taps = self.taps.len();
         for index in 0..frames {
+            for (channel, source) in input.iter().enumerate() {
+                let ring = &mut self.up[channel];
+                let sample = f64::from(source[index]);
+                ring[self.up_position] = sample;
+                ring[self.up_position + span] = sample;
+            }
+            self.up_position = if self.up_position + 1 == span { 0 } else { self.up_position + 1 };
             for phase in 0..self.factor {
-                for (channel, source) in input.iter().enumerate() {
-                    if self.factor == 1 {
-                        self.frame[channel] = f64::from(source[index]);
-                    } else {
-                        self.up[channel][self.position] = if phase == 0 {
-                            f64::from(source[index]) * self.factor as f64
-                        } else {
-                            0.0
-                        };
-                        self.frame[channel] =
-                            convolve(&self.taps, &self.up[channel], self.position);
-                    }
+                for (channel, frame) in self.frame.iter_mut().enumerate() {
+                    let history = &self.up[channel][self.up_position..self.up_position + span];
+                    *frame = convolve(&self.phases[phase], history);
                 }
                 for (slot, sample) in self.frame_f32.iter_mut().zip(self.frame.iter()) {
                     *slot = *sample as f32;
                 }
                 processor(&mut self.frame_f32);
-                for (channel, sample) in self.frame.iter_mut().zip(self.frame_f32.iter()) {
-                    *channel = f64::from(*sample);
-                }
                 for (channel, dest) in output.iter_mut().enumerate() {
-                    if self.factor == 1 {
-                        dest[index] = self.frame[channel] as f32;
-                    } else {
-                        self.down[channel][self.position] = self.frame[channel];
-                        if phase == 0 {
-                            dest[index] =
-                                convolve(&self.taps, &self.down[channel], self.position) as f32;
-                        }
+                    let ring = &mut self.down[channel];
+                    let sample = f64::from(self.frame_f32[channel]);
+                    ring[self.position] = sample;
+                    ring[self.position + taps] = sample;
+                    if phase == 0 {
+                        let history = &ring[self.position + 1..self.position + 1 + taps];
+                        dest[index] = convolve(&self.taps, history) as f32;
                     }
                 }
-                self.position = (self.position + 1) % taps;
+                self.position = if self.position + 1 == taps { 0 } else { self.position + 1 };
             }
         }
         Ok(())
     }
 }
 
-fn convolve(taps: &[f64], ring: &[f64], position: usize) -> f64 {
+/// `sum taps[k] * x[n - k]`, with `history` oldest first and newest last; a
+/// shorter `taps` meets only the newest samples.
+fn convolve(taps: &[f64], history: &[f64]) -> f64 {
     let mut sum = 0.0;
-    for (k, tap) in taps.iter().enumerate() {
-        let index = (position + ring.len() - k) % ring.len();
-        sum += tap * ring[index];
+    for (tap, sample) in taps.iter().zip(history.iter().rev()) {
+        sum += tap * sample;
     }
     sum
 }
@@ -227,6 +253,59 @@ mod tests {
             assert_eq!(peak, oversampler.latency_samples());
             if factor != 1 {
                 assert_eq!(oversampler.latency_samples(), 64);
+            }
+        }
+    }
+
+    /// The direct form this module ran before the polyphase rewrite: every
+    /// tap against the zero-stuffed ring, with a modulo per tap.
+    fn reference(factor: usize, input: &[f32], drive: f32) -> Vec<f32> {
+        let taps = coefficients(factor).unwrap();
+        let n = taps.len();
+        let ring_sum = |ring: &[f64], position: usize| -> f64 {
+            taps.iter()
+                .enumerate()
+                .map(|(k, tap)| tap * ring[(position + n - k) % n])
+                .fold(0.0, |sum, term| sum + term)
+        };
+        let (mut up, mut down, mut position) = (vec![0.0; n], vec![0.0; n], 0);
+        let mut output = Vec::new();
+        for &x in input {
+            for phase in 0..factor {
+                up[position] = if phase == 0 { f64::from(x) * factor as f64 } else { 0.0 };
+                let y = (ring_sum(&up, position) as f32 * drive).tanh();
+                down[position] = f64::from(y);
+                if phase == 0 {
+                    output.push(ring_sum(&down, position) as f32);
+                }
+                position = (position + 1) % n;
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn polyphase_matches_the_direct_form() {
+        let input: Vec<f32> = (0..3000).map(|i| (i as f32 * 0.0731).sin() * 0.9).collect();
+        for factor in [2, 4] {
+            let want = reference(factor, &input, 3.0);
+            let mut oversampler = LinearPhaseOversampler::prepare(factor, 2, 700).unwrap();
+            let mut got = [vec![0.0f32; input.len()], vec![0.0f32; input.len()]];
+            for (start, end) in [(0, 1), (1, 700), (700, 1337), (1337, 2000), (2000, 2700), (2700, 3000)] {
+                let [left, right] = &mut got;
+                let chunk = &input[start..end];
+                oversampler
+                    .process(&[chunk, chunk], &mut [&mut left[start..end], &mut right[start..end]], |frame| {
+                        for sample in frame.iter_mut() {
+                            *sample = (*sample * 3.0).tanh();
+                        }
+                    })
+                    .unwrap();
+            }
+            // Same terms in the same order (the skipped ones are exact zeros), so the bound is 0.
+            for channel in &got {
+                let worst = channel.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+                assert!(worst <= 0.0, "factor {factor}: {worst}");
             }
         }
     }

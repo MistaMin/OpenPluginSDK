@@ -1275,7 +1275,7 @@ os.upsample_2x(&input, &mut doubled);       // same call shape as Oversampler2x
 os.downsample_2x(&doubled, &mut output);
 ```
 
-It is a new type; `Oversampler2x` is unchanged. The prototype (Kaiser, linear phase, asked for `2A + 10` dB) is spectrally factored into a minimum-phase filter of about half its length. Measured at 44.1 kHz base rate:
+`Oversampler2x` is this type designed at 0.45 fs and 80 dB. The prototype (Kaiser, linear phase, asked for `2A + 10` dB) is spectrally factored into a minimum-phase filter of about half its length. Measured at 44.1 kHz base rate:
 
 | passband edge / rejection | taps (at 2x) | stopband (24.1 kHz and up) | passband ripple | group delay, DC to edge (base samples) | linear-phase equivalent |
 | --- | --- | --- | --- | --- | --- |
