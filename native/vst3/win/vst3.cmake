@@ -36,6 +36,22 @@ set(SMTG_CREATE_PLUGIN_LINK OFF CACHE BOOL "" FORCE)
 set(SMTG_RUN_VST_VALIDATOR OFF CACHE BOOL "" FORCE)
 set(SMTG_CREATE_MODULE_INFO OFF CACHE BOOL "" FORCE)
 add_subdirectory("${OP_VST3_SDK}" vst3-sdk EXCLUDE_FROM_ALL)
+# The SDK's own CMake names the C runtime per configuration (/MDd for Debug). Its
+# libraries are linked into the shells, which use the release runtime in every
+# configuration (native/cmake/windows.cmake), so that choice is taken off them.
+foreach(sdk_target IN ITEMS base pluginterfaces sdk sdk_common sdk_hosting)
+  if(TARGET ${sdk_target})
+    get_target_property(sdk_options ${sdk_target} COMPILE_OPTIONS)
+    if(sdk_options)
+      list(FILTER sdk_options EXCLUDE REGEX "/M[DT]d?>$")
+      set_property(TARGET ${sdk_target} PROPERTY COMPILE_OPTIONS "${sdk_options}")
+    endif()
+    get_target_property(sdk_type ${sdk_target} TYPE)
+    if(NOT sdk_type STREQUAL "INTERFACE_LIBRARY")
+      set_property(TARGET ${sdk_target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    endif()
+  endif()
+endforeach()
 
 # UNICODE: dllmain.cpp reads the module path as wide characters. _USE_MATH_DEFINES:
 # the proofs use M_PI. The sources are UTF-8 and carry text outside ASCII.

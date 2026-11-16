@@ -230,7 +230,7 @@ ctest --test-dir build-shell -C Release --output-on-failure
 ```
 
 - **Quote each `-D`.** PowerShell splits an unquoted `-DOP_VERSION=0.3.1` at the first dot, and CMake then reads `.3.1` as a path.
-- **Release only.** The Rust library is built against the release C runtime, so the shells are built as `Release` (or `RelWithDebInfo`). A `Debug` build mixes two C runtimes.
+- **Release and Debug.** `--config Release` is what ships. `--config Debug` (with `ctest -C Debug`) builds and passes the same proofs: unoptimized C++ with debug information and the SDKs' own checks, for stepping through a shell. Every configuration links the release C runtime (`/MD`), Debug included, because the Rust library is built against it and Rust has no build against the debug runtime; one process cannot mix the two. So a Debug shell has no debug heap and no checked iterators, and it links the same `target\release\<name>.lib` as Release. The VST3 SDK's own CMake asks for `/MDd` in Debug; `native/vst3/win/vst3.cmake` takes that off the SDK's libraries. The bundles in the build folder are those of the configuration built last.
 - **One format.** `-DOP_BUILD_AAX=OFF` or `-DOP_BUILD_VST3=OFF` leaves a format out, and its SDK is then not needed. The AAX shell wants AAX SDK 2.8.1: with 2.10 two of the proofs do not build.
 - **System libraries.** `OP_RUST_NATIVE_LIBS` lists what the Rust library links (`user32`, `gdi32`, `shell32`, `comdlg32`, `comctl32` and the ones `std` needs). When a plugin needs more, take the list from `cargo rustc --release --lib -p <crate> --crate-type staticlib -- --print native-static-libs`. It is a cache variable: a build folder configured earlier keeps its old list until it is given again or removed with `-UOP_RUST_NATIVE_LIBS`.
 - **`-DOP_EDITOR=ON`** makes the shells host the plugin's editor (`native/include/op_editor_win.h`). The stand-in plugins have no editor, so, as on macOS, that build has fewer proofs and adds `vst3_editor_proof`, which opens real windows and needs a desktop session (`scripts\windows\run_in_desktop.ps1` from SSH).
@@ -257,10 +257,11 @@ On 16 November 2026, on Windows 11 x64 (Rust 1.100.0 MSVC, MSVC 14.51, CMake 4.4
 - pluginval 1.0.4, `--strictness-level 10`, on the VST3 bundle: `SUCCESS` without the editor (`--skip-gui-tests`, over SSH) and with the editor and pluginval's editor tests (in the desktop session).
 - `openplugin-port scan` and the port's VST3 fixture tests (`OPENPLUGIN_PORT_FIXTURES` at the build folder): the scan reproduces the example's parameters, buses and class ids; capture and null tests pass, the latency one against `Latency Stub.vst3`.
 - REAPER 7.80 with a configuration of its own (`-cfgfile`, `-newinst`) and `scripts/host_smoke/reaper_smoke.lua` unchanged: the VST3 is found and inserted, Gain reads in dB, offline renders have the expected peaks (0.2500 at 0 dB, 0.4988 at +6 dB, 0.0628 at -12 dB, 0.9953 at +12 dB, 0.7596 with Warm on), state and a Gain envelope survive save and reopen, and the plug-in's own editor opens in REAPER's window, twice.
+- `ctest -C Debug` on a `--config Debug` build: 27 of 27 with the editor off and 18 of 18 with it on. `vst3_noalloc_events_proof` takes about six minutes there, because the proof's own setup is unoptimized. The Debug modules import `VCRUNTIME140.dll` and `MSVCP140.dll`, not the `...D.dll` debug runtime.
 
 CI runs the VST3 part without the editor in the `vst3-shell-windows` job on `windows-latest`: the build, the twelve proofs and the port's fixture tests. That job has not run on GitHub yet; its steps were run locally.
 
-Not covered: `Debug` builds, ARM64, a signed or installed bundle, Pro Tools (PACE signing), and Cubase or another Steinberg host.
+Not covered: ARM64, a signed or installed bundle, Pro Tools (PACE signing), and Cubase or another Steinberg host.
 
 ## Windows: packaging
 
