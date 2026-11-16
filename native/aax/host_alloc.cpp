@@ -18,6 +18,8 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <pthread.h>
+#include <thread>
 #include <vector>
 #ifdef OP_STUB_PARAMS
 // Built over the stand-in ABI (AAXAllocLatencyProof): the ABI 2 paths can be driven there.
@@ -32,15 +34,31 @@ extern malloc_logger_t* malloc_logger;
 }
 
 namespace {
-std::atomic<bool> g_armed{false};
+// Armed per thread: only the thread that armed the counters is counted, so another
+// thread of the process cannot add to them. A pthread key, not `thread_local`: the
+// first `thread_local` access on a thread can allocate, and this is read from inside
+// malloc's own logger, where that would recurse.
+pthread_key_t make_armed_key() {
+    pthread_key_t key;
+    pthread_key_create(&key, nullptr);
+    return key;
+}
+const pthread_key_t g_armed_key = make_armed_key();
+struct ThreadArmed {
+    operator bool() const { return pthread_getspecific(g_armed_key) != nullptr; }
+    ThreadArmed& operator=(bool on) {
+        pthread_setspecific(g_armed_key, on ? reinterpret_cast<void*>(1) : nullptr);
+        return *this;
+    }
+} g_armed;
 std::atomic<unsigned long> g_new_events{0};
 std::atomic<unsigned long> g_malloc_events{0};
 
 void on_malloc_event(uint32_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint32_t) {
-    if (g_armed.load(std::memory_order_relaxed)) g_malloc_events.fetch_add(1, std::memory_order_relaxed);
+    if (g_armed) g_malloc_events.fetch_add(1, std::memory_order_relaxed);
 }
 void note_new() {
-    if (g_armed.load(std::memory_order_relaxed)) g_new_events.fetch_add(1, std::memory_order_relaxed);
+    if (g_armed) g_new_events.fetch_add(1, std::memory_order_relaxed);
 }
 void* checked_alloc(std::size_t size) {
     note_new();
@@ -86,10 +104,10 @@ struct Counts {
 void arm() {
     g_new_events.store(0);
     g_malloc_events.store(0);
-    g_armed.store(true, std::memory_order_seq_cst);
+    g_armed = true;
 }
 Counts disarm() {
-    g_armed.store(false, std::memory_order_seq_cst);
+    g_armed = false;
     return {g_new_events.load(), g_malloc_events.load()};
 }
 
@@ -194,6 +212,25 @@ int main() {
         sink = std::malloc(64);
         std::free(sink);
         require(g_new_events.load() == 0 && g_malloc_events.load() == 0, "self-check: counters moved while disarmed");
+        // An allocation made on another thread while this one is armed is not counted.
+        // The helper is started first and parked on atomics, so this thread allocates nothing while armed.
+        {
+            std::atomic<int> go{0}, done{0};
+            std::thread other([&] {
+                while (go.load() == 0) std::this_thread::yield();
+                void* volatile s = std::malloc(64);
+                std::free(s);
+                s = ::operator new(64);
+                ::operator delete(s);
+                done.store(1);
+            });
+            arm();
+            go.store(1);
+            while (done.load() == 0) std::this_thread::yield();
+            const Counts fromOther = disarm();
+            other.join();
+            require(fromOther.news == 0 && fromOther.mallocs == 0, "self-check: an allocation on another thread was counted");
+        }
         std::printf("AAX allocation self-check: malloc counted %lu, operator new counted %lu, vector counted new %lu malloc %lu\n",
                     viaMalloc.mallocs, viaNew.news, viaVector.news, viaVector.mallocs);
     }

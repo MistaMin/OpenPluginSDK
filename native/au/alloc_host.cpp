@@ -14,10 +14,12 @@
 //   ctest --test-dir build-shell -R au_alloc_proof --output-on-failure
 #include "alloc_hook.h"
 #include "proof_au.h"
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <malloc/malloc.h>
 #include <new>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -93,6 +95,25 @@ void self_check() {
     void* engine = nullptr;
     CHECK(allocations_during([&] { engine = op_shell_create(48000.0, 512, 2); escape(engine); }) >= 1);
     op_shell_destroy(engine);
+    // An allocation made on another thread while this one is armed is not counted.
+    // The helper thread is started first and parked on atomics, so nothing on this
+    // thread allocates while armed.
+    {
+        std::atomic<int> go{0}, done{0};
+        std::thread other([&] {
+            while (go.load() == 0) std::this_thread::yield();
+            void* q = malloc(64); escape(q); free(q);
+            auto* v = new int[16]; escape(v); delete[] v;
+            done.store(1);
+        });
+        const Counts before = counts();
+        arm();
+        go.store(1);
+        while (done.load() == 0) std::this_thread::yield();
+        disarm();
+        other.join();
+        CHECK(counts().allocs == before.allocs && counts().frees == before.frees);
+    }
     // Disarmed means not counted, and a free is counted while armed.
     const Counts before = counts();
     void* quiet = strdup("quiet");
@@ -105,7 +126,7 @@ void self_check() {
     free(loud);
     disarm();
     CHECK(counts().frees == before.frees + 1);
-    std::puts("AU alloc proof self-check: libc, operator new, std::vector, CoreFoundation and Rust allocations are all counted");
+    std::puts("AU alloc proof self-check: libc, operator new, std::vector, CoreFoundation and Rust allocations are all counted on the arming thread, and another thread's are not");
 }
 
 void run_phase(AudioUnit unit, ProofBuffers& buffers, const char* label, const char* phase, UInt32 frames, int blocks, double& clock, int param_id, int param_every) {

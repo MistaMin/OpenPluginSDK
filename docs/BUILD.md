@@ -151,7 +151,7 @@ Not covered: installing the package, a signed or notarised package (shown with `
 
 ## Linux
 
-`scripts/build_plugin_linux.sh` builds a plugin crate into the formats that work on Linux today: CLAP and LV2. It is plain bash over `cargo` and binutils, takes the same option names and environment variables as `build_plugin.sh` where they mean the same thing (`--manifest-path`, `--package`, `--lib-name`, `--name`, `--version`, `--ttl-bin`, `--features`, `--formats`, `--out`, `--work-dir`, `--jobs`, `--dry-run`, `--no-verify`), and refuses `vst3`, `au`, `aax` and `standalone`, which are not built on Linux yet. The macOS-only options (`--bundle-id`, `--editor`, `--archs` and so on) are refused by name. It runs only on Linux and never installs anything.
+`scripts/build_plugin_linux.sh` builds a plugin crate into the formats that work on Linux today: CLAP, LV2 and a standalone executable. It is plain bash over `cargo` and binutils, takes the same option names and environment variables as `build_plugin.sh` where they mean the same thing (`--manifest-path`, `--package`, `--lib-name`, `--name`, `--version`, `--ttl-bin`, `--standalone-bin`, `--features`, `--formats`, `--out`, `--work-dir`, `--jobs`, `--dry-run`, `--no-verify`), and refuses `vst3`, `au` and `aax`, which are not built on Linux yet. `--formats all` is `clap,lv2,standalone`, as on macOS, and so needs `--standalone-bin`. The macOS-only options (`--bundle-id`, `--editor`, `--archs` and so on) are refused by name. It runs only on Linux and never installs anything.
 
 ```bash
 scripts/build_plugin_linux.sh \
@@ -164,6 +164,7 @@ scripts/build_plugin_linux.sh \
 |---|---|
 | CLAP | `<out>/<Name>.clap`: the shared library itself, one ELF file, not a folder |
 | LV2 | `<out>/<Stem>.lv2/` with `<Stem>.so`, and `manifest.ttl` and `<Stem>.ttl` written by `<ttl-bin> <folder> <Stem>`. `<Stem>` is reduced as on macOS |
+| Standalone | `<out>/<Name>`: the plugin's `--standalone-bin`, one ELF executable; and `<out>/<id>.desktop`, a freedesktop Desktop Entry (`Type=Application`, `Exec="<Name>"`, `StartupWMClass=OpenPlugin`, the X11 view's class). `<id>` is `<Name>` in lower case with every character but letters, digits, `_`, `.` and `-` as `-`. `Exec` names the executable on `PATH`: the script installs nothing, so the folder is the installer's choice |
 
 The library is a release build of the host architecture, with the same `--remap-path-prefix` list as on macOS. `--strip` runs `strip --strip-all` on each copy; the dynamic symbols stay. Unless `--no-verify` is given, the script then checks each library and fails the run on any of these:
 
@@ -172,6 +173,9 @@ The library is a release build of the host architecture, with the same `--remap-
 - An `RPATH` or `RUNPATH` points into the build tree, the workspace or the home folder.
 - `nm -D --defined-only` does not show `clap_entry` (CLAP) or `lv2_descriptor` (LV2).
 - The LV2 bundle lacks `manifest.ttl` or `<Stem>.ttl`, or `manifest.ttl` does not name `<Stem>.so` as `lv2:binary`.
+- The standalone file is not an ELF executable (it gets the same path, library and run path checks, and no export check), its desktop entry is missing, or `desktop-file-validate` (when installed) rejects the entry.
+
+A standalone bin is the plugin's own: a `main` that builds the editor and calls `openplugin::dri::x11::run_window(title, editor, None)`, which on macOS is `openplugin::dri::cocoa::run_window`. It opens no audio device on either platform (`StandaloneRunner` does no audio, see `API_REVIEW.md` F2). The window is an X11 one, so in a Wayland session it runs through Xwayland.
 
 ### Checks run on Linux
 

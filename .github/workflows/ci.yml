@@ -910,3 +910,43 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/cv/bin/clap-validator" validate "$RUNNER_TEMP/linux-dist/Example Gain.clap"
+
+  # The X11 editor proofs need an X server. Xvfb gives the runner one, so the
+  # view (openplugin-dri), its services and the editor through CLAP and LV2
+  # (examples/editor) run here instead of skipping. A test that prints
+  # "skipped" for any reason other than "macOS only" fails the job: a skip
+  # must not pass for coverage.
+  linux-editor:
+    name: Linux editor on a virtual X display (Xvfb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install Xvfb
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          command -v xvfb-run
+      - name: X11 editor tests on Xvfb
+        working-directory: OpenPluginSDK
+        run: |
+          set -euo pipefail
+          xvfb-run -a -s "-screen 0 1280x1024x24" \
+            cargo test --locked -p openplugin-dri -p example-editor -- --nocapture 2>&1 \
+            | tee "$RUNNER_TEMP/x11.log"
+          if grep -n "skipped" "$RUNNER_TEMP/x11.log" | grep -v "macOS only"; then
+            echo "An X11 test skipped on a runner that has a display." >&2
+            exit 1
+          fi
