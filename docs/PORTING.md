@@ -4,6 +4,8 @@
 
 Today the toolkit has three tools: the scanner (porting task 1), which answers "what is this plugin?", the null test (porting task 4), which answers "does the port sound the same?", and the state import (porting task 3), which answers "will the port open the old plugin's sessions and presets?". The tasks that follow build on the scanner's manifest.
 
+The [porting guides](#porting-guides) (porting task 5) say how to write the port itself: one guide for each SDK a plugin is likely to come from, mapping its concepts onto this SDK's, with a small effect ported in full.
+
 Shipping before the DSP is rewritten? [CPP_BRIDGE.md](CPP_BRIDGE.md) shows how to call your existing C++ DSP from a Rust plugin through `cxx` (porting task 7), with the real-time rules and how to test them.
 
 | Task | Tool | State |
@@ -11,7 +13,53 @@ Shipping before the DSP is rewritten? [CPP_BRIDGE.md](CPP_BRIDGE.md) shows how t
 | 1 | `scan`: read an existing plugin into a manifest and a Rust snippet | this document |
 | 4 | `null`: render the original and the port through the same input and automation and compare | [The null test](#the-null-test) |
 | 3 | `capture` and `openplugin_core::foreign_state`: save the old plugin's state for each preset, and read the containers it is made of | [Foreign state import](#foreign-state-import) |
+| 5 | Guides: iPlug2, DPF, nih-plug, JUCE and the raw VST3, CLAP and Audio Unit SDKs mapped onto this SDK, each with a worked port | [Porting guides](#porting-guides) |
 | 2 | Pin identity the SDK derives today (explicit VST3 parameter ids, class ids) | later; the scanner marks each spot with a `TODO(porting task 2)` |
+
+## Porting guides
+
+One guide for each SDK a plugin is likely to come from. Each maps that SDK's processor, parameters, state, editor, buses, MIDI and threading onto this SDK's in tables you can read beside your own source, then ports a small effect in full, and ends with what has no counterpart yet.
+
+| Coming from | Guide | Worked port |
+|---|---|---|
+| iPlug2 | [porting/iplug2.md](porting/iplug2.md) | A smoothed gain with a peak meter, mono and stereo, and a small editor |
+| DPF (DISTRHO Plugin Framework) | [porting/dpf.md](porting/dpf.md) | A low-pass filter whose programs become factory presets |
+| nih-plug | [porting/nih-plug.md](porting/nih-plug.md) | A ducker driven by a sidechain bus |
+| JUCE | [porting/juce.md](porting/juce.md) | An echo with a tail that opens the old plugin's XML state |
+| VST3 SDK | [porting/vst3.md](porting/vst3.md) | A tremolo locked to the host's tempo and position |
+| CLAP SDK | [porting/clap.md](porting/clap.md) | A gate opened by notes |
+| Audio Unit SDK (version 2 and version 3) | [porting/audio-unit.md](porting/audio-unit.md) | One band of parametric EQ with a reported tail, mono and stereo |
+
+The guides are written from each project's public documentation and public API names. They contain no code from those projects: every code block is Rust written for this SDK.
+
+**The code in the guides cannot rot.** Each guide is the documentation of a module of `examples/porting_guides`, so every code block is a doc test: it is compiled against the current SDK, runs its own checks (the gain, the filter's response, the echo's delay, the state import) and then runs the port through the [conformance kit](TESTING_PLUGINS.md) with the allocation check on. Unit tests in that crate fail if a guide gains a code block that is not a Rust doc test, if a file in `docs/porting` is not compiled, or if this table loses a link.
+
+```bash
+cargo test -p example-porting-guides
+```
+
+### Order of work
+
+1. **Scan the old plugin.** `openplugin-port scan` ([The scanner](#the-scanner)) writes its identity, buses, latency, tail and every parameter, and a Rust snippet with the `ParamInfo` table. Keep the parameters in the old order: the SDK numbers them by table position in every format.
+2. **Write the `Plugin`.** Read the guide for your SDK beside your source. Start with `info`, `prepare`, `reset`, `set_param`, `param` and `process`, then layouts, notes, latency and tail. Allocate only in `prepare`.
+3. **Pass the conformance kit.** `openplugin_testing::conformance` ([TESTING_PLUGINS.md](TESTING_PLUGINS.md)) runs the port through what hosts do: every sample rate and block size, NaN at the input, parameter fuzz, state round-trips, and a check that the audio path does not allocate. Every worked port in the guides ends with it.
+4. **Decide what happens to old sessions.** `openplugin-port capture` ([Foreign state import](#foreign-state-import)) saves the old plugin's state for each preset. If the port must open it, write the import in `load_state` and a test that loads every captured blob.
+5. **Null against the original.** `openplugin-port null` ([The null test](#the-null-test)) renders both through the same input and automation and reports the first differing sample.
+6. **Write the editor** ([EDITOR.md](EDITOR.md)).
+7. **Build every format and run the validators** ([BUILD.md](BUILD.md), [HOST_TESTS.md](HOST_TESTS.md)).
+
+Still on C++ DSP? [CPP_BRIDGE.md](CPP_BRIDGE.md) lets the port ship first and the DSP move later.
+
+### What a port cannot carry over yet
+
+Each guide lists what its SDK has that this one lacks. The ones that matter for every port:
+
+- **The old plugin's identity outside CLAP, LV2 and the Audio Unit.** The CLAP id is `PluginInfo::id`, the LV2 URI is `Plugin::lv2_uri`, and the Audio Unit subtype and manufacturer codes are build options, so those carry over. The VST3 class ids are derived from `PluginInfo::id`, and parameters are numbered by table position in CLAP, VST3 and the Audio Unit, so a plugin whose parameter ids were not `0..n` in order cannot keep them. This is porting task 2.
+- **The old plugin's saved state through the shells.** The CLAP entry hands `load_state` the stream as the host stored it, for a plugin that saves a chunk of its own. The VST3, Audio Unit and AAX shells accept only state they wrote themselves; the Audio Unit shell does restore the parameters of a dictionary the old unit's base class wrote. Also porting task 2.
+- **Parameter values in a plugin's own chunk.** A plugin whose `save_state` returns a chunk has that chunk stored alone by the CLAP entry, and stored beside the parameter values by the shells. Until the entries agree, a chunk must hold the parameter values too.
+- **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`; no format entry publishes a program list yet.
+- **Parameter travel other than linear and logarithmic, and custom value text.** `Taper` has two shapes, and a value prints and parses by its `Unit` and choice names.
+- **More than one output bus or sidechain, 64-bit audio buffers, and SysEx.**
 
 ## The scanner
 

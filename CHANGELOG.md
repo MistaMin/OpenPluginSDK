@@ -8,6 +8,10 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
 
 ## [Unreleased]
 
+### Added
+
+- Porting guides (porting toolkit task 5, [docs/PORTING.md](docs/PORTING.md#porting-guides)): one guide each for iPlug2, DPF, nih-plug, JUCE and the raw VST3, CLAP and Audio Unit SDKs in `docs/porting/`. Each maps that SDK's processor, parameters, state, editor, buses, MIDI and threading onto this SDK's and ports a small effect in full (a gain with a meter and an editor, a low-pass with presets, a sidechain ducker, an echo that reads the old plugin's XML state, a tempo-locked tremolo, a note-opened gate, a parametric EQ band), then lists what has no counterpart yet. Every code block is a doc test of the new `examples/porting_guides` crate (`publish = false`) and each port runs the conformance kit with the allocation check, so the guides stop compiling when the API they describe changes. Docs and an example only: no SDK API changed.
+
 ## [1.0.0-beta] - 2026-11-16
 
 Commits `v0.4.0-beta` to the commit that sets the version to 1.0.0-beta. The SDK becomes 1.0 Beta: the roadmap's 0.5 (a dependable editor layer), 0.6 (every format carries everything) and 0.7 (host integration and editor polish) are all done, the last of 0.7 being per-note expression (shell ABI 7); 0.5, 0.6 and most of 0.7 shipped in 0.4.0-beta, and this release completes them. The workspace now builds and is tested on Linux and Windows as well as macOS (roadmap W1 to W4 in [docs/ROADMAP_WINDOWS_LINUX.md](docs/ROADMAP_WINDOWS_LINUX.md)): an X11 editor view with CLAP `gui` and LV2 `ui:X11UI` on Linux; an HWND editor view with UI Automation, CLAP `gui`, LV2 `ui:WindowsUI`, the VST3 and AAX shells and packaging on Windows; and CI on all three systems. The API is not frozen yet: the remaining 1.0 work is listed in [docs/ROADMAP.md](docs/ROADMAP.md).

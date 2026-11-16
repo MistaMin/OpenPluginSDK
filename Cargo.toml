@@ -16,6 +16,7 @@ members = [
     "examples/cpp_bridge",
     "examples/role_tags",
     "examples/expression_synth",
+    "examples/porting_guides",
 ]
 resolver = "2"
 

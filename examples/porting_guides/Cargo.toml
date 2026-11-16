@@ -1,0 +1,16 @@
+[package]
+name = "example-porting-guides"
+description = "The porting guides of docs/porting, compiled: every code block in them is a doc test of this crate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "porting_guides"
+
+# Only the doc tests use these: the library itself is the guides' text.
+[dev-dependencies]
+openplugin = { workspace = true }
+openplugin-testing = { workspace = true }

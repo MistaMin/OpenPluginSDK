@@ -130,6 +130,7 @@ jobs:
           -p openplugin-core -p openplugin-dsp -p openplugin-dri
           -p openplugin-targets -p openplugin-ffi -p openplugin-port
           -p openplugin-testing -p openplugin
+          -p example-porting-guides
       - name: Clippy, warnings as errors
         working-directory: OpenPluginSDK
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
