@@ -8,7 +8,7 @@
 // without looking, and the proof's self-check (the shell allocates in getState)
 // would fail.
 //
-// This file closes the gap. alloc_hook.cpp reports every heap allocation in the
+// This file closes the gap. native/win/alloc_hook.cpp reports every heap allocation in the
 // process, whichever module asked, to malloc_logger; the logger here answers each
 // one with a call of the proof's operator new, which does the counting. So the
 // proof's count covers every allocation the shell and the plugin make, by any

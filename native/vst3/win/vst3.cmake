@@ -9,7 +9,7 @@
 #   - The entry points are InitDll and ExitDll from the SDK's dllmain.cpp.
 #   - The proofs are the macOS sources unchanged. vst3/win/compat stands in for the
 #     CoreFoundation and unistd calls they make, win/compat for the pthread ones,
-#     vst3/win/alloc_hook.cpp for libmalloc's malloc_logger.
+#     win/alloc_hook.cpp for libmalloc's malloc_logger.
 #   - The settings are given to each target here, so they reach neither the VST3
 #     SDK's own targets nor another format's.
 set(OP_VST3_WIN_DIR "${CMAKE_CURRENT_LIST_DIR}")
@@ -122,9 +122,10 @@ op_link_rust(VST3Proof)
 add_dependencies(VST3Proof OpenPluginVST3)
 add_test(NAME vst3_proof COMMAND VST3Proof "${OP_VST3_DIR_OpenPluginVST3}")
 # process() must not allocate: counted through operator new and the heap functions
-# every allocation in the process ends in (vst3/win/alloc_hook.cpp).
+# every allocation in the process ends in (win/alloc_hook.cpp).
 op_vst3_proof(VST3NoAllocProof noalloc.cpp
-  "${OP_VST3_WIN_DIR}/alloc_hook.cpp"
+  "${OP_NATIVE_DIR}/win/alloc_hook.cpp"
+  "${OP_VST3_WIN_DIR}/hook_on_load.cpp"
   "${OP_SDK_SOURCE}/vst/hosting/parameterchanges.cpp")
 add_dependencies(VST3NoAllocProof OpenPluginVST3)
 add_test(NAME vst3_noalloc_proof COMMAND VST3NoAllocProof "${OP_VST3_DIR_OpenPluginVST3}")
@@ -176,7 +177,8 @@ if(NOT OP_EDITOR)
   # The proof counts with its own operator new, which a Windows module does not share:
   # vst3/win/new_bridge.cpp brings every heap allocation in the process to it.
   op_vst3_proof(VST3EventsProof events_host.cpp
-    "${OP_VST3_WIN_DIR}/alloc_hook.cpp"
+    "${OP_NATIVE_DIR}/win/alloc_hook.cpp"
+    "${OP_VST3_WIN_DIR}/hook_on_load.cpp"
     "${OP_VST3_WIN_DIR}/new_bridge.cpp"
     "${OP_SDK_SOURCE}/common/memorystream.cpp"
     "${OP_SDK_SOURCE}/vst/hosting/parameterchanges.cpp"
@@ -194,7 +196,8 @@ if(NOT OP_EDITOR)
     op_vst3_module(OpenPluginVST3Expression "Expression Synth")
     op_link_rust(OpenPluginVST3Expression "${OP_EXPRESSION_LIB}")
     op_vst3_proof(VST3ExpressionProof expression_host.cpp
-      "${OP_VST3_WIN_DIR}/alloc_hook.cpp"
+      "${OP_NATIVE_DIR}/win/alloc_hook.cpp"
+    "${OP_VST3_WIN_DIR}/hook_on_load.cpp"
       "${OP_VST3_WIN_DIR}/new_bridge.cpp"
       "${OP_SDK_SOURCE}/vst/hosting/eventlist.cpp")
     add_dependencies(VST3ExpressionProof OpenPluginVST3Expression)

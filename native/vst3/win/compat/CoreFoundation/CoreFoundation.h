@@ -39,6 +39,6 @@ extern const CFRunLoopMode kCFRunLoopDefaultMode;
 int32_t CFRunLoopRunInMode(CFRunLoopMode mode, CFTimeInterval seconds, Boolean returnAfterSourceHandled);
 
 // Not CoreFoundation: called with the module handle (HMODULE) after each library a
-// proof loads. alloc_hook.cpp uses it to count the new module's allocations.
+// proof loads. hook_on_load.cpp uses it to count the new module's allocations.
 extern void (*op_win_module_loaded)(void* module);
 }

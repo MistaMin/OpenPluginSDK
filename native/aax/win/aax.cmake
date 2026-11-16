@@ -16,7 +16,7 @@
 #     (`__declspec(dllexport)`, `__stdcall`, which x64 does not decorate), so there
 #     is no .def file.
 #   - With OP_EDITOR the view is aax/win/OpenPluginAAXGUIWin.cpp (an HWND).
-#   - aax/win/alloc_hook.cpp stands in for libmalloc's malloc_logger in the
+#   - win/alloc_hook.cpp stands in for libmalloc's malloc_logger in the
 #     allocation proofs, and aax/win/host_bundle.cpp for the CoreFoundation loader.
 if(NOT OP_BUILD_AAX)
   return()
@@ -134,8 +134,8 @@ op_aax_proof(AAXStateProof host_state.cpp OpenPluginAAXParameters.cpp OpenPlugin
 target_link_libraries(AAXStateProof PRIVATE openplugin_aax_sdk)
 op_link_rust(AAXStateProof)
 # Allocation proof: replaces operator new and counts the heap calls of the whole
-# process (aax/win/alloc_hook.cpp), so it stays a separate binary.
-op_aax_proof(AAXAllocProof host_alloc.cpp OpenPluginAAXProcess.cpp "${OP_AAX_WIN_DIR}/alloc_hook.cpp")
+# process (win/alloc_hook.cpp), so it stays a separate binary.
+op_aax_proof(AAXAllocProof host_alloc.cpp OpenPluginAAXProcess.cpp "${OP_NATIVE_DIR}/win/alloc_hook.cpp")
 op_link_rust(AAXAllocProof)
 # Stand-in ABI proofs (aax/proof_stub.cpp, no Rust library), as on macOS.
 op_aax_proof(AAXBypassProof host_bypass.cpp OpenPluginAAXProcess.cpp proof_stub.cpp)
@@ -148,7 +148,7 @@ op_aax_proof(AAXStateBlobProof host_state_blob.cpp OpenPluginAAXParameters.cpp O
   OpenPluginAAXProcess.cpp proof_stub.cpp)
 target_compile_definitions(AAXStateBlobProof PRIVATE OP_STUB_PARAMS=3 OP_STUB_LATENCY=37)
 target_link_libraries(AAXStateBlobProof PRIVATE openplugin_aax_sdk)
-op_aax_proof(AAXAllocLatencyProof host_alloc.cpp OpenPluginAAXProcess.cpp proof_stub.cpp "${OP_AAX_WIN_DIR}/alloc_hook.cpp")
+op_aax_proof(AAXAllocLatencyProof host_alloc.cpp OpenPluginAAXProcess.cpp proof_stub.cpp "${OP_NATIVE_DIR}/win/alloc_hook.cpp")
 target_compile_definitions(AAXAllocLatencyProof PRIVATE OP_STUB_PARAMS=200 OP_STUB_LATENCY=37)
 op_aax_proof(AAXEventsProof host_events.cpp OpenPluginAAXProcess.cpp proof_stub.cpp)
 target_compile_definitions(AAXEventsProof PRIVATE OP_STUB_PARAMS=1 OP_STUB_LATENCY=0)
