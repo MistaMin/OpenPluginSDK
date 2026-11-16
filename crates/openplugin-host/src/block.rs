@@ -382,6 +382,7 @@ impl HostSession {
     /// # Safety
     /// Every pointer in `args` is null (where allowed) or valid for the count
     /// and `frames` it states; an input may alias an output.
+    #[doc(hidden)] // takes the C ABI's own struct; `op_shell_*` is the contract
     pub unsafe fn process_block(&self, args: &OpProcess) -> bool {
         if (args.struct_size as usize) < std::mem::size_of::<OpProcess>() {
             return false;
@@ -462,6 +463,7 @@ impl HostSession {
     ///
     /// # Safety
     /// `out` is null or writable for `capacity` events.
+    #[doc(hidden)] // takes the C ABI's own struct; `op_shell_*` is the contract
     pub unsafe fn pull_midi_out(&self, out: *mut OpMidiEvent, capacity: u32) -> u32 {
         if out.is_null() || capacity == 0 {
             return 0;
