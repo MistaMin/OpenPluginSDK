@@ -7,7 +7,7 @@
 //! passes its input through, and its notes reach the next block. A plugin whose state
 //! is only its parameters (it says so, or its `save_state` returns `None` when it is
 //! new) is never touched by a state call at all: the parameters go through the plane.
-//! What is saved is the session the shells save: the parameters, then the chunk.
+//! A plugin with a chunk saves the session the shells save: the parameters, then the chunk.
 //!
 //! The plugins here make a race visible. `Stateful` keeps its state in two plain
 //! fields that every operation reads or writes with a pause in between, so a state
@@ -504,8 +504,7 @@ fn parameter_load_is_applied_whole_or_not_at_all() {
     // A non-finite value anywhere refuses the whole state.
     let mut bad = good.clone();
     let len = bad.len();
-    // The last value: the session ends with the (empty) chunk's length.
-    bad[len - 8..len - 4].copy_from_slice(&f32::NAN.to_le_bytes());
+    bad[len - 4..].copy_from_slice(&f32::NAN.to_le_bytes());
     plane.store(0, 1.0);
     plane.store(1, 2.0);
     assert!(!load(plugin, &bad));
@@ -595,7 +594,8 @@ fn sessions_saved_before_clap_wrote_sessions_still_load() {
     // A bare OPST snapshot, as CLAP saved a plugin without a chunk: into both kinds.
     assert!(load(chunky.as_plugin(), &encode_params(&STATEFUL_INFO, &[0.25])));
     assert_eq!(chunky.plane().unwrap().load(0), Some(0.25));
-    let plain = activated(Pair { p0: 0.0, p1: 0.0, declared: false });
+    // (Declared, so creating it does not move the counter another test watches.)
+    let plain = activated(Pair { p0: 0.0, p1: 0.0, declared: true });
     assert!(load(plain.as_plugin(), &encode_params(&PAIR_INFO, &[3.0, 4.0])));
     assert_eq!((plain.plane().unwrap().load(0), plain.plane().unwrap().load(1)), (Some(3.0), Some(4.0)));
 }

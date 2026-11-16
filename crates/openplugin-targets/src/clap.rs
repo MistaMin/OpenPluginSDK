@@ -27,7 +27,7 @@ use std::time::Duration;
 use openplugin_core::DenormalGuard;
 use openplugin_core::{
     Channels, ChannelsMut,
-    decode_session, encode_session, has_state_chunk, identity::clap_id_valid, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
+    decode_session, encode_params, encode_session, has_state_chunk, identity::clap_id_valid, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
     ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamIdMap, ParamInfo, ParamPlane, PinFormat, Plugin, PluginGate, PluginInfo, PortKind,
     Seqlock, SpeakerLayout, Tail, TrackInfo, Transport, MAX_AUDIO_CHANNELS,
 };
@@ -1339,9 +1339,10 @@ unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_
         } else {
             Vec::new()
         };
-        // The same session the shells write: the parameters, then the chunk.
+        // With a chunk, the session the shells write: the parameters, then the chunk.
+        // Without one, the bare snapshot CLAP always wrote, which older builds read.
         let values: Vec<f32> = (0..plane.len()).map(|index| plane.load(index).unwrap_or(0.0)).collect();
-        let bytes = encode_session(info, &values, &chunk);
+        let bytes = if chunk.is_empty() { encode_params(info, &values) } else { encode_session(info, &values, &chunk) };
         let mut offset = 0usize;
         while offset < bytes.len() {
             let remaining = &bytes[offset..];

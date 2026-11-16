@@ -337,7 +337,7 @@ Tests that enforce the gate:
 | A plugin with a chunk stays sound under state calls during playback | `chunk_plugin_state_calls_during_playback_stay_sound` (same file) |
 | The audio thread does not allocate while a save or load runs | `the_audio_thread_does_not_allocate_during_a_save_or_a_load` in [`shell_state_no_alloc.rs`](../crates/openplugin-host/tests/shell_state_no_alloc.rs) |
 | The same, through CLAP | `chunk_state_beside_process_is_never_torn`, `parameter_state_beside_process_is_never_torn_and_never_touches_the_plugin`, `parameter_load_is_applied_whole_or_not_at_all`, `audio_thread_does_not_allocate_during_saves_and_loads` in [`clap_state_concurrency.rs`](../crates/openplugin-targets/tests/clap_state_concurrency.rs) |
-| A CLAP session holds the parameters beside the chunk, and older CLAP sessions still load | `a_chunk_that_leaves_out_the_parameters_gets_them_back`, `sessions_saved_before_clap_wrote_sessions_still_load` (same file) |
+| A CLAP session of a plugin with a chunk holds the parameters beside it, and older CLAP sessions still load | `a_chunk_that_leaves_out_the_parameters_gets_them_back`, `sessions_saved_before_clap_wrote_sessions_still_load` (same file) |
 | A state load applies whole or not at all, and corrupt state never touches the plugin | `restore_params_is_all_or_nothing`, `corrupt_session_envelopes_do_not_touch_the_plugin`, `plugin_load_state_rejects_random_and_corrupt_chunks` in [`state_hostile_input.rs`](../crates/openplugin-core/tests/state_hostile_input.rs) |
 
 ### Editor
