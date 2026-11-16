@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use example_editor::{EditorGain, INFO};
 use openplugin_core::{ParamFlags, ParamInfo, Plugin};
-use openplugin_ffi::shell::{OpShellInfo, write_info};
+use openplugin_host::shell::{OpShellInfo, write_info};
 use openplugin_port::manifest::{Manifest, hex16};
 use openplugin_port::snippet::{self, Inferred};
 use openplugin_port::{ScanOptions, scan};

@@ -556,7 +556,7 @@ pub fn render(m: &Manifest) -> String {
             let _ = write!(line, ".with_steps({})", inf.steps);
         }
         for f in inf.flags.iter().filter(|f| **f != "AUTOMATABLE") {
-            let _ = write!(line, ".flag(ParamFlags::{f})");
+            let _ = write!(line, ".with_flag(ParamFlags::{f})");
         }
         if let Pin::Id { method, id } = pin {
             let _ = write!(line, ".{method}({})", id_literal(*id));
@@ -581,18 +581,17 @@ pub fn render(m: &Manifest) -> String {
     if let Some(n) = id_note {
         let _ = writeln!(s, "// {n}");
     }
-    let _ = writeln!(s, "pub static INFO: PluginInfo = PluginInfo {{");
-    let _ = writeln!(s, "    id: {id_text:?},");
-    let _ = writeln!(s, "    name: {:?},", p.name);
-    let _ = writeln!(s, "    vendor: {:?},", p.vendor);
-    let _ = writeln!(s, "    url: {:?},", p.url);
-    let _ = writeln!(s, "    email: {:?},", p.email);
-    let _ = writeln!(s, "    version: {:?},", p.version);
-    let _ = writeln!(s, "    category: Category::{},", category(p));
-    let _ = writeln!(s, "    params: &PARAMS,");
-    let _ = writeln!(s, "    is_instrument: {},", p.is_instrument);
-    let _ = writeln!(s, "    has_editor: false,");
-    let _ = writeln!(s, "}};");
+    let _ = write!(s, "pub static INFO: PluginInfo = PluginInfo::new({id_text:?}, {:?}, {:?}, {:?}, Category::{}, &PARAMS)", p.name, p.vendor, p.version, category(p));
+    if !p.url.is_empty() {
+        let _ = write!(s, "\n    .with_url({:?})", p.url);
+    }
+    if !p.email.is_empty() {
+        let _ = write!(s, "\n    .with_email({:?})", p.email);
+    }
+    if p.is_instrument {
+        let _ = write!(s, "\n    .with_instrument(true)");
+    }
+    let _ = writeln!(s, ";");
     let _ = writeln!(s);
 
     // ----- build settings -----
