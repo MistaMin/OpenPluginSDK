@@ -59,7 +59,6 @@ Each guide lists what its SDK has that this one lacks. The ones that matter for 
 - **The old plugin's saved state through the shells.** The CLAP entry hands `load_state` the stream as the host stored it, for a plugin that saves a chunk of its own. The VST3, Audio Unit and AAX shells accept only state they wrote themselves; the Audio Unit shell does restore the parameters of a dictionary the old unit's base class wrote.
 - **Parameter values in a plugin's own chunk.** A plugin whose `save_state` returns a chunk has that chunk stored alone by the CLAP entry, and stored beside the parameter values by the shells. Until the entries agree, a chunk must hold the parameter values too.
 - **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`; no format entry publishes a program list yet.
-- **Parameter travel other than linear and logarithmic, and custom value text.** `Taper` has two shapes, and a value prints and parses by its `Unit` and choice names.
 - **More than one output bus or sidechain, 64-bit audio buffers, and SysEx.**
 
 ## The scanner
