@@ -1,0 +1,10 @@
+# Windows (MSVC): the C runtime is linked statically, so no plug-in, example or
+# test binary imports vcruntime140.dll or needs the Visual C++ Redistributable.
+# The Universal CRT is part of Windows 10 and 11. The native shells match it
+# (MultiThreaded, native/cmake/windows.cmake), and scripts/windows/check_imports.ps1
+# checks the result in CI. Other targets are not touched.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

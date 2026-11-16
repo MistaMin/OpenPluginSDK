@@ -36,9 +36,10 @@ set(SMTG_CREATE_PLUGIN_LINK OFF CACHE BOOL "" FORCE)
 set(SMTG_RUN_VST_VALIDATOR OFF CACHE BOOL "" FORCE)
 set(SMTG_CREATE_MODULE_INFO OFF CACHE BOOL "" FORCE)
 add_subdirectory("${OP_VST3_SDK}" vst3-sdk EXCLUDE_FROM_ALL)
-# The SDK's own CMake names the C runtime per configuration (/MDd for Debug). Its
-# libraries are linked into the shells, which use the release runtime in every
-# configuration (native/cmake/windows.cmake), so that choice is taken off them.
+# The SDK's own CMake names the C runtime per configuration (/MDd for Debug, /MD
+# otherwise). Its libraries are linked into the shells, which use the release static
+# runtime (/MT) in every configuration (native/cmake/windows.cmake), so that choice
+# is taken off them and they get the shells' runtime.
 foreach(sdk_target IN ITEMS base pluginterfaces sdk sdk_common sdk_hosting)
   if(TARGET ${sdk_target})
     get_target_property(sdk_options ${sdk_target} COMPILE_OPTIONS)
@@ -48,7 +49,7 @@ foreach(sdk_target IN ITEMS base pluginterfaces sdk sdk_common sdk_hosting)
     endif()
     get_target_property(sdk_type ${sdk_target} TYPE)
     if(NOT sdk_type STREQUAL "INTERFACE_LIBRARY")
-      set_property(TARGET ${sdk_target} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+      set_property(TARGET ${sdk_target} PROPERTY MSVC_RUNTIME_LIBRARY "${OP_MSVC_RUNTIME}")
     endif()
   endif()
 endforeach()
