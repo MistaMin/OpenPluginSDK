@@ -1,31 +1,41 @@
 //! The SIMD kernels and `BiquadBank4::process` do not allocate.
-//! One `#[test]` in this binary so no other test can run while armed.
+//! One `#[test]` in this binary, and the counter is armed per thread, so nothing
+//! else in the process can add to the count.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use openplugin_dsp::simd::{BiquadBank4, Kernels};
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    // Armed per thread: the test harness's own threads (output capture, the
+    // "running for over 60 seconds" notice) never add to the count. `const`
+    // initialisation, so reading it inside the allocator never allocates.
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn armed() -> bool {
+    ARMED.try_with(|a| a.get()).unwrap_or(false)
+}
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 struct Counting;
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::SeqCst) {
+        if armed() {
             ALLOCATIONS.fetch_add(1, Ordering::SeqCst);
         }
         unsafe { System.realloc(ptr, layout, new_size) }
@@ -58,8 +68,16 @@ fn kernels_do_not_allocate() {
         .map(|k| BiquadBank4::with_kernels(&[[0.2, 0.4, 0.2, -0.5, 0.2]; 6], *k))
         .collect();
 
+    // Probe: the counter sees an allocation on this thread, so the test
+    // cannot pass with a dead hook.
+    ARMED.with(|a| a.set(true));
+    drop(std::hint::black_box(Box::new([0u8; 64])));
+    ARMED.with(|a| a.set(false));
+    assert!(ALLOCATIONS.load(Ordering::SeqCst) >= 1, "allocator hook is not live");
     ALLOCATIONS.store(0, Ordering::SeqCst);
-    ARMED.store(true, Ordering::SeqCst);
+
+    ALLOCATIONS.store(0, Ordering::SeqCst);
+    ARMED.with(|a| a.set(true));
     for (k, bank) in paths.iter().zip(banks.iter_mut()) {
         k.gain(&mut d, &a, 0.5);
         k.scale(&mut d, 0.5);
@@ -75,6 +93,6 @@ fn kernels_do_not_allocate() {
         };
         bank.process([c0, c1, c2, c3]);
     }
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.with(|a| a.set(false));
     assert_eq!(ALLOCATIONS.load(Ordering::SeqCst), 0);
 }
