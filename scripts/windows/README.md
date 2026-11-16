@@ -118,3 +118,11 @@ subsystem) program: PowerShell waits for it and sets `$LASTEXITCODE` only
 when its output is piped or redirected (`& pluginval.exe ... | Out-Host`, or
 `*> log.txt`); the runner above always redirects it. `pluginval.exe --help`
 lists the options.
+
+## build_plugin.ps1: a plugin crate into Windows plug-ins
+
+Builds a plugin crate into `<Name>.clap`, `<Name>.vst3` and `<Name>.aaxplugin`
+in one go, gives every binary a version resource, and checks the result (no
+build paths, system DLL imports only, the entry points, the version resource).
+The options and an example are in the script's header and in
+[docs/BUILD.md](../../docs/BUILD.md), "Windows: packaging".
