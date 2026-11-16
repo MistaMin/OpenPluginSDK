@@ -118,6 +118,9 @@ static uint32_t requestResize(void* context, uint32_t width, uint32_t height) {
     // A failed render is silent in the host. Say so in the log.
     if (const int32_t error = op_au_take_error(instance_))
         NSLog(@"%s: the Audio Unit failed to initialize or render (status %d)", OP_AU_VIEW_CLASS_NAME, error);
+    UInt32 dropped = 0, droppedSize = sizeof(dropped);
+    if (AudioUnitGetProperty(unit_, kOpenPluginAUProperty_EventsDropped, kAudioUnitScope_Global, 0, &dropped, &droppedSize) == noErr && dropped)
+        NSLog(@"%s: the Audio Unit's event queue was full; %u events were dropped", OP_AU_VIEW_CLASS_NAME, static_cast<unsigned>(dropped));
     const uint32_t count = op_au_param_count(instance_);
     for (uint32_t i = 0; i < count; ++i) {
         float value = 0.f;

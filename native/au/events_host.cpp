@@ -15,6 +15,7 @@
 #include "alloc_hook.h"
 #include "proof_au.h"
 #include "probe.h"
+#include "OpenPluginAUBridge.h"
 #include <CoreMIDI/CoreMIDI.h>
 #include <map>
 
@@ -296,6 +297,40 @@ void instrument_proof(const Probe& p) {
         CHECK(packets == 8 * 81);
         std::printf("AU allocation: 8 renders with 81 MIDI events, MIDI out and the transport: %llu allocations, %llu frees\n", static_cast<unsigned long long>(allocs), static_cast<unsigned long long>(frees));
         CHECK(allocs == 0 && frees == 0);
+    }
+    // More events between two renders than the 1024 the queue holds: the oldest parameter events
+    // make room, then the oldest events that are not note-offs. Every note-off arrives.
+    {
+        auto dropped = [&] {
+            UInt32 count = 99, bytes = sizeof(count);
+            CHECK(AudioUnitGetProperty(u, kOpenPluginAUProperty_EventsDropped, kAudioUnitScope_Global, 0, &count, &bytes) == noErr);
+            return count;
+        };
+        auto kinds = [&](uint32_t kind) {
+            const ProbeReport* report = p.report();
+            return std::count_if(report->events, report->events + report->event_total, [&](const OpEvent& e) { return e.kind == kind; });
+        };
+        CHECK(dropped() == 0);
+        p.reset();
+        for (int n = 0; n < 500; ++n) set_param(u, kGain, 0.001f * static_cast<float>(n + 1), 1);
+        for (int n = 0; n < 300; ++n) CHECK(MusicDeviceMIDIEvent(u, 0x90 | (n / 100), n % 100, 1, 2) == noErr);
+        for (int n = 0; n < 300; ++n) CHECK(MusicDeviceMIDIEvent(u, 0x80 | (n / 100), n % 100, 0, 3) == noErr);
+        CHECK(render(u, 2, 512, 2000000, out) == noErr);
+        r = p.report();
+        CHECK(r->event_total == 1024 && kinds(OP_EVENT_NOTE_OFF) == 300 && kinds(OP_EVENT_NOTE_ON) == 300 && kinds(OP_EVENT_PARAM_PLAIN) == 424);
+        // The 76 oldest parameter events went; the newest is there, and the unit ends on it.
+        CHECK(r->events[0].kind == OP_EVENT_PARAM_PLAIN && near(r->events[0].value, 0.077f) && near(r->events[423].value, 0.5f));
+        AudioUnitParameterValue gain = 0;
+        CHECK(AudioUnitGetParameter(u, kGain, kAudioUnitScope_Global, 0, &gain) == noErr && near(gain, 0.5f));
+        CHECK(dropped() == 76 && dropped() == 0);
+        // A flood of MIDI alone: note-ons make room for the note-offs.
+        p.reset();
+        for (int n = 0; n < 800; ++n) CHECK(MusicDeviceMIDIEvent(u, 0x90 | (n / 100), n % 100, 1, 2) == noErr);
+        for (int n = 0; n < 300; ++n) CHECK(MusicDeviceMIDIEvent(u, 0x80 | (n / 100), n % 100, 0, 3) == noErr);
+        CHECK(render(u, 2, 512, 2000512, out) == noErr);
+        CHECK(p.report()->event_total == 1024 && kinds(OP_EVENT_NOTE_OFF) == 300 && kinds(OP_EVENT_NOTE_ON) == 724);
+        CHECK(dropped() == 76);
+        std::puts("AU event queue: 1100 events between two renders (500 parameter, 300 note on, 300 note off; then 800 note on, 300 note off): all 300 note-offs arrive each time, the 76 oldest parameter events or note-ons are dropped and counted");
     }
     finish(u);
 

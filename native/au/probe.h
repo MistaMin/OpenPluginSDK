@@ -4,7 +4,7 @@
 #pragma once
 #include "op_shell.h"
 
-enum { kProbeMaxEvents = 512, kProbeMaxChannels = 16 };
+enum { kProbeMaxEvents = 1024, kProbeMaxChannels = 16 };
 
 struct ProbeReport {
     uint32_t created;          // instances created since the last reset

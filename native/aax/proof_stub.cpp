@@ -73,7 +73,9 @@ struct Stub {
     uint32_t midiCount = 0;
     std::vector<float> plain;
     std::vector<uint8_t> chunk;
-    uint32_t growOnQuery = 0;  // bytes the chunk grows by right after the next size query
+    uint32_t growOnQuery = 0;  // bytes the chunk grows by right after the next too-small answer
+    uint32_t saves = 0;        // op_shell_save_state calls
+    uint32_t sets = 0;         // op_shell_set_plain calls
     uint32_t loads = 0;
     // ABI 6: the latency now, what op_shell_latency last returned, and the changes not yet taken.
     std::atomic<uint32_t> latency{kLatency};
@@ -159,6 +161,7 @@ uint32_t op_shell_latency(void* instance) {
 uint32_t op_shell_set_plain(void* instance, uint32_t index, float plain) {
     if (!instance || index >= kParams) return 0;
     static_cast<Stub*>(instance)->plain[index] = plain;
+    ++static_cast<Stub*>(instance)->sets;
     return 1;
 }
 float op_shell_get_plain(void* instance, uint32_t index) {
@@ -179,10 +182,11 @@ uint32_t op_shell_process(void* instance, const float* in_left, const float* in_
 uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, uint32_t* needed) {
     if (!instance || (!out && capacity > 0)) return OP_STATE_FAILED;
     Stub& stub = *static_cast<Stub*>(instance);
+    ++stub.saves;
     const size_t size = blobSize(stub);
     if (needed) *needed = static_cast<uint32_t>(size);
     if (!out || capacity < size) {
-        if (!out && stub.growOnQuery) {
+        if (stub.growOnQuery) {
             stub.chunk.insert(stub.chunk.end(), stub.growOnQuery, 0x11);
             stub.growOnQuery = 0;
         }
@@ -245,6 +249,8 @@ uint32_t op_stub_chunk(void* instance, uint8_t* out, uint32_t capacity) {
     return static_cast<uint32_t>(stub.chunk.size());
 }
 uint32_t op_stub_loads(void* instance) { return instance ? static_cast<Stub*>(instance)->loads : 0; }
+uint32_t op_stub_saves(void* instance) { return instance ? static_cast<Stub*>(instance)->saves : 0; }
+uint32_t op_stub_sets(void* instance) { return instance ? static_cast<Stub*>(instance)->sets : 0; }
 void op_stub_grow_on_query(void* instance, uint32_t bytes) {
     if (instance) static_cast<Stub*>(instance)->growOnQuery = bytes;
 }

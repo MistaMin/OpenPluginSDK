@@ -37,6 +37,8 @@ uint32_t op_stub_set_chunk(void* instance, const uint8_t* data, uint32_t length)
 uint32_t op_stub_chunk(void* instance, uint8_t* out, uint32_t capacity);
 uint32_t op_stub_loads(void* instance);
 void op_stub_grow_on_query(void* instance, uint32_t bytes);
+uint32_t op_stub_saves(void* instance);
+uint32_t op_stub_sets(void* instance);
 }
 
 static void require(bool ok, const char* message) {
@@ -346,19 +348,54 @@ int main() {
         require(shorter.guardIntact(), "inside the promise");
         Instance b(2);
         require(b.params->SetChunk(state::kChunkId, shorter.get()) == AAX_SUCCESS && b.pluginChunk() == pattern(40, 9), "and that chunk restores");
-        // Growth between the size query and the copy inside GetChunk is retried.
+        // A state larger than the last save is saved again at the size the engine asks for,
+        // and growth between that answer and the copy is retried.
         a.setChunk(pattern(40, 9));
         const uint32_t reserved = a.size();
-        a.setChunk(pattern(32, 9));  // 8 bytes of room; the query below grows the state back to 40
+        a.setChunk(pattern(24, 9));
+        AAX_CBoolean ignored = false;
+        require(a.params->CompareActiveChunk(shorter.get(), &ignored) == AAX_SUCCESS, "a save at 24 bytes");
+        a.setChunk(pattern(32, 9));  // larger than the last save; the too-small answer grows the state back to 40
         op_stub_grow_on_query(a.engine(), 8);
         Chunk retried(reserved);
         retried.get()->fChunkID = state::kChunkId;
+        const uint32_t before = op_stub_saves(a.engine());
         require(a.params->GetChunk(state::kChunkId, retried.get()) == AAX_SUCCESS, "state growing between query and copy is retried");
+        require(op_stub_saves(a.engine()) - before == 3, "two too-small answers, then the save");
         require(retried.guardIntact() && static_cast<uint32_t>(retried.get()->fSize) == reserved, "and the chunk holds the grown state");
         Instance c(2);
         require(c.params->SetChunk(state::kChunkId, retried.get()) == AAX_SUCCESS && c.pluginChunk().size() == 40, "which restores");
     }
     std::puts("AAX state blob: GetChunk never writes more than GetChunkSize promised, retries a state that grew mid-save, and refuses one that outgrew the promise");
+
+    // One save per call, and a compare that leaves the engine alone.
+    {
+        Instance a(2);
+        configure(a, 0.8f, 0.125f, 0.375f, true, pattern(53, 100));
+        void* engine = a.engine();
+        uint32_t saves = op_stub_saves(engine), sets = op_stub_sets(engine);
+        // Each count since the last call of this.
+        auto since = [&](uint32_t& mark, uint32_t now) {
+            const uint32_t delta = now - mark;
+            mark = now;
+            return delta;
+        };
+        const uint32_t bytes = a.size();
+        require(since(saves, op_stub_saves(engine)) == 1, "GetChunkSize is one save");
+        Chunk saved(bytes);
+        saved.get()->fChunkID = state::kChunkId;
+        require(a.params->GetChunk(state::kChunkId, saved.get()) == AAX_SUCCESS, "GetChunk");
+        require(since(saves, op_stub_saves(engine)) == 1, "GetChunk is one save");
+        since(sets, op_stub_sets(engine));
+        AAX_CBoolean equal = false;
+        for (int n = 0; n < 5; ++n) require(a.params->CompareActiveChunk(saved.get(), &equal) == AAX_SUCCESS && equal, "compares equal");
+        require(since(saves, op_stub_saves(engine)) == 5, "CompareActiveChunk is one save when the values are equal");
+        require(proofSetPlain(a.params.get(), 1, 0.5f), "set parameter 1");
+        require(a.params->CompareActiveChunk(saved.get(), &equal) == AAX_SUCCESS && !equal, "a different value compares unequal");
+        require(since(saves, op_stub_saves(engine)) == 0, "and costs no save");
+        require(since(sets, op_stub_sets(engine)) == 0 && op_shell_get_plain(engine, 1) == 0.125f, "CompareActiveChunk never writes to the engine");
+        std::puts("AAX state blob: GetChunkSize, GetChunk and an equal CompareActiveChunk each run one op_shell_save_state; a compare with a different value runs none; compare writes nothing to the engine");
+    }
 
     // A large plugin chunk.
     {
