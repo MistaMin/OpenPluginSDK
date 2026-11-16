@@ -10,7 +10,7 @@
 //! allocation count and the free count.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
 use openplugin_ffi::shell;
@@ -18,7 +18,26 @@ use openplugin_ffi::shell;
 #[path = "../../openplugin-targets/tests/common/shift.rs"]
 mod shift;
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+// The armed flag is per thread: only allocations made on the thread that armed
+// it are counted, so the test harness's other threads cannot add to the count.
+// `const` initialisation: reading it inside the allocator never allocates.
+thread_local! {
+    static ARMED_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ThreadArm;
+
+impl ThreadArm {
+    fn load(&self, _: Ordering) -> bool {
+        ARMED_HERE.try_with(|a| a.get()).unwrap_or(false)
+    }
+
+    fn store(&self, value: bool, _: Ordering) {
+        ARMED_HERE.with(|a| a.set(value));
+    }
+}
+
+static ARMED: ThreadArm = ThreadArm;
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static FREES: AtomicUsize = AtomicUsize::new(0);
 

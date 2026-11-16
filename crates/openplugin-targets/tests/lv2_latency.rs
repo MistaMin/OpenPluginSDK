@@ -12,12 +12,31 @@ mod common;
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::shift::{Shift, AFTER_LATENCY};
 use openplugin_targets::lv2::{self, PortMap};
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+// The armed flag is per thread: only allocations made on the thread that armed
+// it are counted, so the test harness's other threads cannot add to the count.
+// `const` initialisation: reading it inside the allocator never allocates.
+thread_local! {
+    static ARMED_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct ThreadArm;
+
+impl ThreadArm {
+    fn load(&self, _: Ordering) -> bool {
+        ARMED_HERE.try_with(|a| a.get()).unwrap_or(false)
+    }
+
+    fn store(&self, value: bool, _: Ordering) {
+        ARMED_HERE.with(|a| a.set(value));
+    }
+}
+
+static ARMED: ThreadArm = ThreadArm;
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 static FREES: AtomicUsize = AtomicUsize::new(0);
 

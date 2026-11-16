@@ -23,6 +23,8 @@
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
 #include <atomic>
+#include <pthread.h>
+#include <thread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -38,11 +40,27 @@ extern "C" {
 typedef void (malloc_logger_t)(uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result, uint32_t num_hot_frames_to_skip);
 extern malloc_logger_t* malloc_logger;
 }
-static std::atomic<bool> g_armed{false};
+// Armed per thread: only the thread that armed the counters is counted, so another
+// thread of the process cannot add to them. A pthread key, not `thread_local`: the
+// first `thread_local` access on a thread can allocate, and this is read from inside
+// malloc's own logger, where that would recurse.
+pthread_key_t make_armed_key() {
+    pthread_key_t key;
+    pthread_key_create(&key, nullptr);
+    return key;
+}
+const pthread_key_t g_armed_key = make_armed_key();
+struct ThreadArmed {
+    operator bool() const { return pthread_getspecific(g_armed_key) != nullptr; }
+    ThreadArmed& operator=(bool on) {
+        pthread_setspecific(g_armed_key, on ? reinterpret_cast<void*>(1) : nullptr);
+        return *this;
+    }
+} g_armed;
 constexpr uint32_t kLogAlloc = 2;  // stack_logging_type_alloc; a realloc carries it too
 static std::atomic<long> g_malloc_calls{0};
 static void malloc_hook(uint32_t type, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uint32_t) {
-    if (g_armed.load(std::memory_order_relaxed) && (type & kLogAlloc)) g_malloc_calls.fetch_add(1, std::memory_order_relaxed);
+    if (g_armed && (type & kLogAlloc)) g_malloc_calls.fetch_add(1, std::memory_order_relaxed);
 }
 #define CHECK(cond) do { if (!(cond)) { std::fprintf(stderr, "VST3 no-alloc proof failed line %d: %s\n", __LINE__, #cond); std::exit(1); } } while (0)
 
@@ -50,7 +68,7 @@ static std::atomic<long> g_new_calls{0};
 
 // ---- operator new / delete in this executable ------------------------------
 static void* counted_new(std::size_t size) {
-    if (g_armed.load(std::memory_order_relaxed)) g_new_calls.fetch_add(1, std::memory_order_relaxed);
+    if (g_armed) g_new_calls.fetch_add(1, std::memory_order_relaxed);
     void* p = std::malloc(size ? size : 1);
     if (!p) throw std::bad_alloc();
     return p;
@@ -129,7 +147,26 @@ static void self_check() {
     g_sink = ::strdup("unarmed");
     std::free(g_sink);
     CHECK(counts().mallocs == c.mallocs);
-    std::puts("VST3 no-alloc self-check: operator new, malloc, calloc, realloc, strdup and getcwd are counted while armed");
+    // An allocation made on another thread while this one is armed is not counted.
+    // The helper is started first and parked on atomics, so this thread allocates nothing while armed.
+    {
+        std::atomic<int> go{0}, done{0};
+        std::thread other([&] {
+            while (go.load() == 0) std::this_thread::yield();
+            g_sink = std::malloc(64);
+            std::free(g_sink);
+            g_sink = ::operator new(8);
+            ::operator delete(g_sink);
+            done.store(1);
+        });
+        arm();
+        go.store(1);
+        while (done.load() == 0) std::this_thread::yield();
+        const Counts other_counts = disarm();
+        other.join();
+        CHECK(other_counts.news == 0 && other_counts.mallocs == 0);
+    }
+    std::puts("VST3 no-alloc self-check: operator new, malloc, calloc, realloc, strdup and getcwd are counted while armed on this thread, another thread's are not");
 }
 
 static void change(ParameterChanges& changes, ParamID id, double value) {

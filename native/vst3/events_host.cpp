@@ -39,7 +39,7 @@ constexpr int kBlock = 512;
 using Audio = std::vector<std::vector<float>>;
 
 // operator new counted while process() runs (the shell is C++; the plugin ABI is checked by its own tests).
-static bool g_armed = false;
+static thread_local bool g_armed = false;  // per thread: only the arming thread is counted
 static long g_allocs = 0;
 void* operator new(std::size_t size) {
     if (g_armed) ++g_allocs;

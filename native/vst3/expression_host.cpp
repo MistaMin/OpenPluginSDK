@@ -43,7 +43,7 @@ constexpr int kMeasure = 24000;  // 0.5 s: Goertzel bins 2 Hz apart, so a voice 
 
 // operator new counted while process() runs: the shell's event path is C++ and must
 // not allocate (the Rust side is measured by examples/expression_synth/tests).
-static bool g_armed = false;
+static thread_local bool g_armed = false;  // per thread: only the arming thread is counted
 static long g_allocs = 0;
 void* operator new(std::size_t size) {
     if (g_armed) ++g_allocs;

@@ -6,7 +6,7 @@
 // tuples of a linked dylib to all images; the main executable's own tuples
 // are not applied, which is why this is not part of the executable.)
 //
-// The counters only run while armed. Test code only, never part of a product.
+// The counters only run while armed, and only on the thread that armed them. Test code only, never part of a product.
 #include "alloc_hook.h"
 #include <atomic>
 #include <cstdint>
@@ -14,7 +14,10 @@
 #include <malloc/malloc.h>
 
 namespace {
-std::atomic<bool> gArmed{false};
+// Armed per thread: only the thread that armed the counter is counted, so another
+// thread of the process (a timer, the test runner, a framework worker) cannot add
+// to it. Constant-initialised and trivially destructible, so reading it never allocates.
+thread_local bool tArmed = false;
 std::atomic<uint64_t> gAllocs{0};
 std::atomic<uint64_t> gFrees{0};
 
@@ -57,13 +60,13 @@ OP_INTERPOSE(hook_zone_free, malloc_zone_free);
 }
 
 extern "C" {
-void op_alloc_arm(void) { gArmed.store(true); }
-void op_alloc_disarm(void) { gArmed.store(false); }
+void op_alloc_arm(void) { tArmed = true; }
+void op_alloc_disarm(void) { tArmed = false; }
 void op_alloc_note(void) {
-    if (gArmed.load(std::memory_order_relaxed)) gAllocs.fetch_add(1, std::memory_order_relaxed);
+    if (tArmed) gAllocs.fetch_add(1, std::memory_order_relaxed);
 }
 void op_alloc_note_free(void* p) {
-    if (p && gArmed.load(std::memory_order_relaxed)) gFrees.fetch_add(1, std::memory_order_relaxed);
+    if (p && tArmed) gFrees.fetch_add(1, std::memory_order_relaxed);
 }
 uint64_t op_alloc_count(void) { return gAllocs.load(); }
 uint64_t op_free_count(void) { return gFrees.load(); }
