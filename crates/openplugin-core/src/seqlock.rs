@@ -9,8 +9,8 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::{fence, AtomicU64, Ordering};
 
-/// Bridge plumbing, not part of the frozen API.
-#[doc(hidden)]
+/// A `Copy` snapshot one thread publishes and any number read, without a lock:
+/// how a plugin hands meters and telemetry from `process` to its editor.
 pub struct Seqlock<T> {
     seq: AtomicU64,
     slot: UnsafeCell<T>,

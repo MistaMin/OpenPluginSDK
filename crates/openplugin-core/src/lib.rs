@@ -28,10 +28,8 @@ pub mod notify;
 pub mod plane;
 pub mod preset;
 pub mod ramp;
-#[doc(hidden)]
 pub mod seqlock;
 pub mod smooth;
-#[doc(hidden)]
 pub mod spsc;
 pub mod state;
 pub mod worker;
@@ -54,9 +52,8 @@ pub use identity::{AuIds, ParamIdMap, ParamPins, PinError, PinFormat, Vst3Ids};
 pub use mpe::{MpeReceiver, MpeZones};
 pub use notify::HostNotifier;
 pub use plane::{ParamCursor, ParamPlane};
-pub use preset::{Preset, PresetBank};
+pub use preset::{Preset, PresetBank, PresetError};
 pub use ramp::SampleRamp;
-#[doc(hidden)]
 pub use seqlock::Seqlock;
 pub use smooth::OnePole;
 pub use state::{

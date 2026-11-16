@@ -1,7 +1,7 @@
 //! Fixed-capacity single-producer, single-consumer queue.
 //!
-//! An ownership-transfer ring. Endpoints are not `Sync`. Bridge plumbing, not
-//! part of the frozen API.
+//! An ownership-transfer ring, for messages between the audio thread and one
+//! other thread. Endpoints are not `Sync`.
 //! A successful push or pop does not allocate, park, or drop an element.
 #![allow(unsafe_code)]
 
@@ -22,12 +22,9 @@ struct Ring<T> {
 unsafe impl<T: Send> Sync for Ring<T> {}
 unsafe impl<T: Send> Send for Ring<T> {}
 
-#[doc(hidden)]
 pub struct Producer<T>(Arc<Ring<T>>, PhantomData<Cell<()>>);
-#[doc(hidden)]
 pub struct Consumer<T>(Arc<Ring<T>>, PhantomData<Cell<()>>);
 
-#[doc(hidden)]
 pub fn channel<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     assert!(capacity > 0, "spsc capacity must be non-zero");
     let ring = Arc::new(Ring {

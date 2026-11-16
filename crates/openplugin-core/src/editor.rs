@@ -1046,7 +1046,7 @@ mod tests {
             self.0.push((index, plain));
         }
         fn render(&mut self, _: f32) -> Frame<'_> {
-            Frame { pixels: &[0], width: 1, height: 1 }
+            Frame::new(&[0], 1, 1)
         }
     }
 
