@@ -42,7 +42,9 @@ fn fault_fixture() -> &'static Path {
         let out = scratch("fixture").join("Fault Fixture.dll");
         let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
         let status = std::process::Command::new(rustc)
-            .args(["--edition", "2024", "--crate-type", "cdylib", "-C", "debuginfo=0", "-o"])
+            // The static C runtime, as every Windows binary of the SDK (.cargo/config.toml does not
+            // reach a direct rustc call); CI fails on a vcruntime140.dll import.
+            .args(["--edition", "2024", "--crate-type", "cdylib", "-C", "debuginfo=0", "-C", "target-feature=+crt-static", "-o"])
             .arg(&out)
             .arg(&source)
             .status()

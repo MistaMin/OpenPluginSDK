@@ -14,8 +14,10 @@ and is allowed.
 
 -Path takes files and folders. A folder is searched recursively for .dll, .exe,
 .clap, .vst3 and .aaxplugin files (a VST3 or AAX bundle folder is searched, its
-binary is checked); CMake's own CMakeFiles folders are skipped. A folder with no
-binary in it is an error, so a wrong path cannot pass.
+binary is checked); CMake's own CMakeFiles folders are skipped, and so is a file
+that is not a Windows image (no "MZ" header, such as a test's junk.clap). A
+folder with no binary in it, or a file given by name that is not an image, is an
+error, so a wrong path cannot pass.
 
 -SelfTest is the negative control: it compiles one small DLL with /MD and checks
 that this script fails on it, and the same source with /MT and checks that it
@@ -76,6 +78,14 @@ function Get-Imports([string]$file) {
     return @($lines | ForEach-Object { if ($_ -match '^\s+(\S+\.dll)\s*$') { $Matches[1] } })
 }
 
+# True when the file starts with "MZ", as every Windows image does. Tests leave files
+# that are not images under a plug-in's name (junk.clap); those are skipped in a folder.
+function Test-Image([string]$file) {
+    $stream = [IO.File]::OpenRead($file)
+    try { $head = New-Object byte[] 2; $read = $stream.Read($head, 0, 2) } finally { $stream.Dispose() }
+    return ($read -eq 2 -and $head[0] -eq 0x4D -and $head[1] -eq 0x5A)
+}
+
 # The binaries under the given files and folders.
 function Get-Binaries([string[]]$roots) {
     $extensions = @('.dll', '.exe', '.clap', '.vst3', '.aaxplugin')
@@ -83,12 +93,18 @@ function Get-Binaries([string[]]$roots) {
     foreach ($root in $roots) {
         if (-not (Test-Path -LiteralPath $root)) { Die "$root does not exist" }
         $item = Get-Item -LiteralPath $root
-        if (-not $item.PSIsContainer) { $found += $item.FullName; continue }
+        if (-not $item.PSIsContainer) {
+            if (-not (Test-Image $item.FullName)) { Die "$root is not a Windows image" }
+            $found += $item.FullName
+            continue
+        }
         $here = @(Get-ChildItem -LiteralPath $item.FullName -Recurse -File |
             Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() -and $_.FullName -notmatch '[\\/]CMakeFiles[\\/]' } |
             ForEach-Object { $_.FullName })
-        if ($here.Count -eq 0) { Die "no binary (.dll, .exe, .clap, .vst3, .aaxplugin) under $root" }
-        $found += $here
+        $images = @($here | Where-Object { Test-Image $_ })
+        foreach ($skipped in @($here | Where-Object { $images -notcontains $_ })) { Write-Host "skip $skipped : not a Windows image" }
+        if ($images.Count -eq 0) { Die "no binary (.dll, .exe, .clap, .vst3, .aaxplugin) under $root" }
+        $found += $images
     }
     return @($found | Sort-Object -Unique)
 }

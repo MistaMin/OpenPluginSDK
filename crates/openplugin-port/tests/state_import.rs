@@ -506,7 +506,14 @@ fn clap_preset_discovery_captures_factory_and_file_presets() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/preset_provider.rs");
     let plugin = work.join("Preset Fixture.clap");
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
-    let status = std::process::Command::new(rustc).args(["--edition", "2024", "--crate-type", "cdylib", "-C", "debuginfo=0", "-o"]).arg(&plugin).arg(&source).status().expect("run rustc");
+    let mut build = std::process::Command::new(rustc);
+    build.args(["--edition", "2024", "--crate-type", "cdylib", "-C", "debuginfo=0"]);
+    // On Windows the static C runtime, as every Windows binary of the SDK (.cargo/config.toml
+    // does not reach a direct rustc call); CI fails on a vcruntime140.dll import.
+    if cfg!(windows) {
+        build.args(["-C", "target-feature=+crt-static"]);
+    }
+    let status = build.arg("-o").arg(&plugin).arg(&source).status().expect("run rustc");
     assert!(status.success(), "building the preset fixture failed");
 
     let mut o = CaptureOptions::new(helper(), work.join("out"));
