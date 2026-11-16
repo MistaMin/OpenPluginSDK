@@ -28,6 +28,8 @@
 //! (`intersample.rs`) evaluates a 96-tap filter together with the filter of
 //! [`crate::TruePeakMeter`] and the taps of [`TruePeak::new`].
 
+use crate::windows::bessel_i0;
+
 const MAX_PHASES: usize = 8;
 const MAX_TAPS: usize = 16;
 const STANDARD_TAPS: usize = 12;
@@ -38,20 +40,6 @@ const PRECISE_PHASES: usize = 8;
 
 /// Delay, in input samples, of [`TruePeak::new`] (12 taps per phase).
 pub const TRUE_PEAK_DELAY: usize = STANDARD_TAPS / 2;
-
-fn bessel_i0(x: f64) -> f64 {
-    let mut sum = 1.0;
-    let mut term = 1.0;
-    let q = x * x / 4.0;
-    for k in 1..80 {
-        term *= q / (k as f64 * k as f64);
-        sum += term;
-        if term < 1e-18 * sum {
-            break;
-        }
-    }
-    sum
-}
 
 /// Kaiser-windowed sinc, `taps` per phase, window shape `beta`; each phase
 /// normalised to unity DC gain. Phase `p`, tap `k` is coefficient `4k + p`.

@@ -4,19 +4,21 @@
 //! with the processed buffer. `mix` does not allocate. A hard bypass that drops
 //! reported latency is the host's choice. This block keeps the delay.
 
-/// Dry delay and a 10 ms crossfade. `wet == 1` is the processed signal.
-pub struct SoftBypass {
+/// Per-channel dry delay rings and a linear fade, shared by [`SoftBypass`]
+/// and [`crate::Delta`]. Allocates only in [`Self::new`].
+pub(crate) struct DelayFade {
     rings: Vec<Vec<f32>>,
     write: usize,
     latency: usize,
-    wet: f32,
-    target: f32,
+    pub(crate) value: f32,
+    pub(crate) target: f32,
     step: f32,
 }
 
-impl SoftBypass {
-    /// `max_latency` is the longest delay `set_latency` may ask for, in samples.
-    pub fn prepare(channels: usize, max_latency: usize, sample_rate: f32) -> Self {
+impl DelayFade {
+    /// Up to 64 channels, delays up to `max_latency` samples, a fade of
+    /// `fade_seconds`, starting (and resting) at `start`.
+    pub(crate) fn new(channels: usize, max_latency: usize, sample_rate: f32, fade_seconds: f32, start: f32) -> Self {
         let channels = channels.clamp(1, 64);
         let cap = max_latency.saturating_add(1).max(1);
         let rate = crate::rate::effective_rate(sample_rate);
@@ -24,81 +26,109 @@ impl SoftBypass {
             rings: vec![vec![0.0; cap]; channels],
             write: 0,
             latency: 0,
-            wet: 1.0,
-            target: 1.0,
-            step: 1.0 / (rate * 0.01).max(1.0),
+            value: start,
+            target: start,
+            step: 1.0 / (rate * fade_seconds).max(1.0),
         }
     }
 
-    pub fn set_latency(&mut self, latency: usize) {
+    pub(crate) fn set_latency(&mut self, latency: usize) {
         let cap = self.rings.first().map(|ring| ring.len()).unwrap_or(1);
         self.latency = latency.min(cap.saturating_sub(1));
     }
 
-    pub fn latency(&self) -> usize {
+    pub(crate) fn latency(&self) -> usize {
         self.latency
     }
 
-    /// `true` fades toward the delayed dry signal.
-    pub fn set_bypassed(&mut self, bypassed: bool) {
-        self.target = if bypassed { 0.0 } else { 1.0 };
+    pub(crate) fn channels(&self) -> usize {
+        self.rings.len()
     }
 
-    /// Jump to the fade target. Tests and a transport stop use this.
-    pub fn snap(&mut self) {
-        self.wet = self.target;
-    }
-
-    pub fn wet(&self) -> f32 {
-        self.wet
-    }
-
-    pub fn reset(&mut self) {
+    pub(crate) fn reset(&mut self) {
         for ring in &mut self.rings {
             ring.fill(0.0);
         }
         self.write = 0;
     }
 
+    /// Store this frame's dry `input` for `channel` (non-finite as 0) and
+    /// return the dry sample from `latency` frames ago.
+    #[inline]
+    pub(crate) fn push(&mut self, channel: usize, input: f32) -> f32 {
+        let ring = &mut self.rings[channel];
+        let length = ring.len();
+        ring[self.write] = if input.is_finite() { input } else { 0.0 };
+        ring[(self.write + length - self.latency) % length]
+    }
+
+    /// End of a frame: move the write position and the fade one step on.
+    #[inline]
+    pub(crate) fn advance(&mut self) {
+        self.write += 1;
+        if self.write == self.rings[0].len() {
+            self.write = 0;
+        }
+        if self.value < self.target {
+            self.value = (self.value + self.step).min(self.target);
+        } else if self.value > self.target {
+            self.value = (self.value - self.step).max(self.target);
+        }
+    }
+}
+
+/// Dry delay and a 10 ms crossfade. `wet == 1` is the processed signal.
+pub struct SoftBypass {
+    line: DelayFade,
+}
+
+impl SoftBypass {
+    /// `max_latency` is the longest delay `set_latency` may ask for, in samples.
+    pub fn prepare(channels: usize, max_latency: usize, sample_rate: f32) -> Self {
+        Self { line: DelayFade::new(channels, max_latency, sample_rate, 0.01, 1.0) }
+    }
+
+    pub fn set_latency(&mut self, latency: usize) {
+        self.line.set_latency(latency);
+    }
+
+    pub fn latency(&self) -> usize {
+        self.line.latency()
+    }
+
+    /// `true` fades toward the delayed dry signal.
+    pub fn set_bypassed(&mut self, bypassed: bool) {
+        self.line.target = if bypassed { 0.0 } else { 1.0 };
+    }
+
+    /// Jump to the fade target. Tests and a transport stop use this.
+    pub fn snap(&mut self) {
+        self.line.value = self.line.target;
+    }
+
+    pub fn wet(&self) -> f32 {
+        self.line.value
+    }
+
+    pub fn reset(&mut self) {
+        self.line.reset();
+    }
+
     /// Replace `wet` with the crossfade. `dry` is the unprocessed input for this block.
     pub fn mix(&mut self, dry: &[&[f32]], wet: &mut [&mut [f32]]) {
-        let Some(first) = self.rings.first() else {
-            return;
-        };
-        let length = first.len();
-        if length == 0 {
-            return;
-        }
         let frames = wet.first().map(|channel| channel.len()).unwrap_or(0);
-        let latency = self.latency.min(length - 1);
         for frame in 0..frames {
-            let dry_gain = 1.0 - self.wet;
-            let wet_gain = self.wet;
-            for (index, ring) in self.rings.iter_mut().enumerate() {
-                let input = dry
-                    .get(index)
-                    .and_then(|channel| channel.get(frame))
-                    .copied()
-                    .unwrap_or(0.0);
-                let input = if input.is_finite() { input } else { 0.0 };
-                ring[self.write] = input;
-                let read = (self.write + length - latency) % length;
-                let delayed = ring[read];
-                if let Some(sample) = wet.get_mut(index).and_then(|channel| channel.get_mut(frame))
-                {
+            let wet_gain = self.line.value;
+            let dry_gain = 1.0 - wet_gain;
+            for index in 0..self.line.channels() {
+                let input = dry.get(index).and_then(|channel| channel.get(frame)).copied().unwrap_or(0.0);
+                let delayed = self.line.push(index, input);
+                if let Some(sample) = wet.get_mut(index).and_then(|channel| channel.get_mut(frame)) {
                     let processed = if sample.is_finite() { *sample } else { 0.0 };
                     *sample = delayed * dry_gain + processed * wet_gain;
                 }
             }
-            self.write += 1;
-            if self.write == length {
-                self.write = 0;
-            }
-            if self.wet < self.target {
-                self.wet = (self.wet + self.step).min(self.target);
-            } else if self.wet > self.target {
-                self.wet = (self.wet - self.step).max(self.target);
-            }
+            self.line.advance();
         }
     }
 }

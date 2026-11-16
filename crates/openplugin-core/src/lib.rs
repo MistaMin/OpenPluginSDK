@@ -654,6 +654,9 @@ pub fn sample_rate_supported(sample_rate: f64) -> bool {
 /// - Realtime safety: `process` never allocates heap memory or panics.
 /// - Unaltered channels: if `io` provides more channels than configured in `prepare`,
 ///   extra channels are untouched.
+///
+/// A new method must also be forwarded by `openplugin_dsp::SurroundAdapter`,
+/// or every wrapped plugin silently answers with the default.
 pub trait Plugin: Send + 'static {
     fn info(&self) -> &'static PluginInfo;
 

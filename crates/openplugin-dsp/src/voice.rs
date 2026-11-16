@@ -175,8 +175,9 @@ impl NoteExpressions {
 /// One voice over a mono slice the caller already owns.
 #[derive(Clone, Copy, Debug)]
 pub struct SampleVoice {
-    cursor: f32,
-    increment: f32,
+    // f64: an f32 playhead drifts out of tune within seconds and stops at 2^24.
+    cursor: f64,
+    increment: f64,
     gain: f32,
     note: u8,
     active: bool,
@@ -215,7 +216,7 @@ impl SampleVoice {
             return;
         }
         self.cursor = 0.0;
-        self.increment = ratio;
+        self.increment = f64::from(ratio);
         self.gain = gain;
         self.note = note;
         self.active = true;
@@ -241,12 +242,12 @@ impl SampleVoice {
             self.active = false;
             return 0.0;
         }
-        let frac = self.cursor - index as f32;
+        let frac = (self.cursor - index as f64) as f32;
         let a = pcm[index];
         let b = pcm.get(index + 1).copied().unwrap_or(a);
         let sample = (a + (b - a) * frac) * self.gain;
         self.cursor += self.increment;
-        if self.cursor >= pcm.len() as f32 {
+        if self.cursor >= pcm.len() as f64 {
             self.active = false;
         }
         sample
@@ -427,6 +428,32 @@ mod tests {
         assert!(!voice.stop(61));
         assert!(voice.stop(60));
         assert_eq!(voice.next(&pcm), 0.0);
+    }
+
+    #[test]
+    fn sample_voice_playhead_keeps_pitch_and_ends_past_two_to_the_24() {
+        // One semitone up, 60 s into the sample at 48 kHz: an f32 playhead had
+        // rounded the step to exactly 1.0 there (a full semitone flat).
+        let ratio = 2f32.powf(1.0 / 12.0);
+        let mut voice = SampleVoice::new();
+        voice.start(60, ratio, 1.0);
+        let start = 60 * 48_000;
+        voice.cursor = start as f64;
+        let ramp: Vec<f32> = (0..start + 4).map(|n| (n - start) as f32).collect();
+        let a = voice.next(&ramp);
+        let b = voice.next(&ramp);
+        let cents = 1200.0 * f64::from(b - a).log2();
+        assert!((cents - 100.0).abs() < 0.01, "{cents} cents");
+
+        // Ratio 1 past 2^24 samples: an f32 playhead stuck at 16_777_216 for good.
+        let len = (1usize << 24) + 8;
+        let pcm = vec![0.5f32; len];
+        voice.start(60, 1.0, 1.0);
+        voice.cursor = (1u64 << 24) as f64;
+        for _ in 0..8 {
+            voice.next(&pcm);
+        }
+        assert!(!voice.is_active(), "voice reaches the end and stops");
     }
 
     #[test]

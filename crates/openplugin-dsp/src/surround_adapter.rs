@@ -51,8 +51,9 @@
 //!    output is taken (the right is discarded). For a plugin that is
 //!    stereo-linked and symmetric the two choices sound the same;
 //! 3. for [`LfeMode::Process`], one more mono engine (same rule) for the LFE.
-//!    [`LfeMode::Pass`] leaves the LFE untouched; [`LfeMode::Mute`] writes
-//!    zeros.
+//!    [`LfeMode::Pass`] delays the LFE by the inner plugin's latency (read
+//!    in `prepare_layout`) so it stays in time with the other channels, and
+//!    otherwise leaves it untouched; [`LfeMode::Mute`] writes zeros.
 //!
 //! Engines are created from the factory in `prepare_layout`, never in
 //! `process`. A new engine takes the parameters (and, unless
@@ -66,7 +67,11 @@
 //! pair only); `load_state` loads into all. `gain_reduction_db` is the
 //! largest of any engine, so a meter shows the deepest reduction. All engines
 //! have the same latency, so the first one's is the bus latency. MIDI and
-//! transport go to every engine.
+//! transport go to every engine, and so do the per-note calls (`note_on_ref`,
+//! `note_off_ref`, `note_expression`), `param_modulation` and
+//! `track_info_changed`; `note_expressions`, `mpe_input`, `voice_info` and
+//! `pull_note_end` come from the first engine. The adapter overrides every
+//! `Plugin` method, so none falls back to the trait default.
 //!
 //! # Shared detector
 //!
@@ -100,8 +105,9 @@
 use std::sync::Mutex;
 
 use openplugin_core::{
-    AaxIds, BusMeters, EditorState, HostNotifier, IoConfig, MeterFrame, NotePorts, Plugin,
-    PluginInfo, SpeakerLayout, Tail, Transport, MAX_AUDIO_CHANNELS,
+    AaxIds, BusMeters, EditorState, Expression, ExpressionSet, HostNotifier, IoConfig, MeterFrame,
+    MpeZones, NoteRef, NotePorts, Plugin, PluginInfo, SpeakerLayout, Tail, TrackInfo, Transport,
+    VoiceInfo, MAX_AUDIO_CHANNELS,
 };
 
 use crate::downmix::{roles_of, Downmix, DownmixTarget, MixSettings};
@@ -128,7 +134,7 @@ pub enum LfeMode {
     /// Run a mono engine on it.
     #[default]
     Process,
-    /// Leave it untouched.
+    /// Leave it untouched, delayed by the inner plugin's latency.
     Pass,
     /// Write silence.
     Mute,
@@ -222,6 +228,9 @@ pub struct SurroundAdapter<P: Plugin, F: Fn() -> P + Send + 'static> {
     downmix: Option<Downmix>,
     fold_scratch: Vec<Vec<f32>>,
     max_block: usize,
+    /// [`LfeMode::Pass`]: (channel, delay ring of `latency()` samples).
+    lfe_delay: Vec<(usize, Vec<f32>)>,
+    lfe_pos: usize,
 }
 
 impl<P: Plugin, F: Fn() -> P + Send + 'static> SurroundAdapter<P, F> {
@@ -244,6 +253,8 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> SurroundAdapter<P, F> {
             downmix: None,
             fold_scratch: Vec::new(),
             max_block: 0,
+            lfe_delay: Vec::new(),
+            lfe_pos: 0,
         };
         me.layout = me.engines[0].plugin.supported_layouts().first().copied().unwrap_or(IoConfig::STEREO);
         me.refresh_layouts();
@@ -377,6 +388,7 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
         self.engines[0].kind = Kind::Whole;
         self.engines[0].plugin.prepare(sample_rate, max_block, channels);
         self.max_block = max_block;
+        self.lfe_delay.clear();
     }
 
     fn prepare_layout(&mut self, sample_rate: f32, max_block: usize, layout: IoConfig) {
@@ -415,6 +427,14 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
         } else {
             self.downmix = None;
         }
+        self.lfe_delay.clear();
+        self.lfe_pos = 0;
+        let delay = self.engines[0].plugin.latency();
+        if mode == Mode::Surround && self.lfe == LfeMode::Pass && delay > 0 {
+            for c in layout.input.unpaired().filter(|&c| layout.input.is_lfe(c)) {
+                self.lfe_delay.push((c, vec![0.0; delay]));
+            }
+        }
     }
 
     fn set_offline(&mut self, offline: bool) {
@@ -424,6 +444,10 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
     }
 
     fn reset(&mut self) {
+        for (_, ring) in &mut self.lfe_delay {
+            ring.fill(0.0);
+        }
+        self.lfe_pos = 0;
         for e in &mut self.engines {
             e.plugin.reset();
             if let Some(link) = self.link {
@@ -570,6 +594,52 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
         }
     }
 
+    fn note_on_ref(&mut self, offset: usize, note: NoteRef, velocity: u8) {
+        for e in &mut self.engines {
+            e.plugin.note_on_ref(offset, note, velocity);
+        }
+    }
+
+    fn note_off_ref(&mut self, offset: usize, note: NoteRef, velocity: u8) {
+        for e in &mut self.engines {
+            e.plugin.note_off_ref(offset, note, velocity);
+        }
+    }
+
+    fn note_expression(&mut self, offset: usize, note: NoteRef, expression: Expression, value: f32) {
+        for e in &mut self.engines {
+            e.plugin.note_expression(offset, note, expression, value);
+        }
+    }
+
+    fn param_modulation(&mut self, offset: usize, index: usize, note: NoteRef, amount: f32) {
+        for e in &mut self.engines {
+            e.plugin.param_modulation(offset, index, note, amount);
+        }
+    }
+
+    fn track_info_changed(&mut self, info: &TrackInfo) {
+        for e in &mut self.engines {
+            e.plugin.track_info_changed(info);
+        }
+    }
+
+    fn note_expressions(&self) -> ExpressionSet {
+        self.engines[0].plugin.note_expressions()
+    }
+
+    fn mpe_input(&self) -> Option<MpeZones> {
+        self.engines[0].plugin.mpe_input()
+    }
+
+    fn voice_info(&self) -> Option<VoiceInfo> {
+        self.engines[0].plugin.voice_info()
+    }
+
+    fn pull_note_end(&mut self) -> Option<NoteRef> {
+        self.engines[0].plugin.pull_note_end()
+    }
+
     fn preset_count(&self) -> usize {
         self.engines[0].plugin.preset_count()
     }
@@ -643,6 +713,17 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> SurroundAdapter<P, F> {
                     ch[..frames].fill(0.0);
                 }
             }
+        }
+        if let Some(len) = self.lfe_delay.first().map(|(_, ring)| ring.len()) {
+            for (c, ring) in &mut self.lfe_delay {
+                let Some(ch) = io.get_mut(*c) else { continue };
+                let mut pos = self.lfe_pos;
+                for x in &mut ch[..frames] {
+                    *x = std::mem::replace(&mut ring[pos], *x);
+                    pos = if pos + 1 == len { 0 } else { pos + 1 };
+                }
+            }
+            self.lfe_pos = (self.lfe_pos + frames) % len;
         }
         let mut start = 0;
         while start < frames {

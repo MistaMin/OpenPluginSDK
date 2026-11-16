@@ -17,7 +17,8 @@ pub fn hann(phase: f32) -> f32 {
 pub struct WindowRms {
     squares: Vec<f32>,
     index: usize,
-    sum: f32,
+    // f64: an f32 running sum keeps rounding residue after loud material.
+    sum: f64,
 }
 
 impl WindowRms {
@@ -40,13 +41,13 @@ impl WindowRms {
         let sample = if sample.is_finite() { sample } else { 0.0 };
         let square = sample * sample;
         let evicted = self.squares[self.index];
-        self.sum = (self.sum - evicted + square).max(0.0);
+        self.sum = (self.sum - f64::from(evicted) + f64::from(square)).max(0.0);
         self.squares[self.index] = square;
         self.index += 1;
         if self.index == self.squares.len() {
             self.index = 0;
         }
-        (self.sum / self.squares.len() as f32).sqrt()
+        (self.sum / self.squares.len() as f64).sqrt() as f32
     }
 }
 
@@ -69,5 +70,22 @@ mod tests {
             last = rms.push(0.5);
         }
         assert!((last - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn silence_after_ten_minutes_of_loud_noise_reads_near_silence() {
+        // With an f32 sum this read -66.7 dBFS instead of silence.
+        let rate = 48_000;
+        let mut rms = WindowRms::new(rate);
+        let mut seed = 1u32;
+        for _ in 0..rate * 600 {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            rms.push((seed >> 8) as f32 / (1u32 << 23) as f32 - 1.0);
+        }
+        let mut last = 1.0;
+        for _ in 0..rate * 2 {
+            last = rms.push(0.0);
+        }
+        assert!(last < 1e-6, "{} dBFS", 20.0 * last.log10());
     }
 }

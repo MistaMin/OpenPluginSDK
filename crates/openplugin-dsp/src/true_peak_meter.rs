@@ -22,25 +22,12 @@
 //! and then falls at 20 dB/s (a typical bar-graph release). The filter state
 //! and history are allocated in `new`; `process` does not allocate.
 
+use crate::windows::bessel_i0;
 use std::f64::consts::PI;
 
 const TAPS_PER_PHASE: usize = 25; // 97 taps / 4 phases, padded
 const MAX_FACTOR: usize = 4;
 const FLOOR_DB: f32 = -120.0;
-
-fn bessel_i0(x: f64) -> f64 {
-    let mut sum = 1.0;
-    let mut term = 1.0;
-    let q = x * x / 4.0;
-    for k in 1..60 {
-        term *= q / (k as f64 * k as f64);
-        sum += term;
-        if term < 1e-18 * sum {
-            break;
-        }
-    }
-    sum
-}
 
 /// Polyphase interpolator for one factor: `phases[p][k]` multiplies `x[n-k]`.
 #[derive(Clone, Debug)]

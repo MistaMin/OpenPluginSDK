@@ -2,8 +2,12 @@
 //! 7.1.4, linked gain reduction, the LFE modes, fold to stereo, state and
 //! parameter linking, the conformance kit and the allocation check.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use openplugin_core::{
-    Category, IoConfig, ParamInfo, Plugin, PluginInfo, SpeakerLayout, Tail, Unit,
+    Category, Expression, ExpressionSet, IoConfig, MpeZones, NoteRef, ParamInfo, Plugin,
+    PluginInfo, SpeakerLayout, Tail, TrackInfo, Unit, VoiceInfo,
 };
 use openplugin_dsp::{
     Downmix, DownmixTarget, LfeMode, LinkedDetector, MixSettings, SurroundAdapter,
@@ -233,10 +237,17 @@ fn run_by_hand(
         }
     }
     let mut io = input.to_vec();
-    if lfe == LfeMode::Mute {
-        for (c, ch) in io.iter_mut().enumerate() {
-            if layout.is_lfe(c) {
-                ch.fill(0.0);
+    for (c, ch) in io.iter_mut().enumerate() {
+        if layout.is_lfe(c) {
+            match lfe {
+                LfeMode::Mute => ch.fill(0.0),
+                // Delayed by the engines' latency, as the mains are.
+                LfeMode::Pass => {
+                    let d = Comp::new(false).latency();
+                    ch.rotate_right(d);
+                    ch[..d].fill(0.0);
+                }
+                LfeMode::Process => {}
             }
         }
     }
@@ -355,7 +366,10 @@ fn independent_engines_match_hand_run_pairs_bit_exact() {
             assert_bits(&got, &want, &format!("{layout:?} {lfe:?}"));
             if let Some(l) = layout.index_of(openplugin_core::layout::SURROUND_LFE) {
                 match lfe {
-                    LfeMode::Pass => assert_bits(&got[l..=l], &input[l..=l], "pass"),
+                    LfeMode::Pass => {
+                        assert!(got[l][..7].iter().all(|&v| v == 0.0));
+                        assert_bits(&[got[l][7..].to_vec()], &[input[l][..4000 - 7].to_vec()], "pass");
+                    }
                     LfeMode::Mute => assert!(got[l].iter().all(|&v| v == 0.0)),
                     LfeMode::Process => assert_ne!(got[l], input[l]),
                 }
@@ -582,4 +596,201 @@ fn default_adapter_names_a_type_for_the_export_macros() {
     adapted(&mut a, surround(SpeakerLayout::Surround51), &[]);
     let mut io = signal(6, 64);
     a.process(&mut io, 64);
+}
+
+/// An impulse on every channel through an inner plugin with 264 samples of
+/// look-ahead: the passed LFE comes out with the mains, not 264 samples early.
+#[test]
+fn passed_lfe_is_delayed_with_the_mains() {
+    #[derive(Default)]
+    struct LookAhead(Vec<Vec<f32>>, usize);
+    impl Plugin for LookAhead {
+        fn info(&self) -> &'static PluginInfo {
+            &INFO
+        }
+        fn prepare(&mut self, _: f32, _: usize, _: usize) {
+            self.0 = vec![vec![0.0; 264]; 2];
+            self.1 = 0;
+        }
+        fn supported_layouts(&self) -> &'static [IoConfig] {
+            STEREO_ONLY
+        }
+        fn latency(&self) -> usize {
+            264
+        }
+        fn reset(&mut self) {}
+        fn set_param(&mut self, _: &str, _: f32) -> bool {
+            false
+        }
+        fn param(&self, _: &str) -> Option<f32> {
+            None
+        }
+        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+            let start = self.1;
+            for (ch, ring) in io.iter_mut().zip(&mut self.0) {
+                let mut pos = start;
+                for x in &mut ch[..frames] {
+                    *x = std::mem::replace(&mut ring[pos], *x);
+                    pos = (pos + 1) % 264;
+                }
+            }
+            self.1 = (start + frames) % 264;
+        }
+    }
+    let layout = SpeakerLayout::Surround51;
+    let mut a = openplugin_dsp::StereoOnSurround::<LookAhead>::default().lfe(LfeMode::Pass);
+    adapted(&mut a, surround(layout), &[]);
+    let mut input = vec![vec![0.0f32; 1000]; 6];
+    for ch in &mut input {
+        ch[10] = 1.0;
+    }
+    let out = run_adapter(&mut a, &input);
+    for (c, ch) in out.iter().enumerate() {
+        let peak = ch.iter().position(|&v| v == 1.0);
+        assert_eq!(peak, Some(274), "channel {c}");
+    }
+}
+
+// Every Plugin call the adapter must forward. A probe counts the calls it gets
+// and answers each getter with its own engine number, so a test sees both how
+// many engines a call reached and which engine answered.
+
+const ON_REF: usize = 0;
+const OFF_REF: usize = 1;
+const EXPRESSION: usize = 2;
+const MODULATION: usize = 3;
+const TRACK: usize = 4;
+const MADE: usize = 5;
+
+#[derive(Default)]
+struct Calls([AtomicUsize; 6]);
+
+struct Probe {
+    calls: Arc<Calls>,
+    engine: usize,
+    ended: bool,
+}
+
+impl Plugin for Probe {
+    fn info(&self) -> &'static PluginInfo {
+        &INFO
+    }
+    fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+    fn supported_layouts(&self) -> &'static [IoConfig] {
+        STEREO_ONLY
+    }
+    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn reset(&mut self) {}
+    fn set_param(&mut self, _: &str, _: f32) -> bool {
+        false
+    }
+    fn param(&self, _: &str) -> Option<f32> {
+        None
+    }
+    fn note_on_ref(&mut self, _: usize, _: NoteRef, _: u8) {
+        self.calls.0[ON_REF].fetch_add(1, Ordering::Relaxed);
+    }
+    fn note_off_ref(&mut self, _: usize, _: NoteRef, _: u8) {
+        self.calls.0[OFF_REF].fetch_add(1, Ordering::Relaxed);
+    }
+    fn note_expression(&mut self, _: usize, _: NoteRef, _: Expression, _: f32) {
+        self.calls.0[EXPRESSION].fetch_add(1, Ordering::Relaxed);
+    }
+    fn param_modulation(&mut self, _: usize, _: usize, _: NoteRef, _: f32) {
+        self.calls.0[MODULATION].fetch_add(1, Ordering::Relaxed);
+    }
+    fn track_info_changed(&mut self, _: &TrackInfo) {
+        self.calls.0[TRACK].fetch_add(1, Ordering::Relaxed);
+    }
+    fn note_expressions(&self) -> ExpressionSet {
+        ExpressionSet::from_bits(self.engine as u32 + 1)
+    }
+    fn mpe_input(&self) -> Option<MpeZones> {
+        Some(MpeZones::new(self.engine as u8 + 1, 0))
+    }
+    fn voice_info(&self) -> Option<VoiceInfo> {
+        Some(VoiceInfo::new(self.engine as u32 + 1, 16))
+    }
+    fn pull_note_end(&mut self) -> Option<NoteRef> {
+        if self.ended {
+            return None;
+        }
+        self.ended = true;
+        Some(NoteRef::key(self.engine as u8 + 1))
+    }
+}
+
+/// A probe adapter on 5.1 (four engines: two pairs, the centre, the LFE).
+fn probe() -> (SurroundAdapter<Probe, impl Fn() -> Probe + Send + 'static>, Arc<Calls>) {
+    let calls = Arc::new(Calls::default());
+    let c = calls.clone();
+    let make = move || Probe { calls: c.clone(), engine: c.0[MADE].fetch_add(1, Ordering::Relaxed), ended: false };
+    let mut a = SurroundAdapter::new(make);
+    adapted(&mut a, surround(SpeakerLayout::Surround51), &[]);
+    assert_eq!(calls.0[MADE].load(Ordering::Relaxed), 4);
+    (a, calls)
+}
+
+fn reached(calls: &Calls, which: usize) -> usize {
+    calls.0[which].load(Ordering::Relaxed)
+}
+
+#[test]
+fn note_on_ref_reaches_every_engine() {
+    let (mut a, calls) = probe();
+    a.note_on_ref(0, NoteRef::new(5, 0, 0, 60), 100);
+    assert_eq!(reached(&calls, ON_REF), 4);
+}
+
+#[test]
+fn note_off_ref_reaches_every_engine() {
+    let (mut a, calls) = probe();
+    a.note_off_ref(0, NoteRef::new(5, 0, 0, 60), 64);
+    assert_eq!(reached(&calls, OFF_REF), 4);
+}
+
+#[test]
+fn note_expression_reaches_every_engine() {
+    let (mut a, calls) = probe();
+    a.note_expression(0, NoteRef::ALL, Expression::Tuning, 1.0);
+    assert_eq!(reached(&calls, EXPRESSION), 4);
+}
+
+#[test]
+fn param_modulation_reaches_every_engine() {
+    let (mut a, calls) = probe();
+    a.param_modulation(0, 0, NoteRef::ALL, 0.5);
+    assert_eq!(reached(&calls, MODULATION), 4);
+}
+
+#[test]
+fn track_info_changed_reaches_every_engine() {
+    let (mut a, calls) = probe();
+    a.track_info_changed(&TrackInfo::default());
+    assert_eq!(reached(&calls, TRACK), 4);
+}
+
+#[test]
+fn note_expressions_come_from_the_first_engine() {
+    let (a, _) = probe();
+    assert_eq!(a.note_expressions(), ExpressionSet::from_bits(1));
+}
+
+#[test]
+fn mpe_input_comes_from_the_first_engine() {
+    let (a, _) = probe();
+    assert_eq!(a.mpe_input(), Some(MpeZones::new(1, 0)));
+}
+
+#[test]
+fn voice_info_comes_from_the_first_engine() {
+    let (a, _) = probe();
+    assert_eq!(a.voice_info(), Some(VoiceInfo::new(1, 16)));
+}
+
+#[test]
+fn pull_note_end_comes_from_the_first_engine() {
+    let (mut a, _) = probe();
+    assert_eq!(a.pull_note_end(), Some(NoteRef::key(1)));
+    assert_eq!(a.pull_note_end(), None);
 }

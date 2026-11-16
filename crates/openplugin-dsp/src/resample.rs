@@ -38,6 +38,7 @@
 //! not in `process`. Reading never allocates. The kernel is immutable and can be
 //! shared by every voice.
 
+use crate::windows::bessel_i0;
 use std::f64::consts::PI;
 
 /// Largest input-samples-per-output-sample ratio (4 octaves up).
@@ -78,20 +79,6 @@ impl From<Quality> for SincConfig {
             Quality::Best => Self { half_width: 64, stopband_db: 120.0, phases: 2048 },
         }
     }
-}
-
-fn bessel_i0(x: f64) -> f64 {
-    let q = 0.25 * x * x;
-    let mut term = 1.0;
-    let mut sum = 1.0;
-    for k in 1..200 {
-        term *= q / (k as f64 * k as f64);
-        sum += term;
-        if term < sum * 1e-17 {
-            break;
-        }
-    }
-    sum
 }
 
 fn kaiser_beta(a: f64) -> f64 {
