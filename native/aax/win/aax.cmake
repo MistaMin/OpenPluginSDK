@@ -69,6 +69,9 @@ target_compile_definitions(openplugin_aax_sdk PRIVATE
   UNICODE _UNICODE NOMINMAX _WINDOWS I18N_LIB PLUGIN_SDK_BUILD AAX_PLUGIN_BUILD
   _CRT_SECURE_NO_DEPRECATE _SCL_SECURE_NO_DEPRECATE)
 target_compile_options(openplugin_aax_sdk PRIVATE /utf-8 /MP)
+# The shells' runtime, the release C runtime linked statically (/MT), named here too
+# so the library never falls back to the SDK project's /MD.
+set_property(TARGET openplugin_aax_sdk PROPERTY MSVC_RUNTIME_LIBRARY "${OP_MSVC_RUNTIME}")
 
 # The plug-in: <Name>.aaxplugin\Contents\x64\<Name>.aaxplugin.
 set(OP_AAX_BUNDLE_DIR "${CMAKE_BINARY_DIR}/${OP_PRODUCT}.aaxplugin")

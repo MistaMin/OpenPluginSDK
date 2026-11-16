@@ -37,7 +37,8 @@
 #   -Tail               the shells report the plugin's tail (OP_TAIL)    [OP_TAIL=1]
 #   -AaxPages           write the AAX page table into the bundle         [OP_AAX_PAGES=1]
 #   -AllowLib DLL       a DLL the plug-in may import besides the system
-#                       ones and the Visual C++ runtime; repeatable
+#                       ones; repeatable. The Visual C++ runtime cannot
+#                       be allowed
 #                       (comma list in the variable)                     [OP_ALLOW_LIBS]
 #
 # Paths
@@ -54,7 +55,9 @@
 #
 # The checks: every binary is a 64-bit DLL; none holds a path of the build machine
 # (the home, workspace, SDK and build folders, as bytes and as UTF-16); each imports
-# only system DLLs and the Visual C++ runtime (dumpbin /dependents); each exports its
+# only system DLLs, and none of the Visual C++ runtime (dumpbin /dependents, through
+# check_imports.ps1): the C and C++ runtime is linked statically, so no plug-in needs
+# the Visual C++ Redistributable; each exports its
 # format's entry points (clap_entry; GetPluginFactory, InitDll, ExitDll; the ACF
 # functions); and each carries a version resource with the product name, the version
 # and the manufacturer. A failed check fails the run.
@@ -205,7 +208,11 @@ $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USER
 $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
 $remaps = @("$($env:USERPROFILE)=home", "$workspaceParent=deps", "$sdkRoot=openplugin-sdk", "$cargoHome=cargo", "$rustupHome=rustup",
     "$workspaceRoot=workspace", "$manifestDir=plugin", "$WorkDir=build")
-$env:CARGO_ENCODED_RUSTFLAGS = ($remaps | ForEach-Object { "--remap-path-prefix=$_" }) -join [string][char]0x1f
+# CARGO_ENCODED_RUSTFLAGS replaces the target rustflags of .cargo/config.toml, and a
+# plugin outside this repository does not read that file, so the static C runtime
+# (+crt-static, as the shells' MultiThreaded) is asked for here too.
+$rustFlags = @('-C', 'target-feature=+crt-static') + @($remaps | ForEach-Object { "--remap-path-prefix=$_" })
+$env:CARGO_ENCODED_RUSTFLAGS = $rustFlags -join [string][char]0x1f
 # The folders no shipped binary may name.
 $private = @($WorkDir, $workspaceParent, $manifestDir, $sdkRoot, $env:USERPROFILE)
 if ($Vst3Sdk) { $private += $Vst3Sdk }
@@ -309,12 +316,12 @@ $bad = 0
 function Fail([string]$text) { Write-Output "FAILED: $text"; $script:bad++ }
 if (-not $NoVerify -and -not $DryRun) {
     Note 'checks'
-    # What a plug-in may import: Windows' own DLLs and the Visual C++ runtime (the
-    # Rust MSVC target and the C++ shells link it dynamically, so the machine needs
-    # the Visual C++ Redistributable, as nearly every host installs).
+    # What a plug-in may import: Windows' own DLLs and the Universal CRT. The Visual
+    # C++ runtime (vcruntime*, msvcp*, concrt*) is linked statically and never allowed,
+    # not even with -AllowLib: check_imports.ps1 fails on it.
     $system = @('kernel32.dll', 'ntdll.dll', 'user32.dll', 'gdi32.dll', 'shell32.dll', 'comdlg32.dll', 'comctl32.dll', 'advapi32.dll',
         'ole32.dll', 'oleaut32.dll', 'ws2_32.dll', 'userenv.dll', 'bcrypt.dll', 'bcryptprimitives.dll', 'dbghelp.dll', 'imm32.dll', 'version.dll',
-        'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll') + @($AllowLib | ForEach-Object { $_.ToLowerInvariant() })
+        'ucrtbase.dll') + @($AllowLib | ForEach-Object { $_.ToLowerInvariant() })
     $exports = @{
         clap = @('clap_entry')
         vst3 = @('GetPluginFactory', 'InitDll', 'ExitDll')
@@ -344,7 +351,10 @@ if (-not $NoVerify -and -not $DryRun) {
                 }
             }
         }
-        # Imports: system DLLs and the C runtime only.
+        # Imports: no Visual C++ runtime (check_imports.ps1, which the CI jobs run too),
+        # then system DLLs only.
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'check_imports.ps1') -Path $file
+        if ($LASTEXITCODE -ne 0) { Fail "Visual C++ runtime: $file imports it; the C and C++ runtime must be linked statically" }
         $imports = @(& dumpbin.exe /nologo /dependents $file | ForEach-Object { if ($_ -match '^\s+(\S+\.dll)\s*$') { $Matches[1] } })
         foreach ($import in $imports) {
             $lower = $import.ToLowerInvariant()

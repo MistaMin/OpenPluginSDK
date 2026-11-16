@@ -119,6 +119,21 @@ when its output is piped or redirected (`& pluginval.exe ... | Out-Host`, or
 `*> log.txt`); the runner above always redirects it. `pluginval.exe --help`
 lists the options.
 
+## check_imports.ps1: no Visual C++ runtime in a binary
+
+Lists the imports of every `.dll`, `.exe`, `.clap`, `.vst3` and `.aaxplugin`
+under the given files and folders (`dumpbin /dependents`) and fails on any DLL
+of the Visual C++ runtime (`vcruntime*`, `msvcp*`, `concrt*`, `vccorlib*`,
+`msvcr1*`, `ucrtbased.dll`): the SDK links the C and C++ runtime statically, so
+no plug-in needs the Visual C++ Redistributable. `-SelfTest` is the negative
+control: a DLL built with `/MD` must be caught and one built with `/MT` must
+pass. It loads Visual Studio's environment itself when `dumpbin` is not on PATH.
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\check_imports.ps1 -Path target\release, build-shell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\check_imports.ps1 -SelfTest
+```
+
 ## build_plugin.ps1: a plugin crate into Windows plug-ins
 
 Builds a plugin crate into `<Name>.clap`, `<Name>.vst3` and `<Name>.aaxplugin`

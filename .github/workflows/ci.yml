@@ -93,6 +93,15 @@ jobs:
       - name: SIMD kernels in release, with the speed-up report
         working-directory: OpenPluginSDK
         run: cargo test -p openplugin-dsp --release --lib simd -- --include-ignored --nocapture
+      # The test binaries built above link the C runtime statically
+      # (.cargo/config.toml): none may import vcruntime*, msvcp* or concrt*.
+      - name: No Visual C++ runtime imports (dumpbin /dependents)
+        if: runner.os == 'Windows'
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -Path target\debug, target\release
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
   # W1 on Linux: build the whole workspace and run every test that needs no
   # window or display (core, DSP, DRI, the CLAP and LV2 targets, the shell ABI in
@@ -226,6 +235,25 @@ jobs:
         run: |
           & (Join-Path $env:RUNNER_TEMP 'clap-validator\clap-validator.exe') validate (Join-Path $env:RUNNER_TEMP 'bundle\Editor.clap')
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # No Visual C++ Redistributable: the C runtime is linked statically
+      # (.cargo/config.toml), so no binary may import vcruntime*, msvcp* or
+      # concrt*. The self-test first: a DLL built with /MD must be caught and
+      # one built with /MT must pass, or the check proves nothing.
+      - name: Import check self-test (a /MD build is caught)
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -SelfTest
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # Every binary built above: the workspace's examples, standalones, tests,
+      # build scripts and proc macros (debug), examples/editor (release), and
+      # the CLAP bundle.
+      - name: No Visual C++ runtime imports (dumpbin /dependents)
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -Path target\debug, target\release, (Join-Path $env:RUNNER_TEMP 'bundle\Editor.clap')
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
   # The VST3 shell on Windows (native/cmake/windows.cmake, native/vst3/win): the
   # same proofs as the macOS vst3-shell job, built with MSVC. AAX is not built
@@ -294,6 +322,23 @@ jobs:
         run: |
           $env:OPENPLUGIN_PORT_FIXTURES = "$PWD\build-shell"
           cargo test -p openplugin-port --no-fail-fast
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      # The shells, the VST3 SDK's libraries and the Rust library are linked
+      # against the static C runtime (MultiThreaded, +crt-static). The self-test
+      # shows the check catches a /MD build; then every binary of this job: the
+      # VST3 bundles, the proofs and their stand-in plug-ins (build-shell), and
+      # openplugin-port with its tests (target).
+      - name: Import check self-test (a /MD build is caught)
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -SelfTest
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: No Visual C++ runtime imports (dumpbin /dependents)
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          & .\scripts\windows\check_imports.ps1 -Path build-shell, target\debug, target\release
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
   # The minimum Rust version on Windows: the Windows-only code (cfg(windows))
