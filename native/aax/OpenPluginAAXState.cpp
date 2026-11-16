@@ -99,7 +99,9 @@ Status decode(const uint8_t* data, size_t size, Values& out) {
     if (!table.valid) return Status::badLayout;
     if (version != kVersion1 && version != kVersion) return Status::badVersion;
     const uint32_t count = get32(data + 8);
-    if (count != table.count || get32(data + 12) != table.hash) return Status::badLayout;
+    // Another parameter layout: readable only through a blob that names its values.
+    const bool otherLayout = count != table.count || get32(data + 12) != table.hash;
+    if (otherLayout && (version != kVersion || count > kMaxParams || !(op_shell_identity() & OP_IDENTITY_KEYED_STATE))) return Status::badLayout;
     const size_t fixed = kHeaderBytes + static_cast<size_t>(count) * sizeof(float);
     size_t blobSize = 0;
     if (version == kVersion1) {
@@ -112,10 +114,11 @@ Status decode(const uint8_t* data, size_t size, Values& out) {
     const uint32_t bypass = get32(data + 16);
     if (bypass > 1) return Status::badValue;
     Values next{};
-    next.count = count;
+    next.count = table.count;
     next.bypass = bypass == 1;
     next.version = version;
-    for (uint32_t i = 0; i < count; ++i) {
+    next.byBlob = otherLayout;
+    for (uint32_t i = 0; i < count && !otherLayout; ++i) {
         const uint32_t bits = get32(data + kHeaderBytes + i * 4);
         float value = 0.f;
         std::memcpy(&value, &bits, sizeof value);

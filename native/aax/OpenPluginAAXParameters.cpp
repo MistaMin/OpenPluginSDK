@@ -147,7 +147,8 @@ public:
         for (uint32_t i = 0; i < info.param_count; ++i) {
             OpParamDesc desc{};
             if (!op_shell_param(i, &desc) || desc.id[0] == '\0') return AAX_ERROR_INVALID_PARAMETER_ID;
-            ids_[i] = desc.id;
+            ids_[i] = shellParamId(i);
+            if (ids_[i].empty()) return AAX_ERROR_INVALID_PARAMETER_ID;
             for (uint32_t earlier = 0; earlier < i; ++earlier) {
                 if (ids_[earlier] == ids_[i]) return AAX_ERROR_INVALID_PARAMETER_ID;
             }
@@ -262,7 +263,8 @@ public:
         state::Values stored{}, current{};
         if (!parse(chunk, stored) || !collect(current)) return AAX_SUCCESS;
         bool same = stored.bypass == current.bypass && stored.count == current.count;
-        for (uint32_t i = 0; same && i < current.count; ++i) same = stored.plain[i] == current.plain[i];
+        // A chunk of another parameter layout holds its values in its blob alone.
+        for (uint32_t i = 0; same && !stored.byBlob && i < current.count; ++i) same = stored.plain[i] == current.plain[i];
         // A version 2 chunk also names the plugin's own state; a version 1 chunk has none to compare.
         if (same && stored.version == state::kVersion) {
             std::vector<uint8_t> blob;
@@ -447,6 +449,14 @@ private:
             if (!state_.engine || values.blobSize > UINT32_MAX ||
                 !op_shell_load_state(state_.engine, values.blob, static_cast<uint32_t>(values.blobSize)))
                 return AAX_ERROR_MALFORMED_CHUNK;
+            if (values.byBlob) {
+                // Written by a build with another parameter order: the blob names its values
+                // by parameter, so the engine now holds each one in its place. Read them back.
+                for (uint32_t i = 0; i < values.count; ++i) targets[i]->SetValueWithFloat(op_shell_get_plain(state_.engine, i));
+                bypass->SetValueWithBool(values.bypass);
+                dirty_ = true;
+                return AAX_SUCCESS;
+            }
             // The chunk's values are the ones the host sees; give them to the engine too.
             for (uint32_t i = 0; i < values.count; ++i) op_shell_set_plain(state_.engine, i, values.plain[i]);
         }

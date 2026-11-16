@@ -257,11 +257,12 @@ jobs:
           path: vst3sdk
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      # The proofs load the example ("Example Gain"); the role proof loads Role Tags and
-      # the per-note expression proof Expression Synth, found next to it.
-      - name: Build the example, Role Tags and Expression Synth as static libraries
+      # The proofs load the example ("Example Gain"); the role proof loads Role Tags, the
+      # per-note expression proof Expression Synth and the identity pinning proof the four
+      # builds of Pinned (examples/pinned/builds), found next to it.
+      - name: Build the example, Role Tags, Expression Synth and Pinned as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b
       # Only the VST3 shell, no editor. The Rust library has the release C
       # runtime, so the shell is built as Release. Each -D is quoted: PowerShell
       # splits an unquoted -DOP_VERSION=0.3.1 at the first dot.
@@ -280,7 +281,7 @@ jobs:
       - name: Build the VST3 shell and its proofs
         working-directory: OpenPluginSDK
         run: cmake --build build-shell --config Release -j 4
-      # The twelve vst3_* proofs. vst3_noalloc_events_proof prepares a point per
+      # The thirteen vst3_* proofs. vst3_noalloc_events_proof prepares a point per
       # sample for 2081 parameters and takes a few minutes.
       - name: Run the VST3 proofs
         working-directory: OpenPluginSDK
@@ -451,9 +452,11 @@ jobs:
       # The proofs load the SDK example (examples/editor, "Example Gain"); the role proof
       # (vst3_roles_proof) loads Role Tags (examples/role_tags) and the expression proof
       # (vst3_expression_proof) Expression Synth (examples/expression_synth), found next to it.
-      - name: Build the example, Role Tags and Expression Synth as static libraries
+      # The identity pinning proof (vst3_identity_proof) loads the four builds of Pinned
+      # (examples/pinned/builds).
+      - name: Build the example, Role Tags, Expression Synth and Pinned as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b
       # Only the VST3 shell: no Audio Unit or AAX SDK, no editor.
       - name: Configure the VST3 shell
         working-directory: OpenPluginSDK
@@ -501,10 +504,11 @@ jobs:
           path: AudioUnitSDK
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
-      # au_roles_proof links Role Tags (examples/role_tags), found next to the example.
-      - name: Build the example plugin and Role Tags as static libraries
+      # au_roles_proof links Role Tags (examples/role_tags), found next to the example;
+      # au_identity_proof links the four builds of Pinned (examples/pinned/builds).
+      - name: Build the example plugin, Role Tags and Pinned as static libraries
         working-directory: OpenPluginSDK
-        run: cargo build --release --lib -p example-editor -p example-role-tags
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b
       - name: Configure the Audio Unit shell only
         working-directory: OpenPluginSDK
         run: >

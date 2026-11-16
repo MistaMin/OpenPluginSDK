@@ -39,7 +39,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | CLAP | OpenPluginSDK | Notes |
 |---|---|---|
 | `clap_plugin_params::count`, `get_info` | `static PARAMS: [ParamInfo; N]` | |
-| `clap_param_info::id` | The position in the table | The entry numbers parameters `0..n` in table order. Hosts store automation by this id, so keep the old order; a plugin whose ids were not `0..n` cannot keep them yet |
+| `clap_param_info::id` | The position in the table, or `ParamInfo::with_clap_id` | The entry numbers parameters `0..n` in table order. Hosts store automation by this id, so keep the old order; ids that were not `0..n` are kept with `ParamInfo::with_clap_id` |
 | `clap_param_info::name`, `module` | `ParamInfo::name`, `.with_group("Filter/Envelope")` | The group path is the module path |
 | `min_value`, `max_value`, `default_value` | `ParamInfo::new(id, name, min, max, default, unit)` | Plain values in both |
 | `CLAP_PARAM_IS_AUTOMATABLE` | The default | |
@@ -337,7 +337,7 @@ What moved where:
 
 ## What has no counterpart yet
 
-- **Parameter ids that are not `0..n` in table order.** The CLAP entry numbers parameters by position. A plugin that used other ids (hashes, sparse numbers) loses its automation links until porting task 2 in [ROADMAP.md](../ROADMAP.md).
+- **Nothing for parameter ids.** A plugin that used ids other than `0..n` in table order (hashes, sparse numbers) keeps them with `ParamInfo::with_clap_id`, and its automation links with them (see [Identity pinning](../PORTING.md#identity-pinning)).
 - **Custom value text.** A parameter prints and parses by its `Unit` and its choice names.
 - **`mark_dirty`.** A change to state that is not a parameter cannot be reported to the host.
 - **Presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`; the CLAP entry has no `preset-load` and no preset discovery.

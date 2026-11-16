@@ -14,6 +14,7 @@
 // refused, as a plugin's load_state may refuse one. op_stub_* are test hooks.
 #include "op_shell.h"
 #include "proof_stub.h"
+#include "stub_identity.h"
 #include <algorithm>
 #include <atomic>
 #include <cmath>

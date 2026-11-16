@@ -306,4 +306,4 @@ What moved where:
 - **SysEx.** MIDI reaches the plugin as messages of up to three bytes.
 - **A failing `process`.** There is no error status to return.
 - **GUI toolkit adapters** for vizia, egui or iced.
-- **Keeping the old plugin's VST3 identity.** `VST3_CLASS_ID` cannot be carried over: the SDK derives the class ids from `PluginInfo::id` and numbers parameters by table position, where nih-plug identifies them by a hash of the id string. The VST3, Audio Unit and AAX shells also accept only state they wrote themselves, so state saved by the old plugin reaches `load_state` only through CLAP. Both are porting task 2 in [ROADMAP.md](../ROADMAP.md).
+- **Keeping the old plugin's state in VST3.** The identity itself carries over: `VST3_CLASS_ID` goes into `Plugin::vst3_ids`, and nih-plug's hashed parameter ids into `ParamInfo::with_host_id` (see [Identity pinning](../PORTING.md#identity-pinning); `openplugin-port scan` writes both). The VST3, Audio Unit and AAX shells still accept only state they wrote themselves, so state saved by the old plugin reaches `load_state` only through CLAP; that part is open.

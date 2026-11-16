@@ -17,6 +17,11 @@ members = [
     "examples/role_tags",
     "examples/expression_synth",
     "examples/porting_guides",
+    "examples/pinned",
+    "examples/pinned/builds/a",
+    "examples/pinned/builds/b",
+    "examples/pinned/builds/plain_a",
+    "examples/pinned/builds/plain_b",
 ]
 resolver = "2"
 

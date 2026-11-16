@@ -1,0 +1,13 @@
+[package]
+name = "example-pinned"
+description = "Test plugin for the identity pinning proof: one plugin in two parameter orders, with and without pinned ids"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The plugin alone, with no exports: tests/session.rs hosts all four builds in one
+# process through CLAP. The crates in builds/ export one build each as a static
+# library for the native VST3, Audio Unit and AAX identity proofs.
+[dependencies]
+openplugin = { workspace = true }

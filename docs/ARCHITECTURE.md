@@ -14,6 +14,7 @@ L0: Core Contracts (openplugin-core)
     - Per-note expression: NoteRef (note id, port, channel, key), Expression, MPE receiver (RP-053) shared by every MIDI entry ([EXPRESSION.md](EXPRESSION.md))
     - Seqlock meter snapshots, SPSC gesture queue, one-pole smoother
     - Versioned OPST parameter snapshot, OPCH session chunk, and A/B compare
+    - Identity pins (`identity`): the ids a host stores, set explicitly; a pinned table is saved by parameter id ([PORTING.md](PORTING.md#identity-pinning))
     - Speaker layouts from mono through 7.1.4 and seventh-order ambisonics, plus an optional sidechain
 L1: Algorithms & DSP (openplugin-dsp)
     - Biquad filters, Dynamics (Compressor/Limiter/Gate), Saturation, Metering

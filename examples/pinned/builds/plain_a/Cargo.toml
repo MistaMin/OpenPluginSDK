@@ -1,0 +1,16 @@
+[package]
+name = "example-pinned-plain-a"
+description = "Identity pinning proof build: no pins, the first parameter order (the negative control)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# staticlib: the native identity proofs link it behind the VST3, Audio Unit and AAX
+# shells (native/CMakeLists.txt finds it next to OP_RUST_LIB).
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+openplugin = { workspace = true }
+example-pinned = { path = "../.." }

@@ -227,6 +227,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-pinned"
+version = "1.0.0-beta"
+dependencies = [
+ "openplugin",
+]
+
+[[package]]
+name = "example-pinned-a"
+version = "1.0.0-beta"
+dependencies = [
+ "example-pinned",
+ "openplugin",
+]
+
+[[package]]
+name = "example-pinned-b"
+version = "1.0.0-beta"
+dependencies = [
+ "example-pinned",
+ "openplugin",
+]
+
+[[package]]
+name = "example-pinned-plain-a"
+version = "1.0.0-beta"
+dependencies = [
+ "example-pinned",
+ "openplugin",
+]
+
+[[package]]
+name = "example-pinned-plain-b"
+version = "1.0.0-beta"
+dependencies = [
+ "example-pinned",
+ "openplugin",
+]
+
+[[package]]
 name = "example-porting-guides"
 version = "1.0.0-beta"
 dependencies = [

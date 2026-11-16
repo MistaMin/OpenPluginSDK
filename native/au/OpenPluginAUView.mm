@@ -22,11 +22,14 @@
 @end
 
 namespace {
+// The editor names a parameter by its index in the plugin's table; the host by its
+// AudioUnitParameterID, which is that index unless the plugin pins another (ABI 8).
+AudioUnitParameterID parameterId(uint32_t index) { return op_au_param_id(index); }
 void notify(AudioUnit unit, AudioUnitEventType type, uint32_t index) {
     AudioUnitEvent event{};
     event.mEventType = type;
     event.mArgument.mParameter.mAudioUnit = unit;
-    event.mArgument.mParameter.mParameterID = index;
+    event.mArgument.mParameter.mParameterID = parameterId(index);
     event.mArgument.mParameter.mScope = kAudioUnitScope_Global;
     event.mArgument.mParameter.mElement = 0;
     AUEventListenerNotify(nullptr, nullptr, &event);
@@ -35,7 +38,7 @@ void beginEdit(void* context, uint32_t index) {
     notify(static_cast<AudioUnit>(context), kAudioUnitEvent_BeginParameterChangeGesture, index);
 }
 void performEdit(void* context, uint32_t index, double plain) {
-    AudioUnitParameter parameter{static_cast<AudioUnit>(context), index, kAudioUnitScope_Global, 0};
+    AudioUnitParameter parameter{static_cast<AudioUnit>(context), parameterId(index), kAudioUnitScope_Global, 0};
     // Sets the value and tells every listener, the host's automation included.
     AUParameterSet(nullptr, nullptr, &parameter, static_cast<AudioUnitParameterValue>(plain), 0);
 }

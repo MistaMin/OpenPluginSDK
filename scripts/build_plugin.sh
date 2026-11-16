@@ -26,6 +26,9 @@ Plugin
   --manufacturer NAME    manufacturer display name (default: OpenPlugin) [OP_MANUFACTURER]
   --au-subtype CODE      Audio Unit subtype, four characters           [OP_AU_SUBTYPE]
   --au-manufacturer CODE Audio Unit manufacturer code, four characters [OP_AU_MANUFACTURER]
+                         Both may be left out when the plugin pins its codes
+                         (Plugin::au_ids); codes that differ from the pinned ones stop the build.
+  --au-type TYPE         Audio Unit component type: auto, aufx, aumu, aumf [OP_AU_TYPE=auto]
   --ttl-bin NAME         the plugin's cargo bin that writes the LV2 files;
                          called as `NAME <folder> <library stem>`      [OP_TTL_BIN]
   --standalone-bin NAME  the plugin's cargo bin that runs standalone   [OP_STANDALONE_BIN]
@@ -75,7 +78,7 @@ USAGE
 MANIFEST="${OP_MANIFEST:-}"; PACKAGE="${OP_PACKAGE:-}"; LIB_NAME="${OP_LIB_NAME:-}"
 NAME="${OP_NAME:-}"; BUNDLE_ID="${OP_BUNDLE_ID:-}"; VERSION="${OP_VERSION:-}"
 MANUFACTURER="${OP_MANUFACTURER:-OpenPlugin}"
-AU_SUBTYPE="${OP_AU_SUBTYPE:-}"; AU_MANUFACTURER="${OP_AU_MANUFACTURER:-}"
+AU_SUBTYPE="${OP_AU_SUBTYPE:-}"; AU_MANUFACTURER="${OP_AU_MANUFACTURER:-}"; AU_TYPE="${OP_AU_TYPE:-auto}"
 TTL_BIN="${OP_TTL_BIN:-}"; STANDALONE_BIN="${OP_STANDALONE_BIN:-}"; FEATURES="${OP_FEATURES:-}"
 FORMATS="${OP_FORMATS:-clap,lv2,vst3,au,aax}"
 EDITOR="${OP_EDITOR:-0}"; TAIL="${OP_TAIL:-0}"; AAX_PAGES="${OP_AAX_PAGES:-0}"
@@ -99,6 +102,7 @@ while [ $# -gt 0 ]; do
     --manufacturer) need "$@"; MANUFACTURER="$2"; shift 2 ;;
     --au-subtype) need "$@"; AU_SUBTYPE="$2"; shift 2 ;;
     --au-manufacturer) need "$@"; AU_MANUFACTURER="$2"; shift 2 ;;
+    --au-type) need "$@"; AU_TYPE="$2"; shift 2 ;;
     --ttl-bin) need "$@"; TTL_BIN="$2"; shift 2 ;;
     --standalone-bin) need "$@"; STANDALONE_BIN="$2"; shift 2 ;;
     --features) need "$@"; FEATURES="$2"; shift 2 ;;
@@ -183,10 +187,13 @@ if has_format vst3; then check_sdk VST3_SDK "$VST3_SDK" public.sdk/source/main/m
 if has_format au; then check_sdk AU_SDK "$AU_SDK" include/AudioUnitSDK/AUBase.h "an AudioUnitSDK"; fi
 if has_format aax; then check_sdk AAX_SDK "$AAX_SDK" Interfaces/AAX.h "an AAX SDK"; fi
 if has_format au || [ "$AAX_PAGES" = 1 ]; then
-  if [ "${#AU_SUBTYPE}" != 4 ] || [ "${#AU_MANUFACTURER}" != 4 ]; then
-    die "--au-subtype and --au-manufacturer must be four characters each"
+  # Both left out: the plugin must pin them (Plugin::au_ids); the shell build asks it and
+  # stops when it pins none.
+  if [ -n "$AU_SUBTYPE$AU_MANUFACTURER" ] && { [ "${#AU_SUBTYPE}" != 4 ] || [ "${#AU_MANUFACTURER}" != 4 ]; }; then
+    die "--au-subtype and --au-manufacturer must be four characters each (or both left out, for a plugin that pins its codes)"
   fi
 fi
+case "$AU_TYPE" in auto|aufx|aumu|aumf) ;; *) die "--au-type must be auto, aufx, aumu or aumf" ;; esac
 if has_format lv2 && [ -z "$TTL_BIN" ]; then die "lv2 needs --ttl-bin, the plugin's bin that writes the description files"; fi
 if has_format standalone && [ -z "$STANDALONE_BIN" ]; then die "standalone needs --standalone-bin, the plugin's bin that runs standalone"; fi
 
@@ -337,6 +344,7 @@ if [ -n "$SHELLS" ]; then
     "-DOP_BUILD_VST3=$(onoff vst3)" "-DOP_BUILD_AU=$(onoff au)" "-DOP_BUILD_AAX=$(onoff aax)" \
     "-DOP_PRODUCT=$NAME" "-DOP_BUNDLE_ID=$BUNDLE_ID" "-DOP_VERSION=$VERSION" \
     "-DOP_MANUFACTURER=$MANUFACTURER" "-DOP_AU_SUBTYPE=$AU_SUBTYPE" "-DOP_AU_MANUFACTURER=$AU_MANUFACTURER" \
+    "-DOP_AU_TYPE=$AU_TYPE" \
     "-DOP_EDITOR=$(tf "$EDITOR")" "-DOP_TAIL=$(tf "$TAIL")" "-DOP_AAX_PAGES=$(tf "$AAX_PAGES")"
   # Only the bundles: the SDK's own proof programs test its example, not this plugin.
   run cmake --build "$CM" --config Release -j "$JOBS" --target $SHELLS

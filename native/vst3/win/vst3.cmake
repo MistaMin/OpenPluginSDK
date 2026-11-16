@@ -220,6 +220,27 @@ if(NOT OP_EDITOR)
     add_test(NAME vst3_expression_proof COMMAND VST3ExpressionProof "${OP_VST3_DIR_OpenPluginVST3Expression}")
   endif()
 
+  # Identity pinning proof (ABI 8): the shell over the four builds of Pinned. A project
+  # saved with one pinned build reopens in the reordered one; the builds without pins are
+  # the negative control.
+  if(OP_IDENTITY_PROOFS)
+    op_vst3_module(OpenPluginVST3PinnedA "Pinned A")
+    op_link_rust(OpenPluginVST3PinnedA "${OP_IDENTITY_LIB_a}")
+    op_vst3_module(OpenPluginVST3PinnedB "Pinned B")
+    op_link_rust(OpenPluginVST3PinnedB "${OP_IDENTITY_LIB_b}")
+    op_vst3_module(OpenPluginVST3PlainA "Plain A")
+    op_link_rust(OpenPluginVST3PlainA "${OP_IDENTITY_LIB_plain_a}")
+    op_vst3_module(OpenPluginVST3PlainB "Plain B")
+    op_link_rust(OpenPluginVST3PlainB "${OP_IDENTITY_LIB_plain_b}")
+    op_vst3_proof(VST3IdentityProof identity_host.cpp
+      "${OP_SDK_SOURCE}/common/memorystream.cpp"
+      "${OP_SDK_SOURCE}/vst/hosting/parameterchanges.cpp")
+    add_dependencies(VST3IdentityProof OpenPluginVST3PinnedA OpenPluginVST3PinnedB OpenPluginVST3PlainA OpenPluginVST3PlainB)
+    add_test(NAME vst3_identity_proof COMMAND VST3IdentityProof
+      "${OP_VST3_DIR_OpenPluginVST3PinnedA}" "${OP_VST3_DIR_OpenPluginVST3PinnedB}"
+      "${OP_VST3_DIR_OpenPluginVST3PlainA}" "${OP_VST3_DIR_OpenPluginVST3PlainB}")
+  endif()
+
   # Channel order proof: the shell over Role Tags, every layout from mono to 9.1.6.
   if(OP_ROLE_PROOFS)
     op_vst3_module(OpenPluginVST3Roles "Role Tags")

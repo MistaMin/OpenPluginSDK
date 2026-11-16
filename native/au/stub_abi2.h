@@ -6,6 +6,7 @@
 #pragma once
 // Define OP_STUB_HAS_PARAM_TEXT before including to bring your own op_shell_param_format/parse.
 #include "op_shell.h"
+#include "stub_identity.h"
 #include <cstdio>
 #include <cstdlib>
 

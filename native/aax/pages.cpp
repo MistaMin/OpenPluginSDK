@@ -121,7 +121,13 @@ int op_aax::write_page_table(const char* path) {
             std::fprintf(stderr, "page table: parameter %u has no id\n", i);
             return 1;
         }
-        ids.push_back(escaped(desc.id));
+        // The ID Pro Tools knows the parameter by (ABI 8): the pin, or the string id.
+        char aaxId[64] = {};
+        if (op_shell_param_aax_id(i, aaxId, sizeof aaxId) == 0 || aaxId[0] == '\0') {
+            std::fprintf(stderr, "page table: parameter %u has no AAX id\n", i);
+            return 1;
+        }
+        ids.push_back(escaped(aaxId));
         groups.push_back(groupOf(i));
         if ((desc.flags & OP_PARAM_DISCRETE) && desc.steps > 1) discrete.push_back(ids.back());
     }

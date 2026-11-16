@@ -1,11 +1,78 @@
 //! From a manifest to Rust: a `&[ParamInfo]` table, a `PluginInfo`, and the
-//! identity settings the SDK build takes today. Every guess is written next
-//! to the item it concerns, and identity the SDK cannot pin yet is marked
-//! `TODO`.
+//! identity pins that make the port the same plugin to a host
+//! (`openplugin_core::identity`): the parameter ids of the scanned format, the
+//! VST3 class ids, the Audio Unit codes and the AAX ids. Every guess is
+//! written next to the item it concerns, and what a person must still decide
+//! is marked `TODO`.
 
 use std::fmt::Write;
 
+use openplugin_core::identity::{PinFormat, VST3_BYPASS_PARAM_ID, VST3_MAX_PARAM_ID, VST3_MIDI_PARAM_BASE, VST3_MIDI_PARAM_COUNT};
+
 use crate::manifest::*;
+
+// ---------- identity pins ----------
+
+/// What the table says about one parameter's id in the scanned format.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pin {
+    /// The source's id is the parameter's position, as the SDK numbers an
+    /// unpinned table: nothing to write.
+    Position,
+    /// Keep the source's id with this `ParamInfo` method (`with_clap_id`,
+    /// `with_vst3_id` or `with_au_id`).
+    Id { method: &'static str, id: u32 },
+    /// The id cannot be kept, and why.
+    Unpinnable(String),
+}
+
+/// The numeric-id format a manifest was scanned from, if it has one.
+fn pin_format(format: &str) -> Option<(PinFormat, &'static str)> {
+    match format {
+        "clap" => Some((PinFormat::Clap, "with_clap_id")),
+        "vst3" => Some((PinFormat::Vst3, "with_vst3_id")),
+        "au" => Some((PinFormat::Au, "with_au_id")),
+        _ => None,
+    }
+}
+
+fn unpinnable(format: PinFormat, id: u32) -> Option<String> {
+    match format {
+        PinFormat::Clap if id == u32::MAX => Some("CLAP_INVALID_ID cannot be a parameter id".into()),
+        PinFormat::Au if id == u32::MAX => Some("the SDK keeps 0xFFFFFFFF for \"no parameter\"".into()),
+        PinFormat::Vst3 if id == VST3_BYPASS_PARAM_ID => {
+            Some(format!("{id} is the id of the bypass parameter the SDK's VST3 shell adds itself: leave this parameter out unless the plugin has a bypass of its own"))
+        }
+        PinFormat::Vst3 if id >= VST3_MIDI_PARAM_BASE && id - VST3_MIDI_PARAM_BASE < VST3_MIDI_PARAM_COUNT => {
+            Some(format!("{id} is in the range the SDK's VST3 shell uses for MIDI controllers"))
+        }
+        PinFormat::Vst3 if id > VST3_MAX_PARAM_ID => Some(format!("{id} is above the largest VST3 ParamID a plugin may use")),
+        _ => None,
+    }
+}
+
+/// One [`Pin`] per parameter of a manifest scanned from `format` (`clap`,
+/// `vst3`, `au`). A table whose ids are all positions needs no pins. As soon
+/// as one parameter needs one, every parameter gets its pin, so the table can
+/// be reordered later without changing any id.
+pub fn pins(format: &str, params: &[Param]) -> Vec<Pin> {
+    let Some((kind, method)) = pin_format(format) else {
+        return vec![Pin::Position; params.len()];
+    };
+    let blocked: Vec<Option<String>> = params.iter().map(|p| unpinnable(kind, p.id)).collect();
+    let needed = params.iter().zip(&blocked).enumerate().any(|(index, (p, why))| why.is_none() && p.id as usize != index);
+    params
+        .iter()
+        .zip(blocked)
+        .enumerate()
+        .map(|(index, (p, why))| match why {
+            Some(why) => Pin::Unpinnable(why),
+            None if params[..index].iter().any(|earlier| earlier.id == p.id) => Pin::Unpinnable(format!("another parameter of the source already has id {}", p.id)),
+            None if needed => Pin::Id { method, id: p.id },
+            None => Pin::Position,
+        })
+        .collect()
+}
 
 /// What the scanner decided one parameter is, in the SDK's terms.
 #[derive(Debug, Clone, PartialEq)]
@@ -304,6 +371,23 @@ fn infer_param(p: &Param) -> Inferred {
 
 // ---------- rendering ----------
 
+/// A parameter id as a Rust literal: small numbers in decimal, the rest in hex
+/// (ids made from a hash or from four characters read better that way).
+fn id_literal(id: u32) -> String {
+    if id < 10_000 { id.to_string() } else { format!("{id:#010X}") }
+}
+
+/// The name a format goes by in the generated comments.
+fn format_name(format: &str) -> &str {
+    match format {
+        "clap" => "CLAP",
+        "vst3" => "VST3",
+        "au" => "Audio Unit",
+        "aax" => "AAX",
+        other => other,
+    }
+}
+
 /// An `f32` literal with six significant digits at most (`0.6000001` reads as `0.6`).
 fn lit(v: f32) -> String {
     if !v.is_finite() {
@@ -378,12 +462,24 @@ pub fn render(m: &Manifest) -> String {
     // ----- parameters -----
     let _ = writeln!(s, "// ---- parameters ----");
     let _ = writeln!(s, "// The SDK addresses a parameter by string id and by its position in this table.");
-    let _ = writeln!(s, "// The ids below are made from the names; the source's own ids are in each comment.");
+    let _ = writeln!(s, "// The string ids below are made from the names; the source's own ids are in each comment.");
+    let param_pins = pins(&m.source.format, &p.params);
+    let pinned = param_pins.iter().any(|pin| matches!(pin, Pin::Id { .. }));
+    if pinned {
+        let _ = writeln!(s, "// The source's {} parameter ids are not positions, so each parameter is pinned to its id", format_name(&m.source.format));
+        let _ = writeln!(s, "// (openplugin::core::identity): automation and saved projects find it wherever it is in the table.");
+        let _ = writeln!(s, "// The pins are for {} alone. Scan the plugin's other formats too: where a parameter has the same", format_name(&m.source.format));
+        let _ = writeln!(s, "// number in CLAP, VST3 and Audio Unit, write with_host_id(n) instead; AAX takes with_aax_id(\"...\").");
+        let _ = writeln!(s, "// Assert check_pins(&plugin) == [] in a test.");
+    }
     let _ = writeln!(s, "pub static PARAMS: [ParamInfo; {}] = [", p.params.len());
-    for (src, inf) in p.params.iter().zip(&inferred) {
+    for ((src, inf), pin) in p.params.iter().zip(&inferred).zip(&param_pins) {
         let _ = writeln!(s, "    // source id {}: \"{}\"{}", src.id, src.name, src.group.as_ref().map(|g| format!(", group {g}")).unwrap_or_default());
         for n in &inf.notes {
             let _ = writeln!(s, "    // {n}");
+        }
+        if let Pin::Unpinnable(why) = pin {
+            let _ = writeln!(s, "    // TODO(porting): the id cannot be pinned: {why}");
         }
         let mut line = format!("    ParamInfo::new({:?}, {:?}, {}, {}, {}, Unit::{})", inf.id, inf.name, lit(inf.min), lit(inf.max), lit(inf.default), inf.unit);
         if inf.taper == "Log" {
@@ -398,6 +494,9 @@ pub fn render(m: &Manifest) -> String {
         }
         for f in inf.flags.iter().filter(|f| **f != "AUTOMATABLE") {
             let _ = write!(line, ".flag(ParamFlags::{f})");
+        }
+        if let Pin::Id { method, id } = pin {
+            let _ = write!(line, ".{method}({})", id_literal(*id));
         }
         line.push(',');
         let _ = writeln!(s, "{line}");
@@ -449,15 +548,31 @@ pub fn render(m: &Manifest) -> String {
         let _ = write!(args, " --bundle-id {prefix:?}");
     }
     if let Some(au) = &ids.au {
-        let _ = write!(args, " --au-subtype {} --au-manufacturer {}", au.subtype, au.manufacturer);
-        let _ = writeln!(s, "// Audio Unit codes (native/CMakeLists.txt cache variables OP_AU_SUBTYPE, OP_AU_MANUFACTURER):");
-        let _ = writeln!(s, "//   -DOP_AU_SUBTYPE={} -DOP_AU_MANUFACTURER={}", au.subtype, au.manufacturer);
-        if au.component_type != "aufx" {
-            let _ = writeln!(s, "// TODO(porting): the source is a '{}' component; the Audio Unit shell writes type 'aufx' and cannot pin another type yet.", au.component_type);
+        let codes = au.subtype.len() == 4 && au.manufacturer.len() == 4 && au.subtype.is_ascii() && au.manufacturer.is_ascii();
+        if codes {
+            let _ = writeln!(s, "// Audio Unit codes, pinned in the Plugin impl (the shell build reads them; --au-subtype and");
+            let _ = writeln!(s, "// --au-manufacturer are then left out, or must say the same):");
+            let _ = writeln!(s, "//   fn au_ids(&self) -> Option<AuIds> {{");
+            let _ = writeln!(s, "//       Some(AuIds {{ subtype: *b{:?}, manufacturer: *b{:?} }})", au.subtype, au.manufacturer);
+            let _ = writeln!(s, "//   }}");
+        } else {
+            let _ = write!(args, " --au-subtype {} --au-manufacturer {}", au.subtype, au.manufacturer);
+            let _ = writeln!(s, "// TODO(porting): the Audio Unit codes '{}' and '{}' are not four ASCII characters each; pass them to the build by hand.", au.subtype, au.manufacturer);
+        }
+        if matches!(au.component_type.as_str(), "aufx" | "aumu" | "aumf") {
+            // The shell picks aufx or aumu from the plugin's kind; aumf is asked for.
+            if au.component_type == "aumf" {
+                let _ = write!(args, " --au-type aumf");
+                let _ = writeln!(s, "// The source is a music effect ('aumf'): build with --au-type aumf (-DOP_AU_TYPE=aumf).");
+            } else {
+                let _ = writeln!(s, "// Audio Unit type '{}': the shell picks it from the plugin's kind (--au-type auto).", au.component_type);
+            }
+        } else {
+            let _ = writeln!(s, "// TODO(porting): the source is a '{}' component; the Audio Unit shell builds aufx, aumu and aumf only.", au.component_type);
         }
     } else {
-        let _ = writeln!(s, "// No Audio Unit codes in the source: pick a four-character subtype and manufacturer (--au-subtype, --au-manufacturer).");
-        let _ = writeln!(s, "// TODO(porting): an existing Audio Unit's codes must be kept by hand when the plugin is also shipped as one.");
+        let _ = writeln!(s, "// No Audio Unit codes in the source: pick a four-character subtype and manufacturer (Plugin::au_ids, or --au-subtype and --au-manufacturer).");
+        let _ = writeln!(s, "// TODO(porting): an existing Audio Unit's codes must be kept when the plugin is also shipped as one; scan the .component.");
     }
     let _ = writeln!(s, "// scripts/build_plugin.sh {args} ...");
     if let Some(aax) = &ids.aax {
@@ -474,28 +589,39 @@ pub fn render(m: &Manifest) -> String {
         let _ = writeln!(s, "// TODO(porting): no AAX ids could be read from the bundle.");
     }
 
-    // ----- ids the SDK cannot pin yet -----
+    // ----- class ids and parameter ids -----
     let _ = writeln!(s);
-    let _ = writeln!(s, "// ---- identity the SDK cannot pin yet ----");
+    let _ = writeln!(s, "// ---- identity pins (openplugin::core::identity) ----");
     if let Some(v) = &ids.vst3 {
-        let _ = writeln!(s, "// TODO(porting task 2): VST3 processor class id is {}; the SDK derives its ids from PluginInfo::id and cannot take this one.", v.class_id);
+        let _ = writeln!(s, "// VST3 class ids, in the Plugin impl: a host finds the plugin in a project by the processor's.");
+        let _ = writeln!(s, "//   fn vst3_ids(&self) -> Option<Vst3Ids> {{");
         match &v.controller_class_id {
             Some(c) => {
-                let _ = writeln!(s, "// TODO(porting task 2): VST3 controller class id is {c}; same.");
+                let _ = writeln!(s, "//       Vst3Ids::from_hex({:?}, {c:?})", v.class_id);
+                let _ = writeln!(s, "//   }}");
             }
             None => {
-                let _ = writeln!(s, "// The source is a single-component VST3 (no separate controller class); the SDK always writes two classes.");
+                let _ = writeln!(s, "//       Vst3Ids::processor_from_hex({:?})", v.class_id);
+                let _ = writeln!(s, "//   }}");
+                let _ = writeln!(s, "// The source is a single-component VST3 (no separate controller class); the SDK always writes two classes,");
+                let _ = writeln!(s, "// and the controller's id stays derived from PluginInfo::id.");
             }
         }
     }
-    let in_order = p.params.iter().enumerate().all(|(i, x)| x.id as usize == i);
+    if ids.clap.is_some() && m.source.format != "clap" {
+        let _ = writeln!(s, "// The CLAP id is PluginInfo::id above.");
+    }
+    let unpinnable = param_pins.iter().filter(|pin| matches!(pin, Pin::Unpinnable(_))).count();
     if p.params.is_empty() {
-    } else if in_order {
-        let _ = writeln!(s, "// Parameter ids in the source are 0..{} in table order, as in the SDK: nothing to pin.", p.params.len() - 1);
+    } else if pinned {
+        let _ = writeln!(s, "// Parameter ids: pinned in the table above with the source's {} ids.", format_name(&m.source.format));
+    } else if pin_format(&m.source.format).is_some() {
+        let _ = writeln!(s, "// Parameter ids in the source are positions in table order, as in the SDK: nothing to pin.");
     } else {
-        let ids_list: Vec<String> = p.params.iter().map(|x| x.id.to_string()).collect();
-        let _ = writeln!(s, "// TODO(porting task 2): explicit parameter ids. The source's ids are [{}]; the SDK numbers parameters by table position in CLAP, VST3 and Audio Unit,", ids_list.join(", "));
-        let _ = writeln!(s, "// so saved sessions and automation that name these ids will not find the parameters until the SDK can pin them.");
+        let _ = writeln!(s, "// Parameter ids: a scan of the {} bundle reads none; scan the plugin's CLAP, VST3 or Audio Unit for them.", format_name(&m.source.format));
+    }
+    if unpinnable > 0 {
+        let _ = writeln!(s, "// TODO(porting): {unpinnable} parameter id(s) could not be pinned; see the table above.");
     }
 
     // ----- audio and timing -----

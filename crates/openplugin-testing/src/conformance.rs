@@ -1103,7 +1103,12 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
                         .map(|e| format!("parameter {:?} has group {:?}, which hosts are shown as the top level: {e:?}", param.id, param.group))
                 })
                 .collect();
-            (p.info().name.to_string(), self.opts.sample_rates.iter().map(|&r| (r, p.accepts_sample_rate(r))).collect::<Vec<_>>(), groups)
+            // An identity pin a format cannot carry, which that format would ignore.
+            let pins: Vec<String> = openplugin_core::identity::check_pins(&*p)
+                .into_iter()
+                .map(|e| format!("an identity pin cannot be used and is ignored: {e}"))
+                .collect();
+            (p.info().name.to_string(), self.opts.sample_rates.iter().map(|&r| (r, p.accepts_sample_rate(r))).collect::<Vec<_>>(), groups, pins)
         })) {
             Ok(v) => v,
             Err(e) => {
@@ -1114,6 +1119,9 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
         self.plugin_name = probe.0;
         for message in probe.2 {
             self.rec.fail(Check::ParamFuzz, "param-groups", self.opts.seed, self.opts.seed, message);
+        }
+        for message in probe.3 {
+            self.rec.fail(Check::ParamFuzz, "identity-pins", self.opts.seed, self.opts.seed, message);
         }
         for (rate, accepted) in probe.1 {
             if accepted {

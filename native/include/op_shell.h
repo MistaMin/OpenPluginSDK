@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 7,
+    OP_SHELL_ABI = 8,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -341,6 +341,53 @@ size_t op_shell_expression_format(uint32_t id, double value, char* buf, size_t c
 // bytes, invalid UTF-8 or text that is not a value. Message thread.
 int op_shell_expression_parse(uint32_t id, const char* text, double* out_value);
 // ---- end of ABI 7 -----------------------------------------------------------
+
+// ---- ABI 8: identity pins -----------------------------------------------------
+// The identifiers a host stores, where the plugin sets them explicitly instead
+// of leaving them derived (docs/SHELL.md, Identity pins). The ABI itself still
+// addresses every parameter by its index in the table; only a shell's edge to
+// its host uses the numbers below. A plugin without pins answers with the
+// derived identifiers: op_shell_param_host_id(format, i) == i,
+// op_shell_param_aax_id(i) == OpParamDesc.id, op_shell_au_code == 0 and
+// op_shell_identity() == 0. Pinned VST3 class IDs and AAX codes arrive in
+// OpShellInfo, in the fields that carried the derived ones.
+enum {
+    OP_HOST_VST3 = 1,               // Vst::ParamID
+    OP_HOST_AU = 2,                 // AudioUnitParameterID
+    OP_NO_HOST_ID = 0xFFFFFFFF,
+    OP_AU_CODE_SUBTYPE = 0,
+    OP_AU_CODE_MANUFACTURER = 1,
+    OP_IDENTITY_KEYED_STATE = 1,    // op_shell_save_state names values by parameter id:
+                                    // the blob loads into a build with another parameter order
+    OP_IDENTITY_VST3_CLASS = 2,     // processor_cid / controller_cid are pinned
+    OP_IDENTITY_AU_CODES = 4,       // op_shell_au_code answers
+    OP_IDENTITY_AAX_CODES = 8,      // manufacturer_id .. plugin_id_stereo are pinned
+    OP_IDENTITY_VST3_PARAMS = 16,   // some op_shell_param_host_id(OP_HOST_VST3, i) != i
+    OP_IDENTITY_AU_PARAMS = 32,     // some op_shell_param_host_id(OP_HOST_AU, i) != i
+    OP_IDENTITY_AAX_PARAMS = 64     // some op_shell_param_aax_id(i) != OpParamDesc.id
+};
+// OP_IDENTITY_* bits: what the plugin pins. No instance; message thread (it
+// builds a plugin to ask it). Bits this header does not define may appear in a
+// newer library; ignore them.
+uint32_t op_shell_identity(void);
+// The number the host of `format` (OP_HOST_*) stores for parameter `index`.
+// Unique per format, never OP_NO_HOST_ID, and for VST3 at most 0x7FFFFFFF and
+// clear of the shell's bypass and MIDI parameters (a pin set that breaks this
+// is ignored as a whole: the library answers `index`). OP_NO_HOST_ID for an
+// unknown format or index. No instance; any thread; no allocation after the
+// first call.
+uint32_t op_shell_param_host_id(uint32_t format, uint32_t index);
+// The AAX parameter ID of parameter `index`: at most 31 printable ASCII
+// characters when pinned, OpParamDesc.id otherwise. Written to `buf` as UTF-8
+// with a NUL, with the length rules of op_shell_param_group. An unknown
+// `index` returns 0 and writes an empty string.
+size_t op_shell_param_aax_id(uint32_t index, char* buf, size_t cap);
+// A pinned Audio Unit code (OP_AU_CODE_*) as a four-character code, first
+// character in the highest byte ('ExGn' is 0x4578476E); 0 when the plugin pins
+// none or `which` is unknown. The codes reach a host through the bundle's
+// Info.plist, so native/CMakeLists.txt asks at configure time (au/kind_probe.c).
+uint32_t op_shell_au_code(uint32_t which);
+// ---- end of ABI 8 -----------------------------------------------------------
 
 #if OP_HAS_TAIL
 // Optional, with -DOP_TAIL=ON: how long the output rings after the input

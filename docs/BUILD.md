@@ -46,7 +46,8 @@ Each option has an environment variable (shown in `--help`), so a plugin can kee
 | `--bundle-id` | Bundle identifier prefix. The VST3, Audio Unit and AAX shells append `.vst3`, `.au`, and so on |
 | `--version` | Bundle version, numbers only (a `-beta` suffix is cut off). Default: the manifest's `version`; give it when the manifest inherits the version from the workspace |
 | `--manufacturer` | Manufacturer display name for the Audio Unit |
-| `--au-subtype`, `--au-manufacturer` | Four-character codes. Required for `au` and for `--aax-pages` |
+| `--au-subtype`, `--au-manufacturer` | Four-character codes. Required for `au` and for `--aax-pages`, unless the plugin pins its own with `Plugin::au_ids`: then both are left out (the shell build asks the plugin), and codes that differ from the pinned ones stop the build |
+| `--au-type` | `auto` (the default: from the plugin's kind), `aufx`, `aumu` or `aumf`. `OP_AU_TYPE` |
 | `--formats` | `clap,lv2,vst3,au,aax,standalone` or `all`. Default: `clap,lv2,vst3,au,aax` |
 | `--ttl-bin` | The plugin's bin that writes the LV2 files. Required for `lv2` |
 | `--standalone-bin` | The plugin's bin that runs standalone. Required for `standalone` |

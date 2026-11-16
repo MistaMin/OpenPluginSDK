@@ -434,4 +434,4 @@ The differences that matter in a port:
 - **SysEx.** MIDI reaches the plugin as messages of up to three bytes.
 - **64-bit audio buffers.** `process` is `f32`.
 - **Web view editors.** The editor contract is a frame of pixels.
-- **Keeping the old plugin's identity.** The SDK derives the VST3 class ids from `PluginInfo::id` and numbers parameters by table position, so a host does not yet take the port for the old VST3. The VST3, Audio Unit and AAX shells also accept only state they wrote themselves, so a chunk saved by the old plugin reaches `load_state` only through CLAP. Both are porting task 2 in [ROADMAP.md](../ROADMAP.md).
+- **Keeping the old plugin's saved state outside CLAP.** The identity itself carries over: the VST3 class ids, the Audio Unit codes and the parameter ids are pinned in the plugin (see [Identity pinning](../PORTING.md#identity-pinning); `openplugin-port scan` writes them). The VST3, Audio Unit and AAX shells still accept only state they wrote themselves, so a chunk saved by the old plugin reaches `load_state` only through CLAP; that part is open.

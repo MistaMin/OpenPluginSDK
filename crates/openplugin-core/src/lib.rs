@@ -16,6 +16,7 @@ pub mod denormal;
 pub mod editor;
 pub mod expression;
 pub mod foreign_state;
+pub mod identity;
 pub mod layout;
 pub mod midi;
 pub mod mpe;
@@ -42,6 +43,7 @@ pub use editor::{
     ParamMenuAction, ValueMirror,
 };
 pub use expression::{Expression, ExpressionSet, NoteRef};
+pub use identity::{AuIds, ParamIdMap, ParamPins, PinError, PinFormat, Vst3Ids};
 pub use mpe::{MpeReceiver, MpeZones};
 pub use notify::HostNotifier;
 pub use plane::{ParamCursor, ParamPlane};
@@ -52,6 +54,7 @@ pub use smooth::OnePole;
 pub use state::{
     decode_params, decode_session, encode_params, encode_session, restore_params, AbCompare,
     Session, SESSION_MAGIC, SESSION_VERSION, SNAPSHOT_MAGIC, SNAPSHOT_VERSION,
+    SNAPSHOT_VERSION_KEYED,
 };
 
 /// Levels the audio thread publishes for an editor. Decibels, not linear gain.
@@ -259,6 +262,13 @@ pub struct ParamInfo {
     /// is, and a host is shown an invalid one as the top level.
     #[serde(skip_serializing_if = "str::is_empty")]
     pub group: &'static str,
+    /// The identifiers hosts store for this parameter, where they are set
+    /// explicitly ([`identity`]). Empty leaves every one derived: the
+    /// parameter's position for CLAP, VST3 and Audio Unit, and [`Self::id`]
+    /// for AAX. Set them with [`ParamInfo::with_host_id`] and the per-format
+    /// forms.
+    #[serde(skip_serializing_if = "ParamPins::is_empty")]
+    pub pins: ParamPins,
 }
 
 impl ParamInfo {
@@ -282,6 +292,7 @@ impl ParamInfo {
             steps: 0,
             flags: ParamFlags::AUTOMATABLE,
             group: "",
+            pins: ParamPins::NONE,
         }
     }
 
@@ -314,6 +325,49 @@ impl ParamInfo {
     /// [`groups_valid`] on the parameter table to catch one at build time.
     pub const fn with_group(mut self, group: &'static str) -> Self {
         self.group = group;
+        self
+    }
+
+    /// Pin the number hosts store for this parameter in CLAP (`param_id`),
+    /// VST3 (`ParamID`) and Audio Unit (`AudioUnitParameterID`) to `id`, in
+    /// place of the parameter's position in the table. Automation and saved
+    /// projects then follow the parameter when the table is reordered or
+    /// grows. Once released, the number never changes. Ids must be unique in
+    /// the table; a parameter without a pin keeps its position as its id. See
+    /// [`identity`] for the ids a format reserves, and
+    /// [`identity::check_pins`] to test a table.
+    ///
+    /// A table with any pin is also saved by [`Self::id`] instead of by
+    /// position ([`identity::state_is_keyed`]).
+    pub const fn with_host_id(mut self, id: u32) -> Self {
+        self.pins.clap = Some(id);
+        self.pins.vst3 = Some(id);
+        self.pins.au = Some(id);
+        self
+    }
+
+    /// Pin the CLAP `param_id` alone, for a port whose formats used different numbers.
+    pub const fn with_clap_id(mut self, id: u32) -> Self {
+        self.pins.clap = Some(id);
+        self
+    }
+
+    /// Pin the VST3 `ParamID` alone. At most `0x7FFF_FFFF`.
+    pub const fn with_vst3_id(mut self, id: u32) -> Self {
+        self.pins.vst3 = Some(id);
+        self
+    }
+
+    /// Pin the `AudioUnitParameterID` alone.
+    pub const fn with_au_id(mut self, id: u32) -> Self {
+        self.pins.au = Some(id);
+        self
+    }
+
+    /// Pin the AAX parameter id (1 to 31 printable ASCII characters) in place
+    /// of [`Self::id`]. Pro Tools stores automation by it.
+    pub const fn with_aax_id(mut self, id: &'static str) -> Self {
+        self.pins.aax = Some(id);
         self
     }
 
@@ -851,6 +905,35 @@ pub trait Plugin: Send + 'static {
     /// the message thread right after the plugin is made, before any audio.
     /// The default shares nothing, and the editor shows host values alone.
     fn editor_state(&self) -> Option<EditorState> {
+        None
+    }
+
+    /// The CLAP plugin id, when it is not [`PluginInfo::id`]. A CLAP host
+    /// finds the plugin in a project by it, so once released it never
+    /// changes. `None` uses [`PluginInfo::id`], which also seeds the derived
+    /// VST3 and AAX ids; pin this to keep a released CLAP id while those stay
+    /// derived from another `PluginInfo::id`, or the reverse. An empty id or
+    /// one with a NUL is ignored.
+    fn clap_id(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Fixed VST3 class ids: the audio processor's and the edit
+    /// controller's. A VST3 host finds the plugin in a project by the
+    /// processor id, so once released they never change. `None` derives both
+    /// from [`PluginInfo::id`]. Ids that fail [`Vst3Ids::is_valid`] are
+    /// ignored.
+    fn vst3_ids(&self) -> Option<Vst3Ids> {
+        None
+    }
+
+    /// Fixed Audio Unit subtype and manufacturer codes. `None` leaves them
+    /// to the build (`--au-subtype`, `--au-manufacturer`). The codes reach a
+    /// host through the bundle's `Info.plist`, which the build writes: a
+    /// build that is given no codes takes these, and one that is given
+    /// different codes stops. Codes that fail [`AuIds::is_valid`] are
+    /// ignored.
+    fn au_ids(&self) -> Option<AuIds> {
         None
     }
 
