@@ -6,7 +6,8 @@
 //! while a call holds the gate is skipped (dry copy, still success); a call
 //! waits for a block already running, at most `STATE_WAIT`, and then fails
 //! without changing anything. No block ever runs against a half-restored
-//! plugin, and no saved blob is ever torn.
+//! plugin, and no saved blob is ever torn. The notes of a skipped block are
+//! delivered by the next one.
 
 #[path = "common/state_plugin.rs"]
 mod common;
@@ -17,6 +18,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::*;
+use openplugin_host::block::{OpEvent, OpProcess, EVENT_NOTE_OFF, EVENT_NOTE_ON, EVENT_PARAM_PLAIN};
 use openplugin_host::shell::{self, ShellInstance};
 
 /// The tests share the hold flags of the plugin, so they run one at a time.
@@ -79,6 +81,58 @@ fn a_block_that_starts_during_a_save_is_dry_and_does_not_wait() {
     let saved = saver.join().unwrap();
     assert!(saved.starts_with(b"OPCH"));
     assert_eq!(block(a).1[63], 3.0, "the plugin runs again once the call ends");
+    unsafe { shell::destroy(a.ptr()) };
+}
+
+/// One block through `op_shell_process_events`. Returns the first output channel.
+fn events_block(instance: Handle, events: &[OpEvent]) -> Vec<f32> {
+    let input = [1.0f32; 64];
+    let mut out = vec![-9.0f32; 64];
+    let inputs = [input.as_ptr()];
+    let outputs = [out.as_mut_ptr()];
+    let args = OpProcess {
+        struct_size: std::mem::size_of::<OpProcess>() as u32,
+        frames: 64,
+        inputs: inputs.as_ptr(),
+        input_channels: 1,
+        output_channels: 1,
+        outputs: outputs.as_ptr(),
+        sidechain: std::ptr::null(),
+        sidechain_channels: 0,
+        event_count: events.len() as u32,
+        events: events.as_ptr(),
+        transport: std::ptr::null(),
+    };
+    assert_eq!(unsafe { shell::process_events(instance.ptr(), &args) }, 1);
+    out
+}
+
+#[test]
+fn the_notes_of_a_block_skipped_by_a_save_reach_the_next_block() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let a = Handle::new();
+    NOTE_TRACE.store(0, Ordering::SeqCst);
+    HOLD_SAVE.store(true, Ordering::SeqCst);
+    let saver = thread::spawn(move || save(a.ptr()));
+    wait_for(&IN_SAVE);
+
+    // Listed out of order on purpose: the note-off is later in the block than the note-on.
+    let events = [
+        OpEvent { offset: 40, kind: EVENT_NOTE_OFF, note: 60, ..OpEvent::default() },
+        OpEvent { offset: 8, kind: EVENT_NOTE_ON, note: 60, velocity: 100, ..OpEvent::default() },
+        OpEvent { offset: 0, kind: EVENT_PARAM_PLAIN, index: 0, value: 6.0, ..OpEvent::default() },
+    ];
+    let out = events_block(a, &events);
+    assert!(out.iter().all(|sample| *sample == 1.0), "the block during the save is dry");
+    assert_eq!(NOTE_TRACE.load(Ordering::SeqCst), 0, "a skipped block does not enter the plugin");
+    assert_eq!(unsafe { shell::get_plain(a.ptr(), 0) }, 6.0, "its parameter event reaches the plane");
+
+    HOLD_SAVE.store(false, Ordering::SeqCst);
+    saver.join().unwrap();
+    assert_ne!(events_block(a, &[])[63], 1.0, "the plugin runs again, with the new gain");
+    assert_eq!(NOTE_TRACE.load(Ordering::SeqCst), 0b01_10, "the note-on, then the note-off");
+    events_block(a, &[]);
+    assert_eq!(NOTE_TRACE.load(Ordering::SeqCst), 0b01_10, "each is delivered once");
     unsafe { shell::destroy(a.ptr()) };
 }
 
@@ -157,8 +211,11 @@ fn saves_and_loads_beside_process_never_tear() {
     let stop = Arc::new(AtomicBool::new(false));
     let blocks = Arc::new(AtomicUsize::new(0));
     let dry = Arc::new(AtomicUsize::new(0));
+    // Blocks that ran the plugin so far: the state threads go on until there are some,
+    // however slowly the audio thread is scheduled.
+    let wet = Arc::new(AtomicUsize::new(0));
     let audio = {
-        let (stop, blocks, dry) = (Arc::clone(&stop), Arc::clone(&blocks), Arc::clone(&dry));
+        let (stop, blocks, dry, wet) = (Arc::clone(&stop), Arc::clone(&blocks), Arc::clone(&dry), Arc::clone(&wet));
         thread::spawn(move || {
             let mut seen_a = 0usize;
             let mut seen_b = 0usize;
@@ -177,6 +234,7 @@ fn saves_and_loads_beside_process_never_tear() {
                 } else {
                     panic!("a block ran with neither state: {first}");
                 }
+                wet.store(seen_a + seen_b, Ordering::SeqCst);
                 count += 1;
                 if count % 97 == 0 {
                     unsafe { shell::reset(a.ptr()) };
@@ -192,8 +250,13 @@ fn saves_and_loads_beside_process_never_tear() {
         .map(|_| {
             let (state_a, state_b) = (state_a.clone(), state_b.clone());
             let (canonical_a, canonical_b) = (canonical_a.clone(), canonical_b.clone());
+            let wet = Arc::clone(&wet);
             thread::spawn(move || {
-                for round in 0..300 {
+                let started = Instant::now();
+                for round in 0.. {
+                    if round >= 300 && (wet.load(Ordering::SeqCst) >= 8 || started.elapsed() > Duration::from_secs(20)) {
+                        break;
+                    }
                     assert!(load(a.ptr(), &state_a), "load A, round {round}");
                     let saved = save(a.ptr());
                     assert!(saved == canonical_a || saved == canonical_b, "torn save, round {round}");

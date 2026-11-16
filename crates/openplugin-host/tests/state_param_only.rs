@@ -1,7 +1,8 @@
 //! Parameter-only state: a plugin that answers
-//! `Plugin::state_is_parameters_only` with `true` is saved and loaded
-//! through the parameter plane, so a concurrent `process` never skips a
-//! block. A plugin with a chunk keeps the gated path and keeps its chunk.
+//! `Plugin::state_is_parameters_only` with `true`, or whose `save_state`
+//! returns `None` when it is new, is saved and loaded through the parameter
+//! plane, so a concurrent `process` never skips a block. A plugin with a
+//! chunk keeps the gated path and keeps its chunk.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -26,20 +27,26 @@ static INFO: PluginInfo = PluginInfo::new(
 .with_email("a@b.c");
 
 /// Gain and mix. With `chunk` set it also owns a tag the parameters do not
-/// hold, saved through `save_state`.
+/// hold, saved through `save_state`. `declared` is its
+/// `state_is_parameters_only`.
 struct Tone {
     gain_db: f32,
     mix: f32,
+    declared: bool,
     chunk: bool,
     tag: u32,
 }
 
 impl Tone {
     fn params_only() -> Self {
-        Self { gain_db: -6.0, mix: 1.0, chunk: false, tag: 0 }
+        Self { gain_db: -6.0, mix: 1.0, declared: true, chunk: false, tag: 0 }
+    }
+    /// No chunk, and every state method left as the trait has it.
+    fn undeclared() -> Self {
+        Self { declared: false, ..Self::params_only() }
     }
     fn with_chunk(tag: u32) -> Self {
-        Self { gain_db: -6.0, mix: 1.0, chunk: true, tag }
+        Self { gain_db: -6.0, mix: 1.0, declared: false, chunk: true, tag }
     }
 }
 
@@ -73,7 +80,7 @@ impl Plugin for Tone {
         }
     }
     fn state_is_parameters_only(&self) -> bool {
-        !self.chunk
+        self.declared
     }
     fn save_state(&mut self) -> Option<Vec<u8>> {
         self.chunk.then(|| self.tag.to_le_bytes().to_vec())
@@ -127,24 +134,27 @@ fn saves_and_loads_during_playback_never_skip_a_block() {
     let (dry_left, _) = input(0);
     assert_ne!(f32::from_bits(reference[3]), dry_left[3]);
 
-    let instance = fresh(Tone::params_only());
-    let stop = AtomicBool::new(false);
-    let (rendered, saves) = thread::scope(|scope| {
-        let worker = scope.spawn(|| {
-            let mut count = 0u64;
-            while !stop.load(Ordering::Acquire) {
-                let bytes = instance.save_bytes().unwrap();
-                assert!(instance.load_bytes(&bytes));
-                count += 1;
-            }
-            count
+    // Declared parameters-only, and one that only leaves `save_state` at `None`.
+    for (name, plugin) in [("declared", Tone::params_only()), ("undeclared", Tone::undeclared())] {
+        let instance = fresh(plugin);
+        let stop = AtomicBool::new(false);
+        let (rendered, saves) = thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let mut count = 0u64;
+                while !stop.load(Ordering::Acquire) {
+                    let bytes = instance.save_bytes().unwrap();
+                    assert!(instance.load_bytes(&bytes));
+                    count += 1;
+                }
+                count
+            });
+            let rendered = render(&instance);
+            stop.store(true, Ordering::Release);
+            (rendered, worker.join().unwrap())
         });
-        let rendered = render(&instance);
-        stop.store(true, Ordering::Release);
-        (rendered, worker.join().unwrap())
-    });
-    assert!(saves > 0, "the other thread never saved");
-    assert_eq!(rendered, reference, "a block differed from an untouched run");
+        assert!(saves > 0, "{name}: the other thread never saved");
+        assert!(rendered == reference, "{name}: a block differed from an untouched run");
+    }
 }
 
 #[test]

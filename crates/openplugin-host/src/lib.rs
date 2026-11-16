@@ -13,35 +13,38 @@
 //! # Session state and the audio thread
 //!
 //! [`HostSession::save_bytes`] and [`HostSession::load_bytes`] need `&mut` access to the plugin object, which the audio
-//! thread uses inside `process_*`. A one-word gate arbitrates, and the audio
-//! thread never waits on it:
+//! thread uses inside `process_*`. A one-word gate
+//! ([`openplugin_core::PluginGate`], the one the CLAP entry uses) arbitrates,
+//! and the audio thread never waits on it:
 //!
 //! - `process_*` and `reset` take the gate with one compare-exchange. If a
 //!   state call holds or has requested the gate, the block is **skipped**: the
 //!   input is copied to the output (dry), the plugin is not entered, and the
-//!   call still returns success. A `reset` that cannot enter is remembered and
-//!   runs at the start of the next block that can.
+//!   call still returns success. The skipped block's parameter events go to
+//!   the plane and its notes and MIDI are delivered at the start of the next
+//!   block. A `reset` that cannot enter is remembered and runs at the start
+//!   of the next block that can.
 //! - A state call (message thread) serialises with other state calls on a
 //!   mutex, raises a request bit, then waits for a block in flight to finish.
 //!   The wait is bounded by [`STATE_WAIT`]; on timeout the call fails and
 //!   changes nothing. New blocks see the request bit and skip, so the wait
 //!   cannot be starved.
 //!
-//! The request bit and the in-flight bit are one atomic, so for any pair of
-//! (block, state call) either the block sees the request and skips, or the
-//! state call sees the block and waits. The audio side allocates nothing.
+//! The audio side allocates nothing. A plugin without a chunk
+//! ([`openplugin_core::has_state_chunk`]) saves and loads through the
+//! parameter plane and never takes the gate, so none of its blocks is skipped.
 #![allow(unsafe_code)]
 
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use openplugin_core::{
-    decode_session, encode_session, release_momentary, sample_rate_supported, BusMeters, Channels,
+    decode_session, encode_session, has_state_chunk, release_momentary, sample_rate_supported, AudioHold, BusMeters, Channels,
     ChannelsMut, DenormalGuard, EditorState, HostNotifier, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane,
-    PluginInfo, Seqlock, Tail, MAX_AUDIO_CHANNELS,
+    PluginGate, PluginInfo, Seqlock, Tail, MAX_AUDIO_CHANNELS,
 };
 
 pub use openplugin_core::Plugin;
@@ -127,34 +130,13 @@ fn tail_seconds_of(tail: Tail, rate: f32) -> f64 {
 /// seconds, and part of the API: the native shells document the same bound.
 pub const STATE_WAIT: Duration = Duration::from_secs(2);
 
-const GATE_AUDIO: u32 = 1;
-const GATE_STATE: u32 = 2;
-/// Held for one read of [`Plugin::info`] by [`HostSession::take_changes`]:
-/// blocks and state calls wait for it as for a block (it lasts one call).
-const GATE_PEEK: u32 = 4;
-
-/// Releases the audio side of the gate when a block (or reset) ends. While it
-/// lives the thread runs with denormals flushed ([`Plugin::flush_denormals`]);
-/// the host's mode comes back when it drops, at the end of the call or while
-/// a panic unwinds out of the plugin.
+/// The audio side of the gate for one block (or reset). While it lives the
+/// thread runs with denormals flushed ([`Plugin::flush_denormals`]); the
+/// host's mode comes back when it drops, at the end of the call or while a
+/// panic unwinds out of the plugin.
 struct AudioGuard<'a> {
-    gate: &'a AtomicU32,
+    _hold: AudioHold<'a>,
     _flush: DenormalGuard,
-}
-
-impl Drop for AudioGuard<'_> {
-    fn drop(&mut self) {
-        self.gate.fetch_and(!GATE_AUDIO, Ordering::SeqCst);
-    }
-}
-
-/// Drops the state request when a state call ends, panic included.
-struct StateGuard<'a>(&'a AtomicU32);
-
-impl Drop for StateGuard<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_and(!GATE_STATE, Ordering::SeqCst);
-    }
 }
 
 /// One host instance. Message-thread calls use the plane and the atomics.
@@ -189,15 +171,16 @@ pub struct HostSession {
     presets: Vec<PresetEntry>,
     /// [`Plugin::editor_state`], taken once at creation.
     editor_state: Option<EditorState>,
-    /// [`Plugin::state_is_parameters_only`], read once: save and load then use
-    /// the parameter plane alone and never take the gate.
+    /// The plugin has no chunk (`!has_state_chunk`, asked once): save and load
+    /// then use the parameter plane alone and never take the gate.
     state_in_params: bool,
     /// Seconds of tail as `f64` bits, refreshed after every block.
     tail: AtomicU64,
-    /// `GATE_AUDIO` while a block runs, `GATE_STATE` while a state call holds
-    /// or has asked for the plugin object, `GATE_PEEK` while `take_changes`
-    /// reads the plugin's table.
-    gate: AtomicU32,
+    /// Who is inside the plugin object: a block, or a state call.
+    gate: PluginGate,
+    /// Notes and MIDI of blocks a state call made the audio thread skip, for
+    /// the next block. Audio thread only; capacity fixed at creation.
+    carry: UnsafeCell<Vec<block::OpEvent>>,
     /// Serialises state calls with each other (message thread only).
     state_lock: Mutex<()>,
     /// A `reset` that found the gate busy; the next block performs it.
@@ -230,7 +213,7 @@ impl HostSession {
         let info = plugin.info();
         let presets = collect_presets(plugin.as_ref());
         let editor_state = plugin.editor_state();
-        let state_in_params = plugin.state_is_parameters_only();
+        let state_in_params = !has_state_chunk(plugin.as_mut());
         let flush_denormals = plugin.flush_denormals();
         let plane = ParamPlane::new(info);
         plane.seed_from(plugin.as_ref());
@@ -263,7 +246,8 @@ impl HostSession {
                 side_channels,
                 max_block,
                 rate,
-                events: Vec::with_capacity(block::MAX_EVENTS),
+                // A block's own events plus the ones carried from skipped blocks.
+                events: Vec::with_capacity(2 * block::MAX_EVENTS),
                 midi_out: Vec::with_capacity(block::MAX_MIDI_OUT),
                 midi_read: 0,
                 layout_index: 0,
@@ -287,7 +271,8 @@ impl HostSession {
             editor_state,
             state_in_params,
             tail: AtomicU64::new(tail.to_bits()),
-            gate: AtomicU32::new(0),
+            gate: PluginGate::new(),
+            carry: UnsafeCell::new(Vec::with_capacity(block::MAX_EVENTS)),
             state_lock: Mutex::new(()),
             reset_pending: AtomicBool::new(false),
             midi_dropped: AtomicU32::new(0),
@@ -300,10 +285,7 @@ impl HostSession {
     /// skips. Never blocks, never allocates. Sets flush-to-zero for as long as
     /// the guard lives. Runs a deferred reset first.
     fn enter_audio(&self) -> Option<AudioGuard<'_>> {
-        self.gate
-            .compare_exchange(0, GATE_AUDIO, Ordering::SeqCst, Ordering::SeqCst)
-            .ok()?;
-        let guard = AudioGuard { gate: &self.gate, _flush: DenormalGuard::new_if(self.flush_denormals) };
+        let guard = AudioGuard { _hold: self.gate.enter_audio()?, _flush: DenormalGuard::new_if(self.flush_denormals) };
         if self.reset_pending.swap(false, Ordering::AcqRel) {
             let audio = unsafe { &mut *self.audio.get() };
             audio.inner.reset();
@@ -318,21 +300,7 @@ impl HostSession {
     /// `None` when no block finished within [`STATE_WAIT`]; `f` did not run.
     fn with_exclusive<T>(&self, f: impl FnOnce(&mut Audio) -> T) -> Option<T> {
         let _serial = self.state_lock.lock().unwrap_or_else(|e| e.into_inner());
-        self.gate.fetch_or(GATE_STATE, Ordering::SeqCst);
-        let _request = StateGuard(&self.gate);
-        let deadline = Instant::now() + STATE_WAIT;
-        let mut spins = 0u32;
-        while self.gate.load(Ordering::SeqCst) & (GATE_AUDIO | GATE_PEEK) != 0 {
-            if Instant::now() >= deadline {
-                return None;
-            }
-            spins += 1;
-            if spins < 64 {
-                std::hint::spin_loop();
-            } else {
-                std::thread::yield_now();
-            }
-        }
+        let _held = self.gate.enter_state(STATE_WAIT)?;
         Some(f(unsafe { &mut *self.audio.get() }))
     }
 
@@ -495,20 +463,8 @@ impl HostSession {
     fn try_read_info(&self) -> bool {
         // Only from an idle gate: no block, no state call holds or wants the
         // plugin object. A state call that asks meanwhile waits for this read.
-        if self
-            .gate
-            .compare_exchange(0, GATE_PEEK, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return false;
-        }
-        struct PeekGuard<'a>(&'a AtomicU32);
-        impl Drop for PeekGuard<'_> {
-            fn drop(&mut self) {
-                self.0.fetch_and(!GATE_PEEK, Ordering::SeqCst);
-            }
-        }
-        let _release = PeekGuard(&self.gate);
+        // Held as a block holds it: one call long, and a state call waits for it.
+        let Some(_release) = self.gate.enter_audio() else { return false };
         let audio = unsafe { &*self.audio.get() };
         if let Ok(info) = catch_unwind(AssertUnwindSafe(|| audio.inner.info())) {
             self.note_info(info);
@@ -645,8 +601,8 @@ impl HostSession {
     ///
     /// `None` when a block did not finish within [`STATE_WAIT`] or the
     /// plugin's `save_state` panicked. Message thread; allocates; blocks at
-    /// most [`STATE_WAIT`]. Safe beside the audio thread: blocks that start
-    /// meanwhile are skipped (dry).
+    /// most [`STATE_WAIT`]. Safe beside the audio thread: for a plugin
+    /// with a chunk, blocks that start meanwhile are skipped (dry).
     pub fn save_bytes(&self) -> Option<Vec<u8>> {
         if self.state_in_params {
             // The whole state is the plane, which the audio thread only reads:

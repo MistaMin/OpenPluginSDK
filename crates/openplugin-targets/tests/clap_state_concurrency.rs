@@ -4,8 +4,10 @@
 //! inside `process`. The adapter keeps the plugin object single-threaded with a
 //! gate: a state call announces itself, waits a bounded time for the block already
 //! running, and works between blocks; a block that starts meanwhile is skipped and
-//! passes its input through. A plugin whose state is only its parameters is never
-//! touched by a state call at all: the parameters go through the plane.
+//! passes its input through, and its notes reach the next block. A plugin whose state
+//! is only its parameters (it says so, or its `save_state` returns `None` when it is
+//! new) is never touched by a state call at all: the parameters go through the plane.
+//! What is saved is the session the shells save: the parameters, then the chunk.
 //!
 //! The plugins here make a race visible. `Stateful` keeps its state in two plain
 //! fields that every operation reads or writes with a pause in between, so a state
@@ -18,10 +20,10 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::ffi::{c_char, c_void};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+use openplugin_core::{decode_session, encode_params, encode_session, Category, ParamInfo, Plugin, PluginInfo, Unit};
 use openplugin_targets::clap_abi::*;
 use openplugin_targets::ClapAdapter;
 
@@ -86,6 +88,7 @@ const fn info(id: &'static str, params: &'static [ParamInfo]) -> PluginInfo {
 }
 static STATEFUL_INFO: PluginInfo = info("com.opengrid.test.clap-state-chunk", &LEVEL);
 static PAIR_INFO: PluginInfo = info("com.opengrid.test.clap-state-pair", &PAIR);
+static SPLIT_INFO: PluginInfo = info("com.opengrid.test.clap-state-split", &LEVEL);
 
 fn pause() {
     for _ in 0..300 {
@@ -159,10 +162,12 @@ impl Plugin for Stateful {
 
 static PAIR_STATE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-/// Parameters only. `save_state` and `load_state` count their calls.
+/// Parameters only. `save_state` and `load_state` count their calls. `declared` is
+/// its `state_is_parameters_only`.
 struct Pair {
     p0: f32,
     p1: f32,
+    declared: bool,
 }
 
 impl Plugin for Pair {
@@ -197,9 +202,8 @@ impl Plugin for Pair {
             }
         }
     }
-    // Declares its state is its parameters, so state calls must never reach it.
     fn state_is_parameters_only(&self) -> bool {
-        true
+        self.declared
     }
     fn save_state(&mut self) -> Option<Vec<u8>> {
         PAIR_STATE_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -208,6 +212,66 @@ impl Plugin for Pair {
     fn load_state(&mut self, _: &[u8]) -> bool {
         PAIR_STATE_CALLS.fetch_add(1, Ordering::SeqCst);
         false
+    }
+}
+
+/// What a test shares with its `Split`.
+#[derive(Clone, Default)]
+struct SplitProbe {
+    /// While true, `save_state` spins (a slow save), up to a safety limit.
+    hold_save: Arc<AtomicBool>,
+    in_save: Arc<AtomicBool>,
+    /// The notes the plugin was given, oldest first, two bits each: 1 a note-on, 2 a note-off.
+    notes: Arc<AtomicU32>,
+}
+
+/// A chunk that does not hold its parameter: `program` is saved by the plugin, `level`
+/// by the SDK. The output is `program + level`.
+struct Split {
+    level: f32,
+    program: u8,
+    probe: SplitProbe,
+}
+
+impl Plugin for Split {
+    fn info(&self) -> &'static PluginInfo {
+        &SPLIT_INFO
+    }
+    fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+    fn reset(&mut self) {}
+    fn set_param(&mut self, id: &str, value: f32) -> bool {
+        if id == "level" {
+            self.level = value;
+        }
+        id == "level"
+    }
+    fn param(&self, id: &str) -> Option<f32> {
+        (id == "level").then_some(self.level)
+    }
+    fn note_on_channel(&mut self, _: usize, _: u8, _: u8, _: u8) {
+        self.probe.notes.store(self.probe.notes.load(Ordering::SeqCst) << 2 | 1, Ordering::SeqCst);
+    }
+    fn note_off(&mut self, _: usize, _: u8) {
+        self.probe.notes.store(self.probe.notes.load(Ordering::SeqCst) << 2 | 2, Ordering::SeqCst);
+    }
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+        for channel in io.iter_mut() {
+            channel[..frames].fill(f32::from(self.program) + self.level);
+        }
+    }
+    fn save_state(&mut self) -> Option<Vec<u8>> {
+        self.probe.in_save.store(true, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        while self.probe.hold_save.load(Ordering::SeqCst) && start.elapsed().as_secs() < 5 {
+            std::hint::spin_loop();
+        }
+        self.probe.in_save.store(false, Ordering::SeqCst);
+        Some(vec![self.program])
+    }
+    fn load_state(&mut self, data: &[u8]) -> bool {
+        let [program] = data else { return false };
+        self.program = *program;
+        true
     }
 }
 
@@ -255,8 +319,33 @@ fn load(plugin: *const clap_plugin, bytes: &[u8]) -> bool {
     unsafe { (*state_ext(plugin)).load.unwrap()(plugin, &stream) }
 }
 
-/// One stereo block. Returns the first channel's output.
+/// One stereo block without events.
 fn run_block(plugin: *const clap_plugin, out: &mut [Vec<f32>; 2], input: &mut [Vec<f32>; 2]) -> i32 {
+    run_block_with(plugin, out, input, std::ptr::null())
+}
+
+unsafe extern "C" fn events_size(list: *const clap_input_events) -> u32 {
+    unsafe { &*((*list).ctx as *const Vec<*const clap_event_header>) }.len() as u32
+}
+
+unsafe extern "C" fn events_get(list: *const clap_input_events, index: u32) -> *const clap_event_header {
+    let headers = unsafe { &*((*list).ctx as *const Vec<*const clap_event_header>) };
+    headers[index as usize]
+}
+
+fn note(kind: u16, time: u32, key: i16) -> clap_event_note {
+    clap_event_note {
+        header: clap_event_header { size: std::mem::size_of::<clap_event_note>() as u32, time, space_id: 0, type_: kind, flags: 0 },
+        note_id: -1,
+        port_index: 0,
+        channel: 0,
+        key,
+        velocity: 0.8,
+    }
+}
+
+/// One stereo block with the host's event list.
+fn run_block_with(plugin: *const clap_plugin, out: &mut [Vec<f32>; 2], input: &mut [Vec<f32>; 2], in_events: *const clap_input_events) -> i32 {
     let mut in_ptrs = [input[0].as_mut_ptr(), input[1].as_mut_ptr()];
     let mut out_ptrs = [out[0].as_mut_ptr(), out[1].as_mut_ptr()];
     let in_buf = clap_audio_buffer { data32: in_ptrs.as_mut_ptr(), data64: std::ptr::null_mut(), channel_count: 2, latency: 0, constant_mask: 0 };
@@ -269,7 +358,7 @@ fn run_block(plugin: *const clap_plugin, out: &mut [Vec<f32>; 2], input: &mut [V
         audio_outputs: &mut out_buf,
         audio_inputs_count: 1,
         audio_outputs_count: 1,
-        in_events: std::ptr::null(),
+        in_events,
         out_events: std::ptr::null(),
     };
     unsafe { ((*plugin).process.unwrap())(plugin, &process) }
@@ -359,6 +448,7 @@ fn chunk_state_beside_process_is_never_torn() {
     for round in 0..400u32 {
         assert!(load(plugin, &chunk(round + 2, 0.5)), "load {round} is accepted");
         let saved = save(plugin).expect("save succeeds beside process");
+        let saved = decode_session(&STATEFUL_INFO, &saved).expect("a session").chunk;
         assert_eq!(saved.len(), 12);
         let a = u32::from_le_bytes(saved[0..4].try_into().unwrap());
         let b = u32::from_le_bytes(saved[4..8].try_into().unwrap());
@@ -375,33 +465,37 @@ fn chunk_state_beside_process_is_never_torn() {
 
 #[test]
 fn parameter_state_beside_process_is_never_torn_and_never_touches_the_plugin() {
-    let adapter = activated(Pair { p0: 0.0, p1: 0.0 });
-    let plugin = adapter.as_plugin();
-    let plane = adapter.plane().unwrap();
-    // States in which both parameters carry the same value, made before the audio runs.
-    let states: Vec<Vec<u8>> = (1..=40u32)
-        .map(|value| {
-            plane.store(0, value as f32);
-            plane.store(1, value as f32);
-            save(plugin).expect("save")
-        })
-        .collect();
-    let baseline = PAIR_STATE_CALLS.load(Ordering::SeqCst);
-    let audio = start_audio(PluginPtr(plugin));
-    for round in 0..1500usize {
-        let state = &states[round % states.len()];
-        assert!(load(plugin, state), "load {round}");
-        assert_eq!(&save(plugin).expect("save").len(), &state.len());
+    // A plugin that declares its state is its parameters, and one that only leaves
+    // `save_state` at `None`: neither is gated.
+    for declared in [true, false] {
+        let adapter = activated(Pair { p0: 0.0, p1: 0.0, declared });
+        let plugin = adapter.as_plugin();
+        let plane = adapter.plane().unwrap();
+        // States in which both parameters carry the same value, made before the audio runs.
+        let states: Vec<Vec<u8>> = (1..=40u32)
+            .map(|value| {
+                plane.store(0, value as f32);
+                plane.store(1, value as f32);
+                save(plugin).expect("save")
+            })
+            .collect();
+        let baseline = PAIR_STATE_CALLS.load(Ordering::SeqCst);
+        let audio = start_audio(PluginPtr(plugin));
+        for round in 0..1500usize {
+            let state = &states[round % states.len()];
+            assert!(load(plugin, state), "load {round}");
+            assert_eq!(&save(plugin).expect("save").len(), &state.len());
+        }
+        let report = audio.finish();
+        assert_eq!(report.torn, 0, "no block saw one new and one old parameter ({} of {})", report.torn, report.blocks);
+        assert_eq!(report.dry, 0, "a parameter-only state never costs the audio thread a block (declared: {declared})");
+        assert_eq!(PAIR_STATE_CALLS.load(Ordering::SeqCst), baseline, "save and load never entered the plugin (declared: {declared})");
     }
-    let report = audio.finish();
-    assert_eq!(report.torn, 0, "no block saw one new and one old parameter ({} of {})", report.torn, report.blocks);
-    assert_eq!(report.dry, 0, "a parameter-only state never costs the audio thread a block");
-    assert_eq!(PAIR_STATE_CALLS.load(Ordering::SeqCst), baseline, "save and load never entered the plugin");
 }
 
 #[test]
 fn parameter_load_is_applied_whole_or_not_at_all() {
-    let adapter = activated(Pair { p0: 0.0, p1: 0.0 });
+    let adapter = activated(Pair { p0: 0.0, p1: 0.0, declared: true });
     let plugin = adapter.as_plugin();
     let plane = adapter.plane().unwrap();
     plane.store(0, 10.0);
@@ -410,7 +504,8 @@ fn parameter_load_is_applied_whole_or_not_at_all() {
     // A non-finite value anywhere refuses the whole state.
     let mut bad = good.clone();
     let len = bad.len();
-    bad[len - 4..].copy_from_slice(&f32::NAN.to_le_bytes());
+    // The last value: the session ends with the (empty) chunk's length.
+    bad[len - 8..len - 4].copy_from_slice(&f32::NAN.to_le_bytes());
     plane.store(0, 1.0);
     plane.store(1, 2.0);
     assert!(!load(plugin, &bad));
@@ -428,7 +523,7 @@ fn audio_thread_does_not_allocate_during_saves_and_loads() {
             let adapter = activated(Stateful { a: 1, b: 1, level: 0.0 });
             (PluginPtr(adapter.as_plugin()), Box::new(adapter))
         } else {
-            let adapter = activated(Pair { p0: 0.0, p1: 0.0 });
+            let adapter = activated(Pair { p0: 0.0, p1: 0.0, declared: true });
             (PluginPtr(adapter.as_plugin()), Box::new(adapter))
         };
         let audio = start_audio(plugin);
@@ -466,20 +561,91 @@ fn a_plugin_with_its_own_chunk_round_trips() {
     let first = activated(Stateful { a: 7, b: 7, level: 0.0 });
     first.plane().unwrap().store(0, 0.75);
     let saved = save(first.as_plugin()).expect("save");
-    assert_eq!(saved, chunk(7, 0.0), "the chunk is the plugin's own, not the parameter snapshot");
+    assert_eq!(saved, encode_session(&STATEFUL_INFO, &[0.75], &chunk(7, 0.0)), "the parameters, then the plugin's own chunk");
 
     let second = activated(Stateful { a: 0, b: 0, level: 0.0 });
-    assert!(load(second.as_plugin(), &chunk(42, 0.75)));
+    assert!(load(second.as_plugin(), &saved));
     assert_eq!(second.plane().unwrap().load(0), Some(0.75), "the plane shows the loaded parameter");
     let mut out = [vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]];
     let mut input = [vec![DRY; FRAMES], vec![DRY; FRAMES]];
     assert_eq!(run_block(second.as_plugin(), &mut out, &mut input), 1);
-    assert!(out.iter().all(|c| c.iter().all(|s| *s == 42.0)), "the next block runs the loaded state");
-    assert_eq!(save(second.as_plugin()).unwrap(), chunk(42, 0.75));
+    assert!(out.iter().all(|c| c.iter().all(|s| *s == 7.0)), "the next block runs the loaded state");
+    assert_eq!(save(second.as_plugin()).unwrap(), encode_session(&STATEFUL_INFO, &[0.75], &chunk(7, 0.75)));
 
     // A chunk the plugin refuses changes nothing.
+    let before = save(second.as_plugin()).unwrap();
     assert!(!load(second.as_plugin(), &[1, 2, 3]));
     assert!(!load(second.as_plugin(), &chunk(9, f32::NAN)));
-    assert_eq!(save(second.as_plugin()).unwrap(), chunk(42, 0.75));
+    assert!(!load(second.as_plugin(), &encode_session(&STATEFUL_INFO, &[0.1], &chunk(9, f32::NAN))));
+    assert_eq!(save(second.as_plugin()).unwrap(), before);
     assert_eq!(second.plane().unwrap().load(0), Some(0.75));
+}
+
+#[test]
+fn sessions_saved_before_clap_wrote_sessions_still_load() {
+    // The plugin's raw chunk, as CLAP saved a plugin with one.
+    let chunky = activated(Stateful { a: 0, b: 0, level: 0.0 });
+    assert!(load(chunky.as_plugin(), &chunk(42, 0.75)));
+    assert_eq!(chunky.plane().unwrap().load(0), Some(0.75), "the plane shows the chunk's parameter");
+    let mut out = [vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]];
+    let mut input = [vec![DRY; FRAMES], vec![DRY; FRAMES]];
+    assert_eq!(run_block(chunky.as_plugin(), &mut out, &mut input), 1);
+    assert!(out.iter().all(|c| c.iter().all(|s| *s == 42.0)), "the next block runs the loaded chunk");
+
+    // A bare OPST snapshot, as CLAP saved a plugin without a chunk: into both kinds.
+    assert!(load(chunky.as_plugin(), &encode_params(&STATEFUL_INFO, &[0.25])));
+    assert_eq!(chunky.plane().unwrap().load(0), Some(0.25));
+    let plain = activated(Pair { p0: 0.0, p1: 0.0, declared: false });
+    assert!(load(plain.as_plugin(), &encode_params(&PAIR_INFO, &[3.0, 4.0])));
+    assert_eq!((plain.plane().unwrap().load(0), plain.plane().unwrap().load(1)), (Some(3.0), Some(4.0)));
+}
+
+#[test]
+fn a_chunk_that_leaves_out_the_parameters_gets_them_back() {
+    let first = activated(Split { level: 0.0, program: 5, probe: SplitProbe::default() });
+    first.plane().unwrap().store(0, 0.75);
+    let saved = save(first.as_plugin()).expect("save");
+
+    let second = activated(Split { level: 0.0, program: 0, probe: SplitProbe::default() });
+    assert!(load(second.as_plugin(), &saved));
+    assert_eq!(second.plane().unwrap().load(0), Some(0.75), "the knob value came back");
+    let mut out = [vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]];
+    let mut input = [vec![DRY; FRAMES], vec![DRY; FRAMES]];
+    assert_eq!(run_block(second.as_plugin(), &mut out, &mut input), 1);
+    assert!(out.iter().all(|c| c.iter().all(|s| *s == 5.75)), "the engine has the chunk and the knob value: {}", out[0][0]);
+}
+
+#[test]
+fn the_notes_of_a_block_skipped_by_a_save_reach_the_next_block() {
+    let probe = SplitProbe::default();
+    let adapter = activated(Split { level: 0.0, program: 1, probe: probe.clone() });
+    let plugin = PluginPtr(adapter.as_plugin());
+    probe.hold_save.store(true, Ordering::SeqCst);
+    let saver = std::thread::spawn(move || {
+        let plugin = plugin;
+        save(plugin.0)
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !probe.in_save.load(Ordering::SeqCst) {
+        assert!(std::time::Instant::now() < deadline, "the save never started");
+        std::thread::yield_now();
+    }
+
+    // Listed out of order on purpose: the note-off is later in the block than the note-on.
+    let (off, on) = (note(EVENT_NOTE_OFF, 40, 60), note(EVENT_NOTE_ON, 8, 60));
+    let headers: Vec<*const clap_event_header> = vec![&off.header, &on.header];
+    let list = clap_input_events { ctx: &headers as *const Vec<*const clap_event_header> as *mut c_void, size: Some(events_size), get: Some(events_get) };
+    let mut out = [vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]];
+    let mut input = [vec![DRY; FRAMES], vec![DRY; FRAMES]];
+    assert_eq!(run_block_with(plugin.0, &mut out, &mut input, &list), 1);
+    assert!(out.iter().all(|c| c.iter().all(|s| *s == DRY)), "the block during the save is dry");
+    assert_eq!(probe.notes.load(Ordering::SeqCst), 0, "a skipped block does not enter the plugin");
+
+    probe.hold_save.store(false, Ordering::SeqCst);
+    assert!(saver.join().unwrap().is_some());
+    assert_eq!(run_block(plugin.0, &mut out, &mut input), 1);
+    assert_eq!(out[0][0], 1.0, "the plugin runs again");
+    assert_eq!(probe.notes.load(Ordering::SeqCst), 0b01_10, "the note-on, then the note-off");
+    assert_eq!(run_block(plugin.0, &mut out, &mut input), 1);
+    assert_eq!(probe.notes.load(Ordering::SeqCst), 0b01_10, "each is delivered once");
 }

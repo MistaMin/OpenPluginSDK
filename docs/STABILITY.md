@@ -296,20 +296,28 @@ There are three kinds of thread, and the SDK's types say which one may touch wha
 ### State
 
 `save_state` and `load_state` take `&mut self` of the plugin object, which is the same object
-`process` runs on. The SDK's FFI layer ([`openplugin-host/src/lib.rs`](../crates/openplugin-host/src/lib.rs),
-module documentation) arbitrates with a one-word gate and the audio thread never waits on it:
+`process` runs on. One gate, `openplugin_core::PluginGate`
+([`openplugin-core/src/gate.rs`](../crates/openplugin-core/src/gate.rs)), arbitrates in the shells and
+in CLAP, and the audio thread never waits on it:
 
 - `process` and `reset` take the gate with one compare-exchange. If a state call holds or has
   requested it, the block is **skipped**: input copied to output (dry), the plugin not entered,
-  success returned.
+  success returned. The skipped block's events are not lost: parameter events go to the parameter
+  plane at once, and notes, MIDI and note expressions are delivered at the start of the next block,
+  in their order (at most 1024 waiting in the shells, 256 in CLAP; more are dropped). A note-off in a
+  skipped block therefore still ends its note.
 - A state call serialises with other state calls on a mutex, raises a request bit, then waits for a
-  block in flight to finish, at most `STATE_WAIT` (2 s). On timeout it fails and changes nothing. New
-  blocks see the request bit and skip, so the wait cannot be starved.
+  block in flight to finish, at most 2 s in the shells (`STATE_WAIT`) and 250 ms in CLAP. On timeout
+  it fails and changes nothing. New blocks see the request bit and skip, so the wait cannot be starved.
 - The request bit and the in-flight bit are one atomic: for any pair of (block, state call) either
   the block sees the request and skips, or the state call sees the block and waits. They are never
   both inside the plugin.
-- A plugin whose whole state is its parameters (`state_is_parameters_only`) takes no gate at all:
-  state is the parameter plane, which the audio thread only reads, and no block is ever skipped.
+- A plugin without a chunk takes no gate at all: its state is the parameter plane, which the audio
+  thread only reads, and no block is ever skipped. That is a plugin that returns `true` from
+  `state_is_parameters_only`, or whose `save_state` returns `None` when the instance is built
+  (`openplugin_core::has_state_chunk`, asked once). So a plugin that ever saves a chunk must return
+  `Some` from `save_state` on a new instance, before `prepare`; one that answers `None` then never has
+  `save_state` or `load_state` called again.
 
 What that means for you: you need **no lock** in `save_state` or `load_state` against `process`; they
 do not overlap. Both may allocate. `load_state` must accept bytes from any version and any
@@ -320,14 +328,16 @@ Tests that enforce the gate:
 | Rule | Test |
 | --- | --- |
 | A block that starts during a save is dry and does not wait | `a_block_that_starts_during_a_save_is_dry_and_does_not_wait` |
+| The notes of a skipped block reach the next block, in order, once | `the_notes_of_a_block_skipped_by_a_save_reach_the_next_block` (also in `clap_state_concurrency.rs`) |
 | A save waits for a block in flight | `a_save_waits_for_a_block_in_flight` |
 | A state call gives up after the bounded wait and changes nothing | `a_call_gives_up_after_a_bounded_wait_and_changes_nothing` |
 | Saves and loads beside `process` never tear | `saves_and_loads_beside_process_never_tear` |
-| (all four above) | [`openplugin-host/tests/shell_state_threads.rs`](../crates/openplugin-host/tests/shell_state_threads.rs) |
-| Parameter-only plugins never skip a block on save or load | `saves_and_loads_during_playback_never_skip_a_block` in [`state_param_only.rs`](../crates/openplugin-host/tests/state_param_only.rs) |
+| (all five above) | [`openplugin-host/tests/shell_state_threads.rs`](../crates/openplugin-host/tests/shell_state_threads.rs) |
+| Plugins without a chunk, declared or not, never skip a block on save or load | `saves_and_loads_during_playback_never_skip_a_block` in [`state_param_only.rs`](../crates/openplugin-host/tests/state_param_only.rs) |
 | A plugin with a chunk stays sound under state calls during playback | `chunk_plugin_state_calls_during_playback_stay_sound` (same file) |
 | The audio thread does not allocate while a save or load runs | `the_audio_thread_does_not_allocate_during_a_save_or_a_load` in [`shell_state_no_alloc.rs`](../crates/openplugin-host/tests/shell_state_no_alloc.rs) |
 | The same, through CLAP | `chunk_state_beside_process_is_never_torn`, `parameter_state_beside_process_is_never_torn_and_never_touches_the_plugin`, `parameter_load_is_applied_whole_or_not_at_all`, `audio_thread_does_not_allocate_during_saves_and_loads` in [`clap_state_concurrency.rs`](../crates/openplugin-targets/tests/clap_state_concurrency.rs) |
+| A CLAP session holds the parameters beside the chunk, and older CLAP sessions still load | `a_chunk_that_leaves_out_the_parameters_gets_them_back`, `sessions_saved_before_clap_wrote_sessions_still_load` (same file) |
 | A state load applies whole or not at all, and corrupt state never touches the plugin | `restore_params_is_all_or_nothing`, `corrupt_session_envelopes_do_not_touch_the_plugin`, `plugin_load_state_rejects_random_and_corrupt_chunks` in [`state_hostile_input.rs`](../crates/openplugin-core/tests/state_hostile_input.rs) |
 
 ### Editor

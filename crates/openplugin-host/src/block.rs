@@ -217,7 +217,47 @@ fn valid_event(event: &OpEvent, frames: usize) -> bool {
     }
 }
 
+/// Adds `event` to `list` by offset, after the events already at that offset
+/// and never before index `from`. The caller has checked the capacity.
+fn insert_by_offset(list: &mut Vec<OpEvent>, from: usize, event: OpEvent) {
+    let mut at = list.len();
+    while at > from && list[at - 1].offset > event.offset {
+        at -= 1;
+    }
+    list.insert(at, event);
+}
+
 impl HostSession {
+    /// The events of a block a state call made the audio thread skip:
+    /// parameters go to the plane, notes and MIDI wait in `carry` (in offset
+    /// order) for the start of the next block. Never touches the plugin.
+    ///
+    /// # Safety
+    /// `args.events` addresses `args.event_count` events.
+    unsafe fn carry_events(&self, args: &OpProcess) {
+        let carry = unsafe { &mut *self.carry.get() };
+        let base = carry.len();
+        for i in 0..args.event_count as usize {
+            let event = unsafe { *args.events.add(i) };
+            if !valid_event(&event, args.frames as usize) {
+                continue;
+            }
+            match event.kind {
+                EVENT_PARAM_PLAIN => {
+                    self.plane.store(event.index as usize, event.value);
+                }
+                EVENT_PARAM_NORMALIZED => {
+                    self.store_normalized(event.index as usize, event.value);
+                }
+                _ if carry.len() < MAX_EVENTS => insert_by_offset(carry, base, event),
+                _ => {}
+            }
+        }
+        for event in &mut carry[base..] {
+            event.offset = 0;
+        }
+    }
+
     fn apply_events(&self, audio: &mut Audio, start: usize, end: usize) {
         for index in start..end {
             let event = audio.events[index];
@@ -377,7 +417,8 @@ impl HostSession {
     /// any bus, or a block longer than the prepared size. An individual event
     /// with an offset at or past `frames`, an unknown kind or an out-of-range
     /// value is ignored. A state call holding the gate makes the block dry
-    /// (events lost) and still returns true.
+    /// and still returns true: its parameter events reach the plane, and its
+    /// notes and MIDI are delivered at offset 0 of the next block.
     ///
     /// # Safety
     /// Every pointer in `args` is null (where allowed) or valid for the count
@@ -404,7 +445,10 @@ impl HostSession {
             return true;
         }
         let Some(_gate) = self.enter_audio() else {
-            unsafe { Self::dry(args) };
+            unsafe {
+                self.carry_events(args);
+                Self::dry(args);
+            }
             return true;
         };
         let audio = unsafe { &mut *self.audio.get() };
@@ -419,18 +463,17 @@ impl HostSession {
         audio.midi_out.clear();
         audio.midi_read = 0;
 
-        // Valid events, stably sorted by offset, in the list made at creation.
+        // What skipped blocks left (offset 0), then this block's valid events,
+        // stably sorted by offset, in the list made at creation.
         audio.events.clear();
+        let carry = unsafe { &mut *self.carry.get() };
+        audio.events.extend_from_slice(carry);
+        carry.clear();
         for i in 0..args.event_count as usize {
             let event = unsafe { *args.events.add(i) };
-            if !valid_event(&event, frames) {
-                continue;
+            if valid_event(&event, frames) {
+                insert_by_offset(&mut audio.events, 0, event);
             }
-            let mut at = audio.events.len();
-            while at > 0 && audio.events[at - 1].offset > event.offset {
-                at -= 1;
-            }
-            audio.events.insert(at, event);
         }
 
         let side = args.sidechain_channels > 0
