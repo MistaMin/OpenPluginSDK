@@ -32,6 +32,11 @@ harness = false
 name = "menu"
 harness = false
 
+# The editor in real HWNDs (Windows; a stub elsewhere). One thread pumps the messages.
+[[test]]
+name = "win32"
+harness = false
+
 # The editor through CLAP and LV2 on a real X display (Linux); one thread, as the view needs.
 [[test]]
 name = "x11"

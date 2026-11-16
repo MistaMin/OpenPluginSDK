@@ -15,6 +15,7 @@ unsafe extern "system" {
     fn FormatMessageW(flags: u32, source: *const c_void, id: u32, language: u32, buffer: *mut u16, size: u32, args: *mut c_void) -> u32;
     fn GetCurrentProcess() -> *mut c_void;
     fn TerminateProcess(process: *mut c_void, code: u32) -> c_int;
+    fn SetErrorMode(mode: u32) -> u32;
 }
 
 /// Look for the DLLs a plug-in depends on in the plug-in's own folder first,
@@ -22,6 +23,13 @@ unsafe extern "system" {
 const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
 const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x0000_0200;
 const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 0x0000_1000;
+/// No system dialog for a DLL that cannot be found or opened, and no Windows
+/// Error Reporting window when the plug-in crashes: the probe dies with its
+/// exception code at once, instead of waiting in a dialog (in a desktop
+/// session) until the parent's timeout kills it and reports a hang.
+const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+const SEM_NOGPFAULTERRORBOX: u32 = 0x0002;
+const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
 
 /// The system's text for the calling thread's last error.
 fn last_error() -> String {
@@ -43,8 +51,10 @@ fn last_error() -> String {
     if text.is_empty() { format!("error {code}") } else { format!("{text} (error {code})") }
 }
 
-/// `LoadLibraryExW` a DLL; the system's error text on failure.
+/// `LoadLibraryExW` a DLL; the system's error text on failure. Only the probe
+/// child loads plug-ins, so the process-wide error mode set here is the child's.
 pub fn open_library(path: &Path) -> Result<*mut c_void, String> {
+    unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX) };
     let path = std::path::absolute(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     let h = unsafe { LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH) };

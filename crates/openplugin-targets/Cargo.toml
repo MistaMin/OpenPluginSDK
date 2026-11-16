@@ -26,6 +26,10 @@ openplugin-dri = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 openplugin-dri = { workspace = true }
 
+# The Win32 editor view.
+[target.'cfg(windows)'.dependencies]
+openplugin-dri = { workspace = true }
+
 [dev-dependencies]
 openplugin-dsp = { workspace = true }
 

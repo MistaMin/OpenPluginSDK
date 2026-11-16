@@ -163,6 +163,12 @@ jobs:
     name: Workspace tests on Windows (stable)
     runs-on: windows-latest
     timeout-minutes: 60
+    env:
+      # clap-validator 0.4.1 (build 127-g152b982), as in the clap-validator
+      # job. The Windows zip holds clap-validator.exe alone. The checksum is
+      # the SHA-256 of the zip.
+      CLAP_VALIDATOR_URL: https://github.com/free-audio/clap-validator/releases/download/0.4.1/clap-validator-0.4.1-127-g152b982-windows.zip
+      CLAP_VALIDATOR_SHA256: d935c3af0a45c3911ea2e900f4aa5d6709dac82bb485f0c4ce28648ab2cd0c10
     steps:
       - name: Check out OpenPluginSDK
         uses: actions/checkout@v4
@@ -187,6 +193,61 @@ jobs:
       - name: Clippy, warnings as errors
         working-directory: OpenPluginSDK
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Nothing from the download runs unless the checksum matches.
+      - name: Download clap-validator and verify its checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'clap-validator'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $zip = Join-Path $dir 'clap-validator.zip'
+          Invoke-WebRequest -Uri $env:CLAP_VALIDATOR_URL -OutFile $zip -UseBasicParsing
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash.ToLowerInvariant()
+          if ($hash -ne $env:CLAP_VALIDATOR_SHA256) { throw "clap-validator.zip has SHA-256 $hash, expected $env:CLAP_VALIDATOR_SHA256" }
+          Expand-Archive -LiteralPath $zip -DestinationPath $dir -Force
+          & (Join-Path $dir 'clap-validator.exe') --version
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build examples/editor
+        working-directory: OpenPluginSDK
+        run: cargo build --release -p example-editor
+      # A CLAP on Windows is the DLL itself, named .clap.
+      - name: Bundle the example as a .clap
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dir = Join-Path $env:RUNNER_TEMP 'bundle'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item -LiteralPath 'target\release\example_editor.dll' -Destination (Join-Path $dir 'Editor.clap') -Force
+      # clap-validator exits non-zero when any test fails.
+      - name: Validate the bundle
+        shell: pwsh
+        run: |
+          & (Join-Path $env:RUNNER_TEMP 'clap-validator\clap-validator.exe') validate (Join-Path $env:RUNNER_TEMP 'bundle\Editor.clap')
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+  # The minimum Rust version on Windows: the Windows-only code (cfg(windows))
+  # must build with 1.85 too, which the macOS msrv job cannot see.
+  msrv-windows:
+    name: MSRV check on Windows (Rust 1.85.0)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Install Rust 1.85.0
+        uses: dtolnay/rust-toolchain@1.85.0
+      - name: Check the workspace on the minimum Rust version
+        working-directory: OpenPluginSDK
+        run: cargo +1.85.0 check --workspace --all-targets --locked
 
   msrv:
     name: MSRV check (Rust 1.85.0)
