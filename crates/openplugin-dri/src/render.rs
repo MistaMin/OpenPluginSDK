@@ -27,8 +27,8 @@
 //! fn render(&mut self, scale: f32) -> Frame<'_> {
 //!     let (gain, warm) = (self.gain, self.warm);
 //!     self.canvas.frame(scale, |dl| {
-//!         draw_faceplate_code(dl, 240.0, 160.0, "Navy");
-//!         draw_knob(dl, 60.0, 70.0, 28.0, gain, "GAIN", "0.0 dB", KnobStyle::Brit, Color::BRIT_RED);
+//!         draw_faceplate(dl, 240.0, 160.0, "Navy");
+//!         draw_knob(dl, 60.0, 70.0, 28.0, gain, "GAIN", "0.0 dB", "Brit", Color::RED);
 //!     })
 //! }
 //! ```
@@ -55,6 +55,11 @@ pub(crate) fn paint_lock() -> MutexGuard<'static, ()> {
 }
 
 /// A reusable drawing surface of a size in points ([`Self::resize`] changes it).
+///
+/// GoodLookin DRI keeps its knob scale, floor colour and device scale process-wide, so a
+/// frame paints and rasterises under one process-wide lock. Editors paint on the main
+/// thread, where it is never contended; a canvas painting on another thread at the same
+/// time (a snapshot tool) waits for the frame in progress.
 pub struct SceneCanvas {
     width: f32,
     height: f32,
@@ -135,7 +140,7 @@ impl SceneCanvas {
         self.list.clear();
         paint(&mut self.list);
         self.framebuffer.replay(&self.list.scene, scale);
-        Frame { pixels: &self.framebuffer.pixels, width: w, height: h }
+        Frame::new(&self.framebuffer.pixels, w, h)
     }
 
     /// [`Self::frame`] in two layers. `layer` paints what does not move (the
@@ -187,7 +192,7 @@ impl SceneCanvas {
         };
         if let Some(rects) = &partial {
             if rects.is_empty() {
-                return Frame { pixels: &self.framebuffer.pixels, width: w, height: h };
+                return Frame::new(&self.framebuffer.pixels, w, h);
             }
         } else if !layer_ready {
             self.layered = false;
@@ -209,7 +214,7 @@ impl SceneCanvas {
             Some(rects) => self.replay_in(&rects, scale),
         }
         self.layered = true;
-        Frame { pixels: &self.framebuffer.pixels, width: w, height: h }
+        Frame::new(&self.framebuffer.pixels, w, h)
     }
 
     /// Restore the layer under each rectangle and replay the list inside it.
@@ -269,6 +274,7 @@ impl SceneCanvas {
     }
 
     /// The scene of the last frame (for tests, or a second backend).
+    #[doc(hidden)]
     pub fn last_scene(&self) -> &goodlookindri::scene::Scene {
         &self.list.scene
     }
@@ -318,7 +324,7 @@ fn pixel_rects(damage: &[DamageRect], scale: f32, width: usize, height: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{draw_faceplate_code, draw_knob_code, Color, KnobTier};
+    use crate::{draw_faceplate, draw_knob, Color, KnobTier};
 
     #[test]
     fn an_oversized_surface_is_drawn_at_a_lower_scale() {
@@ -337,8 +343,8 @@ mod tests {
         let mut canvas = SceneCanvas::new(120.0, 120.0);
         let lit = canvas
             .frame(2.0, |dl| {
-                draw_faceplate_code(dl, 120.0, 120.0, "Navy");
-                draw_knob_code(dl, 60.0, 50.0, 30.0, 0.5, "GAIN", "0 dB", "Brit", Color::BRIT_RED);
+                draw_faceplate(dl, 120.0, 120.0, "Navy");
+                draw_knob(dl, 60.0, 50.0, 30.0, 0.5, "GAIN", "0 dB", "Brit", Color::RED);
             })
             .pixels
             .to_vec();
@@ -350,9 +356,9 @@ mod tests {
 
         let classic = canvas
             .frame(2.0, |dl| {
-                dl.knob_tier = KnobTier::Classic;
-                draw_faceplate_code(dl, 120.0, 120.0, "Navy");
-                draw_knob_code(dl, 60.0, 50.0, 30.0, 0.5, "GAIN", "0 dB", "Brit", Color::BRIT_RED);
+                dl.set_knob_tier(KnobTier::Classic);
+                draw_faceplate(dl, 120.0, 120.0, "Navy");
+                draw_knob(dl, 60.0, 50.0, 30.0, 0.5, "GAIN", "0 dB", "Brit", Color::RED);
             })
             .pixels
             .to_vec();
@@ -367,11 +373,11 @@ mod tests {
 
     #[test]
     fn layered_frame_matches_a_full_frame_and_reuses_the_layer() {
-        let paint_knob = |dl: &mut DrawList| draw_knob_code(dl, 60.0, 50.0, 30.0, 0.7, "GAIN", "3 dB", "Brit", Color::BRIT_RED);
+        let paint_knob = |dl: &mut DrawList| draw_knob(dl, 60.0, 50.0, 30.0, 0.7, "GAIN", "3 dB", "Brit", Color::RED);
         let mut full = SceneCanvas::new(120.0, 120.0);
         let expected = full
             .frame(2.0, |dl| {
-                draw_faceplate_code(dl, 120.0, 120.0, "Navy");
+                draw_faceplate(dl, 120.0, 120.0, "Navy");
                 paint_knob(dl);
             })
             .pixels
@@ -381,7 +387,7 @@ mod tests {
         for _ in 0..3 {
             let got = layered.frame_layered(2.0, 7, |dl| {
                 layer_runs += 1;
-                draw_faceplate_code(dl, 120.0, 120.0, "Navy");
+                draw_faceplate(dl, 120.0, 120.0, "Navy");
             }, paint_knob);
             assert!(got.pixels == expected.as_slice(), "same pixels as one full frame");
         }
@@ -397,7 +403,7 @@ mod tests {
     /// and a text label elsewhere that changes with a counter.
     fn moving_parts(knob: f32, label: u32) -> impl Fn(&mut DrawList) {
         move |dl| {
-            draw_knob_code(dl, 60.0, 50.0, 30.0, knob, "GAIN", &format!("{knob:.2}"), "Brit", Color::BRIT_RED);
+            draw_knob(dl, 60.0, 50.0, 30.0, knob, "GAIN", &format!("{knob:.2}"), "Brit", Color::RED);
             let mut s = goodlookindri::scene::Scene::new();
             s.text(goodlookindri::scene::Point::new(150.0, 100.0), format!("N{label}"), GlColor(0xffffffff), 14.0, true);
             dl.append(s);
@@ -426,7 +432,7 @@ mod tests {
         for scale in [1.0f32, 1.5, 2.0, 2.37] {
             let mut full = SceneCanvas::new(200.0, 120.0);
             let mut part = SceneCanvas::new(200.0, 120.0);
-            let plate = |dl: &mut DrawList| draw_faceplate_code(dl, 200.0, 120.0, "Navy");
+            let plate = |dl: &mut DrawList| draw_faceplate(dl, 200.0, 120.0, "Navy");
             let mut painted = 0;
             for (i, (knob, label, damage)) in steps.iter().enumerate() {
                 let want = full.frame_layered(scale, 3, plate, moving_parts(*knob, *label)).pixels.to_vec();
@@ -441,7 +447,7 @@ mod tests {
     fn damage_that_misses_a_change_shows_in_the_comparison() {
         // The comparison above can fail: a rectangle that leaves out the knob keeps the old knob.
         let mut part = SceneCanvas::new(200.0, 120.0);
-        let plate = |dl: &mut DrawList| draw_faceplate_code(dl, 200.0, 120.0, "Navy");
+        let plate = |dl: &mut DrawList| draw_faceplate(dl, 200.0, 120.0, "Navy");
         part.frame_damaged(2.0, 3, plate, moving_parts(0.2, 0), None);
         let got = part.frame_damaged(2.0, 3, plate, moving_parts(0.8, 0), Some(&[LABEL_BOX])).pixels.to_vec();
         let mut full = SceneCanvas::new(200.0, 120.0);
@@ -452,7 +458,7 @@ mod tests {
     #[test]
     fn damage_falls_back_to_a_full_frame_when_the_cache_is_gone() {
         let mut canvas = SceneCanvas::new(200.0, 120.0);
-        let plate = |dl: &mut DrawList| draw_faceplate_code(dl, 200.0, 120.0, "Navy");
+        let plate = |dl: &mut DrawList| draw_faceplate(dl, 200.0, 120.0, "Navy");
         // Nothing painted yet: an empty damage list must not return a blank frame.
         let first = canvas.frame_damaged(2.0, 3, plate, moving_parts(0.5, 0), Some(&[])).pixels.to_vec();
         let mut full = SceneCanvas::new(200.0, 120.0);
@@ -468,12 +474,12 @@ mod tests {
         let mut canvas = SceneCanvas::new(60.0, 40.0);
         canvas.set_background(0x000000);
         let mut runs = 0;
-        let plate = |dl: &mut DrawList| draw_faceplate_code(dl, 60.0, 40.0, "Navy");
+        let plate = |dl: &mut DrawList| draw_faceplate(dl, 60.0, 40.0, "Navy");
         let small = canvas.frame_layered(1.0, 1, |dl| { runs += 1; plate(dl) }, |_| {}).pixels.to_vec();
         assert_eq!(small.len(), 60 * 40);
         canvas.resize(120.0, 80.0);
         assert_eq!(canvas.size(), (120.0, 80.0));
-        let plate_big = |dl: &mut DrawList| draw_faceplate_code(dl, 120.0, 80.0, "Navy");
+        let plate_big = |dl: &mut DrawList| draw_faceplate(dl, 120.0, 80.0, "Navy");
         let big = canvas.frame_layered(1.0, 1, |dl| { runs += 1; plate_big(dl) }, |_| {});
         assert_eq!((big.width, big.height), (120, 80));
         // The plate covers the larger surface: its far corner is painted, not background.

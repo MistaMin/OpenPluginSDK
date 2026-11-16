@@ -451,7 +451,6 @@ dependencies = [
  "goodlookindri-shell",
  "log",
  "openplugin-core",
- "raw-window-handle",
  "rustix",
  "x11rb",
 ]
@@ -490,7 +489,6 @@ dependencies = [
 name = "openplugin-targets"
 version = "1.0.0-beta"
 dependencies = [
- "log",
  "openplugin-core",
  "openplugin-dri",
  "openplugin-dsp",
@@ -534,12 +532,6 @@ checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
-
-[[package]]
-name = "raw-window-handle"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rustfft"

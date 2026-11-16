@@ -518,14 +518,17 @@ pub type Poll = Box<dyn FnMut(&mut dyn Editor)>;
 
 /// The items of the SDK's own parameter menu, in order: the item chosen is an
 /// index into this list.
+#[doc(hidden)]
 pub const PARAM_MENU_ITEMS: [&str; 4] = ["Reset to default", "Copy value", "Paste value", "Type value"];
 
 /// Stands in for the system menu (tests): returning true means the menu was
 /// handled (nothing is shown); false lets the real popup menu open.
+#[doc(hidden)]
 pub type MenuHook = Box<dyn FnMut(&ParamMenu) -> bool>;
 
 /// Stands in for the system file dialog (tests): `Some(answer)` resolves the
 /// request, `None` lets the real dialog open.
+#[doc(hidden)]
 pub type FileHook = Box<dyn FnMut(&FileDialog) -> Option<Option<Vec<PathBuf>>>>;
 
 struct State {
@@ -1903,12 +1906,14 @@ impl EditorView {
     }
 
     /// The open text field (an `EDIT` control), if any.
+    #[doc(hidden)]
     pub fn text_field(&self) -> Option<Hwnd> {
         self.st().text_field
     }
 
     /// The tooltip rectangles in window pixels (left, top, right, bottom) with
     /// the text the view answers for each, asked the way the tooltip control asks.
+    #[doc(hidden)]
     pub fn tooltip_rects(&self) -> Vec<([i32; 4], String)> {
         let keys = self.st().tip_key.clone();
         keys.iter().map(|(i, r)| ([r.left, r.top, r.right, r.bottom], unsafe { tooltip_text(self.state, *i) })).collect()
@@ -1918,6 +1923,7 @@ impl EditorView {
     /// text it gets for each when it asks the view (`TTM_GETTEXTW`, which sends
     /// the same `TTN_GETDISPINFOW` a showing tip sends). Empty before the view
     /// has a window or tooltips. For tests.
+    #[doc(hidden)]
     pub fn tooltip_control_texts(&self) -> Vec<String> {
         let st = self.st();
         if st.tip.is_null() {
@@ -1944,12 +1950,14 @@ impl EditorView {
 
     /// Answer file dialog requests with `hook` instead of showing the system
     /// dialog, for tests. See [`FileHook`].
+    #[doc(hidden)]
     pub fn set_file_dialog_hook(&self, hook: Option<FileHook>) {
         self.st().file_hook = hook;
     }
 
     /// Answer the SDK's parameter menu with `hook` instead of showing a popup
     /// menu, for tests. See [`MenuHook`].
+    #[doc(hidden)]
     pub fn set_menu_hook(&self, hook: Option<MenuHook>) {
         self.st().menu_hook = hook;
     }
@@ -1957,6 +1965,7 @@ impl EditorView {
     /// Choose item `index` of [`PARAM_MENU_ITEMS`] as if from the menu last
     /// shown, with `text` standing in for the clipboard (what paste reads;
     /// copy returns what it would put there). For tests.
+    #[doc(hidden)]
     pub fn choose_menu_item(&self, index: usize, text: Option<&str>) -> Option<String> {
         unsafe { run_menu_item(self.state, index, text) }
     }
@@ -2237,6 +2246,7 @@ pub fn run_window(title: &str, editor: Box<dyn Editor>, poll: Option<Poll>) -> i
 
 /// What a test of real windows needs: a parent window, a message pump that
 /// waits for a condition, and a picture of what a window drew.
+#[doc(hidden)]
 pub mod testing {
     use super::*;
 
@@ -2675,7 +2685,7 @@ mod tests {
             }
             fn param_changed(&mut self, _: usize, _: f32) {}
             fn render(&mut self, _: f32) -> openplugin_core::editor::Frame<'_> {
-                openplugin_core::editor::Frame { pixels: &[], width: 0, height: 0 }
+                openplugin_core::editor::Frame::new(&[], 0, 0)
             }
         }
         let mut view = EditorView::new(Box::new(Probe((200, 100))), None).unwrap();

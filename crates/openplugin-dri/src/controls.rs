@@ -1,6 +1,6 @@
-//! Hardware controls. Geometry is drawn by GoodLookin DRI. The names on [`crate::KnobStyle`]
-//! and [`crate::FaceplateStyle`] pick a GoodLookin style. Every other style is available
-//! through [`draw_knob_code`] and [`draw_faceplate_code`].
+//! Hardware controls. Geometry is drawn by GoodLookin DRI: [`draw_knob`] and
+//! [`draw_faceplate`] take the code of any GoodLookin style (the 47 knobs and 40 plates of
+//! `goodlookindri::design::KNOB_STYLES` and `FACEPLATES`).
 //!
 //! Knobs are drawn in [`DrawList::knob_tier`]: the lit tier of GoodLookin DRI 0.2 unless
 //! the editor chooses the classic or flat one. A faceplate records its colour as the floor
@@ -12,7 +12,7 @@ use goodlookindri::scene::{Point, Rect, Scene};
 use goodlookindri::{design, hardware, meters};
 
 use crate::canvas::DrawList;
-use crate::styles::{Color, FaceplateStyle, KnobStyle, MeterStyle};
+use crate::styles::{Color, MeterStyle};
 
 fn gl_color(color: Color) -> GlColor {
     GlColor::rgba(
@@ -27,31 +27,6 @@ fn commit(dl: &mut DrawList, scene: Scene) {
     dl.append(scene);
 }
 
-fn knob_code(style: KnobStyle) -> &'static str {
-    match style {
-        KnobStyle::Brit => "Brit",
-        KnobStyle::N => "N",
-        KnobStyle::A => "A",
-        KnobStyle::Bakelite => "Bk",
-        KnobStyle::Metal => "Mtl",
-        KnobStyle::Chrome => "Chr",
-        KnobStyle::Wood => "Wd",
-        KnobStyle::Neon => "Neo",
-        KnobStyle::Digital => "Seg",
-    }
-}
-
-fn plate_code(style: FaceplateStyle) -> &'static str {
-    match style {
-        FaceplateStyle::BrushedAluminum => "Silver",
-        FaceplateStyle::DarkAnodized => "Stealth",
-        FaceplateStyle::BritishConsole => "Navy",
-        FaceplateStyle::AmericanConsole => "Slate",
-        FaceplateStyle::Cyberpunk => "Cyber",
-        FaceplateStyle::WoodChassis => "Walnut",
-    }
-}
-
 /// Pointer angle for a rotary control, in radians from straight up: GoodLookin's sweep of
 /// ±0.8π, the one design files use. 0 is the start, 0.5 points up, 1 is the end.
 pub fn knob_angle(normalized: f32) -> f32 {
@@ -59,12 +34,9 @@ pub fn knob_angle(normalized: f32) -> f32 {
     (t * 1.6 - 0.8) * std::f32::consts::PI
 }
 
-pub fn draw_faceplate(dl: &mut DrawList, w: f32, h: f32, style: FaceplateStyle) {
-    draw_faceplate_code(dl, w, h, plate_code(style));
-}
-
-/// Draws one of the 40 GoodLookin faceplates by its code (`"Navy"`, `"Walnut"`, `"Cyber"`, ...).
-pub fn draw_faceplate_code(dl: &mut DrawList, w: f32, h: f32, code: &str) {
+/// Draws one of the 40 GoodLookin faceplates by its code (`"Navy"`, `"Walnut"`, `"Cyber"`,
+/// `"Silver"`, `"Stealth"`, `"Slate"`, ...). An unknown code draws nothing.
+pub fn draw_faceplate(dl: &mut DrawList, w: f32, h: f32, code: &str) {
     let Some(plate) = design::find_faceplate(code) else { return };
     // The lit knobs reflect the plate they sit on: its middle colour.
     let floor = GlColor(plate.bg_top).mix(GlColor(plate.bg_bottom), 0.5);
@@ -81,24 +53,11 @@ pub fn draw_faceplate_code(dl: &mut DrawList, w: f32, h: f32, code: &str) {
     commit(dl, scene);
 }
 
+/// Draws any GoodLookin knob by style code (`"Brit"`, `"N"`, `"A"`, `"Bk"`, `"Mtl"`, `"Chr"`,
+/// `"Wd"`, `"Neo"`, `"Seg"`, `"Chk"`, `"Rck"`, ...). A `lit_` or `flat_` prefix picks the tier
+/// for this knob.
 #[allow(clippy::too_many_arguments)] // public drawing API; grouping would break callers
 pub fn draw_knob(
-    dl: &mut DrawList,
-    cx: f32,
-    cy: f32,
-    radius: f32,
-    normalized: f32,
-    label: &str,
-    value_text: &str,
-    style: KnobStyle,
-    cap_color: Color,
-) {
-    draw_knob_code(dl, cx, cy, radius, normalized, label, value_text, knob_code(style), cap_color);
-}
-
-/// Draws any GoodLookin knob by style code (`"Brit"`, `"Chk"`, `"Rck"`, ...).
-#[allow(clippy::too_many_arguments)] // public drawing API; grouping would break callers
-pub fn draw_knob_code(
     dl: &mut DrawList,
     cx: f32,
     cy: f32,
@@ -205,7 +164,7 @@ pub fn draw_slider(dl: &mut DrawList, x: f32, y: f32, w: f32, normalized: f32, l
 
 pub fn draw_pan_knob(dl: &mut DrawList, cx: f32, cy: f32, radius: f32, pan: f32, label: &str) {
     let p = pan.clamp(-1.0, 1.0);
-    draw_knob_code(
+    draw_knob(
         dl,
         cx,
         cy,
@@ -249,10 +208,10 @@ mod tests {
     fn brit_knob_uses_goodlookin_geometry() {
         let _paint = crate::render::paint_lock();
         let mut dl = DrawList::new();
-        dl.knob_tier = KnobMode::Classic;
-        draw_knob(&mut dl, 80.0, 80.0, 32.0, 0.5, "GAIN", "0.0 dB", KnobStyle::Brit, Color::BRIT_RED);
-        assert!(dl.scene.cmds.len() > 20, "Brit drawer produced {} commands", dl.scene.cmds.len());
-        assert!(dl.commands.len() > 10);
+        dl.set_knob_tier(KnobMode::Classic);
+        draw_knob(&mut dl, 80.0, 80.0, 32.0, 0.5, "GAIN", "0.0 dB", "Brit", Color::RED);
+        assert!(dl.scene().cmds.len() > 20, "Brit drawer produced {} commands", dl.scene().cmds.len());
+        assert!(dl.commands().len() > 10);
     }
 
     #[test]
@@ -261,31 +220,31 @@ mod tests {
         assert_eq!(design::KNOB_STYLES.len(), 47);
         assert_eq!(design::FACEPLATES.len(), 40);
         let mut dl = DrawList::new();
-        draw_faceplate(&mut dl, 200.0, 80.0, FaceplateStyle::BritishConsole);
-        draw_knob_code(&mut dl, 40.0, 40.0, 16.0, 0.2, "Q", "1.2", "Chk", Color::WHITE);
-        assert!(!dl.scene.cmds.is_empty());
+        draw_faceplate(&mut dl, 200.0, 80.0, "Navy");
+        draw_knob(&mut dl, 40.0, 40.0, 16.0, 0.2, "Q", "1.2", "Chk", Color::WHITE);
+        assert!(!dl.scene().cmds.is_empty());
     }
 
     #[test]
     fn knobs_are_lit_by_default_and_the_old_tiers_remain() {
         let _paint = crate::render::paint_lock();
         use goodlookindri::scene::Cmd;
-        let images = |dl: &DrawList| dl.scene.cmds.iter().filter(|c| matches!(c, Cmd::Image { .. })).count();
+        let images = |dl: &DrawList| dl.scene().cmds.iter().filter(|c| matches!(c, Cmd::Image { .. })).count();
         let mut dl = DrawList::new();
-        draw_knob(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", KnobStyle::Metal, Color::WHITE);
+        draw_knob(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", "Mtl", Color::WHITE);
         assert_eq!(images(&dl), 1, "lit sprite");
-        assert!(dl.commands.len() > 5, "basic hosts get the classic drawing");
+        assert!(dl.commands().len() > 5, "basic hosts get the classic drawing");
         for tier in [KnobMode::Classic, KnobMode::Flat] {
             let mut dl = DrawList::new();
-            dl.knob_tier = tier;
-            draw_knob(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", KnobStyle::Metal, Color::WHITE);
+            dl.set_knob_tier(tier);
+            draw_knob(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", "Mtl", Color::WHITE);
             assert_eq!(images(&dl), 0, "{tier:?}");
-            assert!(!dl.scene.cmds.is_empty());
+            assert!(!dl.scene().cmds.is_empty());
         }
         // A prefix picks a tier for one knob.
         let mut dl = DrawList::new();
-        dl.knob_tier = KnobMode::Classic;
-        draw_knob_code(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", "lit_Chk", Color::WHITE);
+        dl.set_knob_tier(KnobMode::Classic);
+        draw_knob(&mut dl, 40.0, 40.0, 20.0, 0.3, "A", "1", "lit_Chk", Color::WHITE);
         assert_eq!(images(&dl), 1);
         assert!((knob_angle(0.5)).abs() < 1e-6);
         assert!((knob_angle(1.0) - 0.8 * std::f32::consts::PI).abs() < 1e-6);
@@ -298,6 +257,6 @@ mod tests {
         draw_fader(&mut dl, 50.0, 10.0, 140.0, 0.0, "MASTER");
         draw_slider(&mut dl, 100.0, 50.0, 120.0, 0.75, "DRIVE", "75%");
         draw_pan_knob(&mut dl, 250.0, 70.0, 24.0, -0.5, "PAN");
-        assert!(dl.commands.len() > 10);
+        assert!(dl.commands().len() > 10);
     }
 }

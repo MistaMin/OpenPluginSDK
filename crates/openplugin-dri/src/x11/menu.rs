@@ -11,11 +11,13 @@ use openplugin_core::editor::{ParamMenu, ParamMenuAction};
 use x11rb::protocol::xproto::{self, ConnectionExt as _, EventMask, GrabMode, GrabStatus};
 
 /// The items of the SDK's own parameter menu, in order.
+#[doc(hidden)]
 pub const PARAM_MENU_ITEMS: [&str; 4] = ["Reset to default", "Copy value", "Paste value", "Type value"];
 
 /// Answers a parameter menu request in place of the pop-up window, for
 /// tests: return true when the request was taken (no menu is shown; choose
 /// with [`EditorView::choose_menu_item`]).
+#[doc(hidden)]
 pub type MenuHook = Box<dyn FnMut(&ParamMenu) -> bool>;
 
 // The menu's measures, in points.
@@ -80,6 +82,7 @@ impl Menu {
 impl EditorView {
     /// Answer the SDK's parameter menu with `hook` instead of popping up the
     /// menu window, for tests. See [`MenuHook`].
+    #[doc(hidden)]
     pub fn set_menu_hook(&mut self, hook: Option<MenuHook>) {
         self.menu_hook = hook;
     }
@@ -88,11 +91,13 @@ impl EditorView {
     /// shown, with `text` standing in for the clipboard (what paste reads;
     /// copy returns what it would put there). For tests; the menu's own
     /// items do the same with the real clipboard.
+    #[doc(hidden)]
     pub fn choose_menu_item(&mut self, index: usize, text: Option<&str>) -> Option<String> {
         self.run_menu_item(index, text)
     }
 
     /// The open parameter menu's window (an override-redirect child of the root), if any.
+    #[doc(hidden)]
     pub fn menu_window(&self) -> Option<Window> {
         self.menu.as_ref().map(|m| m.window)
     }

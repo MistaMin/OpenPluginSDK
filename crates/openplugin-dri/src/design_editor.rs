@@ -65,7 +65,7 @@ use openplugin_core::editor::{DamageRect, DamageTracker, Key, Modifiers, TextEdi
 use openplugin_core::{Editor, EditorHost, Frame, PluginInfo, Unit};
 
 use crate::canvas::DrawList;
-use crate::controls::{draw_faceplate_code, draw_knob_code};
+use crate::controls::{draw_faceplate, draw_knob};
 use crate::hit::{Area, Control, ControlId, ControlKind, ControlSet};
 use crate::render::SceneCanvas;
 use crate::styles::Color;
@@ -79,6 +79,7 @@ const LINE: f32 = 1.2;
 
 /// Why a row has no control.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum IssueKind {
     /// The `parameter` column is empty.
     NoParameter,
@@ -109,6 +110,7 @@ impl fmt::Display for RowIssue {
 
 /// Why a design editor could not be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DesignEditorError {
     /// The CSV is malformed or has an invalid row (GoodLookin DRI's message).
     Design(String),
@@ -189,6 +191,7 @@ impl DesignOptions {
 
 /// What a bound row is, for tests and tooling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Look {
     Knob,
     FaderV,
@@ -481,7 +484,7 @@ impl Part {
         match self.look {
             Look::Knob => {
                 let m = self.body.center();
-                draw_knob_code(dl, m.x, m.y, self.body.w * 0.5, c.normalized(), "", "", &self.item.style, sdk_colour(self.colour));
+                draw_knob(dl, m.x, m.y, self.body.w * 0.5, c.normalized(), "", "", &self.item.style, sdk_colour(self.colour));
             }
             Look::FaderV | Look::FaderH => {
                 let panel = GlColor(dl.floor.unwrap_or(plate.bg_top));
@@ -550,7 +553,7 @@ impl Editor for DesignEditor {
         let ring = self.keys_active;
         // The plate and the printed labels never move: one layer, rasterised once per scale.
         let layer = |dl: &mut DrawList| {
-            draw_faceplate_code(dl, w, h, plate.code);
+            draw_faceplate(dl, w, h, plate.code);
             let mut legend = Scene::new();
             for p in parts {
                 p.paint_static(&mut legend, plate);
@@ -684,18 +687,15 @@ mod tests {
         ParamInfo::new("drive", "Drive", 0.0, 100.0, 0.0, Unit::Percent),
     ];
 
-    static INFO: PluginInfo = PluginInfo {
-        id: "test.design",
-        name: "Design Test",
-        vendor: "test",
-        url: "",
-        email: "",
-        version: "0",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: true,
-    };
+    static INFO: PluginInfo = PluginInfo::new(
+        "test.design",
+        "Design Test",
+        "test",
+        "0",
+        Category::Utility,
+        &PARAMS,
+    )
+    .with_editor(true);
 
     const HEADER: &str = "GoodLookinUI design version 1\nid,parameter,label,style,colour,x,y,width,height,font size\n";
 

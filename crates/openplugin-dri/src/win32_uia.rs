@@ -154,7 +154,7 @@ fn control_type(role: AccessRole) -> i32 {
     match role {
         AccessRole::Slider => TYPE_SLIDER,
         AccessRole::Switch => TYPE_CHECK_BOX,
-        AccessRole::Button => TYPE_BUTTON,
+        _ => TYPE_BUTTON,
     }
 }
 

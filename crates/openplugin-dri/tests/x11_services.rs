@@ -118,7 +118,7 @@ impl Editor for TestEditor {
         let (w, h) = ((size.0 as f32 * scale).round() as usize, (size.1 as f32 * scale).round() as usize);
         self.pixels.clear();
         self.pixels.resize(w * h, BACKGROUND);
-        Frame { pixels: &self.pixels, width: w, height: h }
+        Frame::new(&self.pixels, w, h)
     }
     fn key_down(&mut self, key: Key, _modifiers: Modifiers) -> bool {
         self.shared.borrow_mut().calls.push(Call::Key(key));

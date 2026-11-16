@@ -141,6 +141,7 @@ impl Area {
 
 /// What a control is and how it answers input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ControlKind {
     /// Rotary knob, driven by vertical drag.
     Knob,
@@ -163,6 +164,7 @@ pub enum ControlKind {
 /// means in most plugins, and the default value stays one gesture away
 /// (Option-double-click, or Delete or Backspace on the focused control).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DoubleClick {
     /// Open a text field over the control. Option held: reset to the default.
     #[default]
@@ -479,6 +481,7 @@ impl ControlSet {
                 self.begin_text_edit(id);
                 None
             }
+            _ => None,
         }
     }
 
@@ -922,7 +925,7 @@ impl ControlSet {
             Key::Return if plain && self.focus.is_some_and(|id| self.begin_text_edit(id)) => true,
             Key::Return | Key::Space => plain && self.focus.is_some_and(|id| self.press_key(id, key)),
             Key::Delete | Key::Backspace => plain && self.focus.is_some_and(|id| self.reset_key(id)),
-            Key::Char(_) => false,
+            _ => false,
         };
         if handled && !self.handled_down.contains(&key) {
             self.handled_down.push(key);
@@ -1072,7 +1075,7 @@ mod tests {
         ParamInfo::new("mode", "Mode", 0.0, 3.0, 1.0, Unit::Choice).with_choices(&["A", "B", "C", "D"]);
     static STEPS: ParamInfo = ParamInfo::new("steps", "Steps", 0.0, 10.0, 0.0, Unit::None).with_steps(6);
     static LOCKED: ParamInfo =
-        ParamInfo::new("lock", "Lock", 0.0, 1.0, 0.0, Unit::None).flag(ParamFlags::READ_ONLY);
+        ParamInfo::new("lock", "Lock", 0.0, 1.0, 0.0, Unit::None).with_flag(ParamFlags::READ_ONLY);
 
     type Log = Rc<RefCell<Vec<Gesture>>>;
 

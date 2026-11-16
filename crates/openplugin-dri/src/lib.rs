@@ -6,7 +6,7 @@
 //! that only replay simple shapes.
 //!
 //! GoodLookin DRI 0.2 adds a lit tier: knobs shaded per pixel and blitted as images, plus
-//! gradient, shadow and image commands. [`DrawList::knob_tier`] picks the tier (lit by
+//! gradient, shadow and image commands. [`DrawList::set_knob_tier`] picks the tier (lit by
 //! default; classic and flat remain), and [`SceneCanvas`] rasterises a whole scene into the
 //! pixels an [`openplugin_core::Editor`] returns, at the display's backing scale.
 //!
@@ -23,21 +23,22 @@ pub mod render;
 pub mod styles;
 #[cfg(windows)]
 pub mod win32;
-pub mod window;
 #[cfg(target_os = "linux")]
 pub mod x11;
 
 pub use canvas::{DrawCmd, DrawList};
+/// GoodLookin DRI's `goodlookindri::draw::KnobMode` under the SDK's name: `Lit`, `Classic`
+/// or `Flat`. A tier GoodLookin adds shows up here.
 pub use goodlookindri::draw::KnobMode as KnobTier;
-pub use goodlookindri_shell;
 pub use render::SceneCanvas;
 pub use controls::{
-    draw_faceplate, draw_faceplate_code, draw_fader, draw_knob, draw_knob_code, draw_pan_knob, draw_slider,
-    draw_vu_meter, fader_db_to_pos, fader_pos_to_db, knob_angle,
+    draw_faceplate, draw_fader, draw_knob, draw_pan_knob, draw_slider, draw_vu_meter, fader_db_to_pos,
+    fader_pos_to_db, knob_angle,
 };
+/// The drawing library, for building scenes of your own. Its version is part of the
+/// SDK's API: a breaking GoodLookin DRI release is a breaking SDK release.
 pub use goodlookindri;
 pub use design_editor::{DesignEditor, DesignEditorError, DesignOptions};
 pub use hit::{Area, Control, ControlId, ControlKind, ControlSet, DoubleClick, Key, Modifiers};
 pub use openplugin_core::editor::{DamageRect, DamageTracker};
-pub use styles::{Color, FaceplateStyle, KnobStyle, MeterStyle};
-pub use window::{DriHostWindow, DriView};
+pub use styles::{Color, MeterStyle};

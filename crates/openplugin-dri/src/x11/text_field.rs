@@ -175,11 +175,13 @@ fn field_rect(rect: &DamageRect, editor: (u32, u32), win: (u32, u32), scale: f32
 
 impl EditorView {
     /// The open type-in field's window (a child of [`EditorView::raw`]), if any.
+    #[doc(hidden)]
     pub fn text_field(&self) -> Option<Window> {
         self.field.as_ref().map(|f| f.window)
     }
 
     /// The text in the open type-in field, if any.
+    #[doc(hidden)]
     pub fn text_field_text(&self) -> Option<String> {
         self.field.as_ref().map(Field::text)
     }
