@@ -20,7 +20,7 @@ goodlookindri-shell = { workspace = true }
 raw-window-handle = { workspace = true }
 log = { workspace = true }
 
-# The X11 editor view (x11.rs): the protocol in pure Rust, no libxcb or libX11.
+# The X11 editor view (x11/): the protocol in pure Rust, no libxcb or libX11.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", default-features = false }
 rustix = { version = "1", default-features = false, features = ["event", "std"] }

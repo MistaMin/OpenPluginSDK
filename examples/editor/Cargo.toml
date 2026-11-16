@@ -31,3 +31,12 @@ harness = false
 [[test]]
 name = "menu"
 harness = false
+
+# The editor through CLAP and LV2 on a real X display (Linux); one thread, as the view needs.
+[[test]]
+name = "x11"
+harness = false
+
+# The test's own X connection: it plays the host.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+x11rb = { version = "0.13", default-features = false }

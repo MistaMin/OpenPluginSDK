@@ -17,14 +17,14 @@ crates/openplugin-port/src/sys/
 - `mod.rs` holds no platform code: only `#[cfg]` lines that pick a file, and the documented list of items each file provides.
 - Every platform file provides the same items under the same names, so the code that calls them has no `#[cfg]` of its own.
 - A feature that exists on one platform only gets a stand-in on the others that compiles and returns a clear error (`openplugin-port/src/au_unsupported.rs` for Audio Units).
-- A new platform view or shell is a new file (`openplugin-dri/src/x11.rs`, `openplugin-dri/src/win32.rs`) next to the existing one (`cocoa.rs`), chosen by one `#[cfg]` line in its crate's `lib.rs`.
+- A new platform view or shell is a new file (`openplugin-dri/src/x11/`, `openplugin-dri/src/win32.rs`) next to the existing one (`cocoa.rs`), chosen by one `#[cfg]` line in its crate's `lib.rs`.
 
 ## Who edits what
 
 | Files | Edited by |
 |---|---|
 | `*/sys/macos.rs`, `openplugin-port/src/au.rs` and `au/`, `openplugin-dri/src/cocoa.rs`, everything in `native/` today, the editor tests `examples/*/tests/{cocoa,a11y,menu,typing}.rs` | macOS work only |
-| `*/sys/linux.rs`, `openplugin-dri/src/x11.rs`, Linux-only tests | Linux work only |
+| `*/sys/linux.rs`, `openplugin-dri/src/x11/` (the X11 view and its services), Linux-only tests such as `examples/editor/tests/x11.rs` | Linux work only |
 | `*/sys/windows.rs`, `openplugin-dri/src/win32.rs`, Windows-only tests | Windows work only |
 | `au_unsupported.rs` | Linux or Windows work; it must stay a stand-in |
 | Everything else | Shared: see below |
