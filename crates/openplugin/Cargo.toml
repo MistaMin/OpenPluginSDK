@@ -1,6 +1,6 @@
 [package]
 name = "openplugin"
-description = "Universal, zero-allocation audio plugin development framework with GoodLookin DRI (CLAP, VST3, AU, AAX, Standalone)"
+description = "Universal, zero-allocation audio plugin development framework with GoodLookin DRI (CLAP, LV2, VST3, AU, AAX)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
