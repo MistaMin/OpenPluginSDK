@@ -24,7 +24,7 @@ crates/openplugin-port/src/sys/
 | Files | Edited by |
 |---|---|
 | `*/sys/macos.rs`, `openplugin-port/src/au.rs` and `au/`, `openplugin-dri/src/cocoa.rs`, everything in `native/` today, the editor tests `examples/*/tests/{cocoa,a11y,menu,typing}.rs` | macOS work only |
-| `*/sys/linux.rs`, `openplugin-dri/src/x11/` (the X11 view and its services), Linux-only tests such as `examples/editor/tests/x11.rs` | Linux work only |
+| `*/sys/linux.rs`, `openplugin-dri/src/x11/` (the X11 view and its services), `openplugin-targets/src/shell_x11.rs`, `native/cmake/linux.cmake`, `native/linux/`, `native/vst3/linux/`, `native/include/op_editor_linux.h`, Linux-only tests such as `examples/editor/tests/x11.rs` | Linux work only |
 | `*/sys/windows.rs`, `openplugin-dri/src/win32.rs`, Windows-only tests | Windows work only |
 | `au_unsupported.rs` | Linux or Windows work; it must stay a stand-in |
 | Everything else | Shared: see below |
@@ -36,7 +36,7 @@ A shared file is anything not listed above: the formats in `openplugin-targets`,
 - Add; don't rewrite. A platform change to a shared file adds a `#[cfg]`-gated `mod` line, a call into the platform file, or a new branch in a `match` on the platform. The platform's code itself goes in its own file.
 - Never change what a shared file does on another platform. A Linux change that alters the macOS build of a shared file is a macOS change and needs the macOS checks below.
 - Name every shared file you changed in the commit message or the report, with one line on why.
-- `native/` is macOS-only today. When the VST3 or AAX shell is brought to Windows, the Windows parts go in their own files or folders (`native/vst3/win/`, `native/aax/win/`) with their own CMake branch, not `#ifdef`s inside the macOS sources.
+- `native/` is macOS-only today. When the VST3 or AAX shell is brought to Windows, the Windows parts go in their own files or folders (`native/vst3/win/`, `native/aax/win/`) with their own CMake branch, not `#ifdef`s inside the macOS sources. The Linux VST3 shell follows the same rule (`native/vst3/linux/`, `native/linux/`, `native/cmake/linux.cmake`): `native/CMakeLists.txt` hands a Linux build machine to that branch before anything of the macOS configuration runs.
 
 ## Checks before a platform change is merged
 

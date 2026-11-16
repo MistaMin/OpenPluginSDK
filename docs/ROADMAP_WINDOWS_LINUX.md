@@ -24,7 +24,7 @@ Status: done on both systems. The workspace builds and every test that needs no 
 - **Formats:** CLAP and LV2 tested in a Linux host; the VST3 shell on Linux.
 - **Proofs:** the main-thread editor test on the Linux display; clap-validator, pluginval and `lv2_validate` on Linux.
 
-Status: done except what needs the owner. The X11 editor view (pure Rust, `x11rb`), CLAP `gui` on X11, LV2 `ui:X11UI`, Linux packaging and the standalone, proven on a real display and in CI under Xvfb, with `lv2_validate`, clap-validator and lilv. Open, for the owner: the VST3 shell on Linux (needs cmake, clang and a VST3 SDK checkout on the Linux machine), pluginval, a Linux DAW, a native Wayland standalone window (X11 under XWayland works today), and whether the CLAP view should stay unmapped until `show`.
+Status: done except what needs the owner. The X11 editor view (pure Rust, `x11rb`), CLAP `gui` on X11, LV2 `ui:X11UI`, Linux packaging and the standalone, proven on a real display and in CI under Xvfb, with `lv2_validate`, clap-validator and lilv. The VST3 shell on Linux (`native/vst3/linux/`, `native/cmake/linux.cmake`): the module, its editor as an X11 view driven from the host's `IRunLoop`, packaging, the twelve shell proofs, the editor proof on a real display, and the VST3 SDK's validator (see `docs/BUILD.md`, Linux: VST3 shell). Open, for the owner: pluginval, a Linux DAW (nothing has been loaded in one yet, in any format), a native Wayland standalone window (X11 under XWayland works today), and whether the CLAP view should stay unmapped until `show`.
 
 ## W3: Windows
 
@@ -38,4 +38,4 @@ Status: done except what needs the owner. The HWND view with the system menu, di
 
 - Every proof that can run headless on every system, and a documented local run for the rest.
 
-Status: the headless proofs run on all three systems in CI and are required checks on `main` (19 jobs): the Linux X11 editor tests under Xvfb, Linux LV2 in lilv, the Windows VST3 shell proofs and clap-validator on Windows. The AAX Validator and pluginval on Windows, and Pro Tools, stay local runs (documented in `docs/BUILD.md` and `docs/AAX_VALIDATOR.md`).
+Status: the headless proofs run on all three systems in CI and are required checks on `main` (19 jobs): the Linux X11 editor tests under Xvfb, Linux LV2 in lilv, the Windows VST3 shell proofs and clap-validator on Windows. The Linux VST3 shell has a job of its own (`vst3-shell-linux`: the proofs, the editor proof under Xvfb and the VST3 SDK's validator), which is not a required check yet. The AAX Validator and pluginval on Windows, and Pro Tools, stay local runs (documented in `docs/BUILD.md` and `docs/AAX_VALIDATOR.md`).

@@ -151,7 +151,7 @@ Not covered: installing the package, a signed or notarised package (shown with `
 
 ## Linux
 
-`scripts/build_plugin_linux.sh` builds a plugin crate into the formats that work on Linux today: CLAP, LV2 and a standalone executable. It is plain bash over `cargo` and binutils, takes the same option names and environment variables as `build_plugin.sh` where they mean the same thing (`--manifest-path`, `--package`, `--lib-name`, `--name`, `--version`, `--ttl-bin`, `--standalone-bin`, `--features`, `--formats`, `--out`, `--work-dir`, `--jobs`, `--dry-run`, `--no-verify`), and refuses `vst3`, `au` and `aax`, which are not built on Linux yet. `--formats all` is `clap,lv2,standalone`, as on macOS, and so needs `--standalone-bin`. The macOS-only options (`--bundle-id`, `--editor`, `--archs` and so on) are refused by name. It runs only on Linux and never installs anything.
+`scripts/build_plugin_linux.sh` builds a plugin crate into the formats that work on Linux: CLAP, LV2, VST3 and a standalone executable. It is plain bash over `cargo` and binutils (and `cmake` with a C++ compiler for VST3), takes the same option names and environment variables as `build_plugin.sh` where they mean the same thing (`--manifest-path`, `--package`, `--lib-name`, `--name`, `--version`, `--ttl-bin`, `--standalone-bin`, `--features`, `--formats`, `--manufacturer`, `--editor`, `--tail`, `--vst3-sdk`, `--out`, `--work-dir`, `--jobs`, `--dry-run`, `--no-verify`), and refuses `au` and `aax`, which do not exist on Linux. The default is `clap,lv2`. `--formats all` is `clap,lv2,standalone`, as on macOS, and so needs `--standalone-bin`; it has `vst3` in it too when a VST3 SDK is given (`--vst3-sdk` or `VST3_SDK`). The macOS-only options (`--bundle-id`, `--archs` and so on) are refused by name. It runs only on Linux and never installs anything.
 
 ```bash
 scripts/build_plugin_linux.sh \
@@ -164,6 +164,7 @@ scripts/build_plugin_linux.sh \
 |---|---|
 | CLAP | `<out>/<Name>.clap`: the shared library itself, one ELF file, not a folder |
 | LV2 | `<out>/<Stem>.lv2/` with `<Stem>.so`, and `manifest.ttl` and `<Stem>.ttl` written by `<ttl-bin> <folder> <Stem>`. `<Stem>` is reduced as on macOS |
+| VST3 | `<out>/<Name>.vst3/Contents/<machine>-linux/<Name>.so` and the VST3 SDK licence in `Contents/Resources`. `<machine>` is what `uname -m` prints (`x86_64`, `aarch64`). Built by `native/` over the crate's `staticlib` (see Linux: VST3 shell below); needs `--vst3-sdk`, and `--editor` for the plugin's editor |
 | Standalone | `<out>/<Name>`: the plugin's `--standalone-bin`, one ELF executable; and `<out>/<id>.desktop`, a freedesktop Desktop Entry (`Type=Application`, `Exec="<Name>"`, `StartupWMClass=OpenPlugin`, the X11 view's class). `<id>` is `<Name>` in lower case with every character but letters, digits, `_`, `.` and `-` as `-`. `Exec` names the executable on `PATH`: the script installs nothing, so the folder is the installer's choice |
 
 The library is a release build of the host architecture, with the same `--remap-path-prefix` list as on macOS. `--strip` runs `strip --strip-all` on each copy; the dynamic symbols stay. Unless `--no-verify` is given, the script then checks each library and fails the run on any of these:
@@ -171,7 +172,7 @@ The library is a release build of the host architecture, with the same `--remap-
 - `strings -a` finds the build, workspace, its parent, plugin crate, SDK or home path.
 - `readelf -d` lists a `NEEDED` library other than glibc's (`libc`, `libm`, and `libdl`, `libpthread`, `librt` for older toolchains), `libgcc_s` and the loader. `--allow-lib SONAME` (or `OP_ALLOW_LIBS`) accepts another. `ldd` reports a library as not found.
 - An `RPATH` or `RUNPATH` points into the build tree, the workspace or the home folder.
-- `nm -D --defined-only` does not show `clap_entry` (CLAP) or `lv2_descriptor` (LV2).
+- `nm -D --defined-only` does not show `clap_entry` (CLAP) or `lv2_descriptor` (LV2), or, for VST3, does not show `GetPluginFactory`, `ModuleEntry` and `ModuleExit`, or shows any other symbol. For VST3 the VST3 SDK's folder counts as a build path too, and the bundle must hold the SDK's licence.
 - The LV2 bundle lacks `manifest.ttl` or `<Stem>.ttl`, or `manifest.ttl` does not name `<Stem>.so` as `lv2:binary`.
 - The standalone file is not an ELF executable (it gets the same path, library and run path checks, and no export check), its desktop entry is missing, or `desktop-file-validate` (when installed) rejects the entry.
 
@@ -186,6 +187,47 @@ On 15 November 2026, on Arch Linux (x86_64, Intel Core i7-2630QM, Rust 1.100), `
 - `clap-validator` 0.4.1, built with `cargo install` from commit `152b982` (the one the `universal` job builds), on `Example Gain.clap`: 44 tests run, 0 failed, 10 skipped, and 34 passed or 33 passed with 1 warning depending on timing (seven full runs: 34 passed in four, 33 passed and 1 warning in three). The skips are the ones seen on macOS: no preset discovery factory (3), no 64-bit audio (2), no note input port (3), no `audio-ports-activation` (1), no `configurable-audio-ports` (1). The warning is `process-audio-denormals`, which compares the time to process denormal input with normal input: 1.28 to 2.45 times longer in the full runs, and 4.6 to 5.6 times longer in 15 runs of that test alone (`--include process-audio-denormals`), each of which warned. No format entry sets flush-to-zero around `process` (`openplugin_dsp::utility::DenormalGuard` exists but is not used there). The machine was shared with other builds during these runs. On macOS (arm64, and x86_64 under Rosetta) the test passes.
 
 CI runs the same commands in the `linux-package` job on `ubuntu-latest`. Its `apt-get install lv2-dev sordi` step has not run on GitHub yet; everything after it was run on the Arch machine.
+
+## Linux: VST3 shell
+
+VST3 is the one format on Linux that needs the native shell: CLAP and LV2 are Rust alone, and there is no Audio Unit or AAX. `native/CMakeLists.txt` hands a Linux build machine to `native/cmake/linux.cmake`, which holds the options, the Rust library and its system libraries, and includes `native/vst3/linux/vst3.cmake`. The compiler is GCC or Clang. `scripts/build_plugin_linux.sh --formats vst3` drives this build for a plugin crate; what follows is the build underneath it, which is also how the SDK's own proofs are built. From the repository root, with the VST3 SDK outside the tree:
+
+```bash
+cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+cmake -S native -B build-shell -DCMAKE_BUILD_TYPE=Release \
+  -DOP_RUST_LIB="$PWD/target/release/libexample_editor.a" \
+  -DOP_VST3_SDK=/path/to/vst3sdk \
+  -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
+  -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid \
+  -DOP_TAIL=ON -DOP_EDITOR=OFF
+cmake --build build-shell -j 4
+ctest --test-dir build-shell --output-on-failure
+```
+
+- **The module** is `<Name>.vst3/Contents/<machine>-linux/<Name>.so` in the build folder, with the VST3 SDK licence in `Contents/Resources`. Its entry points are `ModuleEntry` and `ModuleExit` (the SDK's `linuxmain.cpp`). There is no `Info.plist`, `PkgInfo`, `moduleinfo.json` or signature. Install by copying the outer folder to `~/.vst3` or `/usr/lib/vst3`; nothing here does that.
+- **Exports.** A module exports `GetPluginFactory`, `ModuleEntry` and `ModuleExit` and nothing else (`native/vst3/linux/exports.map`): the plugin's `op_shell_*`, the VST3 SDK and the C++ runtime stay inside it, so two plug-ins in one host share no symbol.
+- **The C++ runtime** is linked into the module (`-static-libstdc++`), so it loads in a host whose `libstdc++` is older than the build machine's. That needs the static library on the build machine (part of GCC on Arch, Debian and Ubuntu; the `libstdc++-static` package on Fedora). `-DOP_STATIC_CXX=OFF` links the shared one. Either way the module needs `libc`, `libm` and `libgcc_s`; the glibc of the build machine is the oldest it runs on.
+- **Class ids** are the 16 bytes of the plugin's FUID strings, as on macOS, so a project saved on one system finds the plug-in on the other (Windows reorders them to the same strings).
+- **Timers.** Linux has no run loop of its own for a plug-in; the host lends one (`Linux::IRunLoop`). The shell's main-thread timer (the poll that announces a new latency or new parameter info) runs on the loop the host gives through `IPluginFactory3::setHostContext`. A host that gives none there gets no announcements; the plug-in works otherwise.
+- **System libraries.** `OP_RUST_NATIVE_LIBS` lists what the Rust library links (`gcc_s;util;rt;pthread;m;dl;c`). When a plugin needs more, take the list from `cargo rustc --release --lib -p <crate> --crate-type staticlib -- --print native-static-libs`.
+- **`-DOP_EDITOR=ON`** makes the shell host the plugin's editor (`native/include/op_editor_linux.h`): the X11 view, embedded with `kPlatformTypeX11EmbedWindowID`, which is how Linux hosts embed editors in a Wayland session too (through Xwayland). The view is driven from the run loop of the host's `IPlugFrame`: one timer of 33 ms and the X connection's descriptor. A frame that lends no run loop cannot show the editor, and `attached` fails there. The editor works in points and the host in pixels; the view converts at its own scale, which it reads from the display (`Xft.dpi` over 96). It does not offer `IPlugViewContentScaleSupport`: a host cannot set the scale, as with the CLAP view. The stand-in plugins have no editor, so, as on macOS, that build has fewer proofs and adds `vst3_editor_proof`, which opens windows and needs an X display (`DISPLAY`; a desktop session, Xwayland or Xvfb) and libxcb's headers (`libxcb1-dev`; `libxcb` on Arch) for the proof's own X client.
+
+The proofs are the macOS proof sources unchanged. `native/vst3/linux/compat` stands in for the CoreFoundation calls they make (a bundle loaded with `dlopen`, and the main run loop, which is also the `IRunLoop` each module is lent), `native/linux/compat/main_thread.h` for `pthread_main_np`, and `native/linux/alloc_hook.cpp` for libmalloc's `malloc_logger`: the proof executable replaces `malloc` and its relatives for the whole process (glibc allows that), so the count covers the module, its C++ runtime and the Rust library. glibc only.
+
+### Checks run on the example
+
+On 16 November 2026, on Arch Linux (x86_64, GCC 16.2.1, Clang 23.1.3, CMake 4.4.4, Rust 1.100), with `examples/editor` as "Example Gain", against VST3 SDK 3.8.1_build_84 (Arch's `vst3sdk` package) and v3.8.0_build_66 (the one CI pins):
+
+- `ctest`, editor off: 12 of 12 with GCC against both SDK versions, and 12 of 12 with Clang. They are the 12 `vst3_*` proofs of the macOS build. `vst3_noalloc_events_proof` takes about 40 seconds, as on the other systems: it prepares a point per sample for 2081 parameters before it measures.
+- `ctest`, editor on, on the desktop's X display (Xwayland under Hyprland, scale 1): 3 of 3. `vst3_editor_proof`: no attach without a run loop; the view opens at 240 x 160 pixels with one timer and one descriptor registered, and the window shows the editor's picture; right click, click, the resize range (180 x 120 to 480 x 320), an editor-initiated size (360 x 240) through `resizeView`, a refusing frame, two views on one controller, and teardown with the processor first.
+- The VST3 SDK's own `validator` (built from the same checkout, `cmake --build build-shell --target validator`): 47 tests passed, 0 failed on each of `Example Gain.vst3`, `Expression Synth.vst3` and `Role Tags.vst3`; with `-e` (extensive) on the packaged bundle, 537 passed, 0 failed.
+- `scripts/build_plugin_linux.sh --formats vst3 --editor --tail --strip`: the script's checks passed. The module needs only `libgcc_s.so.1`, `libm.so.6`, `libc.so.6` and the loader, exports the three entry points, and contains no build, SDK or home path.
+- `openplugin-port scan` on the packaged bundle reads the plug-in: name, vendor and its three parameters, no warnings.
+- `cargo test -p example-editor --test x11_shell` on the same display: the `op_editor_*` calls of `op_editor_linux.h` as a shell makes them, without CMake or the VST3 SDK (attach, the scale, the descriptor and the pump, a click, resize in points, destroy).
+
+CI runs all of this in the `vst3-shell-linux` job on `ubuntu-latest`: the build, the twelve proofs, the validator on the three modules, the editor build with `vst3_editor_proof` under Xvfb, and the packaged bundle through the validator's extensive tests. That job has not run on GitHub yet; its steps were run on the Arch machine, with the desktop's display in place of Xvfb.
+
+Not covered: pluginval and a Linux DAW (neither is on the machine), a display with a scale other than 1 for the VST3 view, aarch64, and a C library other than glibc.
 
 ## Windows: CLAP
 
