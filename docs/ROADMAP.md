@@ -153,7 +153,7 @@ Remaining 1.0 work, open:
 - **CLAP `voice-info` and `NOTE_END`**, so a CLAP host knows the voice count and when a note ends.
 - **The Audio Unit's `SupportsMPE`**, so an AU host knows the plugin takes MPE.
 - **The shell follow-ups**: the shells read a renamed parameter table, and the Audio Unit and AAX bypass delay follows a run-time latency change.
-- **Porting scaffolding and guides** (porting toolkit tasks 5 and 8).
+- **Porting scaffolding** (porting toolkit task 8). The guides (task 5) are done.
 - **No C++ runtime dependency on Windows**: the shells link the C and C++ runtime statically, so no VC++ redistributable is needed.
 
 The freeze itself and the crates.io publish are the owner's decisions.
@@ -209,7 +209,7 @@ A team moving a shipped plugin needs three things: the new build must load the o
 7. **C++ DSP bridge.** For teams that ship before rewriting, a documented pattern for calling existing C++ DSP from a Rust plugin through `cxx`, allocation rules included. This one is C++ by nature: its job is to reuse code a team already has, until it is rewritten in Rust.
 8. **Scaffolding.** `openplugin-port new --from manifest.toml` writes a plugin crate with the pinned identity, the parameter table, the state importer stub and the null test ready to run.
 
-Status: tasks 1 (`openplugin-port scan`), 3 (`openplugin-port capture` and `openplugin_core::foreign_state`: XML, plist, key-value and chunk readers with a documented import pattern), 4 (`openplugin-port null`) and 7 (`examples/cpp_bridge`, `docs/CPP_BRIDGE.md`) are done. Task 6 needs the Faust compiler installed.
+Status: tasks 1 (`openplugin-port scan`), 3 (`openplugin-port capture` and `openplugin_core::foreign_state`: XML, plist, key-value and chunk readers with a documented import pattern), 4 (`openplugin-port null`), 5 (seven guides in `docs/porting/`, linked from `docs/PORTING.md`: iPlug2, DPF, nih-plug, JUCE and the raw VST3, CLAP and Audio Unit SDKs, each with concept tables and a worked port; every code block is a doc test of `examples/porting_guides` and each port runs the conformance kit) and 7 (`examples/cpp_bridge`, `docs/CPP_BRIDGE.md`) are done. The guides list what a port cannot carry over yet; the common items are in `docs/PORTING.md` and most wait on task 2. Task 6 needs the Faust compiler installed.
 
 ## After 1.0
 

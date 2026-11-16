@@ -227,6 +227,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-porting-guides"
+version = "1.0.0-beta"
+dependencies = [
+ "openplugin",
+ "openplugin-testing",
+]
+
+[[package]]
 name = "example-role-tags"
 version = "1.0.0-beta"
 dependencies = [
