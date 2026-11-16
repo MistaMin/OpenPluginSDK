@@ -97,6 +97,7 @@ function(op_vst3_module target_name product_name)
   if(ARGN)
     target_link_libraries(${target_name} PRIVATE OpenPluginWinCompat)
   endif()
+  op_version_resource(${target_name} "${product_name}" "${product_name} (VST3)" "${product_name}.vst3")
   add_custom_command(TARGET ${target_name} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${bundle_dir}/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_VST3_SDK}/LICENSE.txt" "${bundle_dir}/Contents/Resources/VST3-SDK-LICENSE.txt")

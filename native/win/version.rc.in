@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: MIT
+// The version resource of a Windows plug-in binary: what Explorer shows under
+// Properties > Details, and what an installer or a host reads to tell one build from
+// another. native/cmake/windows.cmake (op_version_resource) fills it for the VST3 and
+// AAX modules; scripts/windows/build_plugin.ps1 fills it for the CLAP. The text is
+// UTF-8.
+#pragma code_page(65001)
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION @OP_RC_VERSION_COMMAS@
+PRODUCTVERSION @OP_RC_VERSION_COMMAS@
+FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+FILEFLAGS 0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_DLL
+FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "@OP_RC_COMPANY@"
+      VALUE "FileDescription", "@OP_RC_DESCRIPTION@"
+      VALUE "FileVersion", "@OP_RC_VERSION@"
+      VALUE "InternalName", "@OP_RC_PRODUCT@"
+      VALUE "OriginalFilename", "@OP_RC_FILE@"
+      VALUE "ProductName", "@OP_RC_PRODUCT@"
+      VALUE "ProductVersion", "@OP_RC_VERSION@"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

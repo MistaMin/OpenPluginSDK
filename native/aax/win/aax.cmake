@@ -84,6 +84,7 @@ add_library(OpenPluginAAX MODULE
   "${OP_AAX_DIR}/OpenPluginAAXProcess.cpp"
   "${OP_AAX_GUI_SOURCE}"
   "${OP_AAX_SDK}/Interfaces/AAX_Exports.cpp")
+op_version_resource(OpenPluginAAX "${OP_PRODUCT}" "${OP_PRODUCT} (AAX)" "${OP_PRODUCT}.aaxplugin")
 op_aax_settings(OpenPluginAAX)
 # $<1:...> keeps a Visual Studio build from adding a folder per configuration.
 set_target_properties(OpenPluginAAX PROPERTIES
