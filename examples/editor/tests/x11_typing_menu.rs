@@ -229,6 +229,7 @@ mod linux {
             Gesture::Begin(i) => format!("begin {i}"),
             Gesture::Perform(i, v) => format!("perform {i} {v:.3}"),
             Gesture::End(i) => format!("end {i}"),
+            other => format!("{other:?}"),
         }
     }
 

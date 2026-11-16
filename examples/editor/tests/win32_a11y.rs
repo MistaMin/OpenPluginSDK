@@ -430,6 +430,7 @@ mod win {
                 Gesture::Begin(i) => format!("begin {i}"),
                 Gesture::Perform(i, v) => format!("perform {i} {v:.3}"),
                 Gesture::End(i) => format!("end {i}"),
+                other => format!("{other:?}"),
             })
         });
         let view = EditorView::new(Box::new(GainEditor::new(host)), None).expect("a view");

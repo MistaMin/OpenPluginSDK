@@ -16,7 +16,7 @@ The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin
 | Editor | One Rust `Editor` in every format, resizable, with hit-testing, keyboard focus, damage-only repaint, design-file editors, the host parameter menu, typing a value, tooltips, file drops and accessibility (0.5, 0.7). Views: `NSView` on macOS, HWND with UI Automation on Windows, X11 on Linux (X11 under XWayland on Wayland). |
 | Drawing | GoodLookin DRI 0.2: lit knobs by default, `SceneCanvas` with a cached plate layer and damaged-rectangle repaint. |
 | Proofs | Unit, hostile-input and no-allocation suites in every format; the native VST3, AU and AAX shell proofs; format parity sample for sample across all five formats; `clap-validator`, `lv2_validate`, lilv, `auval -strict`, pluginval at strictness 10 and Avid's AAX Validator (locally). CI runs the workspace and the headless proofs on macOS, Linux and Windows. Host runs: REAPER and OpenGrid9 on macOS, Pro Tools with AAX on macOS, REAPER on Windows ([HOST_TESTS.md](HOST_TESTS.md)). |
-| Not claimed | The API is not frozen yet. The VST3 shell on Linux; a Linux DAW; PACE signing and Pro Tools on Windows; Logic, Cubase and Bitwig sessions. A track's colour and kind in the Audio Unit and AAX, and any track info in LV2: those formats have no call for it. |
+| Not claimed | The API review is applied, but the surface is frozen only when 1.0 is tagged, which is the owner's decision. The VST3 shell on Linux; a Linux DAW; PACE signing and Pro Tools on Windows; Logic, Cubase and Bitwig sessions. A track's colour and kind in the Audio Unit and AAX, and any track info in LV2: those formats have no call for it. |
 
 ## Minimum Rust version
 
@@ -144,16 +144,17 @@ Then **0.7.0**.
 
 Status: tasks 1, 2, 4, 5, 6, 7 and 8 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls; 8: every format builds universal and every proof passes on both slices, x86_64 under Rosetta) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
 
+Done since: **the API freeze** is applied from the decisions in [API_REVIEW.md](API_REVIEW.md) (renames, hidden items, removals, `#[non_exhaustive]`), with the frozen surface stated in [VERSIONING.md](VERSIONING.md#the-frozen-surface) and each breaking change in the changelog.
+
 Remaining 1.0 work, open:
 
 - **API documentation** (task 3): `missing_docs` on every public item, compiled doc examples, docs.rs metadata.
-- **The API freeze**, applied from the decisions in [API_REVIEW.md](API_REVIEW.md): renames, hidden items and removals as decided there.
 - **Porting scaffolding** (porting toolkit task 8). The guides (task 5) are done.
 - **No C++ runtime dependency on Windows**: the shells link the C and C++ runtime statically, so no VC++ redistributable is needed.
 
 Done from this list: the shell follow-ups of 0.6 task 7 (shell ABI 9, see its status).
 
-The freeze itself and the crates.io publish are the owner's decisions.
+Tagging 1.0 and the crates.io publish are the owner's decisions.
 
 ## DSP library: building blocks for good products
 
