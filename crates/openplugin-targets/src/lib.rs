@@ -1,27 +1,29 @@
-//! OpenPluginSDK Target Bridges.
+//! OpenPluginSDK format entries.
 //!
-//! Provides the target export wrappers:
-//! - [`clap`]: CLAP factory that instantiates a [`PluginForExport`] and processes audio
-//! - [`lv2`]: LV2 descriptor. Ports 0 and 1 in, 2 and 3 out, parameters on the shared plane
-//! - [`vst3`]: Steinberg VST3 layouts. A host loads `native/vst3`, not these layouts
-//! - [`au`]: Audio Unit layouts. A host loads `native/au`
-//! - [`aax`]: AAX layouts. A host loads `native/aax`
-//! - [`shell`]: C ABI shared by those three native adapters
-//! - [`standalone`]: Standalone application runner
+//! A plugin crate calls one macro per format:
+//! - [`export_clap!`]: the CLAP entry (`export_clap!(MyPlugin)`, or
+//!   `export_clap!(MyPlugin, editor = make_editor)`).
+//! - [`export_lv2!`]: the LV2 descriptor, with the same two forms. [`lv2`] writes the
+//!   bundle's `.ttl` files.
+//! - [`export_shell!`]: the `op_shell_*` C ABI that the native VST3, Audio Unit and AAX
+//!   shells in `native/` link, with the same two forms.
+//!
+//! The macros are the supported way in. What they expand to (`clap`, `clap_abi`,
+//! `shell` and parts of `lv2`) is hidden and not part of the frozen API: the CLAP and
+//! LV2 specifications and the C headers in `native/include` are the contracts there.
 
-pub mod aax;
-pub mod au;
+#[doc(hidden)]
 pub mod clap;
+#[doc(hidden)]
 pub mod clap_abi;
 pub mod lv2;
+#[doc(hidden)]
 pub mod shell;
-pub mod standalone;
-pub mod vst3;
 
-pub use aax::AaxAdapter;
-pub use au::AuAdapter;
+#[doc(hidden)]
 pub use clap::ClapAdapter;
+#[doc(hidden)]
 pub use lv2::Lv2Harness;
-pub use openplugin_core::Plugin as PluginForExport;
-pub use standalone::StandaloneRunner;
-pub use vst3::Vst3Adapter;
+// The export macros name the core crate through this.
+#[doc(hidden)]
+pub use openplugin_core as __core;

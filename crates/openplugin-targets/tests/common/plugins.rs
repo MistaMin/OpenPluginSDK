@@ -17,31 +17,28 @@ pub static EVENTS: AtomicUsize = AtomicUsize::new(0);
 
 pub static PARAMS: [ParamInfo; 1] = [ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None)];
 
-pub static SYNTH_INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:test-synth",
-    name: "Test Synth",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Instrument,
-    params: &PARAMS,
-    is_instrument: true,
-    has_editor: false,
-};
+pub static SYNTH_INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:test-synth",
+    "Test Synth",
+    "Test",
+    "0.1.0",
+    Category::Instrument,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c")
+.with_instrument(true);
 
-pub static DUCK_INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:test-duck",
-    name: "Test Duck",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Dynamics,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+pub static DUCK_INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:test-duck",
+    "Test Duck",
+    "Test",
+    "0.1.0",
+    Category::Dynamics,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 static DUCK_LAYOUTS: [IoConfig; 1] =
     [IoConfig { input: SpeakerLayout::Stereo, output: SpeakerLayout::Stereo, sidechain: Some(SpeakerLayout::Stereo) }];
@@ -140,7 +137,7 @@ impl Plugin for Synth {
     fn set_offline(&mut self, offline: bool) {
         OFFLINE.store(offline, Ordering::SeqCst);
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let value = if self.held { self.level } else { 0.0 };
         for channel in io.iter_mut() {
             channel[..frames].fill(value);
@@ -204,10 +201,10 @@ impl Plugin for Duck {
     fn set_offline(&mut self, offline: bool) {
         OFFLINE.store(offline, Ordering::SeqCst);
     }
-    fn process(&mut self, _io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, _io: &mut [&mut [f32]], frames: usize) {
         self.queue.pos += frames as u32;
     }
-    fn process_buses(&mut self, io: &mut [Vec<f32>], sidechain: Option<&[Vec<f32>]>, frames: usize) {
+    fn process_buses(&mut self, io: &mut [&mut [f32]], sidechain: Option<&[&[f32]]>, frames: usize) {
         if let Some(side) = sidechain {
             for (channel, samples) in io.iter_mut().enumerate() {
                 if let Some(side) = side.get(channel) {

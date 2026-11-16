@@ -1,4 +1,4 @@
-//! `export_shell!` emits the C ABI in [`openplugin_ffi::shell`].
+//! `export_shell!` emits the C ABI in [`openplugin_host::shell`].
 //!
 //! A native VST3, Audio Unit, or AAX adapter links the plugin static library and
 //! calls `op_shell_*`. One plugin binary exports one shell.
@@ -9,15 +9,15 @@
 //! `-DOP_EDITOR=ON` for it. Resizing is a second, optional block of that
 //! header (`OP_EDITOR_RESIZE`): the size range, `op_editor_resize`, and a
 //! callback for an editor that asks its host for a size. Both forms export `op_shell_tail_seconds` from
-//! [`Plugin::tail`](crate::PluginForExport::tail), for `-DOP_TAIL=ON`, and
+//! [`Plugin::tail`](openplugin_core::Plugin::tail), for `-DOP_TAIL=ON`, and
 //! `op_shell_save_state` / `op_shell_load_state` for the whole plugin state.
 
-pub use openplugin_ffi::shell::{
+pub use openplugin_host::shell::{
     kind, layout_count, layout_selected, midi_dropped, midi_out, note_ports, process_events,
     set_layout, set_offline, set_track_info, track_info_from_abi, write_layout, OpLayout, OpMidiEvent, OpProcess,
     create, destroy, editor_state, get_normalized, get_plain, latency, load_state, param_format, param_group, param_parse, process,
     reset, save_state, set_normalized, set_plain, tail_seconds, to_normalized, to_plain, trace, write_info,
-    write_param, OpParamDesc, OpShellInfo, ShellInstance, ABI, AAX_MAX_PARAMS, PARAM_AUTOMATABLE,
+    write_param, OpParamDesc, OpShellInfo, ShellInstance, ABI, PARAM_AUTOMATABLE,
     PARAM_DISCRETE, PARAM_LOG, STATE_MAX, STATE_OK, STATE_TOO_SMALL,
     // ABI 6: telling the host about changes.
     take_changes, CHANGE_LATENCY, CHANGE_PARAM_INFO,
@@ -96,6 +96,7 @@ pub mod editor {
                         f(c.context, i);
                     }
                 }
+                _ => {}
             }
         })
     }
@@ -358,7 +359,7 @@ pub mod editor {
     }
 }
 
-/// Export `op_shell_*` from the plugin crate. `$plugin` implements [`Plugin`](crate::PluginForExport)
+/// Export `op_shell_*` from the plugin crate. `$plugin` implements [`Plugin`](openplugin_core::Plugin)
 /// and [`Default`]. Link the staticlib into `native/`.
 ///
 /// `export_shell!(P, editor = make_editor)` adds `op_editor_*` on macOS.

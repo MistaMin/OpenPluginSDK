@@ -11,18 +11,14 @@ use openplugin_targets::{lv2, ClapAdapter};
 
 static PARAMS: [ParamInfo; 0] = [];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.sample-rate",
-    name: "Sample Rate Probe",
-    vendor: "OpenGrid",
-    url: "",
-    email: "",
-    version: "0.0.1",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.sample-rate",
+    "Sample Rate Probe",
+    "OpenGrid",
+    "0.0.1",
+    Category::Utility,
+    &PARAMS,
+);
 
 struct RateProbe {
     prepared: Arc<AtomicU32>,
@@ -42,7 +38,7 @@ impl Plugin for RateProbe {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
 }
 
 struct NarrowProbe {
@@ -63,7 +59,7 @@ impl Plugin for NarrowProbe {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     fn accepts_sample_rate(&self, sample_rate: f32) -> bool {
         sample_rate == 48_000.0
     }
@@ -129,7 +125,7 @@ impl Plugin for Lv2Rate {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
 }
 
 fn lv2_probe() -> Box<dyn Plugin> {

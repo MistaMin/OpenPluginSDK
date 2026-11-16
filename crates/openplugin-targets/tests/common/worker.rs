@@ -13,18 +13,16 @@ use openplugin_targets::lv2::{Lv2Descriptor, Lv2Feature};
 
 pub static LOAD_PARAMS: [ParamInfo; 1] = [ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None)];
 
-pub static LOADING_INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:test-loading",
-    name: "Test Loading",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &LOAD_PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+pub static LOADING_INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:test-loading",
+    "Test Loading",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &LOAD_PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 /// Where each job ran: thread id and name.
 pub static JOB_RAN: Mutex<Vec<(ThreadId, String)>> = Mutex::new(Vec::new());
@@ -76,7 +74,7 @@ impl Plugin for Loading {
     fn param(&self, id: &str) -> Option<f32> {
         (id == "level").then_some(self.level)
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         if self.slot.poll() {
             self.polled += 1;
         }

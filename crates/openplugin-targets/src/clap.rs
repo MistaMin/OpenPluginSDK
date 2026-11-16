@@ -26,6 +26,7 @@ use std::time::{Duration, Instant as Clock};
 
 use openplugin_core::DenormalGuard;
 use openplugin_core::{
+    Channels, ChannelsMut,
     decode_params, encode_params, identity::clap_id_valid, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
     ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamIdMap, ParamInfo, ParamPlane, PinFormat, Plugin, PluginInfo, PortKind,
     Seqlock, SpeakerLayout, Tail, TrackInfo, Transport, MAX_AUDIO_CHANNELS,
@@ -640,12 +641,9 @@ fn process_span(
         sidechain,
         ..
     } = instance;
-    let sidechain_arg = if sidechain.is_empty() {
-        None
-    } else {
-        Some(sidechain.as_slice())
-    };
-    inner.process_buses(buffers, sidechain_arg, n);
+    let sidechain_arg = Channels::new(sidechain);
+    let sidechain_arg = (!sidechain_arg.is_empty()).then_some(&*sidechain_arg);
+    inner.process_buses(&mut ChannelsMut::new(buffers), sidechain_arg, n);
     let out_channels = (output.channel_count as usize).min(buffers.len());
     if output.data32.is_null() {
         return;
@@ -1044,7 +1042,7 @@ fn port_type_ptr(layout: SpeakerLayout) -> *const c_char {
         PortKind::Stereo => PORT_STEREO,
         PortKind::Surround => PORT_SURROUND,
         PortKind::Ambisonic => PORT_AMBISONIC,
-        PortKind::Empty | PortKind::Discrete => return std::ptr::null(),
+        _ => return std::ptr::null(),
     };
     bytes.as_ptr() as *const c_char
 }
@@ -1277,6 +1275,7 @@ fn report_gestures(instance: &Instance, out: *const clap_output_events) {
                 };
                 unsafe { push(out, &event.header) };
             }
+            _ => {}
         }
     }
 }
@@ -1585,7 +1584,7 @@ unsafe fn main_thread_changes(raw: *mut Instance) {
 }
 
 fn watch_tail(instance: &mut Instance) {
-    let now = instance.inner.tail().clap_samples();
+    let now = instance.inner.tail().to_clap_samples();
     if now == instance.reported_tail {
         return;
     }
@@ -1606,12 +1605,10 @@ fn apply_transport(instance: &mut Instance, transport: *const clap_event_transpo
     }
     let transport = unsafe { &*transport };
     let flags = transport.flags;
-    let mut info = Transport {
-        playing: flags & TRANSPORT_IS_PLAYING != 0,
-        recording: flags & TRANSPORT_IS_RECORDING != 0,
-        sample_pos: if steady_time >= 0 { steady_time } else { 0 },
-        ..Transport::default()
-    };
+    let mut info = Transport::default();
+    info.playing = flags & TRANSPORT_IS_PLAYING != 0;
+    info.recording = flags & TRANSPORT_IS_RECORDING != 0;
+    info.sample_pos = if steady_time >= 0 { steady_time } else { 0 };
     if flags & TRANSPORT_HAS_TEMPO != 0 && transport.tempo.is_finite() {
         info.tempo = transport.tempo;
     }
@@ -1704,7 +1701,7 @@ fn release_offline_momentary(instance: &mut Instance, offline: bool) {
 unsafe extern "C" fn tail_get(plugin: *const clap_plugin) -> u32 {
     guarded(std::ptr::null(), 0, || {
         instance(plugin)
-            .and_then(|item| item.inner.tail().clap_samples())
+            .and_then(|item| item.inner.tail().to_clap_samples())
             .unwrap_or(0)
     })
 }
@@ -2053,7 +2050,11 @@ fn read_track_info(host: *const clap_host) -> Option<TrackInfo> {
     if raw.flags & TRACK_INFO_IS_FOR_MASTER != 0 {
         kind |= TrackInfo::IS_MASTER;
     }
-    Some(TrackInfo { name, colour, kind })
+    let mut info = TrackInfo::default();
+    info.name = name;
+    info.colour = colour;
+    info.kind = kind;
+    Some(info)
 }
 
 /// Read the host's track info again and, when it differs from what the plugin last heard,
@@ -2154,7 +2155,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
     let info = inner.info();
     let labels = feature_labels(inner.as_ref());
     let reported_latency = inner.latency().min(u32::MAX as usize) as u32;
-    let reported_tail = inner.tail().clap_samples();
+    let reported_tail = inner.tail().to_clap_samples();
     let mut strings = vec![
         cstring(clap_plugin_id(inner.as_ref())),
         cstring(info.name),
@@ -2683,7 +2684,7 @@ mod gui;
 #[macro_export]
 macro_rules! export_clap {
     ($plugin:ty, editor = $editor:path) => {
-        fn __openplugin_clap_create() -> ::std::boxed::Box<dyn $crate::PluginForExport> {
+        fn __openplugin_clap_create() -> ::std::boxed::Box<dyn $crate::__core::Plugin> {
             ::std::boxed::Box::new(<$plugin as ::std::default::Default>::default())
         }
 
@@ -2705,7 +2706,7 @@ macro_rules! export_clap {
         };
     };
     ($plugin:ty) => {
-        fn __openplugin_clap_create() -> ::std::boxed::Box<dyn $crate::PluginForExport> {
+        fn __openplugin_clap_create() -> ::std::boxed::Box<dyn $crate::__core::Plugin> {
             ::std::boxed::Box::new(<$plugin as ::std::default::Default>::default())
         }
 
@@ -2739,18 +2740,24 @@ mod tests {
 
     static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db).with_taper(Taper::Linear)];
 
-    static INFO: PluginInfo = PluginInfo {
-        id: "com.opengrid.test.gain",
-        name: "Test Gain",
-        vendor: "OpenGrid",
-        url: "https://github.com/MistaMin/OpenPluginSDK",
-        email: "contact@mistamin.com",
-        version: "0.1.0-beta.1",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    };
+    fn track(name: Option<&str>, colour: Option<u32>, kind: u32) -> TrackInfo {
+        let mut info = TrackInfo::default();
+        info.name = name.map(String::from);
+        info.colour = colour;
+        info.kind = kind;
+        info
+    }
+
+    static INFO: PluginInfo = PluginInfo::new(
+        "com.opengrid.test.gain",
+        "Test Gain",
+        "OpenGrid",
+        "0.1.0-beta.1",
+        Category::Utility,
+        &PARAMS,
+    )
+    .with_url("https://github.com/MistaMin/OpenPluginSDK")
+    .with_email("contact@mistamin.com");
 
     impl Plugin for Gain {
         fn info(&self) -> &'static PluginInfo { &INFO }
@@ -2763,7 +2770,7 @@ mod tests {
             true
         }
         fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
-        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
             for channel in io {
                 for sample in &mut channel[..frames] {
                     *sample *= self.linear;
@@ -2958,7 +2965,7 @@ mod tests {
         fn reset(&mut self) {}
         fn set_param(&mut self, _: &str, _: f32) -> bool { false }
         fn param(&self, _: &str) -> Option<f32> { None }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
         fn supported_layouts(&self) -> &'static [openplugin_core::IoConfig] { WIDE_LAYOUTS }
         fn accepts_sample_rate(&self, sample_rate: f32) -> bool {
             sample_rate == 48_000.0 || sample_rate == 96_000.0
@@ -3020,7 +3027,7 @@ mod tests {
         fn reset(&mut self) {}
         fn set_param(&mut self, _: &str, _: f32) -> bool { false }
         fn param(&self, _: &str) -> Option<f32> { None }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
         fn supported_layouts(&self) -> &'static [openplugin_core::IoConfig] { BED_LAYOUTS }
     }
 
@@ -3179,7 +3186,7 @@ mod tests {
         fn reset(&mut self) {}
         fn set_param(&mut self, _: &str, _: f32) -> bool { false }
         fn param(&self, _: &str) -> Option<f32> { None }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {
             self.in_process.store(true, Ordering::SeqCst);
             std::thread::sleep(Duration::from_micros(200));
             self.in_process.store(false, Ordering::SeqCst);
@@ -3214,12 +3221,12 @@ mod tests {
         let adapter = unsafe { ClapAdapter::with_host(plugin, &ch) };
         let p = adapter.as_plugin();
         // Read at init: name, colour as 0xRRGGBBAA, kind from the return flag.
-        assert_eq!(*heard.lock().unwrap(), vec![TrackInfo { name: Some("Vox".into()), colour: Some(0x1122_33ff), kind: TrackInfo::IS_RETURN }]);
+        assert_eq!(*heard.lock().unwrap(), vec![track(Some("Vox"), Some(0x1122_33ff), TrackInfo::IS_RETURN)]);
         // The host renames the track and says so: read again and delivered.
         host.set_track(TRACK_INFO_HAS_TRACK_NAME | TRACK_INFO_IS_FOR_BUS | TRACK_INFO_IS_FOR_MASTER, "Drums", [9, 9, 9, 9]);
         unsafe { call_changed(p) };
         let got = heard.lock().unwrap().last().cloned().unwrap();
-        assert_eq!(got, TrackInfo { name: Some("Drums".into()), colour: None, kind: TrackInfo::IS_BUS | TrackInfo::IS_MASTER });
+        assert_eq!(got, track(Some("Drums"), None, TrackInfo::IS_BUS | TrackInfo::IS_MASTER));
         assert!(got.is_bus() && got.is_master() && !got.is_return());
         // The same answer again is not delivered twice.
         let before = heard.lock().unwrap().len();
@@ -3437,7 +3444,7 @@ mod tests {
             true
         }
         fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     }
 
     struct Bytes {
@@ -3488,7 +3495,10 @@ mod tests {
         ParamInfo::new("broken", "Broken", 0.0, 1.0, 0.0, Unit::None).with_group("Filter//Envelope"),
     ];
 
-    static GROUPED_INFO: PluginInfo = PluginInfo { id: "com.opengrid.test.grouped", name: "Grouped", params: &GROUPED_PARAMS, ..INFO };
+    static GROUPED_INFO: PluginInfo =
+        PluginInfo::new("com.opengrid.test.grouped", "Grouped", "OpenGrid", "0.1.0-beta.1", Category::Utility, &GROUPED_PARAMS)
+            .with_url("https://github.com/MistaMin/OpenPluginSDK")
+            .with_email("contact@mistamin.com");
 
     impl Plugin for Grouped {
         fn info(&self) -> &'static PluginInfo { &GROUPED_INFO }
@@ -3496,7 +3506,7 @@ mod tests {
         fn reset(&mut self) {}
         fn set_param(&mut self, id: &str, _: f32) -> bool { GROUPED_INFO.param(id).is_some() }
         fn param(&self, id: &str) -> Option<f32> { GROUPED_INFO.param(id).map(|p| p.default) }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     }
 
     fn modules<P: Plugin>(adapter: &ClapAdapter<P>) -> Vec<String> {

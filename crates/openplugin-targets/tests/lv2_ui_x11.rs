@@ -14,18 +14,15 @@ use openplugin_targets::lv2::{self, Lv2Feature, Lv2UiDescriptor};
 
 static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:test-x11-ui",
-    name: "X11 UI Test",
-    vendor: "OpenGrid",
-    url: "",
-    email: "",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: true,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:test-x11-ui",
+    "X11 UI Test",
+    "OpenGrid",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_editor(true);
 
 #[derive(Default)]
 struct Probe;
@@ -42,7 +39,7 @@ impl Plugin for Probe {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
 }
 
 static MADE: AtomicUsize = AtomicUsize::new(0);
@@ -75,7 +72,7 @@ impl Editor for Counted {
     fn render(&mut self, _scale: f32) -> Frame<'_> {
         let (w, h) = (self.size.0 as usize, self.size.1 as usize);
         self.pixels.resize(w * h, 0);
-        Frame { pixels: &self.pixels, width: w, height: h }
+        Frame::new(&self.pixels, w, h)
     }
 }
 
@@ -92,7 +89,7 @@ fn fixed_editor(_host: EditorHost) -> Option<Box<dyn Editor>> {
         }
         fn param_changed(&mut self, _: usize, _: f32) {}
         fn render(&mut self, _scale: f32) -> Frame<'_> {
-            Frame { pixels: &[], width: 0, height: 0 }
+            Frame::new(&[], 0, 0)
         }
     }
     Some(Box::new(Fixed))

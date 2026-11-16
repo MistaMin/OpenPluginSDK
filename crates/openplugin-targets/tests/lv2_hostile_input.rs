@@ -41,18 +41,16 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("mute", "Mute", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:fuzz-gain",
-    name: "Fuzz Gain",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "0.1.0-beta.1",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:fuzz-gain",
+    "Fuzz Gain",
+    "OpenGrid",
+    "0.1.0-beta.1",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 #[derive(Clone, Copy)]
 struct FuzzGain {
@@ -118,7 +116,7 @@ impl Plugin for FuzzGain {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let linear = self.linear();
         for channel in io.iter_mut() {
             let frames = frames.min(channel.len());

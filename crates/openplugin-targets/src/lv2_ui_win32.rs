@@ -97,6 +97,7 @@ fn host_for(link: Link) -> EditorHost {
                     write(link.controller, link.first + i, 4, 0, &value as *const f32 as *const c_void);
                 }
             }
+            _ => {}
         }
     })
 }

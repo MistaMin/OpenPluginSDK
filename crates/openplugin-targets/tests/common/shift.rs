@@ -39,20 +39,15 @@ pub static RENAMED: [ParamInfo; 2] = [
     ParamInfo::new("names", "Names (renamed)", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-pub static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.shift",
-    name: "Latency Shift",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Delay,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+const fn info(params: &'static [ParamInfo]) -> PluginInfo {
+    PluginInfo::new("com.opengrid.test.shift", "Latency Shift", "Test", "0.1.0", Category::Delay, params)
+        .with_url("https://example.com")
+        .with_email("a@b.c")
+}
 
-pub static INFO_RENAMED: PluginInfo = PluginInfo { params: &RENAMED, ..INFO };
+pub static INFO: PluginInfo = info(&PARAMS);
+
+pub static INFO_RENAMED: PluginInfo = info(&RENAMED);
 
 /// What the test reads back: how often the plugin called its notifier.
 #[derive(Default)]
@@ -152,7 +147,7 @@ impl Plugin for Shift {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let delay = self.current();
         let size = MAX_LOOKAHEAD + 1;
         let start = self.pos;
