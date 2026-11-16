@@ -2,7 +2,8 @@
 //! VST3 or Audio Unit (and reads an AAX bundle's identity), and writes a
 //! manifest and a Rust snippet that start a port to OpenPluginSDK, compares a
 //! port with the original (`null`), and captures the original's saved states
-//! (`capture`). See `docs/PORTING.md`.
+//! (`capture`), and starts the port's crate from a manifest (`new`, in
+//! [`scaffold`]). See `docs/PORTING.md`.
 //!
 //! Every plugin is loaded in a child process of the scanner itself
 //! ([`probe`]), so a plugin that crashes or hangs costs one scan result, not
@@ -21,6 +22,7 @@ pub mod manifest;
 pub mod null;
 pub mod probe;
 pub mod render;
+pub mod scaffold;
 pub mod signal;
 pub mod snippet;
 #[cfg(test)]

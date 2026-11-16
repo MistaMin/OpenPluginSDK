@@ -477,6 +477,7 @@ name = "openplugin-port"
 version = "1.0.0-beta"
 dependencies = [
  "example-editor",
+ "example-pinned",
  "openplugin-core",
  "openplugin-ffi",
  "openplugin-targets",

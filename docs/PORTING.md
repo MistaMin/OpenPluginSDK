@@ -2,7 +2,7 @@
 
 `openplugin-port` is a set of tools for moving a plugin that already ships in CLAP, VST3, Audio Unit or AAX onto OpenPluginSDK without losing what its users depend on: the same parameters, in the same ranges, with the same identity, so sessions and presets keep working. Each tool answers one question and writes something a person can read and check. None of them edits your plugin or installs anything.
 
-Today the toolkit has three tools and one piece of the SDK itself: the scanner (porting task 1), which answers "what is this plugin?", identity pinning (porting task 2), which makes the port the same plugin to a host, the null test (porting task 4), which answers "does the port sound the same?", and the state import (porting task 3), which answers "will the port open the old plugin's sessions and presets?". The tasks that follow build on the scanner's manifest.
+Today the toolkit has four tools and one piece of the SDK itself: the scanner (porting task 1), which answers "what is this plugin?", identity pinning (porting task 2), which makes the port the same plugin to a host, the null test (porting task 4), which answers "does the port sound the same?", the state import (porting task 3), which answers "will the port open the old plugin's sessions and presets?", and the scaffolding (porting task 8), which turns the scanner's manifest into a crate that builds, keeps the original's ids and nulls with `cargo test`. The tasks that follow build on the scanner's manifest.
 
 The [porting guides](#porting-guides) (porting task 5) say how to write the port itself: one guide for each SDK a plugin is likely to come from, mapping its concepts onto this SDK's, with a small effect ported in full.
 
@@ -14,6 +14,7 @@ Shipping before the DSP is rewritten? [CPP_BRIDGE.md](CPP_BRIDGE.md) shows how t
 | 4 | `null`: render the original and the port through the same input and automation and compare | [The null test](#the-null-test) |
 | 3 | `capture` and `openplugin_core::foreign_state`: save the old plugin's state for each preset, and read the containers it is made of | [Foreign state import](#foreign-state-import) |
 | 5 | Guides: iPlug2, DPF, nih-plug, JUCE and the raw VST3, CLAP and Audio Unit SDKs mapped onto this SDK, each with a worked port | [Porting guides](#porting-guides) |
+| 8 | `new`: write the port's crate from a manifest, with its parameter table, identity, state importer stub and null test | [Starting the port: `new`](#starting-the-port-new) |
 | 2 | Identity pins: every id a host stores, set explicitly (`openplugin_core::identity`); the scanner writes them | [Identity pinning](#identity-pinning) |
 
 ## Porting guides
@@ -182,7 +183,7 @@ Audio Unit latency and tail are seconds in the API; the manifest converts them t
 
 ## The Rust snippet
 
-`<name>.<format>.params.rs` has three parts. It is meant to be read and edited, not compiled as it stands: it starts with `use openplugin::prelude::*;` and declares `PARAMS` and `INFO` the way `examples/gain` does.
+`<name>.<format>.params.rs` has three parts. It is meant to be read and edited (`new` puts it in a crate as `src/params.rs`, where it compiles as a module): it starts with `use openplugin::prelude::*;` and declares `PARAMS` and `INFO` the way `examples/gain` does.
 
 **The parameter table.** One `ParamInfo::new(...)` per parameter, with a comment giving the source id and, where something was guessed, what and from what. The SDK addresses a parameter by string id, so the id is made from the name (`Gain` becomes `"gain"`; a repeated name gets `_2`). Then:
 
@@ -328,7 +329,7 @@ openplugin-port null <original> <port> [--format FMT] [--port-format FMT]
 openplugin-port param-map <original> <port> [--out map.json]
 ```
 
-- **Plugins.** Each is a CLAP, VST3 or Audio Unit loaded from its path, the way the scanner loads it: in its own child process (`openplugin-port __render`, hidden), with a timeout (`--timeout`, default 120 s), hand-written bindings, nothing installed, the Audio Unit registered in that process only. The two plugins may be different formats (`--format` names the original's and `--port-format` the port's when the extension does not say; the CLI applies `--format` to both). A bundle that holds several plugins renders the first and says so. AAX cannot be hosted offline and is refused.
+- **Plugins.** Each is a CLAP, VST3 or Audio Unit loaded from its path, the way the scanner loads it: in its own child process (`openplugin-port __render`, hidden), with a timeout (`--timeout`, default 120 s), hand-written bindings, nothing installed, the Audio Unit registered in that process only. The two plugins may be different formats (`--format` names the original's and `--port-format` the port's when the extension does not say; without `--port-format`, `--format` applies to both). A bundle that holds several plugins renders the first and says so. AAX cannot be hosted offline and is refused.
 - **Input.** `--input` is a built-in signal, optionally followed by `:seconds` (default 2): `sweep` (logarithmic, 20 Hz to 20 kHz, 0.5 peak), `noise` (white, 0.25 peak, fixed seed), `impulses` (an impulse every 997 samples), `burst` (silence, then a quarter of two tones, then silence) or `silence`; or a path to a WAV file (8, 16, 24 or 32-bit integer, 32 or 64-bit float, any channel count; read by a small reader in this crate, no dependency). The built-in signals are stereo and deterministic. A plugin's input channel `c` takes source channel `c mod source channels`, so a mono plugin reads the left channel. `--rate` (default 48000, or the WAV file's own rate) must match a WAV file: the tool does not resample. `--block` (default 512) is the host block size.
 - **Automation.** `--automation` is a list of `frame:param=value` entries separated by commas, semicolons or newlines; a time is a frame number or ends in `s` or `ms`; `param` is the original plugin's parameter id or name; the value is a plain value in the parameter's own units, set exactly at that frame (a CLAP `param_value` event with that time, a VST3 queue point with that sample offset after the plugin's own `plainParamToNormalized`, an Audio Unit immediate event at that buffer offset). `@file` reads the entries from a file, one per line, `#` for comments. Both plugins get the same frames and values.
 - **Parameter map.** The port's parameter for each automated original parameter is found, in order, in the map file (`--param-map`, a JSON object from original id or name to port id or name, such as `{"3": "reverb_mix", "Size": 7}`), then by the same name (ignoring case), then by the same id. The pairs used are printed. `openplugin-port param-map <original> <port>` scans both and writes the map it would use as `{"<original id>": <port id>}`, listing on stderr the original parameters without a match so they can be added by hand. A value is passed on unchanged: if the port's range or units differ, the null test cannot compensate; compare at the defaults or give the port the same plain values.
@@ -463,6 +464,47 @@ The module has readers for the containers old formats are made of. Each takes un
 - CLAP presets need both a preset-discovery factory and the plugin's `clap.preset-load/2`; a bundle with only the first is noted. A provider that lists presets only through a `file` location it expects the host to scan from a path it chose itself is read from the locations it declares.
 - A preset that needs a licence, a download or a dialog is skipped with a note. Presets that load into only a part of the state (a layer of a multi-timbral instrument) save the whole state afterwards.
 - Preset names and locations come from the plugin's own provider and are written to the manifest as given.
+
+## Starting the port: `new`
+
+```bash
+openplugin-port scan "/Library/Audio/Plug-Ins/CLAP/Some Reverb.clap" --out port-out
+openplugin-port new --from "port-out/some-reverb.clap.manifest.json" --out some-reverb --sdk /path/to/OpenPluginSDK
+cargo test --manifest-path some-reverb/Cargo.toml
+```
+
+```
+openplugin-port new --from <name>.<format>.manifest.json [--out DIR] [--name CRATE]
+                    [--sdk PATH | --sdk-version VERSION]
+```
+
+`new` reads one manifest the scanner wrote (JSON; the roadmap's `manifest.toml` is this file, and a `.toml` is refused with that hint; a `schema_version` above the tool's is refused) and writes a plugin crate into `--out` (default `./<crate name>`), which must not exist or must be empty: nothing is overwritten. `--name` sets the Cargo package name (default: the plugin's name in lower case with `-` between words, so `Example Gain` is `example-gain`). `--sdk` makes the crate depend on an SDK checkout by path; otherwise it depends on the crates.io release of this tool's version (`--sdk-version` picks another). The crate is a workspace of its own (an empty `[workspace]` table, which a comment says to remove to join an enclosing workspace).
+
+| File | What it holds |
+|---|---|
+| `Cargo.toml` | `cdylib` (CLAP, LV2), `staticlib` (the VST3, Audio Unit and AAX shells, through `scripts/build_plugin.sh`) and `rlib`; the plugin's version when it is `x.y.z`. |
+| `src/params.rs` | Exactly the scanner's Rust snippet (see [The Rust snippet](#the-rust-snippet)): `PARAMS` and `INFO`, every guess explained, the build settings, and each parameter pinned to the scanned format's id (`.with_vst3_id(...)`, `.with_clap_id(...)` or `.with_au_id(...)`) when those ids are not positions. `INFO.id` is the original's CLAP id when it has one. A VST3 scan's bypass parameter under the SDK shell's own id (`0x42595053`, with the bypass flag) is left out, with a scan warning: the port's VST3 shell adds it again. Here it compiles as a module. |
+| `src/lib.rs` | The plugin type (`<Name>Port`): one plain value per parameter in table order, `set_param` and `param` by id, `supported_layouts` written from plain mono and stereo buses, the original's ids as real methods (not comments): `vst3_ids` (`Vst3Ids::from_hex` of the scanned processor and controller class ids, or `processor_from_hex` for a single-component original), `au_ids` and `aax_ids` when the scan read four-character codes, each missing one a `TODO(porting)` line saying which bundle to scan, its own state through `encode_params` and `decode_params`, and `load_state` that tries the original's state first. `process` passes the input through, marked `TODO(porting)`. The original's latency and tail, when not zero, are `TODO` lines: reporting a latency the pass-through does not have would break the null. Exports CLAP, LV2 and the shell ABI. Unit tests: every pin is usable (`identity::check_pins` is empty and each pinned id parses), the port's own state round-trips, and a refused state changes nothing. |
+| `src/state_import.rs` | The `foreign_state` pattern ready to fill: `FORMATS` with one `StateFormat` whose `detect` recognises nothing yet and whose `decode` refuses, both `TODO(porting)`; `param_map()` from the original's ids (the manifest's `params[].id`) to the port's string ids, one line per parameter; `import_original`, which refuses a state that names a parameter the map does not place. A unit test checks every original parameter has a place. |
+| `tests/null.rs` | The null test: builds the crate's library (its path is the one Cargo reports for the build, so `CARGO_TARGET_DIR` and Cargo's configuration are followed), and runs `openplugin-port null <original> <port> --format <original's> --port-format clap` over `sweep`, `noise` and `impulses` with tolerance `1e-6`. It fails with the report when they differ. `AUTOMATION` is empty (defaults) with a `TODO` example made from the parameter names. The original is the scanned path (`OPENPLUGIN_PORT_ORIGINAL` overrides); the tool is `OPENPLUGIN_PORT`, else the `openplugin-port` that wrote the crate, else the one on `PATH`. An AAX original gets the test marked `#[ignore]`, with the reason: AAX cannot be rendered offline. |
+| `README.md`, `.gitignore` | What each file is and what is left, in order. |
+
+Identity is pinned from the scan (porting task 2, [Identity pinning](#identity-pinning)): a host of the original finds the port under the same CLAP id, VST3 class ids, Audio Unit and AAX codes, and the same parameter ids in the scanned format. A manifest holds the parameter ids of one format, so scan the original's other formats too and add their pins where they differ (`with_host_id` when CLAP, VST3 and Audio Unit share a number).
+
+Work then goes in this order: write the DSP in `process` (the null test, at the defaults, proves the pass-through first and the DSP after), add automation to `tests/null.rs`, run `capture` on the original and fill `src/state_import.rs` with a test per captured blob, then settle each remaining identity line.
+
+### What the proof covers
+
+`crates/openplugin-port/tests/new.rs` builds the SDK's example (`examples/editor`), copies it as `original.clap`, scans it, and runs `openplugin-port new --sdk <this checkout>` on the manifest. The files on disk equal what `scaffold::generate` returns; the table holds `ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),`, `INFO.id` is the example's CLAP id, `supported_layouts` is stereo, the state map places ids 0 and 1 on `gain` and `warm`, and a second `new` into the same folder is refused and changes nothing. Then `cargo test` runs in the generated crate (sharing the workspace's target folder and lock file): it builds, its three unit tests pass, and its null test passes against the original with a maximum difference of exactly 0 for all three inputs (the example at its defaults is unity gain). As a negative control the generated `process` is changed to halve the signal, and the same null test fails with `the port does not null against the original`. The generated library, scanned again as CLAP, has the original's CLAP id and parameter ids.
+
+Identity: `examples/pinned` stands for an original whose ids are arbitrary numbers. The test builds the VST3 manifest its scan gives from the functions its VST3 shell exports call (`write_info`, `param_host_id`, `au_code`; `tests/scan.rs` proves the scanner's VST3 reading against the same functions), runs `new`, checks the generated source holds `Vst3Ids::from_hex(...)`, `.with_vst3_id(0x6C65766C)` and `AuIds { subtype: *b"PnEx", ... }` and no `TODO(porting task 2)`, builds the crate (its `every_pin_is_usable` test passes), loads its library, and reads `op_shell_info`, `op_shell_param_host_id` and `op_shell_au_code`: the VST3 processor and controller class ids, every VST3 parameter id, the Audio Unit codes and the four AAX codes equal the original's. With `OPENPLUGIN_PORT_FIXTURES`, a real VST3 scan of `Example Gain.vst3` gives a port whose library reports the scanned class ids and parameter ids. Unit tests in `src/scaffold.rs` cover crate and type names, versions, TOML escaping, a refused crate name, and an AAX manifest (pinned `aax_ids`, ignored null test). A manifest with a higher `schema_version`, a `.toml` file and a missing `--from` are refused, writing nothing.
+
+### Limits of `new`
+
+- The port's audio is a pass-through: it nulls only where the original is transparent (at the defaults of a gain, say). The null test says so; it is the check the DSP must pass, not proof that the port is done.
+- The null test renders the port as CLAP. Building the other formats is `scripts/build_plugin.sh` on the crate, as for any plugin.
+- One manifest makes one crate. A bundle with several plugins gives one manifest each; the null test renders the bundle's first plugin and the generated test says so.
+- Parameter groups, an editor, MIDI, presets and the Audio Unit type are not written; `src/params.rs` lists what the scan saw.
 
 ## Limits of the scanner
 
