@@ -13,7 +13,7 @@ Versions are `0.MINOR.PATCH`, with a pre-release suffix while the SDK is in beta
 - Any release may contain a breaking change. There is no compatibility promise between two `0.x` releases.
 - A breaking change goes into a **minor** release (`0.3` to `0.4`), never into a patch release (`0.3.1` to `0.3.2`). A patch release fixes bugs and adds nothing a plugin must adapt to.
 - Every breaking change is listed in the changelog under Changed or Removed and marked **Breaking**, with what a plugin must do. This is how 0.3.1 recorded `write_info`/`write_param` becoming `unsafe`, the sample-rate range and the knob sweep.
-- The `-beta` suffix stays until 1.0. Cargo treats `0.3.1-beta` as older than `0.3.1`, so the release that drops the suffix is the first stable one.
+- The `-beta` suffix stays until 1.0. Cargo treats `1.0.0-beta` as older than `1.0.0`, so the release that drops the suffix is the first stable one.
 
 ### From 1.0
 

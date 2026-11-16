@@ -53,7 +53,7 @@ One JSON file per plugin. `schema_version` is 1; a reader should refuse a higher
 ```jsonc
 {
   "schema_version": 1,
-  "tool": "openplugin-port 0.4.0-beta",
+  "tool": "openplugin-port 1.0.0-beta",
   "source": {
     "format": "vst3",              // clap | vst3 | au | aax
     "path": "/abs/path/Some Reverb.vst3",
@@ -273,7 +273,7 @@ The output is `<name>.<format>.capture.json` and a folder `<name>.<format>.blobs
 ```json
 {
   "schema_version": 1,
-  "tool": "openplugin-port 0.4.0-beta",
+  "tool": "openplugin-port 1.0.0-beta",
   "source": { "format": "au", "path": "...", "index": 0, "count": 1, "bundle_id": "com.acme.synth.au" },
   "plugin": { "name": "...", "vendor": "...", "version": "...", "ids": { "clap": null, "vst3": null, "au": { "...": "as in the scanner manifest" }, "aax": null } },
   "states": [
