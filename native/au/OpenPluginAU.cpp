@@ -1237,7 +1237,7 @@ private:
         for (uint32_t i = 0; i < count; ++i) {
             ids_[i] = op_shell_param_host_id(OP_HOST_AU, i);
             if (ids_[i] != i) identityIds_ = false;
-            if (ids_[i] == static_cast<uint32_t>(OP_NO_HOST_ID)) usable = false;
+            if (ids_[i] == OP_NO_HOST_ID) usable = false;
         }
         if (!identityIds_ && usable) {
             for (uint32_t i = 0; i < count; ++i) sortedIds_.push_back({ids_[i], i});
@@ -1309,7 +1309,7 @@ uint32_t op_au_param_id(uint32_t index) {
         bool usable = true;
         for (uint32_t i = 0; i < list.size(); ++i) {
             list[i] = op_shell_param_host_id(OP_HOST_AU, i);
-            usable = usable && list[i] != static_cast<uint32_t>(OP_NO_HOST_ID);
+            usable = usable && list[i] != OP_NO_HOST_ID;
         }
         std::vector<uint32_t> sorted = list;
         std::sort(sorted.begin(), sorted.end());

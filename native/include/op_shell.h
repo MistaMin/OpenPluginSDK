@@ -351,10 +351,12 @@ int op_shell_expression_parse(uint32_t id, const char* text, double* out_value);
 // op_shell_param_aax_id(i) == OpParamDesc.id, op_shell_au_code == 0 and
 // op_shell_identity() == 0. Pinned VST3 class IDs and AAX codes arrive in
 // OpShellInfo, in the fields that carried the derived ones.
+// What op_shell_param_host_id answers for an unknown format or index. A macro, not an
+// enumerator: the value does not fit an int.
+#define OP_NO_HOST_ID 0xFFFFFFFFu
 enum {
     OP_HOST_VST3 = 1,               // Vst::ParamID
     OP_HOST_AU = 2,                 // AudioUnitParameterID
-    OP_NO_HOST_ID = 0xFFFFFFFF,
     OP_AU_CODE_SUBTYPE = 0,
     OP_AU_CODE_MANUFACTURER = 1,
     OP_IDENTITY_KEYED_STATE = 1,    // op_shell_save_state names values by parameter id:

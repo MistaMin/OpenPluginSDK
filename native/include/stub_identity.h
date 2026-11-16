@@ -11,7 +11,7 @@
 extern "C" {
 uint32_t op_shell_identity(void) { return 0; }
 uint32_t op_shell_param_host_id(uint32_t format, uint32_t index) {
-    return format == OP_HOST_VST3 || format == OP_HOST_AU ? index : static_cast<uint32_t>(OP_NO_HOST_ID);
+    return format == OP_HOST_VST3 || format == OP_HOST_AU ? index : OP_NO_HOST_ID;
 }
 size_t op_shell_param_aax_id(uint32_t index, char* buf, size_t cap) {
     OpParamDesc desc{};
