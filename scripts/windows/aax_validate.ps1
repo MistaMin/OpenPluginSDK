@@ -18,7 +18,7 @@
 #   AAX_SDK                AAX SDK checkout (required unless -Bundle is given)
 #   AAX_VALIDATOR_OUT      build and log folder (default: build-aax-validator in the repo)
 #   AAX_VALIDATOR_TESTS    space separated test ids to run (default: every test)
-#   OP_EDITOR              OFF (default) or ON, whether the shell hosts the editor
+#   OP_EDITOR              ON (default) or OFF, whether the shell hosts the editor
 #   AAX_VALIDATOR_DSP      1 to count test.cycle_counts (needs HDX); default skips it
 #   AAX_VALIDATOR_TIMEOUT  seconds for the whole dsh run (default 3600)
 #
@@ -68,7 +68,7 @@ if (-not $Bundle) {
     Push-Location -LiteralPath $root
     try { $code = Invoke-Logged 'cargo' @('build', '--release', '--lib', '-p', 'example-editor') } finally { Pop-Location }
     if ($code -ne 0) { [Console]::Error.WriteLine("aax_validate: cargo build failed, see $log"); exit 2 }
-    $editor = if ($env:OP_EDITOR) { $env:OP_EDITOR } else { 'OFF' }
+    $editor = if ($env:OP_EDITOR) { $env:OP_EDITOR } else { 'ON' }
     $cmakeDir = Join-Path $Out 'cmake'
     $code = Invoke-Logged 'cmake' @('-S', (Join-Path $root 'native'), '-B', $cmakeDir, '-A', 'x64',
         "-DOP_RUST_LIB=$(Join-Path $Out 'cargo\release\example_editor.lib')",
