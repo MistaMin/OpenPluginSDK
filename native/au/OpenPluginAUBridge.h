@@ -4,6 +4,9 @@
 #include <stdint.h>
 // Private property: the address of the Audio Unit's C++ object, as a void*.
 enum { kOpenPluginAUProperty_Instance = 64001 };
+// Private property, a UInt32: the events a full queue lost between renders since the last
+// read (reading takes the count). There with or without an editor.
+enum { kOpenPluginAUProperty_EventsDropped = 64002 };
 // Null or zero once the Audio Unit is gone.
 void* op_au_engine(void* instance);
 uint32_t op_au_param_count(void* instance);

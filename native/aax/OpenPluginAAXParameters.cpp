@@ -293,6 +293,7 @@ public:
         if (op_shell_save_state(state_.engine, nullptr, 0, &needed) != OP_STATE_TOO_SMALL || needed == 0) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         const size_t bytes = state::encodedSize(needed);
         if (bytes == 0 || bytes > INT32_MAX) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        blobBytes_ = needed;  // the GetChunk that follows saves into a buffer of this size, once
         reserved_ = static_cast<uint32_t>(bytes);
         *size = reserved_;
         return AAX_SUCCESS;
@@ -302,8 +303,12 @@ public:
         if (id != state::kChunkId) return AAX_ERROR_INVALID_CHUNK_ID;
         state::Values values{};
         if (!collect(values)) return AAX_ERROR_INVALID_PARAMETER_ID;
+        // The engine first receives the parameter values this object holds, so the blob matches
+        // the values saved beside it even before any block has carried them.
+        for (uint32_t i = 0; state_.engine && i < values.count; ++i)
+            if (!op_shell_set_plain(state_.engine, i, values.plain[i])) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         std::vector<uint8_t> blob;
-        if (!saveBlob(values, blob)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
+        if (!saveBlob(blob)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         const size_t bytes = state::encodedSize(blob.size());
         if (bytes == 0 || bytes > reserved_) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
         if (!state::encode(values, blob.data(), blob.size(), reinterpret_cast<uint8_t*>(chunk->fData), bytes)) return AAX_ERROR_INCORRECT_CHUNK_SIZE;
@@ -320,6 +325,10 @@ public:
         if (!parse(chunk, values)) return AAX_ERROR_MALFORMED_CHUNK;
         return apply(values);
     }
+    // Pro Tools calls this often, for its Compare light. The values are compared first and a
+    // difference ends the call; only equal values cost a save, one, and nothing is written to
+    // the engine. A value the engine has not yet received from a block shows as a difference
+    // until the next block carries it.
     AAX_Result CompareActiveChunk(const AAX_SPlugInChunk* chunk, AAX_CBoolean* equal) const override {
         if (!chunk || !equal) return AAX_ERROR_NULL_ARGUMENT;
         // An id we do not know must not light the compare indicator.
@@ -330,15 +339,14 @@ public:
         *equal = false;
         state::Values stored{}, current{};
         if (!parse(chunk, stored) || !collect(current)) return AAX_SUCCESS;
-        bool same = stored.bypass == current.bypass && stored.count == current.count;
+        if (stored.bypass != current.bypass || stored.count != current.count) return AAX_SUCCESS;
         // A chunk of another parameter layout holds its values in its blob alone.
-        for (uint32_t i = 0; same && !stored.byBlob && i < current.count; ++i) same = stored.plain[i] == current.plain[i];
+        for (uint32_t i = 0; !stored.byBlob && i < current.count; ++i)
+            if (stored.plain[i] != current.plain[i]) return AAX_SUCCESS;
         // A version 2 chunk also names the plugin's own state; a version 1 chunk has none to compare.
-        if (same && stored.version == state::kVersion) {
-            std::vector<uint8_t> blob;
-            same = saveBlob(current, blob) && blob.size() == stored.blobSize && std::memcmp(blob.data(), stored.blob, blob.size()) == 0;
-        }
-        *equal = same;
+        std::vector<uint8_t> blob;
+        *equal = stored.version != state::kVersion ||
+                 (saveBlob(blob) && blob.size() == stored.blobSize && std::memcmp(blob.data(), stored.blob, blob.size()) == 0);
         return AAX_SUCCESS;
     }
     // Hooks for the proofs, which have no AAX controller.
@@ -464,28 +472,26 @@ public:
     }
 private:
     mutable std::atomic<uint32_t> reserved_{0};  // bytes the last GetChunkSize promised
-    // Saves the engine's state through the size-query protocol: ask for the size, allocate,
-    // save, and ask again if the state grew in between. The engine first receives the
-    // parameter values this object holds, so the blob matches the values saved beside it
-    // even before any block has carried them. Main thread only: it allocates.
-    bool saveBlob(const state::Values& values, std::vector<uint8_t>& blob) const {
+    mutable std::atomic<uint32_t> blobBytes_{0};  // the engine's state size at the last save or size answer
+    // Saves the engine's state in one call, into a buffer of the size the state had last
+    // time. Only a state that grew since costs another save, at the size the engine then
+    // asked for. Main thread only: it allocates.
+    bool saveBlob(std::vector<uint8_t>& blob) const {
         void* engine = state_.engine;
         if (!engine) return false;
-        for (uint32_t i = 0; i < values.count; ++i)
-            if (!op_shell_set_plain(engine, i, values.plain[i])) return false;
-        uint32_t needed = 0;
-        if (op_shell_save_state(engine, nullptr, 0, &needed) != OP_STATE_TOO_SMALL) return false;
-        for (int attempt = 0; attempt < 8 && needed > 0; ++attempt) {
-            blob.assign(needed, 0);
+        uint32_t size = blobBytes_;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            blob.assign(size, 0);
             uint32_t written = 0;
-            const uint32_t result = op_shell_save_state(engine, blob.data(), static_cast<uint32_t>(blob.size()), &written);
+            const uint32_t result = op_shell_save_state(engine, blob.data(), size, &written);
             if (result == OP_STATE_OK) {
                 if (written == 0 || written > blob.size()) return false;
                 blob.resize(written);
+                blobBytes_ = written;
                 return true;
             }
-            if (result != OP_STATE_TOO_SMALL) return false;
-            needed = written;
+            if (result != OP_STATE_TOO_SMALL || written == 0) return false;
+            size = written;
         }
         return false;
     }

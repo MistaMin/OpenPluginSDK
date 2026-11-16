@@ -123,11 +123,34 @@ struct MuBase : ausdk::MusicDeviceBase {
 // here for the next render. A spin lock held for one copy, no allocation.
 class EventQueue {
 public:
+    // A full queue makes room: the oldest parameter event goes (a later one, or the unit's
+    // own value, stands in for it), else the oldest event that is not a note-off. Only a
+    // queue of nothing but note-offs refuses the new event. Every loss is counted.
     bool push(const OpEvent& event) {
         Hold hold(flag_);
-        if (count_ >= OP_MAX_EVENTS) return false;
+        if (count_ >= OP_MAX_EVENTS) {
+            ++dropped_;
+            uint32_t victim = count_;
+            for (uint32_t i = 0; i < count_; ++i) {
+                if (events_[i].kind == OP_EVENT_PARAM_PLAIN) {
+                    victim = i;
+                    break;
+                }
+                if (victim == count_ && events_[i].kind != OP_EVENT_NOTE_OFF) victim = i;
+            }
+            if (victim == count_) return false;
+            std::memmove(&events_[victim], &events_[victim + 1], (count_ - victim - 1) * sizeof(OpEvent));
+            --count_;
+        }
         events_[count_++] = event;
         return true;
+    }
+    // Events lost to a full queue since the last call.
+    uint32_t takeDropped() {
+        Hold hold(flag_);
+        const uint32_t dropped = dropped_;
+        dropped_ = 0;
+        return dropped;
     }
     uint32_t drain(OpEvent* out) {
         Hold hold(flag_);
@@ -152,6 +175,7 @@ private:
     };
     std::atomic_flag flag_;
     uint32_t count_ = 0;
+    uint32_t dropped_ = 0;
     OpEvent events_[OP_MAX_EVENTS];
 };
 
@@ -270,6 +294,11 @@ public:
             return noErr;
         }
 #endif
+        if (scope == kAudioUnitScope_Global && id == kOpenPluginAUProperty_EventsDropped) {
+            size = sizeof(UInt32);
+            writable = false;
+            return noErr;
+        }
         // The plugin's own parameter text; the parameter id travels in the struct.
         if (id == kAudioUnitProperty_ParameterStringFromValue) {
             size = sizeof(AudioUnitParameterStringFromValue);
@@ -322,6 +351,10 @@ public:
             return noErr;
         }
 #endif
+        if (scope == kAudioUnitScope_Global && id == kOpenPluginAUProperty_EventsDropped) {
+            *static_cast<UInt32*>(data) = events_.takeDropped();
+            return noErr;
+        }
         if (id == kAudioUnitProperty_ParameterStringFromValue) {
             auto* request = static_cast<AudioUnitParameterStringFromValue*>(data);
             const int index = indexOf(request->inParamID);
