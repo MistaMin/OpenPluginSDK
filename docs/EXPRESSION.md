@@ -4,10 +4,10 @@ Roadmap 0.7 task 4. A host can bend, press, brighten, pan or swell one note of a
 
 | Format | What arrives | How |
 |---|---|---|
-| CLAP | note ids on note-on and note-off, `CLAP_EVENT_NOTE_EXPRESSION` (all seven ids), `CLAP_EVENT_PARAM_MOD` | Rust entry, `crates/openplugin-targets/src/clap.rs` |
+| CLAP | note ids on note-on and note-off, `CLAP_EVENT_NOTE_EXPRESSION` (all seven ids), `CLAP_EVENT_PARAM_MOD`; out: `voice-info` and `CLAP_EVENT_NOTE_END` | Rust entry, `crates/openplugin-targets/src/clap.rs` |
 | CLAP (MIDI dialect), LV2 | MPE over MIDI | the shared `MpeReceiver` |
 | VST3 | note ids, `kNoteExpressionValueEvent`; `INoteExpressionController` and `INoteExpressionPhysicalUIMapping` on the controller | shell ABI 7 ([SHELL.md](SHELL.md#per-note-expression-abi-7)) |
-| Audio Unit, AAX | MPE over MIDI | the shells pass MIDI as before; the library runs the `MpeReceiver` |
+| Audio Unit, AAX | MPE over MIDI; the Audio Unit reports `kAudioUnitProperty_SupportsMPE` | the shells pass MIDI as before; the library runs the `MpeReceiver` |
 
 Not checked in a DAW yet: the proofs below are fake hosts.
 
@@ -16,7 +16,7 @@ Not checked in a DAW yet: the proofs below are fake hosts.
 Opt in; a plugin that does not sees exactly what it saw before.
 
 ```rust,ignore
-use openplugin::core::{Expression, ExpressionSet, MpeZones, NoteRef, ParamFlags, ParamInfo, Plugin, Unit};
+use openplugin::core::{Expression, ExpressionSet, MpeZones, NoteRef, ParamFlags, ParamInfo, Plugin, Unit, VoiceInfo};
 use openplugin::dsp::VoiceAllocator;
 
 static PARAMS: [ParamInfo; 1] = [
@@ -42,6 +42,9 @@ impl Plugin for Synth {
     fn param_modulation(&mut self, _offset: usize, index: usize, note: NoteRef, amount: f32) {
         if index == TONE { self.voices.poly_modulation(note, 0, amount); }
     }
+    // CLAP voice-info, and CLAP_EVENT_NOTE_END for each voice that has ended.
+    fn voice_info(&self) -> Option<VoiceInfo> { Some(self.voices.voice_info()) }
+    fn pull_note_end(&mut self) -> Option<NoteRef> { self.voices.pop_ended() }
 }
 ```
 
@@ -52,6 +55,15 @@ Each voice then reads `voice.pitch()` (its tuning included), `voice.expression(E
 - **Values** are in CLAP's units (`Expression::range`): volume a linear gain `0..=4` (1 is unity), pan `0` left to `1` right, tuning `-120..=120` semitones, the rest `0..=1`. Every entry clamps and drops NaN and infinities before the plugin sees them. A value is a statement, not a step: it replaces the last one.
 - **Smoothing**: `NoteExpressions` (one per voice in `VoiceAllocator`, usable on its own) ramps each value linearly over `set_expression_smoothing` (5 ms by default) as `Voice::advance` runs, like the glide. A value sent before the voice has played a sample (at the note-on's own sample, or MPE's initial state) is taken at once, so the note starts there.
 - **Modulation**: `ParamFlags::MODULATABLE` is whole-plugin modulation only (`note` is `NoteRef::ALL`); `ParamFlags::POLY_MODULATION` adds per note id, key, channel and port. The amount is in the parameter's plain units, clamped to its span, and never moves or saves the parameter's value.
+
+## Voices and note ends
+
+A host that models the plugin's voices (to send polyphonic modulation, say) needs to know how many there are and when each one stops sounding:
+
+- `Plugin::voice_info` (default `None`) returns a `VoiceInfo { count, capacity, overlapping_notes }`. The CLAP entry offers `voice-info` only when it is `Some`, and reads it each time the host calls `get` (main thread), so a polyphony setting shows at the host's next look. `VoiceAllocator::voice_info` gives the voices new notes may use (`set_max_voices`; 1 in mono and legato) and `N`; notes do not overlap, since a key held again on the same channel retriggers its voice.
+- `Plugin::pull_note_end` (default `None`) hands over one ended note at a time. After every block the CLAP entry drains it and sends each as `CLAP_EVENT_NOTE_END` with the note-on's note id, port, channel and key, at the block's last sample and after the block's MIDI output, so the events stay in time order. With no output list, or a full one, the ends of that block are dropped rather than sent late. Nothing allocates.
+- `VoiceAllocator` keeps the list (`pop_ended`, at most `ENDED_CAPACITY` = 64 waiting): a note ends when its voice is freed after its release, or when the voice is taken for a different note (stolen, a same-note tail reused, a mono or legato change, a held key retriggered with a new note id). A key retriggered with the same note does not end. `reset` clears the list along with the voices, since a host that resets the plugin forgets its notes itself. A note from MIDI or MPE ends with id `-1` and its channel and key.
+- The Audio Unit shell reports `kAudioUnitProperty_SupportsMPE` (global, read-only `UInt32`): 1 for a plugin whose `mpe_input` is `Some` and that has a note input, else 0. The library says so with the `OP_NOTE_PORT_MPE` bit of `op_shell_note_ports` ([SHELL.md](SHELL.md#per-note-expression-abi-7)).
 
 ## MPE
 
@@ -70,10 +82,11 @@ With VST3, a note that carries a note id is never fed to MPE: the host addresses
 
 - `examples/expression_synth/tests/formats.rs`: CLAP note expressions, CLAP polyphonic modulation (and its flags), MPE over CLAP's MIDI dialect, MPE through the LV2 entry, the shell ABI with note ids and expressions and with MPE over plain MIDI (the Audio Unit and AAX path), the ABI 7 description calls; each with a negative control and hostile input; no allocation in any of those audio paths (counting allocator); the conformance kit.
 - `native/vst3/expression_host.cpp` (`vst3_expression_proof`): the VST3 shell over Expression Synth. Reads `INoteExpressionController` (seven types, titles, units, defaults, bipolar flags, text both ways) and the physical UI mapping, plays notes with ids 1 and 2, and measures with the Goertzel algorithm that pressure, brightness and tuning sent for id 1 change only that voice's partials; id 99 changes nothing; no `operator new` in `process`.
+- Voices and note ends: in `formats.rs`, CLAP `voice-info` reads 8 of 8; two notes with ids, ports and channels, one released: exactly one `NOTE_END` with that note's id, port, channel and key, and none for the held one (the negative control) until it is released; a stolen voice and an MPE note each end once; ends from blocks with no output list are not sent later; the NOTE_END path is inside the no-allocation measurement. `au_mpe_proof` and `au_mpe_proof_off` (`native/au/mpe_host.cpp`) read `SupportsMPE` from the shell over Expression Synth (1) and over the example (0), before and after `Initialize`, and check that a host cannot set it. clap-validator passes on both examples (CI's `clap-validator` job).
 - Unit tests: `crates/openplugin-core/src/mpe.rs` (zones, both zones, pitch bend range changes, master messages, a channel with no zone, hostile bytes), `expression.rs`, `crates/openplugin-dsp/src/voice.rs` and `voice_alloc.rs`.
 
 ## Not done
 
-- CLAP `voice-info` and `CLAP_EVENT_NOTE_END` (telling the host a voice ended) are not sent; some hosts use them to decide whether to send polyphonic modulation.
 - VST3 has no polyphonic parameter modulation in its API; `NoteOnEvent::tuning` (cents at note-on) is not carried.
-- The Audio Unit (`kAudioUnitProperty_SupportsMPE`) and AAX do not declare MPE support to the host; MPE reaches the plugin when the host sends it.
+- AAX does not declare MPE support to the host (it has no such property); MPE reaches the plugin when the host sends it.
+- `CLAP_EVENT_NOTE_END` carries the block's last sample, not the sample the voice ended on. `voice-info` changes are not announced (`clap_host_voice_info::changed`); the host sees them when it next asks.

@@ -893,6 +893,7 @@ fn process_block(instance: &mut Instance, process: *const clap_process) -> i32 {
             let count = instance.sched_count;
             apply_group(instance, 0, count);
         }
+        drain_note_ends(instance, process.out_events, 0);
         watch_latency(instance);
         watch_tail(instance);
         return PROCESS_CONTINUE;
@@ -938,6 +939,7 @@ fn process_block(instance: &mut Instance, process: *const clap_process) -> i32 {
     if !process.out_events.is_null() {
         drain_midi(instance, process.out_events);
     }
+    drain_note_ends(instance, process.out_events, process.frames_count.saturating_sub(1));
     PROCESS_CONTINUE
 }
 
@@ -961,13 +963,20 @@ fn port_type_ptr(layout: SpeakerLayout) -> *const c_char {
     bytes.as_ptr() as *const c_char
 }
 
-fn write_audio_port(info: &mut clap_audio_port_info, id: u32, name: &str, layout: SpeakerLayout, main: bool) {
+/// `paired`: the main port on the other side exists, so the main ports are an in-place
+/// pair. An instrument (no audio input) has no pair for its output.
+fn write_audio_port(info: &mut clap_audio_port_info, id: u32, name: &str, layout: SpeakerLayout, main: bool, paired: bool) {
     info.id = id;
     copy_cstr(&mut info.name, name);
     info.flags = if main { AUDIO_PORT_IS_MAIN } else { 0 };
     info.channel_count = layout.channels().unwrap_or(0) as u32;
     info.port_type = port_type_ptr(layout);
-    info.in_place_pair = if main { id } else { CLAP_INVALID_ID };
+    info.in_place_pair = if main && paired { id } else { CLAP_INVALID_ID };
+}
+
+/// Whether the main port opposite a main port on `is_input`'s side exists.
+fn main_pair_exists(layout: IoConfig, is_input: bool) -> bool {
+    if is_input { layout.output != SpeakerLayout::Absent } else { layout.input != SpeakerLayout::Absent }
 }
 
 fn layout_port(layout: IoConfig, is_input: bool, index: u32) -> Option<(u32, &'static str, SpeakerLayout, bool)> {
@@ -1013,12 +1022,13 @@ unsafe extern "C" fn audio_ports_get(plugin: *const clap_plugin, index: u32, is_
         if info.is_null() {
             return false;
         }
-        let Some((id, name, layout, main)) = layout_port(selected_layout(instance), is_input, index) else {
+        let selected = selected_layout(instance);
+        let Some((id, name, layout, main)) = layout_port(selected, is_input, index) else {
             return false;
         };
         unsafe {
             std::ptr::write_bytes(info, 0, 1);
-            write_audio_port(&mut *info, id, name, layout, main);
+            write_audio_port(&mut *info, id, name, layout, main, main_pair_exists(selected, is_input));
         }
         true
     })
@@ -1559,6 +1569,39 @@ fn drain_midi(instance: &mut Instance, out: *const clap_output_events) {
     }
 }
 
+/// The most `CLAP_EVENT_NOTE_END` events one block sends.
+const MAX_NOTE_ENDS: usize = 4096;
+
+/// Every voice the plugin says has ended ([`Plugin::pull_note_end`]) as a
+/// `CLAP_EVENT_NOTE_END` at `time`, the block's last sample, after its MIDI output so
+/// the events stay in time order. A plugin's queue is drained even with no output list
+/// or a full one, so a later block never reports a stale end (up to [`MAX_NOTE_ENDS`]).
+/// No allocation.
+fn drain_note_ends(instance: &mut Instance, out: *const clap_output_events, time: u32) {
+    let push = if out.is_null() { None } else { unsafe { (*out).try_push } };
+    let mut open = push.is_some();
+    // Bounded, so a plugin that never returns None cannot hold the audio thread.
+    for _ in 0..MAX_NOTE_ENDS {
+        let Some(note) = instance.inner.pull_note_end() else { break };
+        let Some(push) = push.filter(|_| open) else { continue };
+        let event = clap_event_note {
+            header: clap_event_header {
+                size: std::mem::size_of::<clap_event_note>() as u32,
+                time,
+                space_id: 0,
+                type_: EVENT_NOTE_END,
+                flags: 0,
+            },
+            note_id: note.id,
+            port_index: note.port,
+            channel: note.channel,
+            key: note.key,
+            velocity: 0.0,
+        };
+        open = unsafe { push(out, &event.header) };
+    }
+}
+
 fn release_offline_momentary(instance: &mut Instance, offline: bool) {
     if !offline {
         return;
@@ -1581,6 +1624,24 @@ unsafe extern "C" fn tail_get(plugin: *const clap_plugin) -> u32 {
 }
 
 static TAIL: clap_plugin_tail = clap_plugin_tail { get: Some(tail_get) };
+
+/// `voice-info.get` (main thread): [`Plugin::voice_info`], read each time the host asks.
+/// The capacity is never below the count.
+unsafe extern "C" fn voice_info_get(plugin: *const clap_plugin, info: *mut clap_voice_info) -> bool {
+    guarded(std::ptr::null(), false, || {
+        if info.is_null() {
+            return false;
+        }
+        let Some(voices) = instance(plugin).and_then(|item| item.inner.voice_info()) else { return false };
+        let flags = if voices.overlapping_notes { VOICE_INFO_SUPPORTS_OVERLAPPING_NOTES } else { 0 };
+        unsafe {
+            info.write(clap_voice_info { voice_count: voices.count, voice_capacity: voices.capacity.max(voices.count), flags });
+        }
+        true
+    })
+}
+
+static VOICE_INFO: clap_plugin_voice_info = clap_plugin_voice_info { get: Some(voice_info_get) };
 
 /// Whether CLAP can describe every bus of `layout`: a surround bus must use only the
 /// `CLAP_SURROUND_*` channel ids (`SpeakerLayout::clap_expressible`). The beds with top side
@@ -1691,7 +1752,7 @@ unsafe extern "C" fn config_info_get(
         };
         unsafe {
             std::ptr::write_bytes(info, 0, 1);
-            write_audio_port(&mut *info, id, name, speakers, main);
+            write_audio_port(&mut *info, id, name, speakers, main, main_pair_exists(layout, is_input));
         }
         true
     })
@@ -1836,6 +1897,13 @@ unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_c
                 return std::ptr::null();
             }
             return &TAIL as *const clap_plugin_tail as *const c_void;
+        }
+        if id == EXT_VOICE_INFO {
+            // Offered only to a plugin that describes its voices.
+            if instance(plugin).is_some_and(|item| item.inner.voice_info().is_some()) {
+                return &VOICE_INFO as *const clap_plugin_voice_info as *const c_void;
+            }
+            return std::ptr::null();
         }
         if id == EXT_AUDIO_PORTS_CONFIG {
             return &AUDIO_PORTS_CONFIG as *const clap_plugin_audio_ports_config as *const c_void;
@@ -3390,6 +3458,26 @@ mod tests {
         let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
         let ext = unsafe { plugin_extension(adapter.as_plugin(), EXT_GUI.as_ptr() as *const c_char) };
         assert!(ext.is_null());
+    }
+
+    #[test]
+    fn an_effect_pairs_its_main_ports_in_place() {
+        let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
+        let plugin = adapter.as_plugin();
+        for is_input in [true, false] {
+            let mut info = unsafe { std::mem::zeroed::<clap_audio_port_info>() };
+            assert!(unsafe { audio_ports_get(plugin, 0, is_input, &mut info) });
+            assert_eq!(info.in_place_pair, 0);
+        }
+    }
+
+    #[test]
+    fn no_voice_info_for_a_plugin_that_does_not_describe_its_voices() {
+        let adapter = ClapAdapter::new(Gain { db: 0.0, linear: 1.0 });
+        let ext = unsafe { plugin_extension(adapter.as_plugin(), EXT_VOICE_INFO.as_ptr() as *const c_char) };
+        assert!(ext.is_null());
+        // CLAP 1.2 `clap_voice_info`: two uint32 and a uint64.
+        assert_eq!(std::mem::size_of::<clap_voice_info>(), 16);
     }
 
     /// Sizes measured with clang on this aarch64 macOS host against CLAP 1.2.

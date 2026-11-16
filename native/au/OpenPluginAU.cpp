@@ -195,7 +195,9 @@ public:
             // aumu is the instrument; aufx and aumf are both audio effects (an aumf also takes MIDI).
             kindOk_ = (kType == 1) == (kind == OP_KIND_INSTRUMENT);
             hasMainIn_ = kind != OP_KIND_INSTRUMENT;
-            hasMidiOut_ = (op_shell_note_ports() & OP_NOTE_PORT_OUTPUT) != 0;
+            const uint32_t notePorts = op_shell_note_ports();
+            hasMidiOut_ = (notePorts & OP_NOTE_PORT_OUTPUT) != 0;
+            supportsMpe_ = (notePorts & OP_NOTE_PORT_MPE) != 0;
             const uint32_t count = op_shell_layout_count();
             for (uint32_t i = 0; i < count; ++i) {
                 OpLayout layout{};
@@ -276,6 +278,12 @@ public:
                 writable = false;
                 return noErr;
             }
+            // Whether the plugin takes MPE (Plugin::mpe_input), for every plugin: 0 says no.
+            if (id == kAudioUnitProperty_SupportsMPE) {
+                size = sizeof(UInt32);
+                writable = false;
+                return noErr;
+            }
             if (hasMidiOut_ && id == kAudioUnitProperty_MIDIOutputCallback) {
                 size = sizeof(AUMIDIOutputCallbackStruct);
                 writable = true;
@@ -327,6 +335,10 @@ public:
         if (scope == kAudioUnitScope_Global) {
             if (id == kAudioUnitProperty_OfflineRender) {
                 *static_cast<UInt32*>(data) = offline_.load(std::memory_order_relaxed) ? 1 : 0;
+                return noErr;
+            }
+            if (id == kAudioUnitProperty_SupportsMPE) {
+                *static_cast<UInt32*>(data) = supportsMpe_ ? 1 : 0;
                 return noErr;
             }
             if (hasMidiOut_ && id == kAudioUnitProperty_MIDIOutputCallbackInfo) {
@@ -1196,6 +1208,7 @@ private:
     bool kindOk_ = false;
     bool hasMainIn_ = true;
     bool hasMidiOut_ = false;
+    bool supportsMpe_ = false;
     bool hasSidechain_ = false;
     UInt32 scIndex_ = 1;
     std::vector<OpLayout> layouts_;

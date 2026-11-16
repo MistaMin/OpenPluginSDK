@@ -22,6 +22,12 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
 - The CLAP entry skips a parameter event whose `param_id` the plugin does not have. For a plugin without pins that is an id past the end of the table, which had no effect before either.
 - `native/CMakeLists.txt` asks the plugin for pinned Audio Unit codes at configure time (`au/kind_probe.c codes`). A plugin that pins codes gets them in its `Info.plist` when the build gives none, and a build that gives different codes stops. A plugin without pinned codes builds as before.
 - `openplugin-port scan` writes the pins: `.with_clap_id(n)`, `.with_vst3_id(n)` or `.with_au_id(n)` on every parameter when the source's ids are not positions, `fn vst3_ids` with the scanned class ids, and `fn au_ids` with the scanned codes (the build line then leaves `--au-subtype` and `--au-manufacturer` out). The `TODO(porting task 2)` lines are gone; an id a format cannot carry gets a `TODO` that says why. `openplugin-port` now depends on `openplugin-core`.
+- CLAP `voice-info` and `CLAP_EVENT_NOTE_END` (0.7 task 4): `VoiceInfo`, `Plugin::voice_info` and `Plugin::pull_note_end` in core (defaulted to `None`, so nothing changes for a plugin that does not opt in); `VoiceAllocator::voice_info`, `pop_ended`, `ended_len` and `ENDED_CAPACITY` in `openplugin-dsp`. The CLAP entry offers `voice-info` and sends one `NOTE_END` per ended voice after each block, without allocating. Expression Synth uses both and is now also a `cdylib`, which CI's clap-validator job checks.
+- The Audio Unit shell reports `kAudioUnitProperty_SupportsMPE`, from the new `OP_NOTE_PORT_MPE` bit of `op_shell_note_ports` (set for a plugin whose `mpe_input` is `Some`; a library without it reads as no MPE). Proven by `au_mpe_proof` and `au_mpe_proof_off`.
+
+### Fixed
+
+- CLAP: an instrument's audio output named input port 0 as its in-place pair, though it has no input port; clap-validator failed its two out-of-place processing tests on Expression Synth. The main ports are now a pair only when both exist.
 
 ## [1.0.0-beta] - 2026-11-16
 

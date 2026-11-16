@@ -21,6 +21,9 @@
 //! with the Lower Zone of 15 member channels; CLAP note expressions and VST3
 //! note expressions address voices by note id.
 //!
+//! It describes its voices to a CLAP host (`voice-info`) and tells it when
+//! each one ends (`CLAP_EVENT_NOTE_END`), from the allocator's ended list.
+//!
 //! The editor state is a [`VoiceView`]: what each voice plays, published
 //! after every block with atomics (no lock, no allocation). The format
 //! proofs in `tests/` read it; an editor could draw it.
@@ -30,7 +33,7 @@ use std::sync::Arc;
 
 use openplugin::core::{
     Category, EditorState, Expression, ExpressionSet, IoConfig, MpeZones, NotePorts, NoteRef, ParamFlags, ParamInfo,
-    Plugin, PluginInfo, SpeakerLayout, Unit,
+    Plugin, PluginInfo, SpeakerLayout, Unit, VoiceInfo,
 };
 use openplugin::dsp::{Voice, VoiceAllocator, VoicePhase};
 
@@ -274,6 +277,16 @@ impl Plugin for ExpressionSynth {
 
     fn mpe_input(&self) -> Option<MpeZones> {
         Some(MpeZones::LOWER_15)
+    }
+
+    /// CLAP `voice-info`: eight voices.
+    fn voice_info(&self) -> Option<VoiceInfo> {
+        Some(self.voices.voice_info())
+    }
+
+    /// CLAP `NOTE_END`: each voice whose release has finished, or that was taken for another note.
+    fn pull_note_end(&mut self) -> Option<NoteRef> {
+        self.voices.pop_ended()
     }
 
     fn editor_state(&self) -> Option<EditorState> {

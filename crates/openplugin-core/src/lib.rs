@@ -42,7 +42,7 @@ pub use editor::{
     Editor, EditorFactory, EditorHost, EditorState, Frame, Gesture, GestureQueue, ParamMenu,
     ParamMenuAction, ValueMirror,
 };
-pub use expression::{Expression, ExpressionSet, NoteRef};
+pub use expression::{Expression, ExpressionSet, NoteRef, VoiceInfo};
 pub use identity::{AuIds, ParamIdMap, ParamPins, PinError, PinFormat, Vst3Ids};
 pub use mpe::{MpeReceiver, MpeZones};
 pub use notify::HostNotifier;
@@ -853,6 +853,26 @@ pub trait Plugin: Send + 'static {
     /// the parameter's range either way. Modulation is not saved and does not
     /// move the parameter's value.
     fn param_modulation(&mut self, _offset: usize, _index: usize, _note: NoteRef, _amount: f32) {}
+
+    /// The plugin's voices, for a host that asks (CLAP `voice-info`). The
+    /// default `None` offers nothing, as before. Called on the main thread,
+    /// each time the host asks, like [`Self::latency`]; `openplugin_dsp`'s
+    /// `VoiceAllocator::voice_info` gives the answer for its voices.
+    fn voice_info(&self) -> Option<VoiceInfo> {
+        None
+    }
+
+    /// One voice that has finished since the last call, as the [`NoteRef`]
+    /// its note-on carried (note id, port, channel, key); `None` ends the
+    /// drain. The CLAP entry calls it after every block (audio thread, so it
+    /// must not allocate) and sends each as `CLAP_EVENT_NOTE_END`, which
+    /// tells the host it can stop modulating that note. A voice ends when its
+    /// release is over, or when it is taken for another note.
+    /// `openplugin_dsp`'s `VoiceAllocator::pop_ended` keeps that list for its
+    /// voices. The default `None` sends nothing, as before.
+    fn pull_note_end(&mut self) -> Option<NoteRef> {
+        None
+    }
 
     /// Whether the format entries run the plugin with denormals flushed. The
     /// default `true` sets flush-to-zero (FZ on Arm, FTZ and DAZ on x86) for

@@ -209,6 +209,7 @@ pub use vocoder::{PhaseLocking, PitchShifter, TimeStretch, VocoderConfig};
 pub use voice::{NoteExpressions, Polyphony, SampleVoice, MOD_SLOTS};
 pub use voice_alloc::{
     Allocation, GlideMode, NoteOff, StealPolicy, Voice, VoiceAllocator, VoiceMode, VoicePhase,
+    ENDED_CAPACITY,
 };
 pub use wavetable::{WavetableError, WavetableOsc, WavetableSet};
 pub use window::{hann, WindowRms};
