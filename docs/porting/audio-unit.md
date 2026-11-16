@@ -36,7 +36,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | Audio Unit v2 | Audio Unit v3 | OpenPluginSDK | Notes |
 |---|---|---|---|
 | `GetParameterInfo` filling an `AudioUnitParameterInfo` | An `AUParameterTree` of `AUParameter`s | `static PARAMS: [ParamInfo; N]` | |
-| The `AudioUnitParameterID`, in the global scope | The `AUParameterAddress` | The position in the table | The shell numbers parameters `0..n` in table order. Hosts store automation by this id, so keep the old order |
+| The `AudioUnitParameterID`, in the global scope | The `AUParameterAddress` | The position in the table, or `ParamInfo::with_au_id` | The shell numbers parameters `0..n` in table order. Hosts store automation by this id, so keep the old order |
 | `minValue`, `maxValue`, `defaultValue` | `minValue`, `maxValue`, the initial `value` | `ParamInfo::new(id, name, min, max, default, unit)` | Plain values in both |
 | `unit`: `kAudioUnitParameterUnit_Decibels`, `_Hertz`, `_Milliseconds`, `_Percent`, `_Boolean`, `_Generic` | The same units | `Unit::Db`, `Unit::Hz`, `Unit::Ms`, `Unit::Percent`, `Unit::Toggle`, `Unit::None` | |
 | `kAudioUnitParameterUnit_Indexed` with `GetParameterValueStrings` | `valueStrings` | `.with_choices(&[...])` | |
@@ -330,7 +330,7 @@ That holds for a unit whose state was only its parameters. If the old unit added
 ## What has no counterpart yet
 
 - **A version 3 app extension.** The shell is a version 2 component. An iOS or sandboxed extension target is not built.
-- **Parameters outside the global scope**, and parameter ids that are not `0..n` in table order. Sparse or symbolic ids cannot be kept until porting task 2 in [ROADMAP.md](../ROADMAP.md).
+- **Parameters outside the global scope.** Parameter ids that are not `0..n` in table order are kept with `ParamInfo::with_au_id` (see [Identity pinning](../PORTING.md#identity-pinning)).
 - **Custom keys in the class info dictionary.** The old unit's own keys do not reach `load_state` through the Audio Unit shell. Same task.
 - **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`; the shell does not publish `kAudioUnitProperty_FactoryPresets`.
 - **True parameter ramps.** A ramped event arrives as steps 16 frames apart.

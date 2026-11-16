@@ -23,10 +23,7 @@ protected:
         OpShellInfo info{};
         if (!op_shell_info(&info)) return;
         ids_.resize(info.param_count);
-        for (uint32_t i = 0; i < info.param_count; ++i) {
-            OpParamDesc desc{};
-            if (op_shell_param(i, &desc)) ids_[i] = desc.id;
-        }
+        for (uint32_t i = 0; i < info.param_count; ++i) ids_[i] = openplugin_aax::shellParamId(i);
     }
     void CreateViewContainer() override {
         close();

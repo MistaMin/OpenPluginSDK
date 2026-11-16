@@ -1,39 +1,75 @@
 //! Versioned parameter snapshot and A/B compare.
 //!
-//! The blob is the parameter vector in descriptor order. Decode checks the
-//! whole buffer before it returns, which is the rule OpenGridder uses for a
-//! DAW state chunk: a corrupt document must not change a live value.
+//! Version 1 of the blob is the parameter vector in descriptor order. Version
+//! 2 names every value by its parameter's string id, so it survives a
+//! reordered or extended table; it is written for a table with identity pins
+//! ([`crate::identity::state_is_keyed`]) and read for any table. Decode checks
+//! the whole buffer before it returns, which is the rule OpenGridder uses for
+//! a DAW state chunk: a corrupt document must not change a live value.
 //! [`AbCompare`] saves the side being left, matching the insert's A/B switch.
 
+use crate::identity::{state_is_keyed, ParamIdMap, PinFormat};
 use crate::{Plugin, PluginInfo};
 
 pub const SNAPSHOT_MAGIC: &[u8; 4] = b"OPST";
+/// The positional snapshot: one value per parameter in descriptor order.
 pub const SNAPSHOT_VERSION: u16 = 1;
+/// The snapshot by parameter id: `u16` id length, the id's bytes and the
+/// value, once per parameter.
+pub const SNAPSHOT_VERSION_KEYED: u16 = 2;
 
 /// Encode one clamped value per parameter. `values` shorter than the descriptor
-/// is padded with defaults. Extra entries are ignored.
+/// is padded with defaults. Extra entries are ignored. A table without
+/// identity pins is written as version 1, as it always was; a pinned table as
+/// version 2.
 pub fn encode_params(info: &PluginInfo, values: &[f32]) -> Vec<u8> {
     let count = info.params.len();
-    let mut bytes = Vec::with_capacity(8 + count * 4);
+    let keyed = state_is_keyed(info.params);
+    let names: usize = if keyed { info.params.iter().map(|p| 2 + p.id.len()).sum() } else { 0 };
+    let mut bytes = Vec::with_capacity(8 + count * 4 + names);
     bytes.extend_from_slice(SNAPSHOT_MAGIC);
-    bytes.extend_from_slice(&SNAPSHOT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&(if keyed { SNAPSHOT_VERSION_KEYED } else { SNAPSHOT_VERSION }).to_le_bytes());
     bytes.extend_from_slice(&(count as u16).to_le_bytes());
     for (index, param) in info.params.iter().enumerate() {
         let raw = values.get(index).copied().unwrap_or(param.default);
+        if keyed {
+            bytes.extend_from_slice(&(param.id.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(param.id.as_bytes());
+        }
         bytes.extend_from_slice(&param.clamp(raw).to_le_bytes());
     }
     bytes
 }
 
-/// Structural check, then clamped values. A bad magic, version, count, or
-/// truncated tail returns `None` and does not invent a partial vector.
+/// Structural check, then clamped values in the order of `info.params`. A bad
+/// magic, version, count, or truncated tail returns `None` and does not invent
+/// a partial vector.
+///
+/// Version 1 into a table without pins: the count must match and the values
+/// are taken by position. Version 1 into a pinned table: the blob comes from a
+/// build made before the pins, in which a parameter's position was its
+/// numeric id, so value `i` goes to the parameter whose CLAP id is `i`
+/// (refused when there is none), and a parameter the old build did not have
+/// gets its default. Version 2 into any table: each parameter takes the value
+/// stored under its string id, or its default when the blob has none; values
+/// under ids the table does not have are dropped; a blob that names none of
+/// the table's parameters is refused as foreign.
 pub fn decode_params(info: &PluginInfo, bytes: &[u8]) -> Option<Vec<f32>> {
     if bytes.len() < 8 || &bytes[0..4] != SNAPSHOT_MAGIC {
         return None;
     }
     let version = u16::from_le_bytes([bytes[4], bytes[5]]);
     let count = u16::from_le_bytes([bytes[6], bytes[7]]) as usize;
-    if version != SNAPSHOT_VERSION || count != info.params.len() {
+    match version {
+        SNAPSHOT_VERSION if state_is_keyed(info.params) => decode_positional_into_keyed(info, count, &bytes[8..]),
+        SNAPSHOT_VERSION => decode_positional(info, count, bytes),
+        SNAPSHOT_VERSION_KEYED => decode_keyed(info, count, &bytes[8..]),
+        _ => None,
+    }
+}
+
+fn decode_positional(info: &PluginInfo, count: usize, bytes: &[u8]) -> Option<Vec<f32>> {
+    if count != info.params.len() {
         return None;
     }
     if bytes.len() != 8 + count * 4 {
@@ -49,6 +85,61 @@ pub fn decode_params(info: &PluginInfo, bytes: &[u8]) -> Option<Vec<f32>> {
         values.push(param.clamp(raw));
     }
     Some(values)
+}
+
+fn decode_positional_into_keyed(info: &PluginInfo, count: usize, body: &[u8]) -> Option<Vec<f32>> {
+    if count > info.params.len() || body.len() != count * 4 {
+        return None;
+    }
+    let old_ids = ParamIdMap::new(info.params, PinFormat::Clap);
+    let mut values: Vec<f32> = info.params.iter().map(|param| param.default).collect();
+    for (position, chunk) in body.chunks_exact(4).enumerate() {
+        let raw = f32::from_le_bytes(chunk.try_into().ok()?);
+        let index = old_ids.index(position as u32)?;
+        if !raw.is_finite() {
+            return None;
+        }
+        values[index] = info.params[index].clamp(raw);
+    }
+    Some(values)
+}
+
+fn decode_keyed(info: &PluginInfo, count: usize, body: &[u8]) -> Option<Vec<f32>> {
+    // Every entry is checked before any value is used. An entry is at least
+    // six bytes, so the list cannot outgrow the input.
+    let mut entries: Vec<(&[u8], f32)> = Vec::with_capacity(count.min(body.len() / 6));
+    let mut rest = body;
+    for _ in 0..count {
+        if rest.len() < 2 {
+            return None;
+        }
+        let length = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+        if length == 0 || rest.len() < 2 + length + 4 {
+            return None;
+        }
+        let raw = f32::from_le_bytes(rest[2 + length..2 + length + 4].try_into().ok()?);
+        if !raw.is_finite() {
+            return None;
+        }
+        entries.push((&rest[2..2 + length], raw));
+        rest = &rest[2 + length + 4..];
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    let mut found = 0usize;
+    let values: Vec<f32> = info
+        .params
+        .iter()
+        .map(|param| match entries.iter().find(|entry| entry.0 == param.id.as_bytes()) {
+            Some(entry) => {
+                found += 1;
+                param.clamp(entry.1)
+            }
+            None => param.default,
+        })
+        .collect();
+    (found > 0 || (info.params.is_empty() && entries.is_empty())).then_some(values)
 }
 
 pub const SESSION_MAGIC: &[u8; 4] = b"OPCH";

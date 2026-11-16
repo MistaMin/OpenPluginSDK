@@ -4,6 +4,7 @@
 // the plugin's own text (not the normalized number) is visible.
 #pragma once
 #include "op_shell.h"
+#include "stub_identity.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

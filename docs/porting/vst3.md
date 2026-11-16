@@ -38,7 +38,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | VST3 SDK | OpenPluginSDK | Notes |
 |---|---|---|
 | `parameters.addParameter(...)`, `RangeParameter` | `static PARAMS: [ParamInfo; N]` with `ParamInfo::new(id, name, min, max, default, unit)` | |
-| The `ParamID` tag | The position in the table | The shell numbers parameters `0..n` in table order. Keep the old order; a plugin whose tags were not `0..n` cannot keep them yet |
+| The `ParamID` tag | The position in the table, or `ParamInfo::with_vst3_id` | The shell numbers parameters `0..n` in table order. Keep the old order; ids that were not `0..n` are kept with `ParamInfo::with_vst3_id` |
 | `StringListParameter`, `ParameterInfo::kIsList` | `.with_choices(&[...])` | The value is the index |
 | `ParameterInfo::stepCount` | `.with_steps(step_count + 1)` | Positions including both ends |
 | `kCanAutomate` | The default | |
@@ -295,7 +295,7 @@ What moved where:
 
 ## What has no counterpart yet
 
-- **Setting the class ids and the parameter tags.** The SDK derives the processor and controller class ids from `PluginInfo::id` and numbers parameters by table position. Until porting task 2 in [ROADMAP.md](../ROADMAP.md) is done, a host treats the port as a new plugin: old projects do not find it and old automation does not attach to it.
+- **A single-component plugin stays two classes.** The class ids and the parameter tags carry over (`Plugin::vst3_ids`, `ParamInfo::with_vst3_id`; see [Identity pinning](../PORTING.md#identity-pinning)), so a host finds the port in old projects and old automation attaches to it. The SDK always writes a processor and a controller class; a port of a single-component plugin pins the processor id (`Vst3Ids::processor_from_hex`).
 - **Reading the old component state in VST3.** The shell accepts only state it wrote itself, so the old plugin's bytes reach `load_state` only through CLAP. Same task.
 - **Custom curves between normalised and plain values.** `Taper` is linear or logarithmic.
 - **Custom value text.** A parameter prints and parses by its `Unit` and its choice names.

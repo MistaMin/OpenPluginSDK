@@ -12,7 +12,7 @@ The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin
 
 | Area | State |
 |---|---|
-| Formats | CLAP and LV2 are Rust entries on macOS, Windows and Linux. VST3, Audio Unit and AAX are C++ shells over the Rust `op_shell_*` ABI (version 7): VST3 and AAX on macOS and Windows, the Audio Unit on macOS. Every format carries notes, MIDI out, transport, sidechain, layouts in one channel order, offline, parameter groups, state, latency and tail, and tells the host about changes (0.6). |
+| Formats | CLAP and LV2 are Rust entries on macOS, Windows and Linux. VST3, Audio Unit and AAX are C++ shells over the Rust `op_shell_*` ABI (version 8): VST3 and AAX on macOS and Windows, the Audio Unit on macOS. Every format carries notes, MIDI out, transport, sidechain, layouts in one channel order, offline, parameter groups, state, latency and tail, and tells the host about changes (0.6). |
 | Editor | One Rust `Editor` in every format, resizable, with hit-testing, keyboard focus, damage-only repaint, design-file editors, the host parameter menu, typing a value, tooltips, file drops and accessibility (0.5, 0.7). Views: `NSView` on macOS, HWND with UI Automation on Windows, X11 on Linux (X11 under XWayland on Wayland). |
 | Drawing | GoodLookin DRI 0.2: lit knobs by default, `SceneCanvas` with a cached plate layer and damaged-rectangle repaint. |
 | Proofs | Unit, hostile-input and no-allocation suites in every format; the native VST3, AU and AAX shell proofs; format parity sample for sample across all five formats; `clap-validator`, `lv2_validate`, lilv, `auval -strict`, pluginval at strictness 10 and Avid's AAX Validator (locally). CI runs the workspace and the headless proofs on macOS, Linux and Windows. Host runs: REAPER and OpenGrid9 on macOS, Pro Tools with AAX on macOS, REAPER on Windows ([HOST_TESTS.md](HOST_TESTS.md)). |
@@ -148,7 +148,6 @@ Remaining 1.0 work, open:
 
 - **API documentation** (task 3): `missing_docs` on every public item, compiled doc examples, docs.rs metadata.
 - **The API freeze**, applied from the decisions in [API_REVIEW.md](API_REVIEW.md): renames, hidden items and removals as decided there.
-- **Identity pinning** (porting toolkit task 2): every ID a host stores set explicitly.
 - **Track info in LV2, the Audio Unit and AAX**, which today reaches only CLAP and VST3.
 - **CLAP `voice-info` and `NOTE_END`**, so a CLAP host knows the voice count and when a note ends.
 - **The Audio Unit's `SupportsMPE`**, so an AU host knows the plugin takes MPE.
@@ -209,7 +208,7 @@ A team moving a shipped plugin needs three things: the new build must load the o
 7. **C++ DSP bridge.** For teams that ship before rewriting, a documented pattern for calling existing C++ DSP from a Rust plugin through `cxx`, allocation rules included. This one is C++ by nature: its job is to reuse code a team already has, until it is rewritten in Rust.
 8. **Scaffolding.** `openplugin-port new --from manifest.toml` writes a plugin crate with the pinned identity, the parameter table, the state importer stub and the null test ready to run.
 
-Status: tasks 1 (`openplugin-port scan`), 3 (`openplugin-port capture` and `openplugin_core::foreign_state`: XML, plist, key-value and chunk readers with a documented import pattern), 4 (`openplugin-port null`), 5 (seven guides in `docs/porting/`, linked from `docs/PORTING.md`: iPlug2, DPF, nih-plug, JUCE and the raw VST3, CLAP and Audio Unit SDKs, each with concept tables and a worked port; every code block is a doc test of `examples/porting_guides` and each port runs the conformance kit) and 7 (`examples/cpp_bridge`, `docs/CPP_BRIDGE.md`) are done. The guides list what a port cannot carry over yet; the common items are in `docs/PORTING.md` and most wait on task 2. Task 6 needs the Faust compiler installed.
+Status: tasks 1 (`openplugin-port scan`), 2 (identity pins, `openplugin_core::identity`, on shell ABI 8: `Plugin::clap_id`, `vst3_ids` and `au_ids` beside `aax_ids` and `lv2_uri`; `ParamInfo::with_host_id` and the per-format forms; a pinned table is saved by parameter id; `scan` writes the pins; a project saved with one build reopens in a build with another parameter order through fake CLAP, VST3, Audio Unit and AAX hosts, with the unpinned builds as the negative control, see [PORTING.md](PORTING.md#identity-pinning)), 3 (`openplugin-port capture` and `openplugin_core::foreign_state`: XML, plist, key-value and chunk readers with a documented import pattern), 4 (`openplugin-port null`), 5 (seven guides in `docs/porting/`, linked from `docs/PORTING.md`: iPlug2, DPF, nih-plug, JUCE and the raw VST3, CLAP and Audio Unit SDKs, each with concept tables and a worked port; every code block is a doc test of `examples/porting_guides` and each port runs the conformance kit) and 7 (`examples/cpp_bridge`, `docs/CPP_BRIDGE.md`) are done. The guides list what a port cannot carry over yet; the common items are in `docs/PORTING.md`. Identity is no longer one of them (task 2). Task 6 needs the Faust compiler installed. Left of task 2: a session in a real DAW (the proofs are fake hosts); the AAX proof runs only where the AAX SDK is (not in CI).
 
 ## After 1.0
 

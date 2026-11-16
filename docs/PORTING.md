@@ -2,7 +2,7 @@
 
 `openplugin-port` is a set of tools for moving a plugin that already ships in CLAP, VST3, Audio Unit or AAX onto OpenPluginSDK without losing what its users depend on: the same parameters, in the same ranges, with the same identity, so sessions and presets keep working. Each tool answers one question and writes something a person can read and check. None of them edits your plugin or installs anything.
 
-Today the toolkit has three tools: the scanner (porting task 1), which answers "what is this plugin?", the null test (porting task 4), which answers "does the port sound the same?", and the state import (porting task 3), which answers "will the port open the old plugin's sessions and presets?". The tasks that follow build on the scanner's manifest.
+Today the toolkit has three tools and one piece of the SDK itself: the scanner (porting task 1), which answers "what is this plugin?", identity pinning (porting task 2), which makes the port the same plugin to a host, the null test (porting task 4), which answers "does the port sound the same?", and the state import (porting task 3), which answers "will the port open the old plugin's sessions and presets?". The tasks that follow build on the scanner's manifest.
 
 The [porting guides](#porting-guides) (porting task 5) say how to write the port itself: one guide for each SDK a plugin is likely to come from, mapping its concepts onto this SDK's, with a small effect ported in full.
 
@@ -14,7 +14,7 @@ Shipping before the DSP is rewritten? [CPP_BRIDGE.md](CPP_BRIDGE.md) shows how t
 | 4 | `null`: render the original and the port through the same input and automation and compare | [The null test](#the-null-test) |
 | 3 | `capture` and `openplugin_core::foreign_state`: save the old plugin's state for each preset, and read the containers it is made of | [Foreign state import](#foreign-state-import) |
 | 5 | Guides: iPlug2, DPF, nih-plug, JUCE and the raw VST3, CLAP and Audio Unit SDKs mapped onto this SDK, each with a worked port | [Porting guides](#porting-guides) |
-| 2 | Pin identity the SDK derives today (explicit VST3 parameter ids, class ids) | later; the scanner marks each spot with a `TODO(porting task 2)` |
+| 2 | Identity pins: every id a host stores, set explicitly (`openplugin_core::identity`); the scanner writes them | [Identity pinning](#identity-pinning) |
 
 ## Porting guides
 
@@ -54,8 +54,8 @@ Still on C++ DSP? [CPP_BRIDGE.md](CPP_BRIDGE.md) lets the port ship first and th
 
 Each guide lists what its SDK has that this one lacks. The ones that matter for every port:
 
-- **The old plugin's identity outside CLAP, LV2 and the Audio Unit.** The CLAP id is `PluginInfo::id`, the LV2 URI is `Plugin::lv2_uri`, and the Audio Unit subtype and manufacturer codes are build options, so those carry over. The VST3 class ids are derived from `PluginInfo::id`, and parameters are numbered by table position in CLAP, VST3 and the Audio Unit, so a plugin whose parameter ids were not `0..n` in order cannot keep them. This is porting task 2.
-- **The old plugin's saved state through the shells.** The CLAP entry hands `load_state` the stream as the host stored it, for a plugin that saves a chunk of its own. The VST3, Audio Unit and AAX shells accept only state they wrote themselves; the Audio Unit shell does restore the parameters of a dictionary the old unit's base class wrote. Also porting task 2.
+- **The old plugin's identity** is no longer on this list: every id a host stores can be pinned ([Identity pinning](#identity-pinning)).
+- **The old plugin's saved state through the shells.** The CLAP entry hands `load_state` the stream as the host stored it, for a plugin that saves a chunk of its own. The VST3, Audio Unit and AAX shells accept only state they wrote themselves; the Audio Unit shell does restore the parameters of a dictionary the old unit's base class wrote.
 - **Parameter values in a plugin's own chunk.** A plugin whose `save_state` returns a chunk has that chunk stored alone by the CLAP entry, and stored beside the parameter values by the shells. Until the entries agree, a chunk must hold the parameter values too.
 - **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`; no format entry publishes a program list yet.
 - **Parameter travel other than linear and logarithmic, and custom value text.** `Taper` has two shapes, and a value prints and parses by its `Unit` and choice names.
@@ -192,13 +192,21 @@ Audio Unit latency and tail are seconds in the API; the manifest converts them t
 - **Taper.** The five sample points are compared with the line and the exponential curve (`min * (max / min)^t`, which is what `Taper::Log` does) through the end points. The curve is chosen when it fits (error at most 3% of the travel) and the line clearly does not (at least 8%). The series fitted is the plain values when they are not linear in the normalised position (VST3), else the numbers in the value strings. An Audio Unit flagged `log_display` is `Taper::Log`. Everything else is `Taper::Linear`, with a comment saying whether that was a fit or a guess because the plugin gave no usable text (CLAP and Audio Unit plain values are linear by construction, so only their value strings can reveal a curve).
 - **Flags.** `HIDDEN`, `READ_ONLY`, `BYPASS`, `NOT_REALTIME` map across. A parameter that is not automatable in the source and has none of those gets `NOT_REALTIME`, because the SDK has no other way to switch `AUTOMATABLE` off, and the comment says so.
 
-**`PluginInfo`.** Name, vendor, URL, e-mail, version, a `Category` chosen from the categories, `is_instrument`. `id` is the CLAP id when there is one; otherwise it is made from the vendor and name and the comment says that is a guess, because the SDK derives the VST3 class ids from it.
+**Parameter ids.** When the source's ids are the positions `0..n` in table order, the table needs no pins: that is how the SDK numbers an unpinned table. Otherwise every parameter gets the pin of the scanned format, `.with_clap_id(n)`, `.with_vst3_id(n)` or `.with_au_id(n)`, so the id stays with the parameter wherever it is in the table ([Identity pinning](#identity-pinning)). One scan knows one format's ids: scan the plugin's other formats too, and where a parameter has the same number in all three write `.with_host_id(n)`. An id a format cannot carry is not pinned and gets a `TODO` that says why; the usual one is the bypass parameter of a plugin built with this SDK, whose id (1113149523) is the one the VST3 shell's own bypass has.
 
-**Identity and build settings.** The command-line options for `scripts/build_plugin.sh` (`--name`, `--manufacturer`, `--version`, `--bundle-id`), the Audio Unit codes as the CMake cache variables `OP_AU_SUBTYPE` and `OP_AU_MANUFACTURER` (so `-DOP_AU_SUBTYPE=...`) and as `--au-subtype`/`--au-manufacturer`, a ready `fn aax_ids` for `Plugin` when the page table gives two plug-in types, a `supported_layouts` for plain mono and stereo buses, and the reported latency and tail. Then the things the SDK cannot pin yet, each marked `TODO`:
+**`PluginInfo`.** Name, vendor, URL, e-mail, version, a `Category` chosen from the categories, `is_instrument`. `id` is the CLAP id when there is one; otherwise it is made from the vendor and name and the comment says that is a guess (it is then the CLAP id of the port, and the seed of every id that is not pinned).
 
-- the VST3 processor and controller class ids (the SDK derives them from `PluginInfo::id`);
-- the parameter ids, when the source's are not `0..n` in table order (the SDK numbers parameters by position in CLAP, VST3 and Audio Unit); this is porting task 2;
-- an Audio Unit type other than `aufx` (the shell writes `aufx`);
+**Identity and build settings.** The command-line options for `scripts/build_plugin.sh` (`--name`, `--manufacturer`, `--version`, `--bundle-id`, and `--au-type aumf` for a music effect), and the plugin's ids as code for the `Plugin` impl:
+
+- `fn vst3_ids`, with `Vst3Ids::from_hex("<processor>", "<controller>")` from the two class ids, or `Vst3Ids::processor_from_hex` for a single-component source;
+- `fn au_ids`, with the Audio Unit subtype and manufacturer (the shell build reads them from the plugin, so `--au-subtype` and `--au-manufacturer` are left out);
+- `fn aax_ids`, when the page table gives two plug-in types.
+
+Then a `supported_layouts` for plain mono and stereo buses, and the reported latency and tail. What still needs a person is marked `TODO`:
+
+- an Audio Unit type the shell does not build (it builds `aufx`, `aumu` and `aumf`);
+- Audio Unit codes that are not four ASCII characters;
+- a parameter id that cannot be pinned;
 - main buses wider than stereo, or an odd sidechain, which need a hand-written `supported_layouts`.
 
 ## What the proof covers
@@ -206,6 +214,7 @@ Audio Unit latency and tail are seconds in the API; the manifest converts them t
 `crates/openplugin-port/tests/scan.rs` scans the SDK's own example (`examples/editor`) and checks the result against the example's source:
 
 - Always: it builds the example's CLAP library and scans it. The manifest turned into SDK terms is the example's `PARAMS` table exactly (id, name, min, max, default, unit, taper, steps, choices, flags), the CLAP id is `INFO.id`, the generated lines `ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),` and the Warm toggle appear verbatim, and the manifest survives a JSON round trip. A plugin that aborts and one that hangs each fail only their own scan.
+- Pins: `snippet_tests.rs` checks which tables get pins (one id that is not a position pins the whole table; ids a format cannot carry are named, not pinned) and that the generated lines are the SDK's own methods. With `OPENPLUGIN_PORT_FIXTURES` set to the native build folder (`build-shell`), which holds the identity proof's bundles, `a_pinned_vst3_scans_back_to_its_pins` and `a_pinned_audio_unit_scans_back_to_its_pins` scan `Pinned B.vst3` and `Pinned A.component` and find the pinned class ids, Audio Unit codes and parameter ids in the manifest, and the same pins (`.with_vst3_id(0x6C65766C)`, `Vst3Ids::from_hex(...)`, `AuIds { subtype: *b"PnEx", ... }`) in the generated Rust.
 - With `OPENPLUGIN_PORT_FIXTURES` set to a folder holding `Example Gain.clap`, `.vst3`, `.component` and `.aaxplugin` as `scripts/build_plugin.sh` writes them (`--formats clap,vst3,au,aax --tail --aax-pages`, which needs the VST3, AudioUnitSDK and AAX checkouts): the VST3 and Audio Unit scans reproduce the same table; the VST3 class ids equal those `openplugin_ffi::shell::write_info` computes; the Audio Unit is `aufx`/`ExGn`/`OpGd` with its factory function; the AAX ids equal the example's `Plugin::aax_ids`.
 
 ```bash
@@ -230,6 +239,77 @@ The scanner was also run, read-only, over a spread of plugins installed on the d
 | AAX | 25 | identity only; 8 had a page table with ids, 17 keep them inside the binary |
 
 Across the generated tables, 104 parameters were given `Taper::Log` from their value strings or plain values, and 233 became `Unit::Choice`. A first run over the same VST3 plugins found no parameters in half of them: those plugins hand their controller its state through an `IMessage` sent over `IConnectionPoint`, so the scanner's host now makes messages and attribute lists and connects the component to its controller, as a host does.
+
+## Identity pinning
+
+A host does not know a plugin by its name. A project holds the plugin's class or component ids, the state the plugin wrote, and automation lanes that name each parameter by a number (CLAP `param_id`, VST3 `ParamID`, `AudioUnitParameterID`) or, in Pro Tools, by a string. If the port answers with other ids, the host opens the project without the plugin, or with the automation on the wrong controls. Identity pins set every one of those ids explicitly, so the port answers with the old plugin's. They are in `openplugin_core::identity` and need no tool; the scanner writes them from what it reads.
+
+### The pins
+
+| What the host stores | Without a pin | The pin |
+|---|---|---|
+| CLAP plugin id | `PluginInfo::id` | `Plugin::clap_id` |
+| VST3 processor and controller class ids | derived from `PluginInfo::id` | `Plugin::vst3_ids` (`Vst3Ids::from_hex(processor, controller)`, the 32 hex digits a scan prints, the same on every system; `processor_from_hex` when the old plugin had one class) |
+| Audio Unit subtype and manufacturer | build options (`--au-subtype`, `--au-manufacturer`) | `Plugin::au_ids` (`AuIds`); the shell build asks the plugin and writes them into `Info.plist`. The type follows the plugin's kind, or `--au-type` |
+| AAX manufacturer, product and plug-in ids | development ids derived from the vendor and `PluginInfo::id` | `Plugin::aax_ids` (`AaxIds`) |
+| LV2 URI | `PluginInfo::id` | `Plugin::lv2_uri` |
+| CLAP, VST3 and Audio Unit parameter id | the parameter's position in the table | `ParamInfo::with_host_id(n)` for all three, or `with_clap_id`, `with_vst3_id`, `with_au_id` where the old plugin's formats used different numbers |
+| AAX parameter id | `ParamInfo::id` | `ParamInfo::with_aax_id("...")` (1 to 31 printable ASCII characters) |
+
+```rust
+static PARAMS: [ParamInfo; 3] = [
+    ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db).with_host_id(0x6761_696E).with_aax_id("Gain"),
+    ParamInfo::new("mix", "Mix", 0.0, 100.0, 100.0, Unit::Percent).with_host_id(0x006D_6978).with_au_id(3),
+    ParamInfo::new("mode", "Mode", 0.0, 3.0, 0.0, Unit::None).with_steps(4).with_host_id(77),
+];
+
+impl Plugin for Verb {
+    fn clap_id(&self) -> Option<&'static str> { Some("com.acme.verb") }
+    fn vst3_ids(&self) -> Option<Vst3Ids> {
+        Vst3Ids::from_hex("A1B2C3D4E5F60718293A4B5C6D7E8F90", "0F1E2D3C4B5A69788796A5B4C3D2E1F0")
+    }
+    fn au_ids(&self) -> Option<AuIds> { Some(AuIds { subtype: *b"Verb", manufacturer: *b"Acme" }) }
+    fn aax_ids(&self) -> Option<AaxIds> {
+        Some(AaxIds { manufacturer: *b"Acme", product: *b"Verb", mono: *b"VrbM", stereo: *b"VrbS" })
+    }
+    // ...
+}
+```
+
+Rules:
+
+- **Defaults are what they were.** A plugin with no pin shows every host the ids it showed before pins existed, bit for bit, and writes the same state bytes. `tests/identity.rs` in `examples/editor`, `examples/role_tags` and `examples/expression_synth` hold those ids as literals.
+- **A parameter without a pin keeps its position as its id**, also in a table where others are pinned. Ids must be unique per format. Pin every parameter of a table you mean to reorder.
+- **Reserved ids.** CLAP: not `0xFFFFFFFF`. VST3: at most `0x7FFFFFFF`, not the shell's bypass parameter (`0x42595053`) and not its MIDI controller range (`0x4D494400` and the 2080 ids from there). Audio Unit: not `0xFFFFFFFF`. AAX: not `MasterBypassID`.
+- **A pin set a format cannot carry is ignored as a whole for that format**, which then uses the derived ids; the same for class ids and codes that are not valid. That keeps a mistake from loading as half a plugin, but it is silent in a host, so test it: `assert_eq!(openplugin::core::identity::check_pins(&MyPlugin::default()), [])` names every unusable pin.
+- **Once released, a pin never changes.** It is the plugin's identity in every saved project.
+
+### State follows the pins
+
+The SDK's parameter snapshot (`OPST`) is one value per parameter in table order, so the order of an unpinned table is part of its state format. A table with any pin is saved by parameter instead (`OPST` version 2: each value under its `ParamInfo::id`), and so are the heads the shells write beside it (the VST3 component state by `ParamID`, the Audio Unit's values by `AudioUnitParameterID`; an AAX chunk of another layout is read through the plugin blob). Loading such a state into a later build:
+
+- a value goes to the parameter with the same id, wherever it is in the table;
+- a parameter the state does not name (added later) gets its default;
+- a value for a parameter the build no longer has is dropped.
+
+The string ids must be unique and not empty for this (they are in any working plugin; `check_pins` says so).
+
+A plugin that already shipped without pins moves to them in one step: pin every parameter at its position in the released table (`with_host_id(0)`, `with_host_id(1)`, ...). From then on the table can be reordered and extended. A positional state from the old release still loads: its value `i` goes to the parameter pinned at `i`.
+
+The old plugin's own chunks (a port's projects from before the port) are the business of [foreign state import](#foreign-state-import): `Plugin::load_state` reads them and sets parameters by their string ids, which no pin changes.
+
+### What the identity proof covers
+
+One test plugin, `examples/pinned`, in four builds: Pinned A (`level`, `offset`, `invert`) and Pinned B (`invert`, `drive`, `offset`, `level`: another order and one more parameter) pin every id; Plain A and Plain B are the same two tables without pins. A fake host per format saves a project with one build (plugin ids, state, an automation lane of three points addressed by parameter id) and opens it with the other.
+
+| Format | Proof | What it shows |
+|---|---|---|
+| CLAP | `cargo test -p example-pinned` (`tests/session.rs`) | A to B and B to A: the same plugin id, every saved value on its own parameter, the lane's audio identical sample for sample; points for ids a build does not have move nothing; cut, NaN and foreign states are refused. Negative control: Plain B refuses Plain A's state, and the lane (ids 0 and 1, which are now `invert` and `drive`) gives different audio; addressed by name the same lane is right |
+| VST3 | `vst3_identity_proof` (`native/vst3/identity_host.cpp`), macOS and Windows | The same through the real shell, four bundles in one host: class ids, `ParamID`s, `setState` and `setComponentState`, parameter queues with sample offsets. A positional head, cut states and an unknown head version are refused by the pinned build. The same negative control |
+| Audio Unit | `au_identity_proof` (`native/au/identity_host.cpp`) | The same through the real shell: the component (type, subtype, manufacturer, which the build took from the plugin), `kAudioUnitProperty_ParameterList`, ClassInfo restored into an initialized and an uninitialized unit, scheduled parameter events; a preset without the shell's key lands by parameter id and adds no parameter. The same negative control |
+| AAX | `aax_identity_proof` (`native/aax/host_identity.cpp`, run by `identity_proof.cmake`) | Two processes, one per build: manufacturer, product and plug-in ids, the chunk through `SetChunk`, values and a lane by AAX parameter id. Negative control: without pins the chunk of the other layout is refused (the automation itself survives in AAX either way, because its parameter ids are strings) |
+
+The Rust side: `crates/openplugin-core/tests/state_keyed.rs` (the snapshot by id, and hostile bytes), `crates/openplugin-ffi/tests/shell_identity.rs` and `shell_identity_invalid.rs` (the shell ABI's answers, with valid and with unusable pins). None of these is a DAW test: they are the calls a host makes, made by a test.
 
 ## The null test
 

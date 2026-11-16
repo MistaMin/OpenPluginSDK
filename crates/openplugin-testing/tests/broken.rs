@@ -12,6 +12,10 @@ static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, U
 static BAD_GROUP_PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, Unit::None).with_group("Filter//Env")];
 static BAD_GROUP_INFO: PluginInfo = PluginInfo { params: &BAD_GROUP_PARAMS, ..INFO };
 
+/// The same parameter pinned to a VST3 id the shell keeps for its own bypass.
+static BAD_PIN_PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, Unit::None).with_vst3_id(0x4259_5053)];
+static BAD_PIN_INFO: PluginInfo = PluginInfo { params: &BAD_PIN_PARAMS, ..INFO };
+
 static INFO: PluginInfo = PluginInfo {
     id: "test.faulty",
     name: "Faulty",
@@ -38,6 +42,7 @@ enum Fault {
     PoisonedByNan,
     Slow(u32),
     BadGroup,
+    BadPin,
 }
 
 struct Faulty {
@@ -57,10 +62,10 @@ impl Faulty {
 
 impl Plugin for Faulty {
     fn info(&self) -> &'static PluginInfo {
-        if self.fault == Fault::BadGroup {
-            &BAD_GROUP_INFO
-        } else {
-            &INFO
+        match self.fault {
+            Fault::BadGroup => &BAD_GROUP_INFO,
+            Fault::BadPin => &BAD_PIN_INFO,
+            _ => &INFO,
         }
     }
     fn prepare(&mut self, _: f32, _: usize, _: usize) {
@@ -254,6 +259,15 @@ fn an_invalid_group_path_fails_param_fuzz() {
     let failure = report.result(Check::ParamFuzz).first_failure.clone().expect("a failure");
     assert_eq!(failure.case, "param-groups");
     assert!(failure.message.contains("Filter//Env") && failure.message.contains("EmptyName"), "{}", failure.message);
+}
+
+#[test]
+fn an_unusable_identity_pin_fails_param_fuzz() {
+    only(Fault::BadPin, Check::ParamFuzz);
+    let report = run(Fault::BadPin, Options::quick());
+    let failure = report.result(Check::ParamFuzz).first_failure.clone().expect("a failure");
+    assert_eq!(failure.case, "identity-pins");
+    assert!(failure.message.contains("VST3") && failure.message.contains("reserved"), "{}", failure.message);
 }
 
 #[test]

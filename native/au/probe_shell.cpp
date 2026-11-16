@@ -16,6 +16,7 @@
 // Everything the plugin saw is in the ProbeReport (probe.h).
 #include "op_shell.h"
 #include "probe.h"
+#include "stub_identity.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>

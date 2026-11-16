@@ -174,10 +174,15 @@ public:
         abiOk_ = op_shell_abi_version() >= OP_SHELL_ABI && op_shell_info(&info) && info.abi >= OP_SHELL_ABI;
         if (abiOk_) {
             params_.resize(info.param_count);
-            this->Globals()->UseIndexedParameters(info.param_count);
+            loadParameterIds(info.param_count);
+            // Without pins the IDs are 0..n-1 and the element keeps them in an array, as it
+            // always did. Pinned IDs are any numbers, so the element keeps them by ID: each
+            // is made here, before the unit is initialized, and none is added later.
+            if (identityIds_) this->Globals()->UseIndexedParameters(info.param_count);
+            else for (uint32_t i = 0; i < info.param_count; ++i) this->Globals()->SetParameter(ids_[i], 0.0f);
             for (uint32_t i = 0; i < info.param_count; ++i) {
                 if (!op_shell_param(i, &params_[i].desc)) continue;
-                this->Globals()->SetParameter(i, static_cast<float>(params_[i].desc.default_plain));
+                this->Globals()->SetParameter(ids_[i], static_cast<float>(params_[i].desc.default_plain));
                 params_[i].labels = choiceLabels(i, params_[i].desc);
                 // Clumps are flat: one per distinct group path, named by the whole path.
                 const std::string group = shellGroup(i);
@@ -297,23 +302,25 @@ public:
 #endif
         if (id == kAudioUnitProperty_ParameterStringFromValue) {
             auto* request = static_cast<AudioUnitParameterStringFromValue*>(data);
-            if (request->inParamID >= params_.size()) return kAudioUnitErr_InvalidParameter;
+            const int index = indexOf(request->inParamID);
+            if (index < 0) return kAudioUnitErr_InvalidParameter;
             const double plain = request->inValue ? static_cast<double>(*request->inValue) : static_cast<double>(this->Globals()->GetParameter(request->inParamID));
             if (!std::isfinite(plain)) return kAudioUnitErr_InvalidParameterValue;
-            const std::string text = shellText(request->inParamID, plain);
+            const std::string text = shellText(static_cast<uint32_t>(index), plain);
             // The host releases the string.
             request->outString = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8*>(text.data()), static_cast<CFIndex>(text.size()), kCFStringEncodingUTF8, false);
             return request->outString ? OSStatus(noErr) : OSStatus(kAudioUnitErr_InvalidPropertyValue);
         }
         if (id == kAudioUnitProperty_ParameterValueFromString) {
             auto* request = static_cast<AudioUnitParameterValueFromString*>(data);
-            if (request->inParamID >= params_.size() || !request->inString) return kAudioUnitErr_InvalidParameter;
+            const int index = indexOf(request->inParamID);
+            if (index < 0 || !request->inString) return kAudioUnitErr_InvalidParameter;
             const CFIndex room = CFStringGetMaximumSizeForEncoding(CFStringGetLength(request->inString), kCFStringEncodingUTF8) + 1;
             if (room > 4096) return kAudioUnitErr_InvalidPropertyValue;
             std::string text(static_cast<size_t>(room), '\0');
             if (!CFStringGetCString(request->inString, text.data(), room, kCFStringEncodingUTF8)) return kAudioUnitErr_InvalidPropertyValue;
             double plain = 0.0;
-            if (!op_shell_param_parse(request->inParamID, text.c_str(), &plain) || !std::isfinite(plain)) return kAudioUnitErr_InvalidPropertyValue;
+            if (!op_shell_param_parse(static_cast<uint32_t>(index), text.c_str(), &plain) || !std::isfinite(plain)) return kAudioUnitErr_InvalidPropertyValue;
             request->outValue = static_cast<AudioUnitParameterValue>(plain);
             return noErr;
         }
@@ -361,7 +368,7 @@ public:
 #if OP_HAS_EDITOR
     void* engine() const { return engine_; }
     uint32_t paramCount() const { return static_cast<uint32_t>(params_.size()); }
-    float paramValue(uint32_t index) { return this->Globals()->GetParameter(index); }
+    float paramValue(uint32_t index) { return this->Globals()->GetParameter(ids_[index]); }
 #endif
 
     // ---- buses and channels ------------------------------------------------------------
@@ -600,8 +607,19 @@ public:
 #endif
 
     // ---- parameters --------------------------------------------------------------------
-    OSStatus GetParameterInfo(AudioUnitScope scope, AudioUnitParameterID id, AudioUnitParameterInfo& info) override {
-        if (scope != kAudioUnitScope_Global || id >= params_.size()) return kAudioUnitErr_InvalidParameter;
+    // The parameters in the order of the plugin's table, whatever their IDs. With pinned IDs
+    // the element holds them sorted by ID, and may hold a value a preset of another version
+    // named; the host is shown the table.
+    OSStatus GetParameterList(AudioUnitScope scope, AudioUnitParameterID* list, UInt32& count) override {
+        if (identityIds_ || scope != kAudioUnitScope_Global) return Base::GetParameterList(scope, list, count);
+        count = static_cast<UInt32>(ids_.size());
+        if (list) std::copy(ids_.begin(), ids_.end(), list);
+        return noErr;
+    }
+    OSStatus GetParameterInfo(AudioUnitScope scope, AudioUnitParameterID paramId, AudioUnitParameterInfo& info) override {
+        const int index = indexOf(paramId);
+        if (scope != kAudioUnitScope_Global || index < 0) return kAudioUnitErr_InvalidParameter;
+        const auto id = static_cast<size_t>(index);
         std::memset(&info, 0, sizeof(info));
         const OpParamDesc& desc = params_[id].desc;
         // The host releases the CFString.
@@ -651,8 +669,10 @@ public:
         return noErr;
     }
     // The labels of a choice parameter, one per step from min (kAudioUnitParameterUnit_Indexed).
-    OSStatus GetParameterValueStrings(AudioUnitScope scope, AudioUnitParameterID id, CFArrayRef* strings) override {
-        if (scope != kAudioUnitScope_Global || id >= params_.size() || params_[id].labels.empty()) return kAudioUnitErr_InvalidProperty;
+    OSStatus GetParameterValueStrings(AudioUnitScope scope, AudioUnitParameterID paramId, CFArrayRef* strings) override {
+        const int index = indexOf(paramId);
+        if (scope != kAudioUnitScope_Global || index < 0 || params_[static_cast<size_t>(index)].labels.empty()) return kAudioUnitErr_InvalidProperty;
+        const auto id = static_cast<size_t>(index);
         if (!strings) return noErr;
         const auto& labels = params_[id].labels;
         CFMutableArrayRef array = CFArrayCreateMutable(nullptr, static_cast<CFIndex>(labels.size()), &kCFTypeArrayCallBacks);
@@ -667,8 +687,9 @@ public:
         return noErr;
     }
     bool validValue(AudioUnitParameterID id, AudioUnitParameterValue value) const {
-        if (id >= params_.size() || !std::isfinite(value)) return false;
-        const OpParamDesc& desc = params_[id].desc;
+        const int index = indexOf(id);
+        if (index < 0 || !std::isfinite(value)) return false;
+        const OpParamDesc& desc = params_[static_cast<size_t>(index)].desc;
         return value >= desc.min - 1e-4 && value <= desc.max + 1e-4;
     }
     // A value with no offset is stored at once and reaches the plugin at the start of the next
@@ -831,10 +852,12 @@ private:
     }
 
     bool queueParameter(AudioUnitParameterID id, float value, uint32_t offset) {
+        const int index = indexOf(id);
+        if (index < 0) return false;
         OpEvent event{};
         event.offset = offset;
         event.kind = OP_EVENT_PARAM_PLAIN;
-        event.index = id;
+        event.index = static_cast<uint32_t>(index);
         event.value = value;
         return events_.push(event);
     }
@@ -994,7 +1017,7 @@ private:
             }
         }
         for (uint32_t i = 0; i < params_.size(); ++i) {
-            const float plain = this->Globals()->GetParameterRT(i);
+            const float plain = this->Globals()->GetParameterRT(ids_[i]);
             if (!std::isfinite(plain) || !op_shell_set_plain(engine_, i, plain)) return kAudioUnitErr_InvalidParameter;
         }
         OpTransport transport;
@@ -1059,7 +1082,7 @@ private:
         }
         // The parameters that had events end the render at the value of their last one.
         for (uint32_t i = 0; i < params_.size(); ++i) {
-            if (touched_[i]) this->Globals()->SetParameterRT(i, lastValue_[i]);
+            if (touched_[i]) this->Globals()->SetParameterRT(ids_[i], lastValue_[i]);
         }
         flags &= ~kAudioUnitRenderAction_OutputIsSilence;
         return noErr;
@@ -1111,7 +1134,7 @@ private:
     // block, so they are stored first (set_plain is an atomic store, as the render thread's).
     bool saveBlob(void* engine, std::vector<uint8_t>& blob) {
         for (uint32_t i = 0; i < params_.size(); ++i) {
-            const float plain = this->Globals()->GetParameter(i);
+            const float plain = this->Globals()->GetParameter(ids_[i]);
             if (std::isfinite(plain)) op_shell_set_plain(engine, i, plain);
         }
         uint32_t needed = 0;
@@ -1127,7 +1150,7 @@ private:
     // Makes the unit's parameter values the engine's. The render thread pushes the unit's
     // values into the engine every block, so after a restore they must agree.
     void syncParameters(void* engine) {
-        for (uint32_t i = 0; i < params_.size(); ++i) this->Globals()->SetParameter(i, op_shell_get_plain(engine, i));
+        for (uint32_t i = 0; i < params_.size(); ++i) this->Globals()->SetParameter(ids_[i], op_shell_get_plain(engine, i));
     }
     void destroy() {
         if (engine_) {
@@ -1163,7 +1186,7 @@ private:
         if (flags & OP_CHANGE_LATENCY) this->PropertyChanged(kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0);
         if (flags & OP_CHANGE_PARAM_INFO) {
             this->PropertyChanged(kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0);
-            for (uint32_t i = 0; i < params_.size(); ++i) this->PropertyChanged(kAudioUnitProperty_ParameterInfo, kAudioUnitScope_Global, i);
+            for (uint32_t i = 0; i < params_.size(); ++i) this->PropertyChanged(kAudioUnitProperty_ParameterInfo, kAudioUnitScope_Global, ids_[i]);
         }
         return flags;
     }
@@ -1201,6 +1224,42 @@ private:
     std::vector<float> delay_;
     std::vector<float> dry_;
     std::vector<CachedParam> params_;
+    // ---- parameter IDs (ABI 8) ---------------------------------------------------------
+    // The AudioUnitParameterID the host stores for each parameter (op_shell_param_host_id):
+    // the parameter's index for a plugin without pins, as always, or its pinned ID, which
+    // stays with it through any reordering of the table. The ABI and everything in this
+    // shell address a parameter by its index; ids_ and indexOf are the edge to the host.
+    void loadParameterIds(uint32_t count) {
+        ids_.assign(count, 0);
+        sortedIds_.clear();
+        identityIds_ = true;
+        bool usable = true;
+        for (uint32_t i = 0; i < count; ++i) {
+            ids_[i] = op_shell_param_host_id(OP_HOST_AU, i);
+            if (ids_[i] != i) identityIds_ = false;
+            if (ids_[i] == OP_NO_HOST_ID) usable = false;
+        }
+        if (!identityIds_ && usable) {
+            for (uint32_t i = 0; i < count; ++i) sortedIds_.push_back({ids_[i], i});
+            std::sort(sortedIds_.begin(), sortedIds_.end());
+            for (size_t i = 1; i < sortedIds_.size(); ++i) usable = usable && sortedIds_[i].first != sortedIds_[i - 1].first;
+        }
+        // The library checks its pins; one that answers no ID, or one ID twice, gets the indices.
+        if (!identityIds_ && !usable) {
+            for (uint32_t i = 0; i < count; ++i) ids_[i] = i;
+            sortedIds_.clear();
+            identityIds_ = true;
+        }
+    }
+    // The index of the parameter the host calls `id`, or -1. No allocation: also on the render thread.
+    int indexOf(AudioUnitParameterID id) const {
+        if (identityIds_) return id < ids_.size() ? static_cast<int>(id) : -1;
+        const auto at = std::lower_bound(sortedIds_.begin(), sortedIds_.end(), std::pair<AudioUnitParameterID, uint32_t>{id, 0});
+        return at != sortedIds_.end() && at->first == id ? static_cast<int>(at->second) : -1;
+    }
+    std::vector<AudioUnitParameterID> ids_;
+    std::vector<std::pair<AudioUnitParameterID, uint32_t>> sortedIds_;
+    bool identityIds_ = true;
     // Group path of each clump; clump ID n is clumps_[n - 1].
     std::vector<std::string> clumps_;
     // A blob accepted while there was no engine, loaded at the next Initialize.
@@ -1240,6 +1299,25 @@ int32_t op_au_take_error(void* instance) {
     std::lock_guard<std::mutex> lock(gLiveLock);
     OpenPluginAU* unit = live(instance);
     return unit ? static_cast<int32_t>(unit->takeLastError()) : 0;
+}
+// The ID the shell gives the host: the library's answer when it is usable (it is for
+// every index when it is for one), else the index, as loadParameterIds decides.
+uint32_t op_au_param_id(uint32_t index) {
+    static const std::vector<uint32_t> ids = [] {
+        OpShellInfo info{};
+        std::vector<uint32_t> list(op_shell_info(&info) ? info.param_count : 0);
+        bool usable = true;
+        for (uint32_t i = 0; i < list.size(); ++i) {
+            list[i] = op_shell_param_host_id(OP_HOST_AU, i);
+            usable = usable && list[i] != OP_NO_HOST_ID;
+        }
+        std::vector<uint32_t> sorted = list;
+        std::sort(sorted.begin(), sorted.end());
+        usable = usable && std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end();
+        if (!usable) for (uint32_t i = 0; i < list.size(); ++i) list[i] = i;
+        return list;
+    }();
+    return index < ids.size() ? ids[index] : index;
 }
 uint32_t op_au_param(void* instance, uint32_t index, float* value) {
     std::lock_guard<std::mutex> lock(gLiveLock);

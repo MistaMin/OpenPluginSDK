@@ -599,6 +599,18 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
         self.engines[0].plugin.lv2_uri()
     }
 
+    fn clap_id(&self) -> Option<&'static str> {
+        self.engines[0].plugin.clap_id()
+    }
+
+    fn vst3_ids(&self) -> Option<openplugin_core::Vst3Ids> {
+        self.engines[0].plugin.vst3_ids()
+    }
+
+    fn au_ids(&self) -> Option<openplugin_core::AuIds> {
+        self.engines[0].plugin.au_ids()
+    }
+
     fn state_is_parameters_only(&self) -> bool {
         self.engines[0].plugin.state_is_parameters_only()
     }

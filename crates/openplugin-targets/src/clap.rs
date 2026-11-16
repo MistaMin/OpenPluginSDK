@@ -26,8 +26,8 @@ use std::time::{Duration, Instant as Clock};
 
 use openplugin_core::DenormalGuard;
 use openplugin_core::{
-    decode_params, encode_params, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
-    ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamInfo, ParamPlane, Plugin, PluginInfo, PortKind,
+    decode_params, encode_params, identity::clap_id_valid, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
+    ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamIdMap, ParamInfo, ParamPlane, PinFormat, Plugin, PluginInfo, PortKind,
     Seqlock, SpeakerLayout, Tail, TrackInfo, Transport, MAX_AUDIO_CHANNELS,
 };
 
@@ -77,6 +77,12 @@ fn editor_factory() -> Option<EditorFactory> {
 /// Gestures an editor can have waiting before the host collects them.
 const GESTURE_CAPACITY: usize = 1024;
 
+/// The id in the CLAP descriptor: [`Plugin::clap_id`] when the plugin pins a
+/// usable one, else [`PluginInfo::id`].
+fn clap_plugin_id(plugin: &dyn Plugin) -> &'static str {
+    plugin.clap_id().filter(|id| clap_id_valid(id)).unwrap_or(plugin.info().id)
+}
+
 fn cstring(text: &str) -> CString {
     CString::new(text).unwrap_or_else(|_| CString::new("openplugin").expect("static cstring"))
 }
@@ -87,7 +93,7 @@ fn publish() -> Option<&'static Published> {
         let plugin = create();
         let info = plugin.info();
         let owned = vec![
-            cstring(info.id),
+            cstring(clap_plugin_id(plugin.as_ref())),
             cstring(info.name),
             cstring(info.vendor),
             cstring(info.url),
@@ -204,6 +210,10 @@ struct Instance {
     /// When false the state is the parameters alone and state calls never touch `inner`.
     has_chunk: bool,
     info: &'static PluginInfo,
+    /// The host's `param_id` of every parameter and back: the pins of the
+    /// table, or the positions (`openplugin_core::identity`). Everything
+    /// inside the instance addresses a parameter by its position.
+    ids: Arc<ParamIdMap>,
     cursor: ParamCursor,
     /// Editor gestures waiting to be reported to the host.
     gestures: Arc<GestureQueue>,
@@ -363,10 +373,12 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
                     continue;
                 }
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_value) };
+                // An id the plugin does not have is not a parameter of this build.
+                let Some(index) = instance.ids.index(event.param_id) else { continue };
                 push_sched(instance, Sched {
                     time: header.time,
                     kind: KIND_PARAM,
-                    param: event.param_id,
+                    param: index as u32,
                     value: event.value as f32,
                     ..Sched::empty()
                 });
@@ -425,7 +437,8 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
                     continue;
                 }
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_mod) };
-                let Some(param) = instance.info.params.get(event.param_id as usize) else { continue };
+                let Some(index) = instance.ids.index(event.param_id) else { continue };
+                let Some(param) = instance.info.params.get(index) else { continue };
                 let Some(target) = NoteRef::checked(event.note_id, event.port_index, event.channel, event.key) else {
                     continue;
                 };
@@ -443,7 +456,7 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
                 push_sched(instance, Sched {
                     time: header.time,
                     kind: KIND_MOD,
-                    param: event.param_id,
+                    param: index as u32,
                     value: (event.amount as f32).clamp(-span, span),
                     target,
                     ..Sched::empty()
@@ -788,7 +801,7 @@ fn pull_params(instance: &mut Instance) {
 /// The block a state call made the audio thread skip: parameter events still reach
 /// the plane, the input passes through (silence where it has no channel), and nothing
 /// touches the plugin object.
-unsafe fn skipped_block(plane: &ParamPlane, process: &clap_process) -> i32 {
+unsafe fn skipped_block(plane: &ParamPlane, ids: &ParamIdMap, process: &clap_process) -> i32 {
     if !process.in_events.is_null() {
         let events = unsafe { &*process.in_events };
         if let (Some(size), Some(get)) = (events.size, events.get) {
@@ -800,7 +813,9 @@ unsafe fn skipped_block(plane: &ParamPlane, process: &clap_process) -> i32 {
                 let header = unsafe { &*header };
                 if header.type_ == EVENT_PARAM_VALUE && header.space_id == 0 {
                     let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_value) };
-                    plane.store(event.param_id as usize, event.value as f32);
+                    if let Some(index) = ids.index(event.param_id) {
+                        plane.store(index, event.value as f32);
+                    }
                 }
             }
         }
@@ -853,8 +868,8 @@ unsafe extern "C" fn plugin_process(plugin: *const clap_plugin, process: *const 
     // be inside the plugin object, and it never touches the rest.
     let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
     if gate.compare_exchange(0, GATE_AUDIO, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        let plane = unsafe { &*std::ptr::addr_of!((*raw).plane) };
-        return unsafe { skipped_block(plane, &*process) };
+        let (plane, ids) = unsafe { (&*std::ptr::addr_of!((*raw).plane), &*std::ptr::addr_of!((*raw).ids)) };
+        return unsafe { skipped_block(plane, ids, &*process) };
     }
     let _held = AudioGate(gate);
     // Flush-to-zero for the plugin, the host's mode back when this drops: after the block,
@@ -1071,7 +1086,7 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
         unsafe {
             std::ptr::write_bytes(info, 0, 1);
             let info = &mut *info;
-            info.id = index;
+            info.id = instance.ids.id(index as usize).unwrap_or(index);
             info.flags = clap_param_flags(param);
             copy_cstr(&mut info.name, param.name);
             // The group path is CLAP's module path ("Filter/Envelope"); empty is the top level.
@@ -1087,7 +1102,7 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
 unsafe extern "C" fn params_get_value(plugin: *const clap_plugin, param_id: u32, out_value: *mut f64) -> bool {
     guarded(std::ptr::null(), false, || {
         let Some(instance) = instance(plugin) else { return false };
-        let Some(value) = instance.plane.load(param_id as usize) else { return false };
+        let Some(value) = instance.ids.index(param_id).and_then(|index| instance.plane.load(index)) else { return false };
         if out_value.is_null() {
             return false;
         }
@@ -1099,7 +1114,7 @@ unsafe extern "C" fn params_get_value(plugin: *const clap_plugin, param_id: u32,
 unsafe extern "C" fn params_value_to_text(plugin: *const clap_plugin, param_id: u32, value: f64, out_buffer: *mut c_char, capacity: u32) -> bool {
     guarded(std::ptr::null(), false, || {
         let Some(instance) = instance(plugin) else { return false };
-        let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
+        let Some(param) = instance.ids.index(param_id).and_then(|index| instance.inner.info().params.get(index)) else { return false };
         if out_buffer.is_null() || capacity == 0 {
             return false;
         }
@@ -1116,7 +1131,7 @@ unsafe extern "C" fn params_text_to_value(plugin: *const clap_plugin, param_id: 
             return false;
         }
         let Some(instance) = instance(plugin) else { return false };
-        let Some(param) = instance.inner.info().params.get(param_id as usize) else { return false };
+        let Some(param) = instance.ids.index(param_id).and_then(|index| instance.inner.info().params.get(index)) else { return false };
         let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
         let Some(value) = param.parse(&text) else { return false };
         unsafe { *out_value = value as f64 };
@@ -1139,10 +1154,11 @@ fn report_gestures(instance: &Instance, out: *const clap_output_events) {
     while let Some(gesture) = instance.gestures.pop() {
         let Some(push) = push else { continue };
         match gesture {
-            Gesture::Begin(id) | Gesture::End(id) => {
-                if id as usize >= infos.len() {
+            Gesture::Begin(index) | Gesture::End(index) => {
+                if index as usize >= infos.len() {
                     continue;
                 }
+                let Some(id) = instance.ids.id(index as usize) else { continue };
                 let kind = if matches!(gesture, Gesture::Begin(_)) { EVENT_PARAM_GESTURE_BEGIN } else { EVENT_PARAM_GESTURE_END };
                 let event = clap_event_param_gesture {
                     header: event_header(kind, std::mem::size_of::<clap_event_param_gesture>()),
@@ -1150,8 +1166,9 @@ fn report_gestures(instance: &Instance, out: *const clap_output_events) {
                 };
                 unsafe { push(out, &event.header) };
             }
-            Gesture::Perform(id, value) => {
-                let Some(info) = infos.get(id as usize) else { continue };
+            Gesture::Perform(index, value) => {
+                let Some(info) = infos.get(index as usize) else { continue };
+                let Some(id) = instance.ids.id(index as usize) else { continue };
                 let event = clap_event_param_value {
                     header: event_header(EVENT_PARAM_VALUE, std::mem::size_of::<clap_event_param_value>()),
                     param_id: id,
@@ -1928,7 +1945,7 @@ unsafe extern "C" fn context_perform(_plugin: *const clap_plugin, _target: *cons
 
 static CONTEXT_MENU: clap_plugin_context_menu = clap_plugin_context_menu { populate: Some(context_populate), perform: Some(context_perform) };
 
-/// Ask the host to pop up its context menu for parameter `param` at (`x`, `y`), relative to
+/// Ask the host to pop up its context menu for the parameter it calls `param` (the CLAP id) at (`x`, `y`), relative to
 /// the plugin's window. False when the host has no such menu, cannot show one now, or declines.
 fn host_context_popup(host: *const clap_host, param: u32, x: i32, y: i32) -> bool {
     let ext = host_call(host, EXT_CONTEXT_MENU);
@@ -1985,7 +2002,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
     let reported_latency = inner.latency().min(u32::MAX as usize) as u32;
     let reported_tail = inner.tail().clap_samples();
     let mut strings = vec![
-        cstring(info.id),
+        cstring(clap_plugin_id(inner.as_ref())),
         cstring(info.name),
         cstring(info.vendor),
         cstring(info.url),
@@ -2044,6 +2061,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
         state_lock: Mutex::new(()),
         has_chunk,
         info,
+        ids: Arc::new(ParamIdMap::new(info.params, PinFormat::Clap)),
         plane,
         cursor,
         gestures: Arc::new(GestureQueue::new(GESTURE_CAPACITY)),
@@ -2246,7 +2264,8 @@ fn editor_host_for(instance: &Instance) -> openplugin_core::EditorHost {
     let queue = instance.gestures.clone();
     let host = instance.host;
     // A right click on a control asks the host for its menu on that parameter.
-    let menu = move |param: u32, x: i32, y: i32| host_context_popup(host, param, x, y);
+    let ids = instance.ids.clone();
+    let menu = move |param: u32, x: i32, y: i32| ids.id(param as usize).is_some_and(|id| host_context_popup(host, id, x, y));
     openplugin_core::EditorHost::new(move |gesture| {
         let link = link;
         if let Gesture::Perform(id, value) = gesture {

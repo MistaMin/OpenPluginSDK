@@ -21,10 +21,10 @@ pub use openplugin_testing as testing;
 pub mod prelude {
     pub use openplugin_core::{
         decode_params, decode_session, encode_params, encode_session, restore_params, AaxIds,
-        AbCompare, BusMeters, Category, Editor, EditorFactory, EditorHost, EditorState, Frame,
+        AbCompare, AuIds, BusMeters, Category, Editor, EditorFactory, EditorHost, EditorState, Frame,
         Gesture, IoConfig, MeterFrame, NotePorts, OnePole, ParamCursor, ParamFlags, ParamInfo,
-        ParamPlane, Plugin, PluginInfo, PresetBank, SampleRamp, Seqlock, SpeakerLayout, Tail,
-        Taper, Transport, Unit,
+        ParamPins, ParamPlane, Plugin, PluginInfo, PresetBank, SampleRamp, Seqlock, SpeakerLayout,
+        Tail, Taper, Transport, Unit, Vst3Ids,
     };
     pub use openplugin_dri::{
         draw_faceplate, draw_faceplate_code, draw_fader, draw_knob, draw_knob_code, draw_pan_knob,

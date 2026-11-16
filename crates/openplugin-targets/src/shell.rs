@@ -23,6 +23,8 @@ pub use openplugin_ffi::shell::{
     take_changes, CHANGE_LATENCY, CHANGE_PARAM_INFO,
     // ABI 7: per-note expression.
     expression_format, expression_info, expression_parse, expressions, OpExpressionInfo,
+    // ABI 8: identity pins.
+    au_code, identity, param_aax_id, param_host_id,
 };
 
 #[cfg(any(target_os = "macos", windows))]
@@ -649,6 +651,31 @@ macro_rules! export_shell {
             cap: usize,
         ) -> usize {
             unsafe { $crate::shell::param_group::<$plugin>(index, buf as *mut u8, cap) }
+        }
+
+        // ---- ABI 8: identity pins ----
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_identity() -> u32 {
+            $crate::shell::identity::<$plugin>()
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_param_host_id(format: u32, index: u32) -> u32 {
+            $crate::shell::param_host_id::<$plugin>(format, index)
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_param_aax_id(
+            index: u32,
+            buf: *mut ::std::ffi::c_char,
+            cap: usize,
+        ) -> usize {
+            unsafe { $crate::shell::param_aax_id::<$plugin>(index, buf as *mut u8, cap) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_au_code(which: u32) -> u32 {
+            $crate::shell::au_code::<$plugin>(which)
         }
 
         #[unsafe(no_mangle)]

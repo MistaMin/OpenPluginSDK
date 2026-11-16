@@ -17,6 +17,13 @@
 // payload ends with the blob. The shell writes version 2 and reads versions 1
 // and 2. A version 1 chunk loads its parameters and the bypass and leaves the
 // plugin's own chunk alone.
+//
+// A plugin with identity pins (OP_IDENTITY_KEYED_STATE, ABI 8) may reorder its
+// parameter table between releases; its blob names every value by parameter.
+// A version 2 chunk whose count or layout hash is not this build's is then read
+// through its blob alone (Values::byBlob): the positional values are skipped,
+// the blob is loaded, and the parameters are read back from the engine. Without
+// pins such a chunk is refused, as before.
 #pragma once
 #include "OpenPluginAAX.h"
 #include <cstddef>
@@ -34,6 +41,7 @@ struct Values {
     uint32_t version;       // set by decode
     const uint8_t* blob;    // set by decode for version 2: points into the decoded data
     size_t blobSize;
+    bool byBlob;            // set by decode: another layout's chunk; `plain` is not filled
 };
 enum class Status { ok, badSize, badMagic, badVersion, badLayout, badValue };
 const char* describe(Status status);

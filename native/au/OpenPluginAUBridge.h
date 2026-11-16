@@ -8,5 +8,7 @@ enum { kOpenPluginAUProperty_Instance = 64001 };
 void* op_au_engine(void* instance);
 uint32_t op_au_param_count(void* instance);
 uint32_t op_au_param(void* instance, uint32_t index, float* value);
+// The AudioUnitParameterID of the parameter at `index` of the plugin's table.
+uint32_t op_au_param_id(uint32_t index);
 // The last failed initialize or render status since the previous call, or 0.
 int32_t op_au_take_error(void* instance);

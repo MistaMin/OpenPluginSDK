@@ -108,6 +108,25 @@ else()
   message(STATUS "Expression proof not built: no example_expression_synth.lib (cargo build --release --lib -p example-expression-synth)")
 endif()
 
+# The four builds of Pinned (examples/pinned/builds) for the identity pinning proof,
+# found next to OP_RUST_LIB (or in OP_IDENTITY_LIB_DIR).
+set(OP_IDENTITY_LIB_DIR "" CACHE PATH "Folder with the static libraries of examples/pinned/builds, for the identity proofs")
+if(NOT OP_IDENTITY_LIB_DIR)
+  get_filename_component(OP_IDENTITY_LIB_DIR "${OP_RUST_LIB}" DIRECTORY)
+endif()
+set(OP_IDENTITY_PROOFS ON)
+foreach(build a b plain_a plain_b)
+  set(OP_IDENTITY_LIB_${build} "${OP_IDENTITY_LIB_DIR}/example_pinned_${build}.lib")
+  if(NOT EXISTS "${OP_IDENTITY_LIB_${build}}")
+    set(OP_IDENTITY_PROOFS OFF)
+  endif()
+endforeach()
+if(OP_IDENTITY_PROOFS)
+  message(STATUS "Identity proofs over ${OP_IDENTITY_LIB_DIR}/example_pinned_{a,b,plain_a,plain_b}.lib")
+else()
+  message(STATUS "Identity proofs not built: no example_pinned_*.lib (cargo build --release --lib -p example-pinned-a -p example-pinned-b -p example-pinned-plain-a -p example-pinned-plain-b)")
+endif()
+
 # Links the Rust library: OP_RUST_LIB, or the library given as the second argument.
 function(op_link_rust target_name)
   set(rust_lib "${OP_RUST_LIB}")

@@ -22,6 +22,14 @@ inline constexpr uint32_t kMaxBlock = 2048;
 inline constexpr uint32_t kMaxChannels = 16;
 // The library must be at least as new as this header (docs/SHELL.md, Versioning).
 inline bool abiOk() { return op_shell_abi_version() >= static_cast<uint32_t>(OP_SHELL_ABI); }
+// The AAX parameter ID of the parameter at `index` (ABI 8): the plugin's pin, or the
+// parameter's string id, which is what the shell always used. Pro Tools stores
+// automation and control surface assignments by it.
+inline std::string shellParamId(uint32_t index) {
+    char id[64] = {};
+    const size_t length = op_shell_param_aax_id(index, id, sizeof id);
+    return std::string(id, length < sizeof id ? length : sizeof id - 1);
+}
 // Length of the switch between processed and bypassed audio.
 inline constexpr double kBypassFadeSeconds = 0.010;
 // GetCustomData block the view reads: the engine pointer, valid in this process.

@@ -59,7 +59,7 @@ rest runs.
 | `no_denormals` | No subnormal number appears in the output, including while a tail decays. |
 | `bounded_output` | Output stays under `Options::max_output` (default 64). |
 | `hostile_input` | After NaN and infinity bursts, output is finite again within one second plus latency plus tail. Passing NaN through is allowed (set `strict_hostile_output` to forbid it); a filter that keeps the NaN in its state is not. |
-| `param_fuzz` | `set_param` returns true for every parameter, `param` stays finite and inside `min..max` whatever was written. |
+| `param_fuzz` | `set_param` returns true for every parameter, `param` stays finite and inside `min..max` whatever was written. Also fails for a parameter group path hosts cannot show (case `param-groups`) and for an identity pin a format cannot carry (case `identity-pins`, from `identity::check_pins`; see [PORTING.md](PORTING.md#identity-pinning)). |
 | `latency` | `latency()` does not change while processing (unless `latency_depends_on_params`), does not depend on the `prepare` block size, and is under ten seconds. With `verify_latency_by_impulse` an impulse must peak at the reported latency, for plugins where that is meaningful. |
 | `tail` | After input stops, output is below `silence_db` (default -90 dBFS) once latency + reported tail (+ `tail_slack_ms`, default 10 ms) have passed. Skipped for `Tail::Unknown` and `Tail::Infinite`. |
 | `reset` | After `reset` in the middle of a tail, silent input gives silent output. |

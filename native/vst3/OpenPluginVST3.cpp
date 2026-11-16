@@ -177,6 +177,96 @@ constexpr ParamID kMidiParamBase = 0x4D494400;  // "MID", clear of 0..n-1 and kB
 constexpr uint32_t kMidiControllers = 130;
 constexpr uint32_t kMidiParamCount = 16 * kMidiControllers;
 
+// ---- Parameter IDs (ABI 8) ---------------------------------------------------
+// The ParamID the host stores for each plugin parameter, and the way back. A
+// plugin without pins has its ABI indices as IDs, as before pins existed; a
+// pinned one (op_shell_param_host_id) keeps its IDs through any reordering of
+// its table. Everything inside the shell and the ABI addresses a parameter by
+// its index; only the edge to the host uses the ID.
+constexpr ParamID kBypassParamId = 0x42595053;
+constexpr ParamID kMidiParamFirst = 0x4D494400;
+constexpr uint32_t kMidiParamSpan = 16 * 130;
+class ParamIds {
+public:
+    void load(uint32_t count) {
+        ids_.assign(count, 0);
+        sorted_.clear();
+        identity_ = true;
+        bool usable = true;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t id = op_shell_param_host_id(OP_HOST_VST3, i);
+            ids_[i] = id;
+            if (id != i) identity_ = false;
+            // The library has checked its pins; a library that answers an ID the
+            // shell keeps for itself, or none, gets the indices instead.
+            if (id > 0x7FFFFFFFu || id == kBypassParamId || (id >= kMidiParamFirst && id - kMidiParamFirst < kMidiParamSpan)) usable = false;
+        }
+        if (!identity_ && usable) {
+            sorted_.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) sorted_.push_back({ids_[i], i});
+            std::sort(sorted_.begin(), sorted_.end());
+            for (size_t i = 1; i < sorted_.size(); ++i) usable = usable && sorted_[i].first != sorted_[i - 1].first;
+        }
+        if (!identity_ && !usable) {
+            for (uint32_t i = 0; i < count; ++i) ids_[i] = i;
+            sorted_.clear();
+            identity_ = true;
+        }
+    }
+    bool identity() const { return identity_; }
+    ParamID id(uint32_t index) const { return ids_[index]; }
+    // The ABI index of the parameter the host calls `id`, or -1. Audio thread: no allocation.
+    int32 index(ParamID id) const {
+        if (identity_) return id < ids_.size() ? static_cast<int32>(id) : -1;
+        const auto at = std::lower_bound(sorted_.begin(), sorted_.end(), std::pair<ParamID, uint32_t>{id, 0});
+        return at != sorted_.end() && at->first == id ? static_cast<int32>(at->second) : -1;
+    }
+
+private:
+    std::vector<ParamID> ids_;
+    std::vector<std::pair<ParamID, uint32_t>> sorted_;
+    bool identity_ = true;
+};
+
+// ---- The head of the component state -------------------------------------------
+// Version 1 (a plugin without pinned parameter IDs writes it, as always):
+//   int32 1, int32 count, count normalized doubles in table order, int32 bypass.
+// Version 2 (written when the parameter IDs are pinned):
+//   int32 2, int32 count, count pairs of (int32 ParamID, double normalized), int32 bypass.
+// The plugin-state trailer follows either. A pinned shell reads both: in a
+// version 1 head a value's position is its ParamID, which is what it was in
+// the build that wrote it; a value for an ID the plugin no longer has is
+// dropped, and a parameter the head does not name keeps its default. Returns
+// false, changing nothing, for a head it cannot read. `values` arrives holding
+// the defaults.
+constexpr int32 kMaxStateParams = 1 << 20;
+inline bool read_state_head(IBStreamer& reader, const ParamIds& ids, std::vector<double>& values, bool clampRange) {
+    int32 version = 0;
+    int32 count = 0;
+    if (!reader.readInt32(version) || !reader.readInt32(count)) return false;
+    const auto usable = [clampRange](double value) { return std::isfinite(value) && (!clampRange || (value >= 0.0 && value <= 1.0)); };
+    if (ids.identity()) {
+        if (version != 1 || count != static_cast<int32>(values.size())) return false;
+        for (double& slot : values) {
+            if (!reader.readDouble(slot) || !usable(slot)) return false;
+        }
+        return true;
+    }
+    if ((version != 1 && version != 2) || count < 0 || count > kMaxStateParams) return false;
+    if (version == 1 && count > static_cast<int32>(values.size())) return false;
+    for (int32 i = 0; i < count; ++i) {
+        int32 id = i;
+        double value = 0.0;
+        if (version == 2 && !reader.readInt32(id)) return false;
+        if (!reader.readDouble(value) || !usable(value)) return false;
+        const int32 index = ids.index(static_cast<ParamID>(id));
+        // A version 1 head names only parameters the old build had; one of them missing is another plugin's state.
+        if (index < 0 && version == 1) return false;
+        if (index >= 0) values[static_cast<size_t>(index)] = value;
+    }
+    return true;
+}
+
 FUID fuid_from(const uint8_t bytes[16]) {
     TUID cid{};
     std::memcpy(cid, bytes, 16);
@@ -383,8 +473,9 @@ static std::string strip_unit(const std::string& text, const char* unit) {
 
 class ShellParameter final : public Parameter {
 public:
-    ShellParameter(const TChar* title, const TChar* units, ParamID tag, ParamValue normalized, int32 stepCount, int32 flags)
-        : Parameter(title, tag, units, normalized, stepCount, flags), index_(tag) {}
+    // `tag` is the ID the host stores, `index` the parameter's place in the ABI.
+    ShellParameter(const TChar* title, const TChar* units, ParamID tag, uint32_t index, ParamValue normalized, int32 stepCount, int32 flags)
+        : Parameter(title, tag, units, normalized, stepCount, flags), index_(index) {}
     ParamValue toPlain(ParamValue normalized) const SMTG_OVERRIDE { return op_shell_to_plain(index_, normalized); }
     ParamValue toNormalized(ParamValue plain) const SMTG_OVERRIDE { return op_shell_to_normalized(index_, plain); }
     // The plugin's own text for the plain value ("6.0 dB"), not the
@@ -408,7 +499,7 @@ public:
     }
     OBJ_METHODS(ShellParameter, Parameter)
 private:
-    ParamID index_;
+    uint32_t index_;
 };
 
 // Bypass reads "Off" and "On" instead of 0.0000 and 1.0000.
@@ -435,8 +526,9 @@ public:
 };
 
 // The host bypass parameter. Its ID is far outside 0..n-1 so the plugin's own
-// parameter IDs are the ABI indices, unshifted.
-constexpr ParamID kBypassId = 0x42595053;
+// parameter IDs are the ABI indices, unshifted (or its pinned IDs, which the
+// library keeps clear of this one).
+constexpr ParamID kBypassId = kBypassParamId;
 // Length of the switch between processed and bypassed audio.
 constexpr double kBypassFadeSeconds = 0.010;
 
@@ -569,11 +661,13 @@ public:
         if (!load_info(info)) return;
         setControllerClass(fuid_from(info.controller_cid));
         count_ = info.param_count;
+        ids_.load(count_);
         values_ = std::make_unique<std::atomic<double>[]>(count_);
+        defaults_.assign(count_, 0.0);
         for (uint32_t i = 0; i < count_; ++i) {
             OpParamDesc desc{};
-            if (op_shell_param(i, &desc)) values_[i].store(desc.default_normalized);
-            else values_[i].store(0.0);
+            if (op_shell_param(i, &desc)) defaults_[i] = desc.default_normalized;
+            values_[i].store(defaults_[i]);
         }
         loadLayouts();
         const uint32_t ports = op_shell_note_ports();
@@ -720,13 +814,8 @@ public:
     tresult PLUGIN_API setState(IBStream* stream) SMTG_OVERRIDE {
         if (!stream || count_ == 0) return kResultFalse;
         IBStreamer reader(stream, kLittleEndian);
-        int32 version = 0;
-        int32 count = 0;
-        if (!reader.readInt32(version) || version != 1 || !reader.readInt32(count) || count != static_cast<int32>(count_)) return kResultFalse;
-        std::vector<double> loaded(count_);
-        for (uint32_t i = 0; i < count_; ++i) {
-            if (!reader.readDouble(loaded[i]) || !std::isfinite(loaded[i]) || loaded[i] < 0.0 || loaded[i] > 1.0) return kResultFalse;
-        }
+        std::vector<double> loaded(defaults_);
+        if (!read_state_head(reader, ids_, loaded, true)) return kResultFalse;
         // Bypass follows the parameters. A state written before bypass existed
         // ends here, which means not bypassed.
         int32 bypass = 0;
@@ -764,8 +853,11 @@ public:
             blob = pendingBlob_;
         }
         IBStreamer writer(stream, kLittleEndian);
-        if (!writer.writeInt32(1) || !writer.writeInt32(static_cast<int32>(count_))) return kResultFalse;
+        // Pinned parameter IDs: each value is written under its ID (version 2).
+        const bool keyed = !ids_.identity();
+        if (!writer.writeInt32(keyed ? 2 : 1) || !writer.writeInt32(static_cast<int32>(count_))) return kResultFalse;
         for (uint32_t i = 0; i < count_; ++i) {
+            if (keyed && !writer.writeInt32(static_cast<int32>(ids_.id(i)))) return kResultFalse;
             if (!writer.writeDouble(values_[i].load())) return kResultFalse;
         }
         if (!writer.writeInt32(bypass_.load() ? 1 : 0)) return kResultFalse;
@@ -1004,7 +1096,7 @@ private:
 
     // ---- events ------------------------------------------------------------
     bool relevant(ParamID id) const {
-        return id < count_ || id == kBypassId || (noteIn_ && id >= kMidiParamBase && id < kMidiParamBase + kMidiParamCount);
+        return ids_.index(id) >= 0 || id == kBypassId || (noteIn_ && id >= kMidiParamBase && id < kMidiParamBase + kMidiParamCount);
     }
     static uint8_t to_midi7(double normalized) {
         return static_cast<uint8_t>(std::lround(std::clamp(normalized, 0.0, 1.0) * 127.0));
@@ -1035,11 +1127,11 @@ private:
                 bypassPoints_[nBypass_++] = BypassPoint{std::clamp(at, 0, numSamples), order_++, value >= 0.5};
             return;
         }
-        if (id < count_) {
+        if (const int32 index = ids_.index(id); index >= 0) {
             OpEvent ev{};
             ev.offset = static_cast<uint32_t>(std::clamp(at, 0, numSamples));
             ev.kind = OP_EVENT_PARAM_NORMALIZED;
-            ev.index = id;
+            ev.index = static_cast<uint32_t>(index);
             ev.value = static_cast<float>(std::clamp(value, 0.0, 1.0));
             addEvent(ev);
             return;
@@ -1414,6 +1506,9 @@ private:
     void* engine_ = nullptr;
     TrackState track_;
     uint32_t count_ = 0;
+    ParamIds ids_;
+    // The normalized default of each parameter: what a state that does not name it leaves.
+    std::vector<double> defaults_;
     uint32_t channels_ = 2;  // engine bus width given to op_shell_create (the legacy path)
     std::unique_ptr<std::atomic<double>[]> values_;
     std::atomic<bool> bypass_{false};
@@ -1616,6 +1711,7 @@ public:
         if (result != kResultOk) return result;
         OpShellInfo info{};
         if (!load_info(info)) return kResultFalse;
+        ids_.load(info.param_count);
         for (uint32_t i = 0; i < info.param_count; ++i) {
             OpParamDesc desc{};
             if (!op_shell_param(i, &desc)) return kResultFalse;
@@ -1625,7 +1721,7 @@ public:
             UString(unit, 128).fromAscii(desc.unit);
             int32 steps = desc.steps > 1 ? static_cast<int32>(desc.steps - 1) : 0;
             int32 flags = (desc.flags & OP_PARAM_AUTOMATABLE) ? ParameterInfo::kCanAutomate : 0;
-            auto* parameter = new ShellParameter(title, unit, i, desc.default_normalized, steps, flags);
+            auto* parameter = new ShellParameter(title, unit, ids_.id(i), i, desc.default_normalized, steps, flags);
             if (i < units_.unitOf.size()) parameter->setUnitID(units_.unitOf[i]);
             parameters.addParameter(parameter);
         }
@@ -1650,14 +1746,14 @@ public:
     tresult PLUGIN_API setComponentState(IBStream* stream) SMTG_OVERRIDE {
         if (!stream) return kResultFalse;
         IBStreamer reader(stream, kLittleEndian);
-        int32 version = 0;
-        int32 count = 0;
-        if (!reader.readInt32(version) || version != 1 || !reader.readInt32(count) || count != static_cast<int32>(count_)) return kResultFalse;
-        for (int32 i = 0; i < count; ++i) {
-            double value = 0.0;
-            if (!reader.readDouble(value) || !std::isfinite(value)) return kResultFalse;
-            setParamNormalized(static_cast<ParamID>(i), value);
+        // The same head the processor reads; nothing is set unless all of it reads.
+        std::vector<double> loaded(count_);
+        for (uint32_t i = 0; i < count_; ++i) {
+            OpParamDesc desc{};
+            loaded[i] = op_shell_param(i, &desc) ? desc.default_normalized : 0.0;
         }
+        if (!read_state_head(reader, ids_, loaded, false)) return kResultFalse;
+        for (uint32_t i = 0; i < count_; ++i) setParamNormalized(ids_.id(i), loaded[i]);
         // The plugin-state trailer after the flag belongs to the processor.
         int32 bypass = 0;
         if (!reader.readInt32(bypass)) bypass = 0;
@@ -1699,7 +1795,10 @@ public:
     IPlugView* PLUGIN_API createView(FIDString name) SMTG_OVERRIDE;
     tresult PLUGIN_API setParamNormalized(ParamID tag, ParamValue value) SMTG_OVERRIDE {
         const tresult result = EditController::setParamNormalized(tag, value);
-        if (editor_ && result == kResultOk && tag < count_) op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, value)));
+        if (const int32 index = ids_.index(tag); editor_ && result == kResultOk && index >= 0) {
+            const auto at = static_cast<uint32_t>(index);
+            op_editor_set_plain(editor_, at, static_cast<float>(op_shell_to_plain(at, value)));
+        }
         return result;
     }
     // Called by the view.
@@ -1709,8 +1808,7 @@ public:
         editor_ = op_editor_create(&host);
         if (!editor_) return nullptr;
         for (uint32_t i = 0; i < count_; ++i) {
-            const ParamID tag = static_cast<ParamID>(i);
-            op_editor_set_plain(editor_, tag, static_cast<float>(op_shell_to_plain(tag, getParamNormalized(tag))));
+            op_editor_set_plain(editor_, i, static_cast<float>(op_shell_to_plain(i, getParamNormalized(ids_.id(i)))));
         }
         op_editor_bind(editor_, engine_);
         op_editor_set_request_resize(editor_, frameContext, request);
@@ -1731,7 +1829,8 @@ public:
         if (!componentHandler || !view) return false;
         FUnknownPtr<IComponentHandler3> handler(componentHandler);
         if (!handler) return false;
-        ParamID id = index;
+        if (index >= count_) return false;
+        ParamID id = ids_.id(index);
         IContextMenu* menu = handler->createContextMenu(view, &id);
         if (!menu) return false;
         const tresult shown = menu->popup(x, y);
@@ -1754,14 +1853,22 @@ public:
     }
 
 private:
-    static void hostBegin(void* context, uint32_t index) { static_cast<Controller*>(context)->EditController::beginEdit(index); }
+    // The editor names a parameter by its ABI index; the host by its ID.
+    static void hostBegin(void* context, uint32_t index) {
+        auto* self = static_cast<Controller*>(context);
+        if (index < self->count_) self->EditController::beginEdit(self->ids_.id(index));
+    }
     static void hostPerform(void* context, uint32_t index, double plain) {
         auto* self = static_cast<Controller*>(context);
+        if (index >= self->count_) return;
         const ParamValue normalized = op_shell_to_normalized(index, plain);
-        self->EditController::setParamNormalized(index, normalized);
-        self->EditController::performEdit(index, normalized);
+        self->EditController::setParamNormalized(self->ids_.id(index), normalized);
+        self->EditController::performEdit(self->ids_.id(index), normalized);
     }
-    static void hostEnd(void* context, uint32_t index) { static_cast<Controller*>(context)->EditController::endEdit(index); }
+    static void hostEnd(void* context, uint32_t index) {
+        auto* self = static_cast<Controller*>(context);
+        if (index < self->count_) self->EditController::endEdit(self->ids_.id(index));
+    }
     void* editor_ = nullptr;
     const void* owner_ = nullptr;
     void* engine_ = nullptr;
@@ -1790,6 +1897,7 @@ private:
     }
     TrackState track_;
     uint32_t count_ = 0;
+    ParamIds ids_;
     bool midiIn_ = false;
     ShellUnits units_;
     UnitID selectedUnit_ = kRootUnitId;
