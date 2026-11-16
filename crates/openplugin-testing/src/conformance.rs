@@ -1104,7 +1104,7 @@ impl<'a, P: Plugin, F: Fn() -> P> Suite<'a, P, F> {
                 })
                 .collect();
             // An identity pin a format cannot carry, which that format would ignore.
-            let pins: Vec<String> = openplugin_core::identity::check_pins(&*p)
+            let pins: Vec<String> = openplugin_core::identity::check_pins(&p)
                 .into_iter()
                 .map(|e| format!("an identity pin cannot be used and is ignored: {e}"))
                 .collect();
