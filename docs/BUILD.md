@@ -212,3 +212,52 @@ On 15 November 2026, on Windows 11 x64 (Rust 1.100.0 MSVC), `clap-validator` 0.4
 - `RoleTags.clap` fails `param-set-events` and `param-set-no-cookies` on every platform: its one parameter is a toggle whose default is 0, and the validator's fixed-seed value for it is also 0, so the test sees no change. With the default set to 1 for a trial build, both pass; `openplugin-port capture --set Spare=1` reads 1 back through `clap_plugin_params::flush`. The example is a test plug-in for the channel order proof and is not changed for this.
 
 REAPER 7.80 (a portable copy with its own `-cfgfile` and the Dummy Audio device) scans all four, instantiates each, and renders a project with `Editor.clap` (Gain 6 dB, Warm on, set from ReaScript) with `reaper.exe -renderproject`, from an SSH session as well as in the desktop session. The 32-bit float render is bit-identical to `openplugin-port null --save` (the SDK's own offline render of the same input and settings), and the state REAPER saved in the `.rpp` reopens to Gain 6 dB and Warm on.
+
+## Windows: VST3 and AAX shells
+
+`native/CMakeLists.txt` hands a Windows build machine to `native/cmake/windows.cmake`, which holds the options, the Rust library and its system libraries, and includes one file per format: `native/vst3/win/vst3.cmake` and `native/aax/win/aax.cmake`. The compiler is MSVC (Visual Studio or its Build Tools) for x64. There is no Audio Unit on Windows, and `scripts/build_plugin.sh` is macOS only: on Windows the bundles come from CMake directly. In PowerShell, from the repository root, with the SDK checkouts outside the tree:
+
+```powershell
+cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+cmake -S native -B build-shell -A x64 `
+  "-DOP_RUST_LIB=$PWD\target\release\example_editor.lib" `
+  "-DOP_VST3_SDK=C:\path\to\vst3sdk" "-DOP_AAX_SDK=C:\path\to\aax-sdk-2-8-1" `
+  "-DOP_PRODUCT=Example Gain" "-DOP_BUNDLE_ID=com.opengrid.example" `
+  "-DOP_VERSION=0.3.1" "-DOP_MANUFACTURER=OpenGrid" `
+  "-DOP_TAIL=ON" "-DOP_EDITOR=OFF"
+cmake --build build-shell --config Release -j 4
+ctest --test-dir build-shell -C Release --output-on-failure
+```
+
+- **Quote each `-D`.** PowerShell splits an unquoted `-DOP_VERSION=0.3.1` at the first dot, and CMake then reads `.3.1` as a path.
+- **Release only.** The Rust library is built against the release C runtime, so the shells are built as `Release` (or `RelWithDebInfo`). A `Debug` build mixes two C runtimes.
+- **One format.** `-DOP_BUILD_AAX=OFF` or `-DOP_BUILD_VST3=OFF` leaves a format out, and its SDK is then not needed. The AAX shell wants AAX SDK 2.8.1: with 2.10 two of the proofs do not build.
+- **System libraries.** `OP_RUST_NATIVE_LIBS` lists what the Rust library links (`user32`, `gdi32`, `shell32`, `comdlg32`, `comctl32` and the ones `std` needs). When a plugin needs more, take the list from `cargo rustc --release --lib -p <crate> --crate-type staticlib -- --print native-static-libs`. It is a cache variable: a build folder configured earlier keeps its old list until it is given again or removed with `-UOP_RUST_NATIVE_LIBS`.
+- **`-DOP_EDITOR=ON`** makes the shells host the plugin's editor (`native/include/op_editor_win.h`). The stand-in plugins have no editor, so, as on macOS, that build has fewer proofs and adds `vst3_editor_proof`, which opens real windows and needs a desktop session (`scripts\windows\run_in_desktop.ps1` from SSH).
+
+What is built, in the build folder:
+
+| Format | Layout | Notes |
+|---|---|---|
+| VST3 | `<Name>.vst3\Contents\x86_64-win\<Name>.vst3`, the VST3 SDK licence in `Contents\Resources` | The inner file is the DLL. Its entry points are `InitDll` and `ExitDll`. No `Info.plist`, `PkgInfo` or `moduleinfo.json`. Install by copying the outer folder to `%COMMONPROGRAMFILES%\VST3` |
+| AAX | `<Name>.aaxplugin\Contents\x64\<Name>.aaxplugin` | Unsigned: Pro Tools loads it only after PACE signing. The AAX Validator loads it as it is (see [AAX_VALIDATOR.md](AAX_VALIDATOR.md)) |
+
+Nothing is signed, installed or copied into a plug-in folder.
+
+A VST3 class has the same id on Windows as on macOS. The plugin gives each class id as the 16 bytes of its FUID string. On macOS those bytes are the TUID; on Windows the VST3 SDK is COM compatible and a TUID is a GUID, so the Windows shell stores the first three fields in little-endian order (`native/vst3/win/OpenPluginVST3Win.cpp`). A host reads the same FUID on both, and a project saved on one system finds the plug-in on the other. `crates/openplugin-port/tests/scan.rs` holds the example's two ids as fixed strings.
+
+The editor's sizes: the editor works in points, a Windows host in pixels. The VST3 view converts at its scale, which is the one the host gives through `IPlugViewContentScaleSupport` or, without that, the DPI of the host's window over 96.
+
+### Checks run on the example
+
+On 16 November 2026, on Windows 11 x64 (Rust 1.100.0 MSVC, MSVC 14.51, CMake 4.4, VST3 SDK v3.8.0_build_66, AAX SDK 2.8.1), with `examples/editor` as "Example Gain":
+
+- `ctest -C Release`, editor off: 27 of 27, the 12 `vst3_*` proofs of the macOS build and the 15 `aax_*` proofs. `vst3_noalloc_events_proof` takes one to three minutes: it prepares a point per sample for 2081 parameters before it measures.
+- `ctest -C Release`, editor on, in the desktop session: 18 of 18. `vst3_editor_proof` ran on a display at 150 %: the view opened at 360 x 240 pixels for 240 x 160 points, resized through its range (270 x 180 to 720 x 480), opened at 480 x 320 after `setContentScaleFactor(2.0)` and went to 360 x 240, asking the frame, after `setContentScaleFactor(1.5)`.
+- pluginval 1.0.4, `--strictness-level 10`, on the VST3 bundle: `SUCCESS` without the editor (`--skip-gui-tests`, over SSH) and with the editor and pluginval's editor tests (in the desktop session).
+- `openplugin-port scan` and the port's VST3 fixture tests (`OPENPLUGIN_PORT_FIXTURES` at the build folder): the scan reproduces the example's parameters, buses and class ids; capture and null tests pass, the latency one against `Latency Stub.vst3`.
+- REAPER 7.80 with a configuration of its own (`-cfgfile`, `-newinst`) and `scripts/host_smoke/reaper_smoke.lua` unchanged: the VST3 is found and inserted, Gain reads in dB, offline renders have the expected peaks (0.2500 at 0 dB, 0.4988 at +6 dB, 0.0628 at -12 dB, 0.9953 at +12 dB, 0.7596 with Warm on), state and a Gain envelope survive save and reopen, and the plug-in's own editor opens in REAPER's window, twice.
+
+CI runs the VST3 part without the editor in the `vst3-shell-windows` job on `windows-latest`: the build, the twelve proofs and the port's fixture tests. That job has not run on GitHub yet; its steps were run locally.
+
+Not covered: `Debug` builds, ARM64, a signed or installed bundle, Pro Tools (PACE signing), Cubase or another Steinberg host, and a version resource in the DLLs (they carry none).

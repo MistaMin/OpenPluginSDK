@@ -226,6 +226,75 @@ jobs:
           & (Join-Path $env:RUNNER_TEMP 'clap-validator\clap-validator.exe') validate (Join-Path $env:RUNNER_TEMP 'bundle\Editor.clap')
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
+  # The VST3 shell on Windows (native/cmake/windows.cmake, native/vst3/win): the
+  # same proofs as the macOS vst3-shell job, built with MSVC. AAX is not built
+  # here (its SDK is not redistributable), and the editor proof needs a desktop.
+  vst3-shell-windows:
+    name: VST3 shell proofs on Windows
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      # VST3 SDK v3.8.0_build_66, as in the vst3-shell job.
+      VST3_SDK_REF: v3.8.0_build_66
+    steps:
+      - name: Check out OpenPluginSDK
+        uses: actions/checkout@v4
+        with:
+          path: OpenPluginSDK
+      - name: Check out GoodLookinDri as a sibling
+        uses: actions/checkout@v4
+        with:
+          repository: MistaMin/GoodLookinDri
+          ref: ${{ env.GOODLOOKINDRI_REF }}
+          path: GoodLookinDri
+      - name: Check out the public VST3 SDK
+        uses: actions/checkout@v4
+        with:
+          repository: steinbergmedia/vst3sdk
+          ref: ${{ env.VST3_SDK_REF }}
+          submodules: recursive
+          path: vst3sdk
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+      # The proofs load the example ("Example Gain"); the role proof loads Role Tags and
+      # the per-note expression proof Expression Synth, found next to it.
+      - name: Build the example, Role Tags and Expression Synth as static libraries
+        working-directory: OpenPluginSDK
+        run: cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+      # Only the VST3 shell, no editor. The Rust library has the release C
+      # runtime, so the shell is built as Release. Each -D is quoted: PowerShell
+      # splits an unquoted -DOP_VERSION=0.3.1 at the first dot.
+      - name: Configure the VST3 shell
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          cmake -S native -B build-shell -A x64 `
+            "-DOP_RUST_LIB=$PWD\target\release\example_editor.lib" `
+            "-DOP_VST3_SDK=$env:GITHUB_WORKSPACE\vst3sdk" `
+            "-DOP_BUILD_AAX=OFF" `
+            "-DOP_PRODUCT=Example Gain" "-DOP_BUNDLE_ID=com.opengrid.example" `
+            "-DOP_VERSION=0.3.1" "-DOP_MANUFACTURER=OpenGrid" `
+            "-DOP_TAIL=ON" "-DOP_EDITOR=OFF"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Build the VST3 shell and its proofs
+        working-directory: OpenPluginSDK
+        run: cmake --build build-shell --config Release -j 4
+      # The twelve vst3_* proofs. vst3_noalloc_events_proof prepares a point per
+      # sample for 2081 parameters and takes a few minutes.
+      - name: Run the VST3 proofs
+        working-directory: OpenPluginSDK
+        run: ctest --test-dir build-shell -C Release --output-on-failure
+      # openplugin-port's own VST3 host against the bundles just built
+      # (Example Gain.vst3, Latency Stub.vst3): scan, capture and null tests.
+      # The Audio Unit halves of the mixed tests skip themselves (no .component).
+      - name: openplugin-port against the built VST3 bundles
+        working-directory: OpenPluginSDK
+        shell: pwsh
+        run: |
+          $env:OPENPLUGIN_PORT_FIXTURES = "$PWD\build-shell"
+          cargo test -p openplugin-port --no-fail-fast
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
   # The minimum Rust version on Windows: the Windows-only code (cfg(windows))
   # must build with 1.85 too, which the macOS msrv job cannot see.
   msrv-windows:

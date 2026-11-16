@@ -292,7 +292,6 @@ fn formats() -> [(&'static str, &'static str); 2] {
 }
 
 #[test]
-#[cfg_attr(windows, ignore = "needs the Windows VST3 shell (native/vst3/win); Audio Units exist only on macOS")]
 fn vst3_and_au_identical_builds_null_and_a_changed_port_fails() {
     let Some(dir) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");
@@ -328,7 +327,6 @@ fn vst3_and_au_identical_builds_null_and_a_changed_port_fails() {
 /// A plugin that reports 37 samples of latency is aligned by it: its render is shifted by the
 /// latency, and the report says the latencies differ.
 #[test]
-#[cfg_attr(windows, ignore = "needs the Windows VST3 shell (native/vst3/win); Audio Units exist only on macOS")]
 fn latency_is_reported_and_aligned() {
     let Some(dir) = fixtures() else {
         eprintln!("skipped: OPENPLUGIN_PORT_FIXTURES is not set");

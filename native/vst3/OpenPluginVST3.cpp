@@ -1798,8 +1798,11 @@ private:
 
 #if OP_HAS_EDITOR
 // The NSView host. The controller owns the editor, so a view that outlives its
-// window still closes cleanly.
-class EditorView final : public CPluginView {
+// window still closes cleanly. Not final, and its helpers are protected: a platform
+// file that includes this one may derive its own view and define
+// Controller::createView itself (OP_VST3_OWN_EDITOR_VIEW; native/vst3/win/OpenPluginVST3Win.cpp
+// adds IPlugViewContentScaleSupport that way).
+class EditorView : public CPluginView {
 public:
     explicit EditorView(Controller* controller) : controller_(controller) {
         uint32_t width = 0;
@@ -1861,7 +1864,7 @@ public:
         return kResultOk;
     }
 
-private:
+protected:
     // This view's editor, or null when it is closed or another view replaced it.
     void* ownEditor() const { return open_ && controller_ ? controller_->editorOf(this) : nullptr; }
     // The editor's own adjustment when it is open. Before that only the
@@ -1894,10 +1897,12 @@ private:
     uint32_t minW_ = 0, minH_ = 0, maxW_ = 0, maxH_ = 0, aspectW_ = 0, aspectH_ = 0;
 };
 
+#ifndef OP_VST3_OWN_EDITOR_VIEW
 IPlugView* PLUGIN_API Controller::createView(FIDString name) {
     if (!name || std::strcmp(name, ViewType::kEditor) != 0) return nullptr;
     return new EditorView(this);
 }
+#endif
 #endif
 }
 
