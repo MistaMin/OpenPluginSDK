@@ -170,7 +170,7 @@ fn reference(s: &Scenario, late: u32) -> [Vec<f32>; 2] {
             assert!(plugin.set_param(["gain", "warm"][e.param as usize], e.value));
         }
         let mut io = vec![s.input[0][a..b].to_vec(), s.input[1][a..b].to_vec()];
-        plugin.process(&mut io, b - a);
+        plugin.process(&mut openplugin::core::ChannelsMut::new(&mut io), b - a);
         out[0][a..b].copy_from_slice(&io[0]);
         out[1][a..b].copy_from_slice(&io[1]);
     }
