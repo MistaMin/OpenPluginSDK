@@ -11,8 +11,8 @@
 //! With pinned ids the project reopens: the same plugin id, the saved values on
 //! the same parameters, and the lane played back gives the same audio sample
 //! for sample. The negative control is the same pair of builds without pins,
-//! where a parameter's id is its position: the state is refused and the lane
-//! moves other parameters, so the audio differs.
+//! where a parameter's id is its position: the state's values land by position
+//! on other parameters, and the lane moves other parameters, so the audio differs.
 
 use std::ffi::{c_void, CStr};
 
@@ -320,8 +320,14 @@ fn without_pins_the_same_project_does_not_reopen() {
     assert_eq!(heard, expected(), "the unpinned build plays its own lane as the pinned one does");
 
     let second = Host::<PlainB>::open();
-    // The positional state of three parameters is not a state of four.
-    assert!(!second.load_state(&project.state), "the reordered build must refuse the positional state");
+    // The positional state of three parameters loads as the first three of
+    // four, the rule for a table that grew at its end. This table was reordered
+    // too, so each value lands on the parameter now at its position: offset's on
+    // Drive, invert's on Offset; Level, which the state does not reach, keeps
+    // its default.
+    assert!(second.load_state(&project.state));
+    let at = |name: &str| second.value(second.id_of(name));
+    assert_eq!((at("Drive"), at("Offset"), at("Level")), (Some(0.25), Some(1.0), Some(1.0)));
     // The lane's ids are positions: 0 was level and is now invert, 1 was offset and is now drive.
     assert_eq!((second.id_of("Invert"), second.id_of("Drive")), (level, offset));
     assert_ne!(second.render(0.5, &project.lane), heard, "the lane moves other parameters, so the audio differs");

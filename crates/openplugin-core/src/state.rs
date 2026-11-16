@@ -45,8 +45,11 @@ pub fn encode_params(info: &PluginInfo, values: &[f32]) -> Vec<u8> {
 /// magic, version, count, or truncated tail returns `None` and does not invent
 /// a partial vector.
 ///
-/// Version 1 into a table without pins: the count must match and the values
-/// are taken by position. Version 1 into a pinned table: the blob comes from a
+/// Version 1 into a table without pins: the values are taken by position. A
+/// blob with fewer values than the table has parameters comes from an older
+/// build, whose table ended earlier: its values go to the first parameters and
+/// the rest get their defaults. A blob with more values, or none, is refused.
+/// Version 1 into a pinned table: the blob comes from a
 /// build made before the pins, in which a parameter's position was its
 /// numeric id, so value `i` goes to the parameter whose CLAP id is `i`
 /// (refused when there is none), and a parameter the old build did not have
@@ -69,20 +72,20 @@ pub fn decode_params(info: &PluginInfo, bytes: &[u8]) -> Option<Vec<f32>> {
 }
 
 fn decode_positional(info: &PluginInfo, count: usize, bytes: &[u8]) -> Option<Vec<f32>> {
-    if count != info.params.len() {
+    if count > info.params.len() || (count == 0 && !info.params.is_empty()) {
         return None;
     }
     if bytes.len() != 8 + count * 4 {
         return None;
     }
-    let mut values = Vec::with_capacity(count);
-    for (index, param) in info.params.iter().enumerate() {
+    let mut values: Vec<f32> = info.params.iter().map(|param| param.default).collect();
+    for (index, param) in info.params.iter().take(count).enumerate() {
         let start = 8 + index * 4;
         let raw = f32::from_le_bytes(bytes[start..start + 4].try_into().ok()?);
         if !raw.is_finite() {
             return None;
         }
-        values.push(param.clamp(raw));
+        values[index] = param.clamp(raw);
     }
     Some(values)
 }

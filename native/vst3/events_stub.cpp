@@ -23,6 +23,8 @@
 #endif
 
 namespace {
+uint32_t g_creates = 0;
+uint32_t g_param_sets = 0;
 struct Stub {
     float mode = 0.0f;
     int note = -1;
@@ -151,13 +153,16 @@ uint32_t op_shell_param(uint32_t index, OpParamDesc* out) {
     out->default_plain = 0.0;
     out->default_normalized = 0.0;
     out->flags = OP_PARAM_AUTOMATABLE;
-    put(out->name, sizeof(out->name), "Mode");
+    put(out->name, sizeof(out->name), "M\xC3\xB6" "d\xC3\xA9");  // "Mode" with o umlaut and e acute: a name outside ASCII
     put(out->id, sizeof(out->id), "mode");
     return 1;
 }
 double op_shell_to_plain(uint32_t, double normalized) { return normalized; }
 double op_shell_to_normalized(uint32_t, double plain) { return plain; }
-void* op_shell_create(double, uint32_t, uint32_t) { return new (std::nothrow) Stub; }
+void* op_shell_create(double, uint32_t, uint32_t) {
+    ++g_creates;
+    return new (std::nothrow) Stub;
+}
 void op_shell_destroy(void* instance) { delete static_cast<Stub*>(instance); }
 void op_shell_reset(void* instance) {
     if (instance) static_cast<Stub*>(instance)->note = -1;
@@ -165,6 +170,7 @@ void op_shell_reset(void* instance) {
 uint32_t op_shell_latency(void*) { return 0; }
 uint32_t op_shell_set_plain(void* instance, uint32_t index, float plain) {
     if (!instance || index != 0) return 0;
+    ++g_param_sets;
     static_cast<Stub*>(instance)->mode = plain;
     return 1;
 }
@@ -251,7 +257,10 @@ uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, ui
     if (!instance) return OP_STATE_FAILED;
     if (needed) *needed = sizeof(EventsProbe);
     if (!out || capacity < sizeof(EventsProbe)) return OP_STATE_TOO_SMALL;
-    std::memcpy(out, &static_cast<Stub*>(instance)->probe, sizeof(EventsProbe));
+    EventsProbe probe = static_cast<Stub*>(instance)->probe;
+    probe.creates = g_creates;
+    probe.param_sets = g_param_sets;
+    std::memcpy(out, &probe, sizeof(EventsProbe));
     return OP_STATE_OK;
 }
 uint32_t op_shell_load_state(void* instance, const uint8_t*, uint32_t length) { return instance && length == sizeof(EventsProbe); }

@@ -17,6 +17,7 @@
 //
 //   ctest --test-dir build-shell -R au_state_proof --output-on-failure
 #include "proof_au.h"
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <thread>
@@ -28,6 +29,8 @@ struct Hooks {
     void (*set)(void*, const uint8_t*, uint32_t);
     uint32_t (*get)(void*, uint8_t*, uint32_t);
     void (*grow)(void*, uint32_t);
+    uint32_t (*creates)();
+    uint32_t (*sets)();
 } hooks;
 
 struct Unit {
@@ -279,6 +282,91 @@ void check_one(AudioComponent component, UInt32 channels, const char* label) {
     CHECK(chunk(live) == kChunkA && param(live, kGain) == 2.5f);
     std::printf("AU state %s: 100 saves and restores beside %d rendered blocks, no render failure\n", label, blocks.load());
 
+    // An old preset (no "OpenPluginState" key) from an untrusted file: the base class writes
+    // its values into the unit unchecked. One that is not a number, and one out of range, are
+    // put back to the defaults, and the unit still renders. The element saves each value as a
+    // big-endian float: gain 2.5 is 40 20 00 00 and tilt 0.25 is 3E 80 00 00.
+    {
+        CFMutableDictionaryRef hostile = CFDictionaryCreateMutableCopy(nullptr, 0, saved);
+        CFDictionaryRemoveValue(hostile, CFSTR("OpenPluginState"));
+        auto data = static_cast<CFDataRef>(CFDictionaryGetValue(hostile, CFSTR(kAUPresetDataKey)));
+        CHECK(data && CFGetTypeID(data) == CFDataGetTypeID());
+        Bytes raw(CFDataGetBytePtr(data), CFDataGetBytePtr(data) + CFDataGetLength(data));
+        const auto replace = [&raw](const Bytes& from, const Bytes& to) {
+            const auto at = std::search(raw.begin(), raw.end(), from.begin(), from.end());
+            CHECK(at != raw.end());
+            std::copy(to.begin(), to.end(), at);
+        };
+        replace({0x40, 0x20, 0x00, 0x00}, {0x7F, 0xC0, 0x00, 0x00});  // gain: NaN
+        replace({0x3E, 0x80, 0x00, 0x00}, {0x41, 0x10, 0x00, 0x00});  // tilt: 9.0, above its maximum of 1
+        CFDataRef patched = CFDataCreate(nullptr, raw.data(), static_cast<CFIndex>(raw.size()));
+        CFDictionarySetValue(hostile, CFSTR(kAUPresetDataKey), patched);
+        CFRelease(patched);
+        for (bool initialized : {true, false}) {
+            Unit unit = make(component, channels);
+            if (initialized) initialize(unit);
+            set_param(unit, kGain, 3.0f);
+            CHECK(set_class_info(unit, hostile) == noErr);
+            CHECK(param(unit, kGain) == 1.0f && param(unit, kTilt) == 0.5f);
+            if (!initialized) initialize(unit);
+            check_gain(unit, channels, 1.0f);
+            uninitialize(unit);
+            CHECK(AudioComponentInstanceDispose(unit.unit) == noErr);
+        }
+        CFRelease(hostile);
+        std::printf("AU state %s: an old preset with a NaN and an out-of-range value restores the defaults and renders\n", label);
+    }
+
+    // The render thread hands the engine a parameter value only when it moved.
+    {
+        Unit unit = make(component, channels);
+        initialize(unit);
+        proof_render_run(unit.unit, channels, 0, 2);
+        const uint32_t before = hooks.sets();
+        proof_render_run(unit.unit, channels, 2, 64);
+        CHECK(hooks.sets() == before);
+        set_param(unit, kGain, 2.0f);
+        proof_render_run(unit.unit, channels, 66, 8);
+        CHECK(hooks.sets() - before == 1);
+        check_gain(unit, channels, 2.0f);
+        // A state call writes the engine from the main thread; the next render pushes everything once.
+        CFDictionaryRef now = class_info(unit);
+        CFRelease(now);
+        const uint32_t afterSave = hooks.sets();
+        proof_render_run(unit.unit, channels, 0, 8);
+        CHECK(hooks.sets() - afterSave == 2);
+        uninitialize(unit);
+        CHECK(AudioComponentInstanceDispose(unit.unit) == noErr);
+        std::printf("AU state %s: 64 steady renders make no parameter call into the engine; a changed value makes one\n", label);
+    }
+
+    // A state restored before Initialize is loaded into a scratch engine, which Initialize
+    // adopts when it was made for the same formats and slice size.
+    {
+        Unit unit = make(component, channels);
+        const uint32_t before = hooks.creates();
+        CHECK(set_class_info(unit, saved) == noErr);
+        initialize(unit);
+        CHECK(hooks.creates() - before == 1);
+        CHECK(chunk(unit) == kChunkA && param(unit, kGain) == 2.5f && param(unit, kTilt) == 0.25f);
+        check_gain(unit, channels, 2.5f);
+        uninitialize(unit);
+        CHECK(AudioComponentInstanceDispose(unit.unit) == noErr);
+        // Another slice size after the restore: the scratch engine does not fit, a new one is made.
+        Unit other = make(component, channels);
+        const uint32_t again = hooks.creates();
+        CHECK(set_class_info(other, saved) == noErr);
+        const UInt32 slice = 1024;
+        CHECK(AudioUnitSetProperty(other.unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &slice, sizeof(slice)) == noErr);
+        initialize(other);
+        CHECK(hooks.creates() - again == 2);
+        CHECK(chunk(other) == kChunkA && param(other, kGain) == 2.5f);
+        check_gain(other, channels, 2.5f);
+        uninitialize(other);
+        CHECK(AudioComponentInstanceDispose(other.unit) == noErr);
+        std::printf("AU state %s: a restore before Initialize builds one engine, not two; a changed slice size builds a new one\n", label);
+    }
+
     CFRelease(saved);
     for (Unit* u : {&source, &target, &early, &legacy, &legacy_early, &live, &idle, &grow, &large_target}) {
         if (u->engine) uninitialize(*u);
@@ -294,7 +382,9 @@ int main(int argc, char** argv) {
     hooks.set = reinterpret_cast<void (*)(void*, const uint8_t*, uint32_t)>(proof_bundle_symbol("op_test_set_chunk"));
     hooks.get = reinterpret_cast<uint32_t (*)(void*, uint8_t*, uint32_t)>(proof_bundle_symbol("op_test_get_chunk"));
     hooks.grow = reinterpret_cast<void (*)(void*, uint32_t)>(proof_bundle_symbol("op_test_grow_after_query"));
-    CHECK(hooks.last && hooks.set && hooks.get && hooks.grow);
+    hooks.creates = reinterpret_cast<uint32_t (*)()>(proof_bundle_symbol("op_test_creates"));
+    hooks.sets = reinterpret_cast<uint32_t (*)()>(proof_bundle_symbol("op_test_param_sets"));
+    CHECK(hooks.last && hooks.set && hooks.get && hooks.grow && hooks.creates && hooks.sets);
     check_one(component, 1, "mono");
     check_one(component, 2, "stereo");
     std::puts("AU state proof: ClassInfo carries the plugin state: round trip, old dictionary, corrupt blobs refused, size query, beside render: PASS");

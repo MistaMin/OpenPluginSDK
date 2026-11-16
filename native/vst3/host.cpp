@@ -902,6 +902,64 @@ int main(int argc, char** argv) {
         CHECK(wrongCount.write(words, sizeof(words), nullptr) == kResultOk);
         wrongCount.seek(0, IBStream::kIBSeekSet, nullptr);
         CHECK(component->setState(&wrongCount) != kResultOk);
+        // A state from an older build of a plugin without pinned IDs, whose table ended one
+        // parameter earlier: the head (version 1) and the plugin's blob (OPST version 1) both
+        // hold one value fewer. It loads, and the parameter it does not have takes its default.
+        if (info.param_count > 1 && !(op_shell_identity() & OP_IDENTITY_KEYED_STATE)) {
+            const uint32_t fewer = info.param_count - 1;
+            std::string older;
+            const auto put = [&older](const void* data, size_t size) { older.append(static_cast<const char*>(data), size); };
+            const int32_t header[2] = {1, static_cast<int32_t>(fewer)};
+            put(header, sizeof(header));
+            for (uint32_t i = 0; i < fewer; ++i) {
+                const double value = op_shell_to_normalized(i, plain[i]);
+                put(&value, sizeof(value));
+            }
+            const int32_t notBypassed = 0;
+            put(&notBypassed, sizeof(notBypassed));
+            const uint16_t plane[2] = {1, static_cast<uint16_t>(fewer)};
+            const uint32_t trailer[3] = {0x4F505342, 1, static_cast<uint32_t>(4 + sizeof(plane) + 4 * fewer)};
+            put(trailer, sizeof(trailer));
+            put("OPST", 4);
+            put(plane, sizeof(plane));
+            for (uint32_t i = 0; i < fewer; ++i) put(&plain[i], sizeof(float));
+            // First move the last parameter off its default, with a head of this build.
+            OpParamDesc last{};
+            CHECK(op_shell_param(fewer, &last));
+            const double moved = last.default_normalized < 0.5 ? 1.0 : 0.0;
+            std::string full = older.substr(0, 8 + 8 * fewer);
+            full.append(reinterpret_cast<const char*>(&moved), sizeof(moved));
+            const int32_t count_now = static_cast<int32_t>(info.param_count);
+            std::memcpy(&full[4], &count_now, 4);
+            MemoryStream fullStream;
+            CHECK(fullStream.write(full.data(), static_cast<int32>(full.size()), nullptr) == kResultOk);
+            fullStream.seek(0, IBStream::kIBSeekSet, nullptr);
+            CHECK(component->setState(&fullStream) == kResultOk);
+            fullStream.seek(0, IBStream::kIBSeekSet, nullptr);
+            CHECK(controller->setComponentState(&fullStream) == kResultOk);
+            CHECK(controller->getParamNormalized(fewer) == moved);
+            MemoryStream stream;
+            CHECK(stream.write(older.data(), static_cast<int32>(older.size()), nullptr) == kResultOk);
+            stream.seek(0, IBStream::kIBSeekSet, nullptr);
+            CHECK(component->setState(&stream) == kResultOk);
+            stream.seek(0, IBStream::kIBSeekSet, nullptr);
+            CHECK(controller->setComponentState(&stream) == kResultOk);
+            CHECK(controller->getParamNormalized(fewer) == last.default_normalized);
+            MemoryStream now;
+            CHECK(component->getState(&now) == kResultOk);
+            int32_t count = 0;
+            std::memcpy(&count, now.getData() + 4, 4);
+            CHECK(count == static_cast<int32_t>(info.param_count));
+            for (uint32_t i = 0; i < info.param_count; ++i) {
+                double value = -1.0;
+                std::memcpy(&value, now.getData() + 8 + 8 * i, 8);
+                CHECK(std::fabs(value - (i < fewer ? op_shell_to_normalized(i, plain[i]) : last.default_normalized)) < 1e-6);
+            }
+            std::printf("VST3 %s state of an older build with %u of %u parameters: loads, the missing one at its default\n", label, fewer, info.param_count);
+            // Back to the values the checks below start from.
+            legacy.seek(0, IBStream::kIBSeekSet, nullptr);
+            CHECK(component->setState(&legacy) == kResultOk);
+        }
         // Parameter changes and bypass at their sample offsets.
         check_sample_accurate(component, processor, reference.instance, channels, gain, warm, bypass, 4096);
         CHECK(processor->setProcessing(false) == kResultOk);

@@ -61,8 +61,12 @@ fn a_table_without_pins_writes_the_positional_snapshot_byte_for_byte() {
     }
     assert_eq!(bytes, want);
     assert_eq!(decode_params(&OLD, &bytes), Some(vec![6.0, 50.0, 2.0]));
-    // And it is as strict as it was: the count must match.
-    assert_eq!(decode_params(&OLD, &encode_params(&info(&OLD_PARAMS[..2]), &[6.0, 50.0])), None);
+    // A blob from an older build, whose table ended earlier: its values, then defaults.
+    let older = encode_params(&info(&OLD_PARAMS[..2]), &[6.0, 50.0]);
+    assert_eq!(decode_params(&OLD, &older), Some(vec![6.0, 50.0, MODE.default]));
+    // A blob with more values than the table has parameters, or with none, is still refused.
+    assert_eq!(decode_params(&info(&OLD_PARAMS[..2]), &bytes), None);
+    assert_eq!(decode_params(&OLD, &encode_params(&info(&[]), &[])), None);
 }
 
 #[test]

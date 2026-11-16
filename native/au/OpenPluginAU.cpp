@@ -14,6 +14,7 @@
 // The host's name for the track (kAudioUnitProperty_ContextName) goes to
 // op_shell_set_track_info on the main thread, and to the view.
 #include "op_shell.h"
+#include "op_shell_calls.h"
 #include "OpenPluginAUBridge.h"
 #include "au_layout.h"
 #include <memory>
@@ -28,6 +29,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <pthread.h>
 #include <string>
 #include <type_traits>
@@ -50,27 +52,6 @@ struct CachedParam {
     // The clump of the parameter's group (1, 2, ... in the order groups first appear), 0 for none.
     UInt32 clump = 0;
 };
-// The group path of parameter `index` (op_shell_param_group, ABI 5): "Filter/Envelope", or "" for
-// the top level.
-std::string shellGroup(uint32_t index) {
-    char small[128];
-    const size_t length = op_shell_param_group(index, small, sizeof(small));
-    if (length < sizeof(small)) return std::string(small, length);
-    std::string text(length + 1, '\0');
-    const size_t again = op_shell_param_group(index, text.data(), text.size());
-    text.resize(std::min(again, length));
-    return text;
-}
-// The plugin's text for a plain value (op_shell_param_format). Main thread only; it allocates.
-std::string shellText(uint32_t index, double plain) {
-    char small[128];
-    const size_t length = op_shell_param_format(index, plain, small, sizeof(small));
-    if (length < sizeof(small)) return std::string(small, length);
-    std::string text(length + 1, '\0');
-    const size_t again = op_shell_param_format(index, plain, text.data(), text.size());
-    text.resize(std::min(again, length));
-    return text;
-}
 bool isNumberText(const std::string& text) {
     char* end = nullptr;
     std::strtod(text.c_str(), &end);
@@ -84,7 +65,7 @@ std::vector<std::string> choiceLabels(uint32_t index, const OpParamDesc& desc) {
     if (desc.max - desc.min != static_cast<double>(desc.steps - 1) || desc.min != std::floor(desc.min)) return labels;
     bool allNumbers = true;
     for (uint32_t step = 0; step < desc.steps; ++step) {
-        labels.push_back(shellText(index, desc.min + step));
+        labels.push_back(op_shell_calls::param_text(index, desc.min + step));
         if (!isNumberText(labels.back())) allNumbers = false;
     }
     if (allNumbers) labels.clear();
@@ -104,6 +85,57 @@ std::string utf8FromCF(CFStringRef text) {
 // The shell's own key in the kAudioUnitProperty_ClassInfo dictionary. The value is the
 // opaque blob of op_shell_save_state, as CFData. The base class's keys stay as they are.
 #define OP_AU_STATE_KEY CFSTR("OpenPluginState")
+// ---- one timer for every unit ---------------------------------------------------------
+// A single timer on the main run loop while any unit lives, not one per unit. Each tick
+// calls every unit's poll. Units are made and destroyed on any thread, so the list has a
+// lock. It is never held during a poll: a poll notifies the host, which may make or
+// dispose of units, or wait for a thread that does.
+class Poller {
+public:
+    using Poll = void (*)(void*);
+    static void add(void* unit, Poll poll) {
+        State& s = state();
+        std::lock_guard<std::mutex> lock(s.lock);
+        s.units.push_back({unit, poll});
+        if (s.timer) return;
+        s.timer = CFRunLoopTimerCreate(nullptr, CFAbsoluteTimeGetCurrent() + kSeconds, kSeconds, 0, 0, &Poller::tick, nullptr);
+        if (s.timer) CFRunLoopAddTimer(CFRunLoopGetMain(), s.timer, kCFRunLoopCommonModes);
+    }
+    static void remove(void* unit) {
+        State& s = state();
+        std::lock_guard<std::mutex> lock(s.lock);
+        s.units.erase(std::remove_if(s.units.begin(), s.units.end(), [unit](const auto& entry) { return entry.first == unit; }), s.units.end());
+        if (!s.units.empty() || !s.timer) return;
+        CFRunLoopTimerInvalidate(s.timer);
+        CFRelease(s.timer);
+        s.timer = nullptr;
+    }
+
+private:
+    static constexpr CFTimeInterval kSeconds = 0.030;
+    struct State {
+        std::mutex lock;
+        std::vector<std::pair<void*, Poll>> units;
+        CFRunLoopTimerRef timer = nullptr;
+    };
+    static State& state() {
+        static State* s = new State;  // never destroyed: no order to get wrong at exit
+        return *s;
+    }
+    static void tick(CFRunLoopTimerRef, void*) {
+        State& s = state();
+        // By index: a poll may add or remove units.
+        for (size_t i = 0;; ++i) {
+            std::pair<void*, Poll> unit;
+            {
+                std::lock_guard<std::mutex> lock(s.lock);
+                if (i >= s.units.size()) return;
+                unit = s.units[i];
+            }
+            unit.second(unit.first);
+        }
+    }
+};
 struct EngineDeleter {
     void operator()(void* engine) const { op_shell_destroy(engine); }
 };
@@ -223,7 +255,7 @@ public:
                 this->Globals()->SetParameter(ids_[i], static_cast<float>(params_[i].desc.default_plain));
                 params_[i].labels = choiceLabels(i, params_[i].desc);
                 // Clumps are flat: one per distinct group path, named by the whole path.
-                const std::string group = shellGroup(i);
+                const std::string group = op_shell_calls::param_group(i);
                 if (group.empty()) continue;
                 auto known = std::find(clumps_.begin(), clumps_.end(), group);
                 if (known == clumps_.end()) known = clumps_.insert(clumps_.end(), group);
@@ -361,7 +393,7 @@ public:
             if (index < 0) return kAudioUnitErr_InvalidParameter;
             const double plain = request->inValue ? static_cast<double>(*request->inValue) : static_cast<double>(this->Globals()->GetParameter(request->inParamID));
             if (!std::isfinite(plain)) return kAudioUnitErr_InvalidParameterValue;
-            const std::string text = shellText(static_cast<uint32_t>(index), plain);
+            const std::string text = op_shell_calls::param_text(static_cast<uint32_t>(index), plain);
             // The host releases the string.
             request->outString = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8*>(text.data()), static_cast<CFIndex>(text.size()), kCFStringEncodingUTF8, false);
             return request->outString ? OSStatus(noErr) : OSStatus(kAudioUnitErr_InvalidPropertyValue);
@@ -415,10 +447,11 @@ public:
                 if (size < sizeof(AUMIDIOutputCallbackStruct) || !data) return kAudioUnitErr_InvalidPropertyValue;
                 const auto* callback = static_cast<const AUMIDIOutputCallbackStruct*>(data);
                 // Published as a whole, so the render thread never sees a proc with another unit's data.
-                // Replaced targets are kept until the unit is destroyed: a set is rare and a render may hold one.
+                // The target this one replaces is kept, because a render may still hold it; older ones go.
                 auto target = std::make_unique<MidiOutTarget>(MidiOutTarget{callback->midiOutputCallback, callback->userData});
                 midiOut_.store(callback->midiOutputCallback ? target.get() : nullptr, std::memory_order_release);
                 midiTargets_.push_back(std::move(target));
+                if (midiTargets_.size() > 2) midiTargets_.erase(midiTargets_.begin());
                 return noErr;
             }
         }
@@ -543,35 +576,31 @@ public:
             return kAudioUnitErr_FormatNotSupported;
         }
         destroy();
-        const double rate = this->Output(0).GetStreamFormat().mSampleRate;
-        UInt32 frames = this->GetMaxFramesPerSlice();
-        if (frames < 1) frames = 512;
-        if (frames > 65536) frames = 65536;
-        maxFrames_ = frames;
-        engine_ = op_shell_create(rate, frames, std::max(plan.inChannels, plan.outChannels) > 1 ? 2 : 1);
+        const EngineSetup setup = engineSetup(plan);
+        maxFrames_ = setup.frames;
+        // The engine RestoreState made to check a blob already holds that blob; it is this
+        // engine when it was made for the same rate, block size and layout.
+        const bool adopted = scratch_ && scratchSetup_ == setup;
+        engine_ = adopted ? scratch_.release() : makeEngine(setup);
+        scratch_.reset();
         if (!engine_) {
             lastError_.store(kAudioUnitErr_FormatNotSupported, std::memory_order_relaxed);
             return kAudioUnitErr_FormatNotSupported;
         }
-        // Always selected, layout 0 included: a new engine reports layout 0 but has not been
-        // prepared for it (the plugin saw only prepare with one or two channels).
-        if (!layouts_.empty() && plan.select && !op_shell_set_layout(engine_, plan.layout)) {
-            destroy();
-            lastError_.store(kAudioUnitErr_FormatNotSupported, std::memory_order_relaxed);
-            return kAudioUnitErr_FormatNotSupported;
-        }
+        const double rate = setup.rate;
+        const UInt32 frames = setup.frames;
         plan_ = plan;
         op_shell_reset(engine_);
         op_shell_set_offline(engine_, offline_.load(std::memory_order_relaxed) ? 1 : 0);
         resetPending_.store(false, std::memory_order_relaxed);
         events_.clear();
-        // A state restored while uninitialized (or kept over Uninitialize) goes in now. It was
-        // checked when it arrived, so a refusal here is not expected. The parameters need no
-        // sync: the unit's values are already the blob's, and the render thread pushes them.
-        if (!pending_.empty()) {
-            op_shell_load_state(engine_, pending_.data(), static_cast<uint32_t>(pending_.size()));
-            pending_.clear();
-        }
+        // A state restored while uninitialized (or kept over Uninitialize) goes in now, unless
+        // this is the engine that checked it. It was checked when it arrived, so a refusal here
+        // is not expected. The parameters need no sync: the unit's values are already the
+        // blob's, and the render thread pushes them.
+        if (!adopted && !pending_.empty()) op_shell_load_state(engine_, pending_.data(), static_cast<uint32_t>(pending_.size()));
+        pending_.clear();
+        pushAll_.store(true, std::memory_order_release);
         // A new engine has not heard about the track.
         {
             std::lock_guard<std::mutex> lock(trackLock_);
@@ -593,6 +622,7 @@ public:
         touched_.assign(params_.size(), 0);
         lastOffset_.assign(params_.size(), 0);
         lastValue_.assign(params_.size(), 0.0f);
+        lastPushed_.assign(params_.size(), 0.0f);
         pendingEvents_.resize(OP_MAX_EVENTS);
         chunkEvents_.resize(OP_MAX_EVENTS);
         midiPacketBuffer_.assign(kMidiPacketBytes, 0);
@@ -644,11 +674,14 @@ public:
     // then the parameters are read back from the engine, so the blob wins over the base
     // dictionary. If the base class then fails, the previous state is put back.
     // Key absent (an old preset): the base restore only; the plugin's chunk is left alone.
-    // Without an engine the blob is checked on a scratch engine, held until Initialize.
+    // The base class writes the dictionary's values into the element unchecked, so a value
+    // that is not finite or is out of range is put back to the parameter's default.
+    // Without an engine the blob is loaded into a scratch engine made as Initialize would
+    // make it, which Initialize then adopts, and is held for a save.
     OSStatus RestoreState(CFPropertyListRef plist) override {
-        if (!plist || CFGetTypeID(plist) != CFDictionaryGetTypeID()) return Base::RestoreState(plist);
+        if (!plist || CFGetTypeID(plist) != CFDictionaryGetTypeID()) return restoreBase(plist);
         const void* value = CFDictionaryGetValue(static_cast<CFDictionaryRef>(plist), OP_AU_STATE_KEY);
-        if (!value) return Base::RestoreState(plist);
+        if (!value) return restoreBase(plist);
         if (CFGetTypeID(value) != CFDataGetTypeID()) return kAudioUnitErr_InvalidPropertyValue;
         const auto data = static_cast<CFDataRef>(value);
         const CFIndex length = CFDataGetLength(data);
@@ -662,16 +695,39 @@ public:
             const OSStatus status = Base::RestoreState(plist);
             if (status != noErr && haveBefore) op_shell_load_state(engine_, before.data(), static_cast<uint32_t>(before.size()));
             syncParameters(engine_);
+            pushAll_.store(true, std::memory_order_release);
             return status;
         }
-        const double rate = this->Output(0).GetStreamFormat().mSampleRate;
-        std::unique_ptr<void, EngineDeleter> scratch(op_shell_create(rate > 0.0 ? rate : 44100.0, 512, 2));
+        // The formats the host has set so far; a unit they do not fit yet gets a stereo engine,
+        // which checks the blob and is not the one Initialize needs.
+        Plan plan;
+        if (!makePlan(plan)) {
+            plan = Plan{};
+            plan.select = false;
+            plan.outChannels = 2;
+        }
+        EngineSetup setup = engineSetup(plan);
+        if (!(setup.rate > 0.0)) setup.rate = 44100.0;
+        // A refusal, of the blob or by the base class, takes the scratch engine with it.
+        std::unique_ptr<void, EngineDeleter> scratch = std::move(scratch_);
+        if (!scratch || !(scratchSetup_ == setup)) scratch.reset(makeEngine(setup));
         if (!scratch || !op_shell_load_state(scratch.get(), bytes, size)) return kAudioUnitErr_InvalidPropertyValue;
         const OSStatus status = Base::RestoreState(plist);
         if (status != noErr) return status;
         syncParameters(scratch.get());
         pending_.assign(bytes, bytes + size);
+        scratch_ = std::move(scratch);
+        scratchSetup_ = setup;
         return noErr;
+    }
+    // The base restore, then every parameter value it left that SetParameter would refuse
+    // is replaced by the default.
+    OSStatus restoreBase(CFPropertyListRef plist) {
+        const OSStatus status = Base::RestoreState(plist);
+        for (size_t i = 0; i < params_.size(); ++i) {
+            if (!validValue(ids_[i], this->Globals()->GetParameter(ids_[i]))) this->Globals()->SetParameter(ids_[i], static_cast<float>(params_[i].desc.default_plain));
+        }
+        return status;
     }
     OSStatus Reset(AudioUnitScope scope, AudioUnitElement element) override {
         // A host may call this from its main thread while the render thread is
@@ -1105,9 +1161,15 @@ private:
                 lastValue_[p] = event.value;
             }
         }
+        // Only a value the engine may not hold crosses the ABI: one that moved, or every one
+        // after the main thread wrote the engine (pushAll_). A value that is not finite is
+        // not pushed; the engine keeps its last one.
+        const bool all = pushAll_.exchange(false, std::memory_order_acquire);
         for (uint32_t i = 0; i < params_.size(); ++i) {
             const float plain = this->Globals()->GetParameterRT(ids_[i]);
-            if (!std::isfinite(plain) || !op_shell_set_plain(engine_, i, plain)) return kAudioUnitErr_InvalidParameter;
+            if (!std::isfinite(plain) || (!all && plain == lastPushed_[i])) continue;
+            if (!op_shell_set_plain(engine_, i, plain)) return kAudioUnitErr_InvalidParameter;
+            lastPushed_[i] = plain;
         }
         OpTransport transport;
         const bool haveTransport = fillTransport(time, transport);
@@ -1170,8 +1232,12 @@ private:
             base += count;
         }
         // The parameters that had events end the render at the value of their last one.
+        // The engine may not have applied the event (a block during a state call is skipped),
+        // so the next render pushes the value again.
         for (uint32_t i = 0; i < params_.size(); ++i) {
-            if (touched_[i]) this->Globals()->SetParameterRT(ids_[i], lastValue_[i]);
+            if (!touched_[i]) continue;
+            this->Globals()->SetParameterRT(ids_[i], lastValue_[i]);
+            lastPushed_[i] = kNeverPushed;
         }
         flags &= ~kAudioUnitRenderAction_OutputIsSilence;
         return noErr;
@@ -1226,15 +1292,8 @@ private:
             const float plain = this->Globals()->GetParameter(ids_[i]);
             if (std::isfinite(plain)) op_shell_set_plain(engine, i, plain);
         }
-        uint32_t needed = 0;
-        uint32_t result = op_shell_save_state(engine, nullptr, 0, &needed);
-        for (int attempt = 0; attempt < 8 && result == OP_STATE_TOO_SMALL; ++attempt) {
-            blob.assign(needed, 0);
-            result = op_shell_save_state(engine, blob.data(), needed, &needed);
-        }
-        if (result != OP_STATE_OK) return false;
-        blob.resize(needed);
-        return true;
+        pushAll_.store(true, std::memory_order_release);
+        return op_shell_calls::save_blob(engine, blob);
     }
     // Makes the unit's parameter values the engine's. The render thread pushes the unit's
     // values into the engine every block, so after a restore they must agree.
@@ -1247,31 +1306,49 @@ private:
             engine_ = nullptr;
         }
     }
+    // What an engine is made for: the stream format's rate, the largest slice and the plan's layout.
+    struct EngineSetup {
+        double rate = 0.0;
+        UInt32 frames = 0;
+        uint32_t channels = 0;
+        uint32_t layout = 0;  // kNoLayout when none is selected
+        bool operator==(const EngineSetup& o) const { return rate == o.rate && frames == o.frames && channels == o.channels && layout == o.layout; }
+    };
+    static constexpr uint32_t kNoLayout = ~0u;
+    EngineSetup engineSetup(const Plan& plan) {
+        const double rate = this->Output(0).GetStreamFormat().mSampleRate;
+        UInt32 frames = this->GetMaxFramesPerSlice();
+        if (frames < 1) frames = 512;
+        if (frames > 65536) frames = 65536;
+        return {rate, frames, std::max(plan.inChannels, plan.outChannels) > 1 ? 2u : 1u, !layouts_.empty() && plan.select ? plan.layout : kNoLayout};
+    }
+    // A new engine on its layout, or null. The layout is always selected, layout 0 included: a
+    // new engine reports layout 0 but has not been prepared for it (the plugin saw only prepare
+    // with one or two channels).
+    static void* makeEngine(const EngineSetup& setup) {
+        void* engine = op_shell_create(setup.rate, setup.frames, setup.channels);
+        if (engine && setup.layout != kNoLayout && !op_shell_set_layout(engine, setup.layout)) {
+            op_shell_destroy(engine);
+            engine = nullptr;
+        }
+        return engine;
+    }
+    // Holds pending_ whenever it exists; only while there is no engine.
+    std::unique_ptr<void, EngineDeleter> scratch_;
+    EngineSetup scratchSetup_;
     // ---- telling the host about changes (ABI 6) ---------------------------------------
-    // A timer on the main run loop asks the engine what changed and tells the host through
+    // The timer on the main run loop (Poller) asks the engine what changed and tells the host through
     // property notifications, which reach the listeners on the main thread, never inside a
     // render. A new latency: kAudioUnitProperty_Latency (GetLatency reads the engine, so the
     // host reads the new value at once). New parameter info: kAudioUnitProperty_ParameterList
     // on the global scope, then kAudioUnitProperty_ParameterInfo for each parameter.
-    static constexpr CFTimeInterval kChangesPollSeconds = 0.030;
-    static void onTimer(CFRunLoopTimerRef, void* info) {
+    static void onTimer(void* info) {
         auto* self = static_cast<OpenPluginAUImpl*>(info);
         self->pollTrack();
         self->pollChanges();
     }
-    void startPolling() {
-        CFRunLoopTimerContext context{};
-        context.info = this;
-        timer_ = CFRunLoopTimerCreate(nullptr, CFAbsoluteTimeGetCurrent() + kChangesPollSeconds, kChangesPollSeconds, 0, 0, &OpenPluginAUImpl::onTimer, &context);
-        if (timer_) CFRunLoopAddTimer(CFRunLoopGetMain(), timer_, kCFRunLoopCommonModes);
-    }
-    void stopPolling() {
-        if (timer_) {
-            CFRunLoopTimerInvalidate(timer_);
-            CFRelease(timer_);
-            timer_ = nullptr;
-        }
-    }
+    void startPolling() { Poller::add(this, &OpenPluginAUImpl::onTimer); }
+    void stopPolling() { Poller::remove(this); }
     // Main thread. Returns the OP_CHANGE_* bits it told the host about.
     uint32_t pollChanges() {
         if (!engine_) return 0;
@@ -1326,7 +1403,6 @@ private:
     std::mutex trackLock_;
     TrackState track_;
     std::atomic<bool> trackPending_{false};
-    CFRunLoopTimerRef timer_ = nullptr;
     void* engine_ = nullptr;
     bool abiOk_ = false;
     bool kindOk_ = false;
@@ -1345,6 +1421,11 @@ private:
     std::vector<uint8_t> touched_;
     std::vector<uint32_t> lastOffset_;
     std::vector<float> lastValue_;
+    // What the render thread last gave the engine for each parameter; kNeverPushed forces a push.
+    std::vector<float> lastPushed_;
+    static constexpr float kNeverPushed = std::numeric_limits<float>::quiet_NaN();
+    // The main thread wrote the engine's values (a state call, a new engine): push them all.
+    std::atomic<bool> pushAll_{true};
     std::vector<uint8_t> midiPacketBuffer_;
     std::atomic<const MidiOutTarget*> midiOut_{nullptr};
     std::vector<std::unique_ptr<MidiOutTarget>> midiTargets_;

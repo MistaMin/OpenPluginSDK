@@ -76,6 +76,7 @@ struct Stub {
     uint32_t growOnQuery = 0;  // bytes the chunk grows by right after the next too-small answer
     uint32_t saves = 0;        // op_shell_save_state calls
     uint32_t sets = 0;         // op_shell_set_plain calls
+    uint32_t gets = 0;         // op_shell_get_plain calls
     uint32_t loads = 0;
     // ABI 6: the latency now, what op_shell_latency last returned, and the changes not yet taken.
     std::atomic<uint32_t> latency{kLatency};
@@ -165,6 +166,7 @@ uint32_t op_shell_set_plain(void* instance, uint32_t index, float plain) {
     return 1;
 }
 float op_shell_get_plain(void* instance, uint32_t index) {
+    if (instance) ++static_cast<Stub*>(instance)->gets;
     return instance && index < kParams ? static_cast<Stub*>(instance)->plain[index] : 0.0f;
 }
 uint32_t op_shell_set_normalized(void* instance, uint32_t index, float normalized) { return op_shell_set_plain(instance, index, normalized); }
@@ -251,6 +253,7 @@ uint32_t op_stub_chunk(void* instance, uint8_t* out, uint32_t capacity) {
 uint32_t op_stub_loads(void* instance) { return instance ? static_cast<Stub*>(instance)->loads : 0; }
 uint32_t op_stub_saves(void* instance) { return instance ? static_cast<Stub*>(instance)->saves : 0; }
 uint32_t op_stub_sets(void* instance) { return instance ? static_cast<Stub*>(instance)->sets : 0; }
+uint32_t op_stub_gets(void* instance) { return instance ? static_cast<Stub*>(instance)->gets : 0; }
 void op_stub_grow_on_query(void* instance, uint32_t bytes) {
     if (instance) static_cast<Stub*>(instance)->growOnQuery = bytes;
 }

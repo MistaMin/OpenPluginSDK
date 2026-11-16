@@ -10,6 +10,7 @@
 // The op_test_* functions are for the proof to reach the chunk. It is linked
 // into a test bundle and never into a product.
 #include "op_shell.h"
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <mutex>
@@ -27,6 +28,8 @@ struct Engine {
     uint32_t growAfterQuery = 0;  // proof hook: the chunk grows once right after a size query
 };
 Engine* gLast = nullptr;
+std::atomic<uint32_t> gCreates{0};
+std::atomic<uint32_t> gParamSets{0};
 void copy(char* dst, size_t size, const char* text) {
     std::strncpy(dst, text, size - 1);
     dst[size - 1] = 0;
@@ -66,6 +69,7 @@ double op_shell_to_plain(uint32_t index, double normalized) { return normalized 
 double op_shell_to_normalized(uint32_t index, double plain) { return plain / (index == 0 ? 4.0 : 1.0); }
 void* op_shell_create(double, uint32_t, uint32_t channels) {
     if (channels != 1 && channels != 2) return nullptr;
+    ++gCreates;
     gLast = new (std::nothrow) Engine();
     return gLast;
 }
@@ -77,6 +81,7 @@ void op_shell_reset(void*) {}
 uint32_t op_shell_latency(void*) { return 0; }
 uint32_t op_shell_set_plain(void* instance, uint32_t index, float plain) {
     if (!instance || index > 1) return 0;
+    ++gParamSets;
     auto* engine = static_cast<Engine*>(instance);
     std::lock_guard<std::mutex> guard(engine->lock);
     (index == 0 ? engine->gain : engine->tilt) = plain;
@@ -155,6 +160,9 @@ uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t lengt
 
 // Proof hooks.
 void* op_test_last_engine() { return gLast; }
+// Engines made and parameter values set through the ABI, over the whole process.
+uint32_t op_test_creates() { return gCreates.load(); }
+uint32_t op_test_param_sets() { return gParamSets.load(); }
 void op_test_set_chunk(void* instance, const uint8_t* data, uint32_t length) {
     auto* engine = static_cast<Engine*>(instance);
     std::lock_guard<std::mutex> guard(engine->lock);

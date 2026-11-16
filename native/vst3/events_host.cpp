@@ -101,6 +101,11 @@ struct Plug {
         CHECK(std::memcmp(text, expected, sizeof(expected)) == 0);
         double typed = -1.0;
         CHECK(controller->getParamValueByString(0, text, typed) == kResultOk && typed == 0.5);
+        // So is a parameter's name: the stub's has two 2 byte characters.
+        ParameterInfo named{};
+        CHECK(controller->getParameterInfo(0, named) == kResultOk);
+        static const TChar name[] = {'M', 0x00F6, 'd', 0x00E9, 0};
+        CHECK(std::memcmp(named.title, name, sizeof(name)) == 0);
     }
     ~Plug() {
         if (active) stop();
@@ -131,7 +136,9 @@ struct Plug {
         CHECK(processor->setProcessing(true) == kResultOk);
         active = true;
     }
+    // A host changes the arrangement of an inactive processor only (the shell refuses otherwise).
     tresult arrange(std::vector<SpeakerArrangement> in, std::vector<SpeakerArrangement> out) {
+        if (active) stop();
         return processor->setBusArrangements(in.data(), static_cast<int32>(in.size()), out.data(), static_cast<int32>(out.size()));
     }
     SpeakerArrangement arrangementOf(BusDirection dir, int32 index) {
@@ -462,6 +469,65 @@ int main(int argc, char** argv) {
             process(p, kBlock, &in, nullptr, 2, true, nullptr, nullptr, nullptr, kRealtime);
             CHECK(p.probe().offline == 0);
             std::printf("VST3 events: kOffline reaches the plugin as the offline flag, and clears with kRealtime\n");
+        }
+
+        // An arrangement set while the processor is active is refused and changes nothing.
+        // (Accepted, 5.1 over buffers made for stereo overran the bypass buffers.)
+        {
+            std::vector<SpeakerArrangement> wide{k51, kEmpty}, wideOut{k51};
+            CHECK(p.active && p.processor->setBusArrangements(wide.data(), 2, wideOut.data(), 1) == kResultFalse);
+            CHECK(p.arrangementOf(kInput, 0) == kStereo && p.arrangementOf(kOutput, 0) == kStereo);
+            const Audio in = constant(2, kBlock, 0.0f);
+            process(p, kBlock, &in, nullptr, 2, true);
+            CHECK(p.probe().layout == 1 && p.probe().output_channels == 2);
+            std::printf("VST3 events: setBusArrangements(5.1) on an active stereo processor is refused; it stays stereo\n");
+        }
+
+        // Parameter values cross the ABI only when they may differ from the engine's. Every
+        // probe is a getState, which hands the engine the values itself (one call for the one
+        // parameter) and makes the next block push them all once more.
+        {
+            const Audio in = constant(2, kBlock, 0.0f);
+            const uint32_t before = p.probe().param_sets;
+            for (int block = 0; block < 64; ++block) process(p, kBlock, &in, nullptr, 2, true);
+            const uint32_t steady = p.probe().param_sets;
+            CHECK(steady - before == 2);  // the block after the probe, and this probe: not one per block
+            // A point reaches the engine as an event. The next block pushes its value again, in
+            // case the engine skipped the block that carried it; the blocks after push nothing.
+            ParameterChanges same;
+            point(same, 0, 0, 0.0);
+            process(p, kBlock, &in, nullptr, 2, true, &same);
+            for (int block = 0; block < 8; ++block) process(p, kBlock, &in, nullptr, 2, true);
+            CHECK(p.probe().param_sets - steady == 3);  // the block after the probe, the block after the point, this probe
+            std::printf("VST3 events: 64 steady blocks make %u parameter calls into the engine (one per block before); a point is pushed again once\n", steady - before);
+        }
+
+        // A state restored while inactive is loaded into a scratch engine, which the next
+        // activation adopts when it was made for the same rate, block size and layout.
+        {
+            const Audio in = constant(2, kBlock, 0.0f);
+            MemoryStream saved;
+            CHECK(p.component->getState(&saved) == kResultOk);
+            const auto restoreInactive = [&] {
+                p.stop();
+                saved.seek(0, IBStream::kIBSeekSet, nullptr);
+                CHECK(p.component->setState(&saved) == kResultOk);
+            };
+            const uint32_t before = p.probe().creates;
+            restoreInactive();
+            p.start({true, false}, true);
+            process(p, kBlock, &in, nullptr, 2, true);
+            const uint32_t adopted = p.probe().creates;
+            CHECK(adopted - before == 1);
+            // Another block size: the scratch engine does not fit and a new one is made.
+            restoreInactive();
+            ProcessSetup half{kRealtime, kSample32, kBlock / 2, kRate};
+            CHECK(p.processor->setupProcessing(half) == kResultOk);
+            CHECK(p.component->setActive(true) == kResultOk && p.processor->setProcessing(true) == kResultOk);
+            p.active = true;
+            process(p, kBlock / 2, &in, nullptr, 2, true);
+            CHECK(p.probe().creates - adopted == 2);
+            std::printf("VST3 events: setState before setActive builds one engine, not two; a changed block size builds a new one\n");
         }
         mapping->release();
     }

@@ -177,6 +177,59 @@ int main() {
             require(legacy.params->CompareActiveChunk(old.get(), &eq) == AAX_SUCCESS && eq, "a version 1 chunk compares equal on values");
         }
 
+        // A chunk from an older build of a plugin without pins, whose table ended one parameter
+        // earlier: its layout hash is that of the shorter table, and the blob of a version 2
+        // chunk is that build's OPST plane. It loads, and the parameter it does not have takes
+        // its default. The same chunk with another hash is another plugin's and is refused.
+        if (info.param_count > 1 && !(op_shell_identity() & OP_IDENTITY_KEYED_STATE)) {
+            const uint32_t fewer = info.param_count - 1;
+            uint32_t hash = 2166136261u;
+            const auto mix = [&hash](uint8_t byte) { hash = (hash ^ byte) * 16777619u; };
+            for (int i = 0; i < 4; ++i) mix(static_cast<uint8_t>(fewer >> (8 * i)));
+            for (uint32_t i = 0; i < fewer; ++i) {
+                for (const char* c = descs[i].id; *c; ++c) mix(static_cast<uint8_t>(*c));
+                mix(0);
+            }
+            const OpParamDesc& last = descs[fewer];
+            const float moved = static_cast<float>(last.default_plain == last.max ? last.min : last.max);
+            for (uint32_t version : {1u, 2u}) {
+                std::vector<unsigned char> payload;
+                const auto put = [&payload](const void* data, size_t size) {
+                    payload.insert(payload.end(), static_cast<const unsigned char*>(data), static_cast<const unsigned char*>(data) + size);
+                };
+                const uint32_t head[5] = {state::kMagic, version, fewer, hash, 1u};
+                put(head, sizeof head);
+                put(changed.plain(), sizeof(float) * fewer);
+                if (version == 2) {
+                    const uint16_t plane[2] = {1, static_cast<uint16_t>(fewer)};
+                    const uint32_t blobBytes = static_cast<uint32_t>(4 + sizeof plane + sizeof(float) * fewer);
+                    put(&blobBytes, sizeof blobBytes);
+                    put("OPST", 4);
+                    put(plane, sizeof plane);
+                    put(changed.plain(), sizeof(float) * fewer);
+                }
+                Chunk older(payload.size());
+                older.get()->fChunkID = state::kChunkId;
+                older.get()->fVersion = static_cast<int32_t>(version);
+                older.get()->fSize = static_cast<int32_t>(payload.size());
+                std::memcpy(older.data(), payload.data(), payload.size());
+                Instance target(channels);
+                require(proofSetPlain(target.params.get(), fewer, moved), "move the last parameter off its default");
+                require(target.params->SetChunk(state::kChunkId, older.get()) == AAX_SUCCESS, "a chunk of an older build with fewer parameters loads");
+                const PacketBuffer loaded = target.packet();
+                for (uint32_t i = 0; i < fewer; ++i) require(loaded.plain()[i] == changed.plain()[i], "the older chunk's values load in table order");
+                require(loaded.plain()[fewer] == static_cast<float>(last.default_plain) && loaded.get()->bypass == 1, "the parameter the older chunk lacks takes its default");
+                if (version == 2) require(op_shell_get_plain(proofEngine(target.params.get()), fewer) == static_cast<float>(last.default_plain), "in the engine too");
+                AAX_CBoolean eq = false;
+                require(target.params->CompareActiveChunk(older.get(), &eq) == AAX_SUCCESS && (eq || version == 2), "the loaded older chunk compares equal on values");
+                older.data()[12] ^= 0x01;
+                Instance other(channels);
+                require(other.params->SetChunk(state::kChunkId, older.get()) != AAX_SUCCESS && same(other.packet(), defaults), "a shorter chunk of another table is refused");
+            }
+            std::printf("AAX state %s: chunks of an older build with %u of %u parameters (payload versions 1 and 2) load, the missing one at its default\n",
+                        channels == 1 ? "mono" : "stereo", fewer, info.param_count);
+        }
+
         ProcessState a, b;
         require(a.prepare(48000.0, channels) && b.prepare(48000.0, channels), "prepare");
         std::vector<float> rightA, rightB;

@@ -399,8 +399,10 @@ fn hostile_documents() -> Vec<(Vec<u8>, &'static str)> {
         ));
     }
 
-    // Wrong parameter count, including the largest count a u16 can declare.
-    for count in [0u16, 3, 5] {
+    // Wrong parameter count, including the largest count a u16 can declare. A
+    // smaller count that is not zero is an older build's blob and loads
+    // (tests/state_keyed.rs).
+    for count in [0u16, 5, 6] {
         let short = vec![0.0; count as usize];
         cases.push((
             plane_bytes(SNAPSHOT_MAGIC, SNAPSHOT_VERSION, count, &short),
@@ -506,7 +508,7 @@ fn hostile_documents() -> Vec<(Vec<u8>, &'static str)> {
     cases.push((session_bytes(&nan_plane, &chunk), "OPCH plane with NaN"));
 
     // A correct envelope around a plane with the wrong parameter count.
-    let wrong_count_plane = plane_bytes(SNAPSHOT_MAGIC, SNAPSHOT_VERSION, 3, &[0.0; 3]);
+    let wrong_count_plane = plane_bytes(SNAPSHOT_MAGIC, SNAPSHOT_VERSION, 5, &[0.0; 5]);
     cases.push((
         session_bytes(&wrong_count_plane, &chunk),
         "OPCH plane with wrong count",
