@@ -308,7 +308,7 @@ fn the_ttl_declares_the_worker() {
     assert!(ttl.contains("@prefix work: <http://lv2plug.in/ns/ext/worker#> ."));
     assert!(ttl.contains("lv2:optionalFeature lv2:hardRTCapable , work:schedule ;"));
     assert!(!ttl.contains("requiredFeature work:"));
-    assert!(ttl.contains("lv2:extensionData work:interface ;"));
+    assert!(ttl.contains("lv2:extensionData work:interface , state:interface ;"));
 }
 
 /// Writes the bundle's description files and runs `lv2_validate` on them when

@@ -60,6 +60,7 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
   - `Compressor` stopped compressing for good after one infinite sample, and `VuMeter` read NaN after one non-finite sample; both skip such samples in their detectors.
   - `Stft::tick`, `process` and `process_in_place` return silence for a channel the transform was not made with, `LoudnessMatch::process` runs to the shortest channel, and `BiquadBank4::set_section` ignores an index past the end, where each panicked.
   - `DynamicEqParams::static_delta_db` with a NaN `range_db` returns 0, and `DiodePair::new` replaces an `is` or `nvt` that is not finite and positive with the 1N4148's, where both panicked in `clamp`.
+- LV2 now saves a plugin's own data. The entry answers `state:interface` (listed in the TTL as `lv2:extensionData`): `save` stores the `save_state` chunk as one `atom:Chunk` property (`urn:openplugin:state#chunk`, POD and portable) through the host's `store`, and `restore` hands it to `load_state`. Before, only the control ports were saved, so a chunk (an impulse response loaded through the worker, say) was lost when an LV2 session was reopened. A plugin whose `state_is_parameters_only` is `true` stores nothing; its control ports remain its state, as before. A block that starts during a `save` passes its input through, as in the CLAP entry.
 
 ## [1.0.0-beta] - 2026-11-16
 
