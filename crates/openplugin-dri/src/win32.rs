@@ -274,6 +274,11 @@ unsafe extern "system" {
     fn GetDC(hwnd: Hwnd) -> Handle;
     fn ReleaseDC(hwnd: Hwnd, dc: Handle) -> i32;
     fn PrintWindow(hwnd: Hwnd, dc: Handle, flags: u32) -> i32;
+    fn PostMessageW(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> i32;
+    fn SetCursorPos(x: i32, y: i32) -> i32;
+    fn FindWindowExW(parent: Hwnd, after: Hwnd, class: *const u16, title: *const u16) -> Hwnd;
+    fn GetWindowThreadProcessId(hwnd: Hwnd, process: *mut u32) -> u32;
+    fn GetClassNameW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
 }
 
 #[link(name = "gdi32")]
@@ -348,6 +353,7 @@ unsafe extern "system" {
     fn GlobalLock(mem: Handle) -> *mut c_void;
     fn GlobalUnlock(mem: Handle) -> i32;
     fn GlobalFree(mem: Handle) -> Handle;
+    fn GetCurrentProcessId() -> u32;
 }
 
 #[link(name = "shell32")]
@@ -1840,6 +1846,34 @@ impl EditorView {
         keys.iter().map(|(i, r)| ([r.left, r.top, r.right, r.bottom], unsafe { tooltip_text(self.state, *i) })).collect()
     }
 
+    /// What the tooltip control itself holds: how many tools it has, and the
+    /// text it gets for each when it asks the view (`TTM_GETTEXTW`, which sends
+    /// the same `TTN_GETDISPINFOW` a showing tip sends). Empty before the view
+    /// has a window or tooltips. For tests.
+    pub fn tooltip_control_texts(&self) -> Vec<String> {
+        let st = self.st();
+        if st.tip.is_null() {
+            return Vec::new();
+        }
+        let keys = st.tip_key.clone();
+        let (tip, hwnd) = (st.tip, st.hwnd);
+        unsafe {
+            // TTM_GETTOOLCOUNT
+            let count = SendMessageW(tip, 0x0400 + 13, 0, 0) as usize;
+            keys.iter()
+                .take(count)
+                .map(|(i, r)| {
+                    let mut buf = vec![0u16; 1024];
+                    let mut info = tool_info(hwnd, *i, *r);
+                    info.text = buf.as_mut_ptr();
+                    // TTM_GETTEXTW; wParam is the room in the buffer.
+                    SendMessageW(tip, 0x0400 + 56, buf.len() - 1, &mut info as *mut ToolInfoW as isize);
+                    from_wide(&buf)
+                })
+                .collect()
+        }
+    }
+
     /// Answer file dialog requests with `hook` instead of showing the system
     /// dialog, for tests. See [`FileHook`].
     pub fn set_file_dialog_hook(&self, hook: Option<FileHook>) {
@@ -2308,6 +2342,107 @@ pub mod testing {
             let out = grab(rc.right - rc.left, rc.bottom - rc.top, |dc| BitBlt(dc, 0, 0, rc.right - rc.left, rc.bottom - rc.top, screen, rc.left, rc.top, 0x00CC_0020 | 0x4000_0000) != 0);
             ReleaseDC(null_mut(), screen);
             out
+        }
+    }
+
+    /// Put the real pointer at a screen position. False where there is no
+    /// pointer to move (a locked desktop, a process with no desktop).
+    pub fn set_pointer(x: i32, y: i32) -> bool {
+        unsafe { SetCursorPos(x, y) != 0 }
+    }
+
+    /// `PostMessageW`: the message waits in the window's queue, so a modal loop
+    /// the window's thread is inside (a menu, a dialog) is the one that reads it.
+    ///
+    /// # Safety
+    /// As the message requires.
+    pub unsafe fn post(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> bool {
+        unsafe { PostMessageW(hwnd, msg, w, l) != 0 }
+    }
+
+    /// The child windows of `parent` (the top-level windows, for a null
+    /// `parent`) that belong to this process, of a class (any, for `None`).
+    ///
+    /// # Safety
+    /// `parent` is null or a window.
+    pub unsafe fn windows(parent: Hwnd, class: Option<&str>) -> Vec<Hwnd> {
+        unsafe {
+            let class = class.map(wide);
+            let name = class.as_ref().map_or(null(), |c| c.as_ptr());
+            let mut out = Vec::new();
+            let mut at = null_mut();
+            loop {
+                at = FindWindowExW(parent, at, name, null());
+                if at.is_null() {
+                    return out;
+                }
+                let mut process = 0u32;
+                GetWindowThreadProcessId(at, &mut process);
+                if process == GetCurrentProcessId() {
+                    out.push(at);
+                }
+            }
+        }
+    }
+
+    /// Every window below `parent`, at any depth.
+    ///
+    /// # Safety
+    /// `parent` is a window.
+    pub unsafe fn descendants(parent: Hwnd) -> Vec<Hwnd> {
+        unsafe {
+            let mut out = Vec::new();
+            for child in windows(parent, None) {
+                out.push(child);
+                out.extend(descendants(child));
+            }
+            out
+        }
+    }
+
+    /// # Safety
+    /// `hwnd` is a window.
+    pub unsafe fn class_name(hwnd: Hwnd) -> String {
+        let mut buf = [0u16; 128];
+        let n = unsafe { GetClassNameW(hwnd, buf.as_mut_ptr(), 128) }.max(0) as usize;
+        String::from_utf16_lossy(&buf[..n])
+    }
+
+    /// The window's text (a title, a field's contents).
+    ///
+    /// # Safety
+    /// `hwnd` is a window.
+    pub unsafe fn text(hwnd: Hwnd) -> String {
+        unsafe { field_text(hwnd) }
+    }
+
+    /// Replace the window's text (`WM_SETTEXT`, which works across threads).
+    ///
+    /// # Safety
+    /// `hwnd` is a window.
+    pub unsafe fn set_text(hwnd: Hwnd, text: &str) {
+        unsafe { SendMessageW(hwnd, 0x000C, 0, wide(text).as_ptr() as isize) };
+    }
+
+    /// # Safety
+    /// `hwnd` is null or a window.
+    pub unsafe fn is_visible(hwnd: Hwnd) -> bool {
+        unsafe { !hwnd.is_null() && IsWindowVisible(hwnd) != 0 }
+    }
+
+    /// The whole window as the compositor has it, frame and all
+    /// (`PrintWindow` with `PW_RENDERFULLCONTENT`); for windows that are not
+    /// ours to ask (a menu, a system dialog).
+    ///
+    /// # Safety
+    /// `hwnd` is a window.
+    pub unsafe fn capture_window(hwnd: Hwnd) -> Option<Bitmap> {
+        unsafe {
+            let mut rc = Rect::default();
+            if GetWindowRect(hwnd, &mut rc) == 0 {
+                return None;
+            }
+            grab(rc.right - rc.left, rc.bottom - rc.top, |dc| PrintWindow(hwnd, dc, 0x2) != 0)
         }
     }
 
