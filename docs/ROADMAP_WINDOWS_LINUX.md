@@ -15,6 +15,8 @@ The macOS roadmap is in [ROADMAP.md](ROADMAP.md). This one brings the SDK to Win
 - CI jobs on GitHub's Windows and Linux runners that build the workspace and run the tests that do not need a window: core, DSP, CLAP, LV2 and the shell ABI, with clippy and the minimum Rust version.
 - Fix what does not build: platform-specific code behind `cfg`, paths, the macOS-only editor view excluded.
 
+Status: done on both systems. The workspace builds and every test that needs no window passes on Linux and Windows, with clippy and the minimum Rust version, in CI (`linux`, `msrv-linux`, `windows`, `msrv-windows`).
+
 ## W2: Linux
 
 - **Standalone:** a native Wayland window for the standalone app.
@@ -22,12 +24,18 @@ The macOS roadmap is in [ROADMAP.md](ROADMAP.md). This one brings the SDK to Win
 - **Formats:** CLAP and LV2 tested in a Linux host; the VST3 shell on Linux.
 - **Proofs:** the main-thread editor test on the Linux display; clap-validator, pluginval and `lv2_validate` on Linux.
 
+Status: done except what needs the owner. The X11 editor view (pure Rust, `x11rb`), CLAP `gui` on X11, LV2 `ui:X11UI`, Linux packaging and the standalone, proven on a real display and in CI under Xvfb, with `lv2_validate`, clap-validator and lilv. Open, for the owner: the VST3 shell on Linux (needs cmake, clang and a VST3 SDK checkout on the Linux machine), pluginval, a Linux DAW, a native Wayland standalone window (X11 under XWayland works today), and whether the CLAP view should stay unmapped until `show`.
+
 ## W3: Windows
 
 - **Editor:** an `HWND` view.
 - **Shells:** VST3 and AAX on Windows. AAX stays C++, because the Avid SDK has no C interface.
 - **Proofs:** the shell proofs, clap-validator and pluginval on Windows; the AAX Validator locally.
 
+Status: done except what needs the owner. The HWND view with the system menu, dialog, tooltips and UI Automation, CLAP `gui` and LV2 `ui:WindowsUI`, the VST3 and AAX shells (Release and Debug), packaging with version resources; shell proofs, clap-validator, pluginval at strictness 10 and the AAX Validator locally; REAPER. Open, for the owner: PACE signing and Pro Tools on Windows, and repeating the system UI and accessibility checks with real input on an unlocked desktop (`OP_SYSTEM_UI=1 cargo test -p example-editor --test win32_system_ui`, and `--test win32_a11y`); Narrator not tried.
+
 ## W4: CI on all three systems
 
 - Every proof that can run headless on every system, and a documented local run for the rest.
+
+Status: the headless proofs run on all three systems in CI and are required checks on `main` (19 jobs): the Linux X11 editor tests under Xvfb, Linux LV2 in lilv, the Windows VST3 shell proofs and clap-validator on Windows. The AAX Validator and pluginval on Windows, and Pro Tools, stay local runs (documented in `docs/BUILD.md` and `docs/AAX_VALIDATOR.md`).
