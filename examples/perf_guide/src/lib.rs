@@ -26,7 +26,7 @@ pub mod stable_filter;
 pub trait Kernel: Send + 'static {
     fn prepare(&mut self, sample_rate: f32, max_block: usize, channels: usize);
     fn reset(&mut self) {}
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize);
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize);
 }
 
 impl Kernel for Box<dyn Kernel> {
@@ -36,23 +36,21 @@ impl Kernel for Box<dyn Kernel> {
     fn reset(&mut self) {
         (**self).reset();
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         (**self).process(io, frames);
     }
 }
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.example.perf-guide",
-    name: "Perf guide kernel",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "1.0.0-beta",
-    category: Category::Utility,
-    params: &[],
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.example.perf-guide",
+    "Perf guide kernel",
+    "OpenGrid",
+    "1.0.0-beta",
+    Category::Utility,
+    &[],
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 /// Wraps a [`Kernel`] as a parameterless [`Plugin`], so the bench harness and the conformance kit
 /// accept it.
@@ -74,7 +72,7 @@ impl<K: Kernel> Plugin for Rig<K> {
     fn param(&self, _id: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         self.0.process(io, frames);
     }
 }

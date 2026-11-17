@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 
 use openplugin_core::{mpe, Expression, IoConfig, NoteRef, Transport, MAX_AUDIO_CHANNELS};
 
-use crate::{Audio, FfiInstance};
+use crate::{Audio, HostSession};
 
 /// Most events one block may carry. A longer list is refused whole.
 pub const MAX_EVENTS: usize = 1024;
@@ -99,12 +99,10 @@ pub struct OpTransport {
 
 impl OpTransport {
     pub fn to_transport(&self) -> Transport {
-        let mut out = Transport {
-            playing: self.flags & TRANSPORT_PLAYING != 0,
-            recording: self.flags & TRANSPORT_RECORDING != 0,
-            sample_pos: self.sample_pos.max(0),
-            ..Transport::default()
-        };
+        let mut out = Transport::default();
+        out.playing = self.flags & TRANSPORT_PLAYING != 0;
+        out.recording = self.flags & TRANSPORT_RECORDING != 0;
+        out.sample_pos = self.sample_pos.max(0);
         if self.flags & TRANSPORT_HAS_TEMPO != 0 && self.tempo.is_finite() {
             out.tempo = self.tempo;
         }
@@ -219,7 +217,7 @@ fn valid_event(event: &OpEvent, frames: usize) -> bool {
     }
 }
 
-impl FfiInstance {
+impl HostSession {
     fn apply_events(&self, audio: &mut Audio, start: usize, end: usize) {
         for index in start..end {
             let event = audio.events[index];
@@ -321,12 +319,9 @@ impl FfiInstance {
                 sidechain,
                 ..
             } = &mut *audio;
-            let side_arg = if side && !sidechain.is_empty() {
-                Some(sidechain.as_slice())
-            } else {
-                None
-            };
-            inner.process_buses(&mut buffers[..channels], side_arg, n);
+            let side_arg = openplugin_core::Channels::new(sidechain);
+            let side_arg = (side && !side_arg.is_empty()).then_some(&*side_arg);
+            inner.process_buses(&mut openplugin_core::ChannelsMut::new(&mut buffers[..channels]), side_arg, n);
         }
         // Drain the plugin's MIDI output; bounded so a plugin that never stops cannot hang the block.
         let mut budget = MAX_MIDI_OUT * 2;
@@ -387,6 +382,7 @@ impl FfiInstance {
     /// # Safety
     /// Every pointer in `args` is null (where allowed) or valid for the count
     /// and `frames` it states; an input may alias an output.
+    #[doc(hidden)] // takes the C ABI's own struct; `op_shell_*` is the contract
     pub unsafe fn process_block(&self, args: &OpProcess) -> bool {
         if (args.struct_size as usize) < std::mem::size_of::<OpProcess>() {
             return false;
@@ -467,6 +463,7 @@ impl FfiInstance {
     ///
     /// # Safety
     /// `out` is null or writable for `capacity` events.
+    #[doc(hidden)] // takes the C ABI's own struct; `op_shell_*` is the contract
     pub unsafe fn pull_midi_out(&self, out: *mut OpMidiEvent, capacity: u32) -> u32 {
         if out.is_null() || capacity == 0 {
             return 0;

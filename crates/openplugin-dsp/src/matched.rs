@@ -43,6 +43,7 @@ use std::f64::consts::PI;
 
 /// Filter shape; parameters mean the same as in [`crate::FilterType`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MatchedKind {
     LowPass,
     HighPass,

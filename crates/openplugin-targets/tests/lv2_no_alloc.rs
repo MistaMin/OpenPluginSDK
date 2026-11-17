@@ -125,18 +125,16 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("on", "On", 0.0, 1.0, 1.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.lv2-no-alloc",
-    name: "LV2 No Alloc",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.lv2-no-alloc",
+    "LV2 No Alloc",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 /// Gain in dB plus an on/off toggle. Neither `prepare`, `reset`, `set_param`
 /// nor `process` allocates.
@@ -194,7 +192,7 @@ impl Plugin for GainToggle {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = if self.on { self.linear } else { 0.0 };
         for channel in io.iter_mut() {
             for sample in channel[..frames].iter_mut() {

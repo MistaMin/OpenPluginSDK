@@ -178,7 +178,7 @@ mod mac {
         }
         fn param_changed(&mut self, _: usize, _: f32) {}
         fn render(&mut self, _scale: f32) -> Frame<'_> {
-            Frame { pixels: &self.pixels, width: 40, height: 30 }
+            Frame::new(&self.pixels, 40, 30)
         }
         fn right_mouse_down(&mut self, x: f32, y: f32) -> bool {
             // Anywhere is "on parameter 7": ask the host for its menu there.
@@ -227,8 +227,15 @@ mod mac {
             editor::set_track_info(handle, std::ptr::null(), 0xdead_beef, 1);
             let heard = HEARD.with(Clone::clone);
             assert_eq!(heard.borrow().len(), 2);
-            assert_eq!(heard.borrow()[0], TrackInfo { name: Some("Gtr \u{266a}".into()), colour: Some(0x1122_33ff), kind: TrackInfo::IS_MASTER });
-            assert_eq!(heard.borrow()[1], TrackInfo { name: None, colour: None, kind: TrackInfo::IS_RETURN });
+            let track = |name: Option<&str>, colour, kind| {
+                let mut info = TrackInfo::default();
+                info.name = name.map(String::from);
+                info.colour = colour;
+                info.kind = kind;
+                info
+            };
+            assert_eq!(heard.borrow()[0], track(Some("Gtr \u{266a}"), Some(0x1122_33ff), TrackInfo::IS_MASTER));
+            assert_eq!(heard.borrow()[1], track(None, None, TrackInfo::IS_RETURN));
             // A null editor is ignored.
             editor::set_track_info(std::ptr::null_mut(), name.as_ptr(), 0, 0);
             editor::set_context_menu(std::ptr::null_mut(), std::ptr::null_mut(), None);
@@ -279,7 +286,7 @@ mod mac {
         fn render(&mut self, _scale: f32) -> Frame<'_> {
             let mut seen = self.seen.borrow_mut();
             seen.nested += u32::from(seen.inside);
-            Frame { pixels: &self.pixels, width: 40, height: 30 }
+            Frame::new(&self.pixels, 40, 30)
         }
         fn right_mouse_down(&mut self, _x: f32, _y: f32) -> bool {
             self.seen.borrow_mut().inside = true;

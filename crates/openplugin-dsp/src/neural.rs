@@ -134,6 +134,7 @@ pub const MAX_JSON_BYTES: usize = 64 << 20;
 
 /// Why a model could not be built or loaded.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ModelError {
     /// The text is not valid JSON, or too large.
     Json(String),
@@ -175,6 +176,7 @@ impl std::error::Error for ModelError {}
 
 /// Activation function of a [`Dense`] or [`Conv1d`] layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Activation {
     /// `x`
     Identity,
@@ -591,6 +593,7 @@ impl Conv1d {
 
 /// One layer of a [`Model`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Layer {
     /// Fully connected.
     Dense(Dense),

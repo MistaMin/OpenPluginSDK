@@ -73,18 +73,16 @@ static PAIR: [ParamInfo; 2] = [
 ];
 
 const fn info(id: &'static str, params: &'static [ParamInfo]) -> PluginInfo {
-    PluginInfo {
+    PluginInfo::new(
         id,
-        name: "State",
-        vendor: "OpenGrid",
-        url: "https://github.com/MistaMin/OpenPluginSDK",
-        email: "contact@mistamin.com",
-        version: "0.3.0-beta",
-        category: Category::Utility,
+        "State",
+        "OpenGrid",
+        "0.3.0-beta",
+        Category::Utility,
         params,
-        is_instrument: false,
-        has_editor: false,
-    }
+    )
+    .with_url("https://github.com/MistaMin/OpenPluginSDK")
+    .with_email("contact@mistamin.com")
 }
 static STATEFUL_INFO: PluginInfo = info("com.opengrid.test.clap-state-chunk", &LEVEL);
 static PAIR_INFO: PluginInfo = info("com.opengrid.test.clap-state-pair", &PAIR);
@@ -120,7 +118,7 @@ impl Plugin for Stateful {
     fn param(&self, id: &str) -> Option<f32> {
         (id == "level").then_some(self.level)
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let half = frames / 2;
         for channel in io.iter_mut() {
             for sample in &mut channel[..half] {
@@ -188,7 +186,7 @@ impl Plugin for Pair {
             _ => None,
         }
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let half = frames / 2;
         for channel in io.iter_mut() {
             for sample in &mut channel[..half] {

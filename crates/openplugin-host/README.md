@@ -1,4 +1,4 @@
-# openplugin-ffi
+# openplugin-host
 
 Rust host session that drives one OpenPluginSDK plugin: parameter plane, rendering and state.
 

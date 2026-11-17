@@ -1,7 +1,7 @@
 //! Fixed-capacity single-producer, single-consumer queue.
 //!
-//! This is the ownership-transfer ring from the MIT OpenGridder client (the
-//! archived tree and the current `ag-plugin` queue). Endpoints are not `Sync`.
+//! An ownership-transfer ring, for messages between the audio thread and one
+//! other thread. Endpoints are not `Sync`.
 //! A successful push or pop does not allocate, park, or drop an element.
 #![allow(unsafe_code)]
 

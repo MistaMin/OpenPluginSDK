@@ -1,8 +1,7 @@
 //! Fixed delay line for dry-path alignment.
 //!
-//! OpenGridder delays the dry console path by the reported insert latency, and
-//! Water Channel's oversampler documents the same requirement for bypass and
-//! wet/dry. The buffer is allocated in [`DelayLine::new`]. `process_sample`
+//! A dry, bypass or wet/dry path has to be delayed by the latency the plugin
+//! reports, or the mix comb-filters. The buffer is allocated in [`DelayLine::new`]. `process_sample`
 //! does not allocate. A delay of 0 returns the input.
 
 #[derive(Clone, Debug)]

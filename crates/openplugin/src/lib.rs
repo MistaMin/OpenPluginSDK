@@ -1,47 +1,31 @@
 //! # OpenPluginSDK
 //!
 //! A zero-allocation, panic-free digital audio plugin development framework with GoodLookin DRI
-//! (Design Rust Interface), targeting **CLAP**, **VST3**, **Audio Unit (AU)**, and **Avid AAX**.
+//! (Design Rust Interface), targeting **CLAP**, **LV2**, **VST3**, **Audio Unit (AU)**, and **Avid AAX**.
 //!
 //! ## Modules
 //! - [`core`]: Plugin trait, parameter descriptors, normalization, and transport.
 //! - [`dsp`]: Standard library of textbook, realtime-safe DSP filters and dynamics.
 //! - [`dri`]: Procedural hardware GUI engine (GoodLookin DRI).
-//! - [`targets`]: Host target bridges (CLAP, VST3, AU, AAX, LV2, Standalone).
-//! - [`ffi`]: Rust host session. A host writes the parameter plane and renders through scratch.
+//! - [`targets`]: The format entries: `export_clap!`, `export_lv2!` and `export_shell!`.
+//! - [`host`]: Rust host session. A host writes the parameter plane and renders through scratch.
+//! - [`prelude`]: what nearly every plugin imports.
 
 pub use openplugin_core as core;
 pub use openplugin_dri as dri;
 pub use openplugin_dsp as dsp;
-pub use openplugin_ffi as ffi;
+pub use openplugin_host as host;
 pub use openplugin_targets as targets;
 #[cfg(feature = "testing")]
 pub use openplugin_testing as testing;
 
+/// The names nearly every plugin uses: the plugin and editor contracts, the descriptors,
+/// the channel adapters its tests call `process` through, and the export macros. DSP blocks and drawing come from [`crate::dsp`] and [`crate::dri`].
 pub mod prelude {
     pub use openplugin_core::{
-        decode_params, decode_session, encode_params, encode_session, restore_params, AaxIds,
-        AbCompare, AuIds, BusMeters, Category, Editor, EditorFactory, EditorHost, EditorState, Frame,
-        Gesture, IoConfig, MeterFrame, NotePorts, OnePole, ParamCursor, ParamFlags, ParamInfo,
-        ParamPins, ParamPlane, Plugin, PluginInfo, PresetBank, SampleRamp, Seqlock, SpeakerLayout,
-        Tail, Taper, Transport, Unit, Vst3Ids,
+        Category, Channels, ChannelsMut, Editor, EditorFactory, EditorHost, EditorState, Frame, IoConfig,
+        MeterFrame, NotePorts, ParamFlags, ParamInfo, Plugin, PluginInfo, SpeakerLayout, Tail, Taper,
+        Transport, Unit,
     };
-    pub use openplugin_dri::{
-        draw_faceplate, draw_faceplate_code, draw_fader, draw_knob, draw_knob_code, draw_pan_knob,
-        draw_slider, draw_vu_meter, fader_db_to_pos, fader_pos_to_db, knob_angle, Color, DrawList,
-        FaceplateStyle, KnobStyle, KnobTier, MeterStyle, SceneCanvas,
-    };
-    pub use openplugin_dsp::{
-        f32_to_i16, f32_to_i32, hann, hz_from_midi, i16_to_f32, i32_to_f32, lerp, midi_from_hz,
-        ms_from_samples, ms_per_beat, plan_rate, samples_from_ms, samples_from_ticks,
-        samples_per_beat, saturate_sample, Adaa2Taylor, Biquad, BlockConvolver, Compressor,
-        DelayLine, FilterType,
-        correlation, BlockLevel, GainComp, LinearPhaseOversampler, MeterBank, MeterReadings,
-        Delta, KWeighting, Loudness, LoudnessMatch, Oscillator, OversampleFactor, SoftBypass,
-        Oversampler2x, Polyphony, ResidualAdaa1, SampleVoice, SaturationMode, VuMeter, Wave,
-        WindowRms,
-    };
-    pub use openplugin_targets::{
-        AaxAdapter, AuAdapter, ClapAdapter, Lv2Harness, StandaloneRunner, Vst3Adapter,
-    };
+    pub use openplugin_targets::{export_clap, export_lv2, export_shell};
 }

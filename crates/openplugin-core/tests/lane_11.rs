@@ -1,4 +1,4 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 fn assert_punched(lane: &AutomationLane) {
     let expect = [
@@ -23,7 +23,7 @@ fn assert_punched(lane: &AutomationLane) {
     }
 }
 
-fn punch(mode: LaneMode, touch: bool) -> AutomationLane {
+fn punch(mode: AutomationMode, touch: bool) -> AutomationLane {
     let mut lane = AutomationLane::new(0.0, 1.0, 0.0);
     lane.insert_point(0, 0.20);
     lane.insert_point(48_000, 0.80);
@@ -39,15 +39,15 @@ fn punch(mode: LaneMode, touch: bool) -> AutomationLane {
 
 #[test]
 fn write_punches_without_touch() {
-    assert_punched(&punch(LaneMode::Write, false));
+    assert_punched(&punch(AutomationMode::Write, false));
 }
 
 #[test]
 fn touch_punches_when_held_before_roll() {
-    assert_punched(&punch(LaneMode::Touch, true));
+    assert_punched(&punch(AutomationMode::Touch, true));
 }
 
 #[test]
 fn latch_punches_without_touch() {
-    assert_punched(&punch(LaneMode::Latch, false));
+    assert_punched(&punch(AutomationMode::Latch, false));
 }

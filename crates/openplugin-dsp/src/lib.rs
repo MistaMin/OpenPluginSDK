@@ -3,10 +3,8 @@
 //! Realtime-safe DSP building blocks:
 //! - [`Biquad`]: Robert Bristow-Johnson cookbook audio filters.
 //! - [`Svf`], [`MatchedBiquad`], [`Butterworth`], [`Crossover`] (Linkwitz-Riley), [`OnePoleFilter`], [`DcBlocker`], [`Allpass1`], [`Allpass2`]: TPT, analog-matched and classic filters (see `docs/DSP_COOKBOOK.md`).
-//! - [`Compressor`]: Log-domain dynamics processor with soft knee.
 //! - [`Dynamics`], [`GainComputer`], [`EnvelopeFollower`], [`Ballistics`]: linked compressor / expander / gate with soft knee, hysteresis, range, hold, a sidechain hook (Giannoulis, Massberg, Reiss 2012).
 //! - [`Limiter`], [`TruePeak`]: lookahead brickwall limiter with a true-peak ceiling (ITU-R BS.1770-4 Annex 2) held for full-band material too, and a reported latency; a 4x/8x true-peak detector.
-//! - [`VuMeter`]: ANSI standard 300 ms ballistic level detector.
 //! - [`MeterBank`]: stereo peak, RMS, PPM, and VU, plus envelope gain reduction.
 //! - [`LinearPhaseOversampler`]: 1x/2x/4x linear-phase resampling, 64 host samples at 2x and 4x.
 //! - [`BlockConvolver`]: overlap-save playback of a real impulse of at most 1024 taps.
@@ -143,6 +141,7 @@ pub use delay::DelayLine;
 pub use downmix::{
     roles_of, Downmix, DownmixTarget, MixSettings, Normalize, SurroundFill, Upmix, UpmixSettings,
 };
+#[allow(deprecated)]
 pub use dynamics::Compressor;
 pub use surround_adapter::{LfeMode, LinkedDetector, StereoOnSurround, SurroundAdapter};
 pub use envelope::{Ballistics, Detection, Domain, EnvelopeFollower, Topology};
@@ -181,20 +180,23 @@ pub use ppm::{Ppm, PpmType};
 pub use scope::{scope_feed, ScopeFrame, ScopeReader, ScopeWriter, SCOPE_POINTS};
 pub use true_peak_meter::TruePeakMeter;
 pub use utility::{
-    balance_gains, db_to_gain, gain_to_db, ms_decode, ms_encode, polarity, stereo_width, DenormalGuard, Gain,
+    balance_gains, db_to_gain, gain_to_db, lerp, ms_decode, ms_encode, polarity, stereo_width, DenormalGuard, Gain,
     PanLaw, Panner,
 };
+#[allow(deprecated)]
 pub use meter::{correlation, BlockLevel, MeterBank, MeterReadings, VuIec, VuMeter};
 pub use musical::{
     ms_from_samples, ms_per_beat, samples_from_ms, samples_from_ticks, samples_per_beat,
 };
 pub use noise::{PinkNoise, WhiteNoise, PINK_LOW_HZ, PINK_RMS};
+#[allow(deprecated)]
 pub use oscillator::{Oscillator, Wave};
-pub use oversampling::{OversampleFactor, Oversampler2x};
+#[allow(deprecated)]
+pub use oversampling::Oversampler2x;
 pub use dither::{Dither, DitherKind, NoiseShaping};
 pub use phaser::{Phaser, MAX_PHASER_FEEDBACK, MAX_PHASER_STAGES};
 pub use partitioned::{ConvolutionIr, ConvolveError, ConvolverConfig, Layout, LongConvolver};
-pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to_f32, lerp};
+pub use pcm::{f32_to_i16, f32_to_i24, f32_to_i32, i16_to_f32, i24_to_f32, i32_to_f32};
 pub use pitch::{hz_from_midi, midi_from_hz};
 pub use modal::{
     mode_ratios, Exciter, ModalBank, ModalPreset, PresetSettings, Strike, MAX_PRESET_MODES,
@@ -215,12 +217,14 @@ pub use wdf::{
     Resistor, ResistiveVoltageSource, Series, SingleDiode, WdfPort,
 };
 pub use vocoder::{PhaseLocking, PitchShifter, TimeStretch, VocoderConfig};
+#[allow(deprecated)]
 pub use voice::{NoteExpressions, Polyphony, SampleVoice, MOD_SLOTS};
 pub use voice_alloc::{
     Allocation, GlideMode, NoteOff, StealPolicy, Voice, VoiceAllocator, VoiceMode, VoicePhase,
     ENDED_CAPACITY,
 };
 pub use wavetable::{WavetableError, WavetableOsc, WavetableSet};
+#[allow(deprecated)]
 pub use window::{hann, WindowRms};
 pub use spectrum::{
     bin_frequency, log_frequency_bins, spectrum_feed, SpectrumAnalyzer, SpectrumConfig,

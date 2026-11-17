@@ -33,6 +33,7 @@ use openplugin_core::Transport;
 
 /// Waveform of an [`Lfo`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LfoShape {
     Sine,
     Triangle,
@@ -48,6 +49,7 @@ pub enum LfoShape {
 
 /// Dotted, straight or triplet timing of a [`NoteDivision`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Feel {
     Straight,
     /// 1.5 times as long.
@@ -84,6 +86,7 @@ impl NoteDivision {
 
 /// How fast an [`Lfo`] runs.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum LfoRate {
     /// Free-running, cycles per second.
     Hz(f32),

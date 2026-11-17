@@ -19,7 +19,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | DPF | OpenPluginSDK | Notes |
 |---|---|---|
 | A class derived from `Plugin`, constructed with the parameter, program and state counts; `createPlugin()` | A `struct` with `impl Plugin` and `impl Default`; the export macros | `Default::default()` is what the format entries call |
-| `DISTRHO_PLUGIN_NAME`, `DISTRHO_PLUGIN_BRAND`, `getLabel`, `getMaker`, `getHomePage`, `getVersion` | `PluginInfo { name, vendor, url, version, .. }` | There is no licence field |
+| `DISTRHO_PLUGIN_NAME`, `DISTRHO_PLUGIN_BRAND`, `getLabel`, `getMaker`, `getHomePage`, `getVersion` | `PluginInfo::new(..)`, `with_url` | There is no licence field |
 | `DISTRHO_PLUGIN_CLAP_ID` | `PluginInfo::id` | The CLAP id is the plugin id, so keep the old string |
 | `DISTRHO_PLUGIN_URI` | `Plugin::lv2_uri` | LV2 sessions find the plugin by it, so keep the old URI |
 | `getUniqueId`, `DISTRHO_PLUGIN_BRAND_ID`, `DISTRHO_PLUGIN_UNIQUE_ID` | `--au-subtype`, `--au-manufacturer` of `scripts/build_plugin.sh`; `Plugin::aax_ids` | See [BUILD.md](../BUILD.md) |
@@ -27,10 +27,10 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `DISTRHO_PLUGIN_IS_RT_SAFE` | Always required | The conformance kit checks that the audio path does not allocate |
 | `activate()` | `reset()` | Clear filter and delay history; must not allocate |
 | `sampleRateChanged`, `bufferSizeChanged`, `getSampleRate()`, `getBufferSize()` | `prepare(sample_rate, max_block, channels)` | Called again when either changes. Allocate here |
-| `run(const float** inputs, float** outputs, uint32_t frames)` | `process(io: &mut [Vec<f32>], frames)` | In place: `io[channel][..frames]` holds the input and receives the output |
+| `run(const float** inputs, float** outputs, uint32_t frames)` | `process(io: &mut [&mut [f32]], frames)` | In place: `io[channel][..frames]` holds the input and receives the output |
 | `setLatency`, `DISTRHO_PLUGIN_WANT_LATENCY` | `Plugin::latency` | The entries read it after every block |
 | `getTimePosition()`, `DISTRHO_PLUGIN_WANT_TIMEPOS` | `Plugin::set_transport(&Transport)` | Called before each block. `playing`, `sample_pos`, `tempo`, `bar_number`, `quarter_notes` |
-| (none) | `Plugin::tail_samples`, `Plugin::tail` | DPF has no tail report; a reverb or delay port should add one |
+| (none) | `Plugin::tail` | DPF has no tail report; a reverb or delay port should add one |
 
 ### Parameters
 
@@ -44,8 +44,8 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `kParameterIsBoolean` | `Unit::Toggle` | |
 | `kParameterIsInteger` | `.with_steps(n)` | `n` positions including both ends |
 | `kParameterIsLogarithmic` | `.with_taper(Taper::Log)` | Needs a minimum above zero |
-| `kParameterIsOutput` | `.flag(ParamFlags::READ_ONLY)` | For meters prefer `Plugin::meters` or shared editor state |
-| `kParameterIsTrigger` | `.flag(ParamFlags::MOMENTARY)` | |
+| `kParameterIsOutput` | `.with_flag(ParamFlags::READ_ONLY)` | For meters prefer `Plugin::meters` or shared editor state |
+| `kParameterIsTrigger` | `.with_flag(ParamFlags::MOMENTARY)` | |
 | `parameter.enumValues` | `.with_choices(&[...])` | The value is the index |
 | `parameter.designation = kParameterDesignationBypass` | `Plugin::set_host_bypass`, or a parameter with `ParamFlags::BYPASS` | |
 | `parameter.groupId`, `initPortGroup` | `.with_group("Filter/Envelope")` | |
@@ -117,6 +117,7 @@ The port uses the SDK's state-variable filter, which accepts new coefficients at
 ```rust
 use std::sync::OnceLock;
 
+use openplugin::core::{restore_params, PresetBank};
 use openplugin::dsp::{Svf, SvfMode};
 use openplugin::prelude::*;
 use openplugin_testing::{conformance, Options};
@@ -127,18 +128,15 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("resonance", "Resonance", 0.5, 10.0, 0.707, Unit::None),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.ported-lowpass",
-    name: "Ported Low-pass",
-    vendor: "Example Audio",
-    url: "https://example.com",
-    email: "",
-    version: "2.0.0",
-    category: Category::Eq,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.ported-lowpass",
+    "Ported Low-pass",
+    "Example Audio",
+    "2.0.0",
+    Category::Eq,
+    &PARAMS,
+)
+.with_url("https://example.com");
 
 // `initProgramName` and `loadProgram`. A parameter a preset leaves out keeps
 // its default. In a plugin crate these are files embedded by
@@ -217,7 +215,7 @@ impl Plugin for PortedLowpass {
     }
 
     // `run`, in place.
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         if self.stale {
             self.stale = false;
             for filter in &mut self.filters {
@@ -276,7 +274,7 @@ fn gain_at(plugin: &mut PortedLowpass, hz: f32) -> f32 {
             io[0][i] = (std::f32::consts::TAU * hz * t).sin();
             io[1][i] = io[0][i];
         }
-        plugin.process(&mut io, 64);
+        plugin.process(&mut ChannelsMut::new(&mut io), 64);
         if block >= 100 {
             peak = io[0].iter().fold(peak, |p, s| p.max(s.abs()));
         }
@@ -315,7 +313,7 @@ What moved where:
 
 ## What has no counterpart yet
 
-- **Programs in the host's menu.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`, and the plugin's own editor can offer them, but no format entry publishes a program list to the host yet.
+- **Programs in the host's menu.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`, and the plugin's own editor can offer them, but no format entry publishes a program list to the host yet.
 - **CV ports.** Audio buses only.
 - **A parameter bound to a MIDI CC in the descriptor** (`midiCC`). Read the CC in `Plugin::midi` and map it yourself.
 - **A parameter change requested by the plugin** (`requestParameterValueChange`). Only the host and the editor change parameters.

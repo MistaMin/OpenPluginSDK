@@ -51,6 +51,7 @@ pub const PITCH_BEND_CENTER: u16 = 8192;
 
 /// One decoded message. `SysEx` borrows the payload between `F0` and `F7`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Message<'a> {
     NoteOff {
         channel: Channel,
@@ -106,6 +107,7 @@ pub enum Message<'a> {
 
 /// Why [`Parser::pull`] rejected a buffer. The parser is unchanged after an error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MidiError {
     Truncated,
     BadData,

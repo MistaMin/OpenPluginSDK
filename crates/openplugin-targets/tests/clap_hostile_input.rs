@@ -53,18 +53,16 @@ static PARAMS: [ParamInfo; 3] = [
     ParamInfo::new("enabled", "Enabled", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.hostile",
-    name: "Hostile Input",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "0.0.1",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.hostile",
+    "Hostile Input",
+    "OpenGrid",
+    "0.0.1",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 static MONO_LAYOUTS: &[IoConfig] = &[IoConfig {
     input: SpeakerLayout::Mono,
@@ -149,7 +147,7 @@ impl Plugin for Hostile {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         // No allocation and no panic: every channel is at least `frames` long
         // because the bridge sizes it from activate's max_frames.
         for channel in io.iter_mut() {

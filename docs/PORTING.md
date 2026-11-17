@@ -58,7 +58,7 @@ Each guide lists what its SDK has that this one lacks. The ones that matter for 
 - **The old plugin's identity** is no longer on this list: every id a host stores can be pinned ([Identity pinning](#identity-pinning)).
 - **The old plugin's saved state through the shells.** The CLAP entry hands `load_state` the stream as the host stored it, for a plugin that saves a chunk of its own. The VST3, Audio Unit and AAX shells accept only state they wrote themselves; the Audio Unit shell does restore the parameters of a dictionary the old unit's base class wrote.
 - **Parameter values in a plugin's own chunk.** A plugin whose `save_state` returns a chunk has that chunk stored alone by the CLAP entry, and stored beside the parameter values by the shells. Until the entries agree, a chunk must hold the parameter values too.
-- **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`; no format entry publishes a program list yet.
+- **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`; no format entry publishes a program list yet.
 - **Parameter travel other than linear and logarithmic, and custom value text.** `Taper` has two shapes, and a value prints and parses by its `Unit` and choice names.
 - **More than one output bus or sidechain, 64-bit audio buffers, and SysEx.**
 
@@ -216,7 +216,7 @@ Then a `supported_layouts` for plain mono and stereo buses, and the reported lat
 
 - Always: it builds the example's CLAP library and scans it. The manifest turned into SDK terms is the example's `PARAMS` table exactly (id, name, min, max, default, unit, taper, steps, choices, flags), the CLAP id is `INFO.id`, the generated lines `ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),` and the Warm toggle appear verbatim, and the manifest survives a JSON round trip. A plugin that aborts and one that hangs each fail only their own scan.
 - Pins: `snippet_tests.rs` checks which tables get pins (one id that is not a position pins the whole table; ids a format cannot carry are named, not pinned) and that the generated lines are the SDK's own methods. With `OPENPLUGIN_PORT_FIXTURES` set to the native build folder (`build-shell`), which holds the identity proof's bundles, `a_pinned_vst3_scans_back_to_its_pins` and `a_pinned_audio_unit_scans_back_to_its_pins` scan `Pinned B.vst3` and `Pinned A.component` and find the pinned class ids, Audio Unit codes and parameter ids in the manifest, and the same pins (`.with_vst3_id(0x6C65766C)`, `Vst3Ids::from_hex(...)`, `AuIds { subtype: *b"PnEx", ... }`) in the generated Rust.
-- With `OPENPLUGIN_PORT_FIXTURES` set to a folder holding `Example Gain.clap`, `.vst3`, `.component` and `.aaxplugin` as `scripts/build_plugin.sh` writes them (`--formats clap,vst3,au,aax --tail --aax-pages`, which needs the VST3, AudioUnitSDK and AAX checkouts): the VST3 and Audio Unit scans reproduce the same table; the VST3 class ids equal those `openplugin_ffi::shell::write_info` computes; the Audio Unit is `aufx`/`ExGn`/`OpGd` with its factory function; the AAX ids equal the example's `Plugin::aax_ids`.
+- With `OPENPLUGIN_PORT_FIXTURES` set to a folder holding `Example Gain.clap`, `.vst3`, `.component` and `.aaxplugin` as `scripts/build_plugin.sh` writes them (`--formats clap,vst3,au,aax --tail --aax-pages`, which needs the VST3, AudioUnitSDK and AAX checkouts): the VST3 and Audio Unit scans reproduce the same table; the VST3 class ids equal those `openplugin_host::shell::write_info` computes; the Audio Unit is `aufx`/`ExGn`/`OpGd` with its factory function; the AAX ids equal the example's `Plugin::aax_ids`.
 
 ```bash
 F=build/fixtures
@@ -310,7 +310,7 @@ One test plugin, `examples/pinned`, in four builds: Pinned A (`level`, `offset`,
 | Audio Unit | `au_identity_proof` (`native/au/identity_host.cpp`) | The same through the real shell: the component (type, subtype, manufacturer, which the build took from the plugin), `kAudioUnitProperty_ParameterList`, ClassInfo restored into an initialized and an uninitialized unit, scheduled parameter events; a preset without the shell's key lands by parameter id and adds no parameter. The negative control as in VST3 |
 | AAX | `aax_identity_proof` (`native/aax/host_identity.cpp`, run by `identity_proof.cmake`) | Two processes, one per build: manufacturer, product and plug-in ids, the chunk through `SetChunk`, values and a lane by AAX parameter id. Negative control: without pins the chunk of the other layout is refused (the automation itself survives in AAX either way, because its parameter ids are strings) |
 
-The Rust side: `crates/openplugin-core/tests/state_keyed.rs` (the snapshot by id, and hostile bytes), `crates/openplugin-ffi/tests/shell_identity.rs` and `shell_identity_invalid.rs` (the shell ABI's answers, with valid and with unusable pins). None of these is a DAW test: they are the calls a host makes, made by a test.
+The Rust side: `crates/openplugin-core/tests/state_keyed.rs` (the snapshot by id, and hostile bytes), `crates/openplugin-host/tests/shell_identity.rs` and `shell_identity_invalid.rs` (the shell ABI's answers, with valid and with unusable pins). None of these is a DAW test: they are the calls a host makes, made by a test.
 
 ## The null test
 

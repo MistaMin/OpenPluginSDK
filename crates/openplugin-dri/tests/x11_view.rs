@@ -136,7 +136,7 @@ impl Editor for TestEditor {
                 self.pixels.push(if x < w / 2 { s.left } else { s.right });
             }
         }
-        Frame { pixels: &self.pixels, width: w, height: h }
+        Frame::new(&self.pixels, w, h)
     }
     fn damage(&mut self) -> Option<Vec<DamageRect>> {
         let mut s = self.shared.borrow_mut();

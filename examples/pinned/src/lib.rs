@@ -59,18 +59,7 @@ static PARAMS_PLAIN_A: [ParamInfo; 3] = [LEVEL, OFFSET, INVERT];
 static PARAMS_PLAIN_B: [ParamInfo; 4] = [INVERT, DRIVE, OFFSET, LEVEL];
 
 const fn info(id: &'static str, name: &'static str, params: &'static [ParamInfo]) -> PluginInfo {
-    PluginInfo {
-        id,
-        name,
-        vendor: "OpenPlugin proofs",
-        url: "",
-        email: "",
-        version: "1.0.0",
-        category: Category::Utility,
-        params,
-        is_instrument: false,
-        has_editor: false,
-    }
+    PluginInfo::new(id, name, "OpenPlugin proofs", "1.0.0", Category::Utility, params)
 }
 
 // The two pinned builds deliberately have different `PluginInfo::id`s: every
@@ -144,7 +133,7 @@ impl<const REORDERED: bool, const PINS: bool> Plugin for Pinned<REORDERED, PINS>
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for channel in io.iter_mut() {
             for sample in channel.iter_mut().take(frames) {
                 *sample = self.shape(*sample);

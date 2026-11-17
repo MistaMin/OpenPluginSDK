@@ -79,6 +79,7 @@ impl EditorView {
     /// The tooltip rectangles in editor points (x, y, width, height) with the
     /// text the editor answers for each now. Empty and non-finite rectangles
     /// are left out.
+    #[doc(hidden)]
     pub fn tooltip_rects(&self) -> Vec<([f64; 4], String)> {
         let tips = self.editor.tooltips();
         tips.into_iter()

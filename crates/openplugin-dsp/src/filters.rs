@@ -30,6 +30,7 @@ fn tan_g(sample_rate: f32, freq: f32) -> Option<f64> {
 
 /// Response of a [`OnePoleFilter`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OnePoleMode {
     /// `1 / (s + 1)` with `s` normalised to the corner.
     LowPass,
@@ -219,6 +220,7 @@ impl DcBlocker {
 
 /// Low-pass or high-pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ButterworthKind {
     LowPass,
     HighPass,

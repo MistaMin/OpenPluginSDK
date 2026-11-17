@@ -22,6 +22,7 @@ use super::xml::{self, Element};
 use super::{ErrorKind, ForeignError, Limits, Result};
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Value {
     Null,
     Bool(bool),

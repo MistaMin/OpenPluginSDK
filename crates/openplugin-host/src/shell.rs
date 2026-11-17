@@ -13,7 +13,7 @@ use openplugin_core::{
     ParamIdMap, ParamInfo, PinFormat, PluginInfo, PortKind, SpeakerLayout, Taper, Unit, Vst3Ids,
 };
 
-use crate::{FfiInstance, Plugin};
+use crate::{HostSession, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
 pub const ABI: u32 = 9;
@@ -64,9 +64,6 @@ pub const ROLE_SLOTS: usize = 16;
 pub const PARAM_LOG: u32 = 1;
 pub const PARAM_DISCRETE: u32 = 2;
 pub const PARAM_AUTOMATABLE: u32 = 4;
-/// Plain values in one AAX packet. VST3 and Audio Unit are not capped by this.
-pub const AAX_MAX_PARAMS: u32 = 64;
-
 #[repr(C)]
 pub struct OpShellInfo {
     pub abi: u32,
@@ -121,7 +118,7 @@ pub struct OpLayout {
 }
 
 pub struct ShellInstance {
-    ffi: FfiInstance,
+    ffi: HostSession,
 }
 
 fn put(dst: &mut [u8], src: &str) {
@@ -413,6 +410,7 @@ fn bus_of(layout: SpeakerLayout) -> OpBus {
             PortKind::Surround => BUS_SURROUND,
             PortKind::Ambisonic => BUS_AMBISONIC,
             PortKind::Discrete => BUS_DISCRETE,
+            _ => BUS_DISCRETE,
         },
         channels: u32::from(layout.channels().unwrap_or(0)),
         roles,
@@ -478,11 +476,11 @@ pub unsafe fn track_info_from_abi(name: *const std::ffi::c_char, rgba: u32, flag
         let text = unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy();
         Some(text.chars().take(255).collect::<String>()).filter(|n| !n.is_empty())
     };
-    openplugin_core::TrackInfo {
-        name,
-        colour: (flags & TRACK_HAS_COLOUR != 0).then_some(rgba),
-        kind: flags & (TRACK_RETURN | TRACK_BUS | TRACK_MASTER),
-    }
+    let mut info = openplugin_core::TrackInfo::default();
+    info.name = name;
+    info.colour = (flags & TRACK_HAS_COLOUR != 0).then_some(rgba);
+    info.kind = flags & (TRACK_RETURN | TRACK_BUS | TRACK_MASTER);
+    info
 }
 
 /// Tell the plugin about the host's track. Message thread; waits for a running
@@ -505,7 +503,7 @@ pub unsafe fn set_track_info(ptr: *mut ShellInstance, name: *const std::ffi::c_c
 /// `ptr` is null or a live [`ShellInstance`].
 pub unsafe fn set_offline(ptr: *mut ShellInstance, offline: u32) {
     if !ptr.is_null() {
-        unsafe { (*ptr).ffi.set_offline_flag(offline != 0) };
+        unsafe { (*ptr).ffi.set_offline(offline != 0) };
     }
 }
 
@@ -573,10 +571,9 @@ fn category_name(category: Category) -> &'static str {
         Category::Delay => "Fx|Delay",
         Category::Modulation => "Fx|Modulation",
         Category::Harmonic => "Fx|Distortion",
-        Category::Dither => "Fx",
         Category::Instrument => "Instrument",
         Category::Utility => "Fx|Tools",
-        Category::Other => "Fx",
+        _ => "Fx",
     }
 }
 
@@ -590,7 +587,7 @@ fn unit_name(unit: Unit) -> &'static str {
         Unit::Semitones => "st",
         Unit::Cents => "ct",
         Unit::Seconds => "s",
-        Unit::Toggle | Unit::Choice | Unit::None => "",
+        _ => "",
     }
 }
 
@@ -966,7 +963,7 @@ pub unsafe fn expression_parse(id: u32, text: *const std::ffi::c_char, out_value
 // ---- ABI 9: the instance's own parameter table, and its largest latency ----
 
 /// The table the host should show for the instance at `ptr`: the one its
-/// plugin returned last ([`FfiInstance::current_info`]), or the plugin type's
+/// plugin returned last ([`HostSession::current_info`]), or the plugin type's
 /// first table when `ptr` is null or not a live instance. Message thread.
 fn table_of<P: Plugin + Default>(ptr: *const ShellInstance) -> &'static PluginInfo {
     with_live(ptr, |instance| instance.ffi.current_info()).unwrap_or_else(plugin_info::<P>)
@@ -1016,7 +1013,7 @@ pub unsafe fn instance_param_parse<P: Plugin + Default>(ptr: *const ShellInstanc
 }
 
 /// `op_shell_max_latency`: the largest latency the instance may report until
-/// it is prepared again ([`FfiInstance::max_latency`]); 0 for a null
+/// it is prepared again ([`HostSession::max_latency`]); 0 for a null
 /// instance. Any thread; never blocks, never allocates.
 ///
 /// # Safety
@@ -1056,7 +1053,7 @@ pub fn create<P: Plugin + Default>(rate: f64, max_block: u32, channels: u32) -> 
         if !plugin.accepts_sample_rate(rate as f32) {
             return None;
         }
-        let ffi = FfiInstance::new(plugin, rate, max_block as usize, channels as usize);
+        let ffi = HostSession::new(plugin, rate, max_block as usize, channels as usize).ok()?;
         Some(Box::into_raw(Box::new(ShellInstance { ffi })))
     }));
     match created {
@@ -1183,7 +1180,7 @@ pub unsafe fn save_state(ptr: *mut ShellInstance, out: *mut u8, capacity: u32, n
     if ptr.is_null() || (out.is_null() && capacity > 0) {
         return 0;
     }
-    let saved = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.try_save_bytes() }));
+    let saved = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.save_bytes() }));
     let Ok(Some(bytes)) = saved else { return 0 };
     if bytes.len() > STATE_MAX {
         return 0;
@@ -1417,18 +1414,14 @@ mod tests {
         ParamInfo::new("warm", "Warm", 0.0, 1.0, 0.0, Unit::Toggle).with_group("Filter//Bad"),
     ];
 
-    static INFO: PluginInfo = PluginInfo {
-        id: "shell-gain-test",
-        name: "Gain",
-        vendor: "Test",
-        url: "",
-        email: "",
-        version: "0.0.1",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    };
+    static INFO: PluginInfo = PluginInfo::new(
+        "shell-gain-test",
+        "Gain",
+        "Test",
+        "0.0.1",
+        Category::Utility,
+        &PARAMS,
+    );
 
     impl Default for Gain {
         fn default() -> Self {
@@ -1457,7 +1450,7 @@ mod tests {
                 _ => None,
             }
         }
-        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
             let linear = 10f32.powf(self.db / 20.0);
             for channel in io.iter_mut() {
                 for sample in channel.iter_mut().take(frames) {
@@ -1487,7 +1480,7 @@ mod tests {
         fn param(&self, id: &str) -> Option<f32> {
             self.0.param(id)
         }
-        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
             self.0.process(io, frames)
         }
         fn track_info_changed(&mut self, info: &openplugin_core::TrackInfo) {

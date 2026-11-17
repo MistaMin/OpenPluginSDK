@@ -64,7 +64,10 @@ use std::path::PathBuf;
 use std::ptr::null_mut;
 use std::time::Instant;
 
-pub type Id = *mut c_void;
+type Id = *mut c_void;
+
+/// An `NSView *` (for [`EditorView::raw`] and [`EditorView::attach`]).
+pub type NSViewPtr = *mut c_void;
 type Sel = *mut c_void;
 type Class = *mut c_void;
 
@@ -248,14 +251,17 @@ struct State {
 
 /// The items of the SDK's own parameter menu, in order: the item chosen is an
 /// index into this list.
+#[doc(hidden)]
 pub const PARAM_MENU_ITEMS: [&str; 4] = ["Reset to default", "Copy value", "Paste value", "Type value"];
 
 /// Stands in for the system menu (tests): returning true means the menu was
 /// handled (nothing is shown); false lets the real `NSMenu` pop up.
+#[doc(hidden)]
 pub type MenuHook = Box<dyn FnMut(&ParamMenu) -> bool>;
 
 /// Stands in for the system file panel (tests): `Some(answer)` resolves the
 /// request, `None` lets the real panel open.
+#[doc(hidden)]
 pub type FileHook = Box<dyn FnMut(&FileDialog) -> Option<Option<Vec<PathBuf>>>>;
 
 /// A node as the last notification pass saw it.
@@ -1018,6 +1024,7 @@ extern "C" fn view_will_move_to_window(this: Id, _cmd: Sel, new_window: Id) {
 
 /// What the field does with a key while it is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum FieldKey {
     Commit,
     Cancel,
@@ -1026,6 +1033,7 @@ pub enum FieldKey {
 
 /// Return (36) and keypad Enter (76) commit, Escape (53) cancels, but only when the field's own
 /// editor holds the keyboard; every other key, and these keys elsewhere, pass unchanged.
+#[doc(hidden)]
 pub fn field_key(key_code: u16, field_editor_is_first_responder: bool) -> FieldKey {
     match (field_editor_is_first_responder, key_code) {
         (true, 36 | 76) => FieldKey::Commit,
@@ -1062,6 +1070,7 @@ thread_local! {
 }
 
 /// How many key monitors the type-in fields hold right now. Zero when no field is open.
+#[doc(hidden)]
 pub fn key_monitor_count() -> usize {
     MONITORS.with(|m| m.borrow().len())
 }
@@ -1500,7 +1509,7 @@ fn role_name(role: AccessRole) -> Id {
         match role {
             AccessRole::Slider => NSAccessibilitySliderRole,
             AccessRole::Switch => NSAccessibilityCheckBoxRole,
-            AccessRole::Button => NSAccessibilityButtonRole,
+            _ => NSAccessibilityButtonRole,
         }
     }
 }
@@ -1521,7 +1530,7 @@ extern "C" fn ax_value(this: Id, _cmd: Sel) -> Id {
         match n.role {
             AccessRole::Slider => ns_string(&n.value),
             AccessRole::Switch => send!(Id, class(b"NSNumber\0") as Id, b"numberWithInt:\0", i32 = n.on as i32),
-            AccessRole::Button => null_mut(),
+            _ => null_mut(),
         }
     }
 }
@@ -1800,7 +1809,7 @@ impl EditorView {
     }
 
     /// The `NSView`. The view keeps its own reference until drop.
-    pub fn raw(&self) -> Id {
+    pub fn raw(&self) -> NSViewPtr {
         self.view
     }
 
@@ -1831,7 +1840,7 @@ impl EditorView {
     ///
     /// # Safety
     /// `parent` is null or a live `NSView`.
-    pub unsafe fn attach(&self, parent: Id) -> bool { unsafe {
+    pub unsafe fn attach(&self, parent: NSViewPtr) -> bool { unsafe {
         if parent.is_null() {
             return false;
         }
@@ -1849,13 +1858,15 @@ impl EditorView {
     }
 
     /// The open text field (an `NSTextField`), if any.
-    pub fn text_field(&self) -> Option<Id> {
+    #[doc(hidden)]
+    pub fn text_field(&self) -> Option<NSViewPtr> {
         unsafe { self.state.as_ref().and_then(|s| s.text_field) }
     }
 
     /// The tooltip rectangles in view points (x, y, width, height) with the
     /// text the view answers for each, asked through the same
     /// `view:stringForToolTip:point:userData:` method AppKit calls.
+    #[doc(hidden)]
     pub fn tooltip_rects(&self) -> Vec<([f64; 4], String)> {
         unsafe {
             let Some(st) = self.state.as_ref() else { return Vec::new() };
@@ -1873,6 +1884,7 @@ impl EditorView {
 
     /// Answer file dialog requests with `hook` instead of showing the system
     /// panel, for tests. See [`FileHook`].
+    #[doc(hidden)]
     pub fn set_file_dialog_hook(&self, hook: Option<FileHook>) {
         if let Some(s) = unsafe { self.state.as_mut() } {
             s.file_hook = hook;
@@ -1881,13 +1893,15 @@ impl EditorView {
 
     /// The `NSOpenPanel` the view would show for a request, not shown (the
     /// caller owns nothing: it is autoreleased). For tests.
-    pub fn open_panel_for(request: &FileDialog) -> Id {
+    #[doc(hidden)]
+    pub fn open_panel_for(request: &FileDialog) -> NSViewPtr {
         unsafe { make_open_panel(request) }
     }
 
     /// Run the completion path of a real panel with `response` (1 is OK, 0
     /// cancel) on a panel that was never shown: the same block the system
     /// calls. For tests.
+    #[doc(hidden)]
     pub fn simulate_panel_response(&self, request: &FileDialog, response: isize) {
         unsafe {
             let panel = make_open_panel(request);
@@ -1898,6 +1912,7 @@ impl EditorView {
 
     /// Answer the SDK's parameter menu with `hook` instead of popping up an
     /// `NSMenu`, for tests. See [`MenuHook`].
+    #[doc(hidden)]
     pub fn set_menu_hook(&self, hook: Option<MenuHook>) {
         if let Some(s) = unsafe { self.state.as_mut() } {
             s.menu_hook = hook;
@@ -1908,6 +1923,7 @@ impl EditorView {
     /// shown, with `text` standing in for the clipboard (what paste reads;
     /// copy returns what it would put there). For tests; the menu's own
     /// action, `openpluginMenuItem:`, does the same with the real clipboard.
+    #[doc(hidden)]
     pub fn choose_menu_item(&self, index: usize, text: Option<&str>) -> Option<String> {
         unsafe { run_menu_item(self.view, index, text) }
     }
@@ -1958,6 +1974,14 @@ impl Drop for EditorView {
 
 /// Show the editor in its own window and run the application until the
 /// window closes or the user quits. Returns the exit code. Main thread.
+/// Whether the caller is on the process's main thread, where every AppKit call belongs.
+pub fn on_main_thread() -> bool {
+    unsafe extern "C" {
+        fn pthread_main_np() -> i32;
+    }
+    unsafe { pthread_main_np() == 1 }
+}
+
 pub fn run_window(title: &str, editor: Box<dyn Editor>, poll: Option<Poll>) -> i32 {
     unsafe {
         let pool = send!(Id, send!(Id, class(b"NSAutoreleasePool\0") as Id, b"alloc\0"), b"init\0");

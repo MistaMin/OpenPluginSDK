@@ -16,18 +16,14 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "test.neural",
-    name: "Test Neural Amp",
-    vendor: "test",
-    url: "",
-    email: "",
-    version: "0",
-    category: Category::Harmonic,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "test.neural",
+    "Test Neural Amp",
+    "test",
+    "0",
+    Category::Harmonic,
+    &PARAMS,
+);
 
 fn model_text() -> String {
     // Deterministic pseudo-random weights, conditioned on drive.
@@ -105,7 +101,7 @@ impl Plugin for Amp {
     fn state_is_parameters_only(&self) -> bool {
         true
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         self.slot.poll();
         let _ = &self.loader;
         let Some(model) = self.slot.get_mut() else { return };

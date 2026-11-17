@@ -23,18 +23,16 @@ fn info() -> &'static PluginInfo {
                 ParamInfo::new(id, id, 0.0, 1.0, 0.0, Unit::None)
             })
             .collect();
-        PluginInfo {
-            id: "com.opengrid.test.parambench",
-            name: "Param Bench",
-            vendor: "OpenGrid",
-            url: "https://github.com/MistaMin/OpenPluginSDK",
-            email: "contact@mistamin.com",
-            version: "0.0.1",
-            category: Category::Utility,
-            params: Box::leak(params.into_boxed_slice()),
-            is_instrument: false,
-            has_editor: false,
-        }
+        PluginInfo::new(
+            "com.opengrid.test.parambench",
+            "Param Bench",
+            "OpenGrid",
+            "0.0.1",
+            Category::Utility,
+            Box::leak(params.into_boxed_slice()),
+        )
+            .with_url("https://github.com/MistaMin/OpenPluginSDK")
+            .with_email("contact@mistamin.com")
     })
 }
 
@@ -57,7 +55,7 @@ impl Plugin for Many {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
 }
 
 /// Drives a CLAP instance of [`Many`] as the bench's plugin: each block carries
@@ -121,7 +119,7 @@ impl Plugin for Driver {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         self.turn ^= 1;
         let events = clap_input_events {
             ctx: &self.lists[self.turn] as *const Vec<clap_event_param_value> as *mut c_void,

@@ -62,7 +62,7 @@ mod win {
             let (w, h) = ((200.0 * scale).round() as usize, (80.0 * scale).round() as usize);
             self.pixels.clear();
             self.pixels.resize(w * h, 0x0030_5080);
-            Frame { pixels: &self.pixels, width: w, height: h }
+            Frame::new(&self.pixels, w, h)
         }
         fn damage(&mut self) -> Option<Vec<DamageRect>> {
             Some(Vec::new())

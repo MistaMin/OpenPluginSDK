@@ -81,7 +81,7 @@ The "before" allocates a `Vec` per channel per block; the "after" takes a scratc
 
 ```rust
 // before: the allocator is called on the audio thread
-fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
     for channel in io.iter_mut() {
         let copy: Vec<f32> = channel[..frames].to_vec();          // allocates and frees
         for (d, s) in channel[..frames].iter_mut().zip(&copy) { *d = *s * 0.5; }
@@ -90,7 +90,7 @@ fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
 
 // after: sized once, in prepare
 fn prepare(&mut self, _: f32, max_block: usize, _: usize) { self.scratch = vec![0.0; max_block]; }
-fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
     for channel in io.iter_mut() {
         let copy = &mut self.scratch[..frames];
         copy.copy_from_slice(&channel[..frames]);
@@ -124,7 +124,7 @@ asserts that exactly `no_alloc` fails for the first and nothing fails for the se
   `poisoned_by_nan_fails_hostile_input`, and so on). `no_denormals` has no entry there; its failing
   case is `subnormal_output_fails_the_kit_and_the_flush_passes` in the perf guide's tests.
 - The SDK's own audio paths carry the same proof: counting-allocator tests in
-  [`openplugin-ffi`](../crates/openplugin-ffi/tests/shell_no_alloc.rs),
+  [`openplugin-host`](../crates/openplugin-host/tests/shell_no_alloc.rs),
   [`openplugin-targets`](../crates/openplugin-targets/tests/clap_no_alloc.rs) (CLAP, LV2) and
   [`openplugin-dsp`](../crates/openplugin-dsp/tests/filters_no_alloc.rs) (filters, dynamics,
   convolution, dither, downmix).
@@ -178,7 +178,7 @@ caught), so the host's arithmetic is never changed by the plugin. A plugin that 
 subnormal numbers (very unusual) returns `false` from `Plugin::flush_denormals`; the entries then
 leave the host's mode as it is. Tests: [`clap_denormals.rs`](../crates/openplugin-targets/tests/clap_denormals.rs),
 [`lv2_denormals.rs`](../crates/openplugin-targets/tests/lv2_denormals.rs) and
-[`shell_denormals.rs`](../crates/openplugin-ffi/tests/shell_denormals.rs) set several host modes
+[`shell_denormals.rs`](../crates/openplugin-host/tests/shell_denormals.rs) set several host modes
 (flush off, already on, only FTZ on x86, each with a non-default rounding mode), record the mode
 inside the plugin's callbacks and check it afterwards, after a panic and with the opt-out; the
 guard's own tests are in [`denormal.rs`](../crates/openplugin-core/src/denormal.rs). They pass on
@@ -300,7 +300,7 @@ the target between 0.25 and 1.0 every block, a parameter under constant automati
 
 ```rust
 // before: always step the one-pole, fill a gain curve, multiply
-for g in &mut ramp[..frames] { *g = pole.next(target); }
+for g in &mut ramp[..frames] { *g = pole.next_value(target); }
 for (s, g) in channel.iter_mut().zip(&ramp[..frames]) { *s *= *g; }
 
 // after, settled: once it has arrived, a constant multiply
@@ -363,7 +363,7 @@ it hid the layout. Measure the loop you ship, not the one you meant.) Test:
 
 Where the fields are used together every time, an array of structures is not slower, and it is
 simpler. The change pays when there are many elements, a big struct, and a loop that reads few
-fields. For audio buffers the SDK already gives you the good layout: `io: &mut [Vec<f32>]` is one
+fields. For audio buffers the SDK already gives you the good layout: `io: &mut [&mut [f32]]` is one
 contiguous slice per channel (planar), not interleaved frames.
 
 ## 7. Helping the compiler vectorise

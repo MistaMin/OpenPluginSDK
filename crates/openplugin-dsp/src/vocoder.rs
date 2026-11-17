@@ -84,6 +84,7 @@ const CHUNK: usize = 256;
 
 /// How the phases of bins near a partial are kept together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PhaseLocking {
     /// Each bin advances on its own (the plain phase vocoder).
     None,

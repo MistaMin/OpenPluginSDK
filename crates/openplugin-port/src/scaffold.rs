@@ -233,6 +233,18 @@ fn lib_rs(m: &Manifest, ty: &str) -> String {
     let _ = writeln!(s, "mod params;");
     let _ = writeln!(s, "pub mod state_import;");
     let _ = writeln!(s);
+    // The prelude is the names every plugin uses; the pins and the state helpers are imported by name.
+    let mut names = vec!["decode_params", "encode_params"];
+    if snippet::aax_ids_expr(p).is_some() {
+        names.push("AaxIds");
+    }
+    if snippet::au_ids_expr(p).is_some() {
+        names.push("AuIds");
+    }
+    if p.ids.vst3.is_some() {
+        names.push("Vst3Ids");
+    }
+    let _ = writeln!(s, "use openplugin::core::{{{}}};", names.join(", "));
     let _ = writeln!(s, "use openplugin::prelude::*;");
     let _ = writeln!(s);
     let _ = writeln!(s, "pub use params::{{INFO, PARAMS}};");
@@ -286,7 +298,7 @@ fn lib_rs(m: &Manifest, ty: &str) -> String {
     let _ = writeln!(s, "        Self::index(id).map(|i| self.values[i])");
     let _ = writeln!(s, "    }}");
     let _ = writeln!(s);
-    let _ = writeln!(s, "    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {{");
+    let _ = writeln!(s, "    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {{");
     let _ = writeln!(s, "        // TODO(porting): the DSP. Until it is written the port passes its input through");
     let _ = writeln!(s, "        // unchanged, which nulls against the original only where the original does too.");
     let _ = writeln!(s, "        let _ = (io, frames);");

@@ -10,8 +10,12 @@
 
 #![deny(unsafe_code)]
 
+/// Host-side automation lanes. Behind the `automation` feature: no bridge or
+/// plugin needs it, so it is outside the frozen API.
+#[cfg(feature = "automation")]
 pub mod automation;
 pub mod build;
+pub mod channels;
 pub mod denormal;
 pub mod editor;
 pub mod expression;
@@ -30,24 +34,25 @@ pub mod spsc;
 pub mod state;
 pub mod worker;
 
+pub use channels::{Channels, ChannelsMut};
 pub use denormal::DenormalGuard;
-pub use automation::{
-    AutomationInterpolation, AutomationLane, AutomationMode, CurveInterpolation, LaneMode,
-};
+#[cfg(feature = "automation")]
+pub use automation::{AutomationInterpolation, AutomationLane, AutomationMode};
 pub use layout::{
     BusMeters, IoConfig, NotePorts, ParamFlags, PortKind, SpeakerLayout, Tail, STEREO_LAYOUTS,
     BUS_METER_CHANNELS, MAX_AUDIO_CHANNELS,
 };
 pub use editor::{
-    Editor, EditorFactory, EditorHost, EditorState, Frame, Gesture, GestureQueue, ParamMenu,
-    ParamMenuAction, ValueMirror,
+    Editor, EditorFactory, EditorHost, EditorState, Frame, Gesture, ParamMenu, ParamMenuAction,
 };
+#[doc(hidden)]
+pub use editor::{GestureQueue, ValueMirror};
 pub use expression::{Expression, ExpressionSet, NoteRef, VoiceInfo};
 pub use identity::{AuIds, ParamIdMap, ParamPins, PinError, PinFormat, Vst3Ids};
 pub use mpe::{MpeReceiver, MpeZones};
 pub use notify::HostNotifier;
 pub use plane::{ParamCursor, ParamPlane};
-pub use preset::{Preset, PresetBank};
+pub use preset::{Preset, PresetBank, PresetError};
 pub use ramp::SampleRamp;
 pub use seqlock::Seqlock;
 pub use smooth::OnePole;
@@ -63,7 +68,11 @@ pub use state::{
 /// `true_peak_db`, the loudness fields, `correlation`, and `sidechain_db` are
 /// whatever the plugin last published. `correlation` runs from -1 to 1.
 /// `clip` bit 0 is left and bit 1 is right. Wider buses use [`BusMeters`].
+///
+/// More fields may come: start from [`MeterFrame::SILENT`] and set the ones
+/// you publish.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct MeterFrame {
     pub input_db: [f32; 2],
     pub output_db: [f32; 2],
@@ -98,6 +107,7 @@ impl Default for MeterFrame {
 
 /// Plugin category for host menus and classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Category {
     Eq,
     Dynamics,
@@ -112,8 +122,11 @@ pub enum Category {
     Other,
 }
 
-/// Display unit of a parameter.
+/// Display unit of a parameter. `Toggle` and `Choice` are more than a label:
+/// they make [`ParamInfo::clamp`] round to whole values, and select what
+/// [`ParamInfo::format`] prints and [`ParamInfo::parse`] reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Unit {
     None,
     Db,
@@ -130,6 +143,7 @@ pub enum Unit {
 
 /// Taper describing how normalized 0..1 travel maps onto parameter values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum Taper {
     Linear,
     Log,
@@ -142,6 +156,7 @@ pub const GROUP_MAX_BYTES: usize = 255;
 
 /// Why [`check_group`] refused a group path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum GroupError {
     /// A name is empty: the path starts or ends with `/`, or has `//`.
     EmptyName,
@@ -241,6 +256,7 @@ pub fn group_name(path: &str) -> &str {
 
 /// Static description of a single plugin parameter.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[non_exhaustive]
 pub struct ParamInfo {
     pub id: &'static str,
     pub name: &'static str,
@@ -387,7 +403,7 @@ impl ParamInfo {
     }
 
     /// Add one flag. Read-only and not-realtime clear [`ParamFlags::AUTOMATABLE`].
-    pub const fn flag(mut self, flag: ParamFlags) -> Self {
+    pub const fn with_flag(mut self, flag: ParamFlags) -> Self {
         self.flags = self.flags.union(flag);
         if flag.contains(ParamFlags::READ_ONLY) || flag.contains(ParamFlags::NOT_REALTIME) {
             self.flags = self.flags.difference(ParamFlags::AUTOMATABLE);
@@ -544,8 +560,11 @@ impl ParamInfo {
     }
 }
 
-/// Static descriptor of a plugin.
+/// Static descriptor of a plugin. Built with [`PluginInfo::new`] and the
+/// `with_*` methods, all `const`, so it can sit in a `static`; more fields
+/// may come.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[non_exhaustive]
 pub struct PluginInfo {
     pub id: &'static str,
     pub name: &'static str,
@@ -560,13 +579,49 @@ pub struct PluginInfo {
 }
 
 impl PluginInfo {
+    /// An effect with no URL, e-mail or editor.
+    pub const fn new(
+        id: &'static str,
+        name: &'static str,
+        vendor: &'static str,
+        version: &'static str,
+        category: Category,
+        params: &'static [ParamInfo],
+    ) -> Self {
+        Self { id, name, vendor, url: "", email: "", version, category, params, is_instrument: false, has_editor: false }
+    }
+
+    pub const fn with_url(mut self, url: &'static str) -> Self {
+        self.url = url;
+        self
+    }
+
+    pub const fn with_email(mut self, email: &'static str) -> Self {
+        self.email = email;
+        self
+    }
+
+    /// Whether the plugin makes sound from notes rather than from its input.
+    pub const fn with_instrument(mut self, is_instrument: bool) -> Self {
+        self.is_instrument = is_instrument;
+        self
+    }
+
+    /// Whether the plugin has an editor of its own.
+    pub const fn with_editor(mut self, has_editor: bool) -> Self {
+        self.has_editor = has_editor;
+        self
+    }
+
     pub fn param(&self, id: &str) -> Option<&'static ParamInfo> {
         self.params.iter().find(|p| p.id == id)
     }
 }
 
-/// Host transport state for synchronization.
+/// Host transport state for synchronization. Read it; a host adapter starts
+/// from `Transport::default()`, since more fields may come.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Transport {
     pub playing: bool,
     pub recording: bool,
@@ -585,6 +640,7 @@ pub struct Transport {
 /// thread, never on the audio thread. A field the host does not know is
 /// `None` / 0.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TrackInfo {
     /// The track's name, if the host gave one and it is not empty.
     pub name: Option<String>,
@@ -639,9 +695,13 @@ pub const MAX_SAMPLE_RATE: f32 = 768_000.0;
 
 /// Whether `sample_rate` is a finite rate in [`MIN_SAMPLE_RATE`]..=[`MAX_SAMPLE_RATE`].
 ///
-/// CLAP and LV2 hand the rate to the bridge as an `f64`; [`Plugin::accepts_sample_rate`]
-/// is the plugin's own `f32` predicate, which defaults to this range. A format
-/// bridge checks this range first, so a plugin can narrow the decision but not widen it.
+/// A sample rate is an `f32` everywhere a plugin or a DSP block sees one.
+/// This check alone takes an `f64`, because it runs on what the host hands
+/// over (CLAP, LV2 and the shell ABI pass an `f64`) before the value is
+/// narrowed: a rate just outside the range must not round into it.
+/// [`Plugin::accepts_sample_rate`] is the plugin's own predicate, which
+/// defaults to this range. A format bridge checks this range first, so a
+/// plugin can narrow the decision but not widen it.
 pub fn sample_rate_supported(sample_rate: f64) -> bool {
     sample_rate.is_finite()
         && sample_rate >= f64::from(MIN_SAMPLE_RATE)
@@ -649,6 +709,16 @@ pub fn sample_rate_supported(sample_rate: f64) -> bool {
 }
 
 /// Core Plugin Trait.
+///
+/// Six methods are required: `info`, `prepare`, `reset`, `set_param`, `param`
+/// and `process`. Every other one has a default, and every method added after
+/// 1.0 will have one.
+///
+/// Call order: the host picks a layout while the plugin is deactivated
+/// ([`Self::supported_layouts`], then [`Self::set_layout`]), activates with
+/// [`Self::prepare_layout`] (which calls [`Self::prepare`] by default), then
+/// calls [`Self::process_buses`] (which calls [`Self::process`] by default)
+/// for every block.
 ///
 /// Guaranteed contracts:
 /// - Realtime safety: `process` never allocates heap memory or panics.
@@ -670,7 +740,10 @@ pub trait Plugin: Send + 'static {
     /// Resets internal filter history, delay lines, and voice states.
     fn reset(&mut self);
 
-    /// Sets parameter value by ID. Returns false if ID is unrecognized.
+    /// Sets parameter value by ID. Returns false if ID is unrecognized. The
+    /// bridges call [`Self::set_param_index`] on the audio thread; its
+    /// default looks the id up and calls this, so compare ids cheaply or
+    /// override the index form.
     fn set_param(&mut self, id: &str, value: f32) -> bool;
 
     /// Index form of [`Self::set_param`]. Hosts call this after reading a [`ParamPlane`].
@@ -681,16 +754,20 @@ pub trait Plugin: Send + 'static {
         }
     }
 
-    /// Retrieves current parameter value.
+    /// Retrieves current parameter value. A string lookup: for tests, state
+    /// and editors, not for every sample.
     fn param(&self, id: &str) -> Option<f32>;
 
-    /// Editor-facing levels. The audio thread publishes this through a [`Seqlock`].
+    /// Editor-facing levels, gain reduction included
+    /// ([`MeterFrame::reduction_db`]). The bridges read it after each block
+    /// and publish it to the editor.
     fn meters(&self) -> MeterFrame {
         MeterFrame::SILENT
     }
 
-    /// In-place planar audio processing.
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize);
+    /// In-place planar audio processing: one slice per channel, each at
+    /// least `frames` long.
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize);
 
     /// Latency in samples introduced by DSP buffers (for Delay Compensation).
     fn latency(&self) -> usize {
@@ -710,18 +787,17 @@ pub trait Plugin: Send + 'static {
     }
 
     /// Tail duration in samples after input ceases (e.g. reverb decay).
+    #[deprecated(since = "1.0.0", note = "override `tail` instead; `Tail::from_samples` converts a count")]
     fn tail_samples(&self) -> usize {
         0
     }
 
-    /// Tail as a host property. The default maps [`Self::tail_samples`]: zero
-    /// is [`Tail::None`], anything else is [`Tail::Finite`]. Override this to
-    /// report [`Tail::Unknown`] or [`Tail::Infinite`].
+    /// Decay after the input stops, as a host property. The default is the
+    /// deprecated [`Self::tail_samples`] through [`Tail::from_samples`], so
+    /// [`Tail::None`] unless that is overridden.
     fn tail(&self) -> Tail {
-        match self.tail_samples() {
-            0 => Tail::None,
-            samples => Tail::Finite(samples.min(u32::MAX as usize) as u32),
-        }
+        #[allow(deprecated)]
+        Tail::from_samples(self.tail_samples())
     }
 
     /// Layouts the host may select while the plugin is deactivated.
@@ -744,7 +820,7 @@ pub trait Plugin: Send + 'static {
 
     /// Main bus plus an optional sidechain. The sidechain is detector input.
     /// The default drops it and calls [`Self::process`].
-    fn process_buses(&mut self, io: &mut [Vec<f32>], sidechain: Option<&[Vec<f32>]>, frames: usize) {
+    fn process_buses(&mut self, io: &mut [&mut [f32]], sidechain: Option<&[&[f32]]>, frames: usize) {
         let _ = sidechain;
         self.process(io, frames);
     }
@@ -759,7 +835,11 @@ pub trait Plugin: Send + 'static {
         }
     }
 
-    /// Same as [`Self::note_on`] with a MIDI channel 0..15.
+    /// Same as [`Self::note_on`] with a MIDI channel 0..15. The bridges call
+    /// [`Self::note_on_ref`] and [`Self::note_off_ref`]; those default to
+    /// this and to [`Self::note_off`], so a plugin overrides the form that
+    /// carries what it needs: `note_on`/`note_off` (key only), this one (key
+    /// and channel), or the `_ref` pair (note id, port, channel, key).
     fn note_on_channel(&mut self, offset: usize, _channel: u8, note: u8, velocity: u8) {
         self.note_on(offset, note, velocity);
     }
@@ -788,11 +868,6 @@ pub trait Plugin: Send + 'static {
     /// bridge enforces. A plugin may narrow it.
     fn accepts_sample_rate(&self, sample_rate: f32) -> bool {
         sample_rate_supported(f64::from(sample_rate))
-    }
-
-    /// Metering: current gain reduction in dB (e.g. for compressor VU meters).
-    fn gain_reduction_db(&self) -> f32 {
-        0.0
     }
 
     /// Updates transport info prior to each block.
@@ -904,7 +979,8 @@ pub trait Plugin: Send + 'static {
         true
     }
 
-    /// Factory programs. `0` means the host shows no program list.
+    /// Factory programs. `0` means the host shows no program list. A
+    /// [`PresetBank`] answers all three methods from preset text files.
     /// [`Self::preset_values`] is plain values in descriptor order and must
     /// not touch DSP state: a message thread can read it during playback.
     fn preset_count(&self) -> usize {
@@ -1033,10 +1109,20 @@ pub struct AaxIds {
 
 impl AaxIds {
     /// True when every code is four printable characters and the two
-    /// plug-in types differ.
-    pub fn is_valid(&self) -> bool {
-        let printable = |code: &[u8; 4]| code.iter().all(|b| (0x20..0x7f).contains(b));
-        [self.manufacturer, self.product, self.mono, self.stereo].iter().all(printable) && self.mono != self.stereo
+    /// plug-in types differ. `const`, so a plugin can assert it at build time.
+    pub const fn is_valid(&self) -> bool {
+        let codes = [self.manufacturer, self.product, self.mono, self.stereo];
+        let mut same = true;
+        let mut i = 0;
+        while i < 16 {
+            let b = codes[i / 4][i % 4];
+            if b < 0x20 || b >= 0x7f {
+                return false;
+            }
+            same &= i >= 4 || self.mono[i] == self.stereo[i];
+            i += 1;
+        }
+        !same
     }
 }
 

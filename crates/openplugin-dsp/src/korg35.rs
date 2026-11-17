@@ -54,6 +54,7 @@ pub const MAX_RESONANCE: f32 = 1.1;
 
 /// Response of a [`Korg35`] filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Korg35Mode {
     /// `1 / (s^2 + (2-K) s + 1)`.
     LowPass,

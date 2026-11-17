@@ -144,6 +144,7 @@ const TINY: f32 = 1.0e-30;
 
 /// Channel arrangement and how impulses map onto it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Layout {
     /// One input, one output, one impulse.
     Mono,
@@ -184,6 +185,7 @@ impl Layout {
 
 /// Why a configuration or an impulse was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConvolveError {
     /// Stage sizes must be powers of two in `MIN_STAGE..=MAX_STAGE`, strictly
     /// ascending, at most `MAX_STAGES` of them.

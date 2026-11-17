@@ -16,7 +16,7 @@ A call shorter than 48 samples is convolved directly against a time-domain copy 
 
 ## Add the crate
 
-The type is exported from `openplugin-dsp` and from the `openplugin` prelude.
+The type is exported from `openplugin-dsp` (`openplugin::dsp::BlockConvolver` through the facade).
 
 ```rust
 use openplugin::dsp::BlockConvolver;

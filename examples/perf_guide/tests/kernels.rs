@@ -30,7 +30,7 @@ fn run(k: &mut impl Kernel, blocks: usize, frames: usize) -> Vec<Vec<f32>> {
     let mut io = input.clone();
     for _ in 0..blocks {
         io.clone_from(&input);
-        k.process(&mut io, frames);
+        k.process(&mut openplugin_core::ChannelsMut::new(&mut io), frames);
     }
     io
 }

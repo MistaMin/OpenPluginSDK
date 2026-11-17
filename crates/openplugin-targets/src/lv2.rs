@@ -1,8 +1,8 @@
 //! LV2 `lv2_descriptor` for one stereo insert, its editor, and the two
 //! description files a host reads.
 //!
-//! Ports: 0 and 1 are the audio inputs, 2 and 3 the audio outputs (the map
-//! OpenGridder's shell uses), and every parameter is a control input from
+//! Ports: 0 and 1 are the audio inputs, 2 and 3 the audio outputs (an
+//! instrument has outputs only), and every parameter is a control input from
 //! port 4 on, in descriptor order. `run` stores each connected control port
 //! in the [`ParamPlane`] and the plugin pulls the slots that changed, so it
 //! does not lock. The control ports are the whole state, as the host saves
@@ -69,6 +69,7 @@ use openplugin_core::midi::{self, Message, Parser};
 use openplugin_core::mpe::{self, MpeReceiver};
 use openplugin_core::DenormalGuard;
 use openplugin_core::{
+    Channels, ChannelsMut,
     sample_rate_supported, Category, EditorFactory, IoConfig, MeterFrame, ParamCursor, ParamInfo, ParamPlane,
     Plugin, Seqlock, Taper, Transport, Unit,
 };
@@ -96,6 +97,7 @@ const OUT_EVENT: usize = 24;
 /// The layout the LV2 entry runs: the first stereo-output layout, preferring
 /// one with a sidechain. LV2 ports are fixed, so the choice is made once from
 /// the plugin and the description file and the instance agree.
+#[doc(hidden)]
 pub fn layout_of(plugin: &dyn Plugin) -> IoConfig {
     let fits = |l: &&IoConfig| l.output_channels() == 2 && (l.input_channels() == 2 || l.input_channels() == 0);
     let layouts = plugin.supported_layouts();
@@ -490,6 +492,7 @@ static WORKER_IFACE: WorkerInterface = WorkerInterface { work: lv2_work, work_re
 
 /// Counts of what the worker bridge did, for tests and diagnostics.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[doc(hidden)]
 pub struct WorkerStats {
     /// `schedule_work` calls the host accepted.
     pub scheduled: usize,
@@ -625,6 +628,7 @@ fn bridge_of(handle: *mut c_void) -> Option<Arc<Bridge>> {
 }
 
 /// Worker counters of a live instance handle (for tests and diagnostics).
+#[doc(hidden)]
 pub fn worker_stats(handle: *mut c_void) -> Option<WorkerStats> {
     bridge_of(handle).map(|bridge| bridge.stats())
 }
@@ -682,6 +686,7 @@ unsafe extern "C" fn lv2_end_run(_handle: *mut c_void) -> u32 {
 }
 
 /// Install the plugin `lv2_descriptor` will instantiate.
+#[doc(hidden)]
 pub fn set_creator(create: CreateFn) {
     *CREATOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(create);
 }
@@ -691,6 +696,7 @@ fn creator() -> Option<CreateFn> {
 }
 
 /// Install the editor `lv2ui_descriptor` will open.
+#[doc(hidden)]
 pub fn set_editor(factory: EditorFactory) {
     if let Ok(mut slot) = EDITOR.lock() {
         *slot = Some(factory);
@@ -703,12 +709,14 @@ fn editor_factory() -> Option<EditorFactory> {
 }
 
 #[repr(C)]
+#[doc(hidden)]
 pub struct Lv2Feature {
     pub uri: *const c_char,
     pub data: *mut c_void,
 }
 
 #[repr(C)]
+#[doc(hidden)]
 pub struct Lv2Descriptor {
     pub uri: *const c_char,
     pub instantiate: extern "C" fn(*const Lv2Descriptor, f64, *const c_char, *const *const Lv2Feature) -> *mut c_void,
@@ -952,8 +960,9 @@ fn render(instance: &mut Instance, offset: usize, frames: usize) {
             buffer[..frames].copy_from_slice(samples);
         }
     }
-    let side = if instance.side.is_empty() { None } else { Some(instance.side.as_slice()) };
-    instance.inner.process_buses(&mut instance.scratch, side, frames);
+    let side = Channels::new(&instance.side);
+    let side = (!side.is_empty()).then_some(&*side);
+    instance.inner.process_buses(&mut ChannelsMut::new(&mut instance.scratch), side, frames);
     for channel in 0..2 {
         let dst = instance.ports[channel + 2];
         if !dst.is_null() {
@@ -1410,6 +1419,7 @@ fn published() -> &'static Lv2Descriptor {
 }
 
 /// `lv2_descriptor`. Index 0 is the plugin. Call [`set_creator`] first.
+#[doc(hidden)]
 pub fn descriptor(index: u32) -> *const Lv2Descriptor {
     // `published` builds the URI, which may run the plugin's constructor.
     guarded(std::ptr::null(), || if index == 0 && creator().is_some() { published() } else { std::ptr::null() })
@@ -1421,6 +1431,7 @@ pub fn descriptor(index: u32) -> *const Lv2Descriptor {
 /// # Safety
 /// `handle` is null or the handle a host passes as `instance-access`, which
 /// is a plugin instance in the same process.
+#[doc(hidden)]
 pub unsafe fn instance_state(handle: *const c_void) -> Option<EditorState> {
     let instance = unsafe { (handle as *const Instance).as_ref()? };
     if instance.magic != MAGIC {
@@ -1430,9 +1441,11 @@ pub unsafe fn instance_state(handle: *const c_void) -> Option<EditorState> {
 }
 
 #[cfg(target_os = "macos")]
+#[doc(hidden)]
 pub use ui::{lv2ui_descriptor, Lv2UiDescriptor};
 
 #[cfg(target_os = "linux")]
+#[doc(hidden)]
 pub use ui_x11::{lv2ui_descriptor, Lv2UiDescriptor};
 
 #[cfg(target_os = "linux")]
@@ -1440,6 +1453,7 @@ pub use ui_x11::{lv2ui_descriptor, Lv2UiDescriptor};
 mod ui_x11;
 
 #[cfg(windows)]
+#[doc(hidden)]
 pub use ui_win32::{lv2ui_descriptor, Lv2UiDescriptor};
 
 #[cfg(windows)]
@@ -1540,6 +1554,7 @@ mod ui {
                         write(link.controller, link.first + i, 4, 0, &value as *const f32 as *const c_void);
                     }
                 }
+                _ => {}
             }
         })
     }
@@ -1718,6 +1733,7 @@ fn number(v: f32) -> String {
 }
 
 /// A port symbol: letters, digits and underscores, not starting with a digit.
+#[doc(hidden)]
 pub fn symbol(id: &str) -> String {
     let mut s: String = id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     if s.chars().next().is_none_or(|c| c.is_ascii_digit()) {
@@ -1773,7 +1789,7 @@ fn class_of(category: Category, instrument: bool) -> &'static str {
         Category::Harmonic => "lv2:DistortionPlugin",
         Category::Instrument => "lv2:InstrumentPlugin",
         Category::Dither | Category::Utility => "lv2:UtilityPlugin",
-        Category::Other => "lv2:Plugin",
+        _ => "lv2:Plugin",
     }
 }
 
@@ -2019,6 +2035,7 @@ pub fn write_bundle_for_editor(
 }
 
 /// In-process stereo LV2 run. Ports are owned vectors: 0 and 1 in, 2 and 3 out.
+#[doc(hidden)]
 pub struct Lv2Harness<P: Plugin> {
     inner: P,
     plane: ParamPlane,
@@ -2076,7 +2093,7 @@ impl<P: Plugin> Lv2Harness<P> {
         for channel in 0..2 {
             self.scratch[channel][..frames].copy_from_slice(&self.ports[channel][..frames]);
         }
-        self.inner.process(&mut self.scratch, frames);
+        self.inner.process(&mut ChannelsMut::new(&mut self.scratch), frames);
         for channel in 0..2 {
             self.ports[channel + 2][..frames].copy_from_slice(&self.scratch[channel][..frames]);
         }
@@ -2102,7 +2119,7 @@ macro_rules! export_lv2 {
         }
     };
     ($plugin:ty) => {
-        fn __openplugin_lv2_create() -> ::std::boxed::Box<dyn $crate::PluginForExport> {
+        fn __openplugin_lv2_create() -> ::std::boxed::Box<dyn $crate::__core::Plugin> {
             ::std::boxed::Box::new(<$plugin as ::std::default::Default>::default())
         }
 
@@ -2126,18 +2143,16 @@ mod tests {
 
     static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
 
-    static INFO: PluginInfo = PluginInfo {
-        id: "urn:openplugin:test-gain",
-        name: "Test Gain",
-        vendor: "OpenGrid",
-        url: "https://github.com/MistaMin/OpenPluginSDK",
-        email: "contact@mistamin.com",
-        version: "0.1.0-beta.1",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    };
+    static INFO: PluginInfo = PluginInfo::new(
+        "urn:openplugin:test-gain",
+        "Test Gain",
+        "OpenGrid",
+        "0.1.0-beta.1",
+        Category::Utility,
+        &PARAMS,
+    )
+    .with_url("https://github.com/MistaMin/OpenPluginSDK")
+    .with_email("contact@mistamin.com");
 
     impl Plugin for Gain {
         fn info(&self) -> &'static PluginInfo {
@@ -2158,7 +2173,7 @@ mod tests {
         fn param(&self, id: &str) -> Option<f32> {
             (id == "gain").then_some(self.db)
         }
-        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
             for channel in io {
                 for sample in &mut channel[..frames] {
                     *sample *= self.linear;
@@ -2223,7 +2238,10 @@ mod tests {
             ParamInfo::new("on", "On", 0.0, 1.0, 1.0, Unit::Toggle),
             ParamInfo::new("2freq", "Freq", 20.0, 20_000.0, 1_000.0, Unit::Hz).with_taper(openplugin_core::Taper::Log),
         ];
-        static MORE_INFO: PluginInfo = PluginInfo { params: &MORE, category: Category::Reverb, version: "1.4.2-beta", ..INFO };
+        static MORE_INFO: PluginInfo =
+            PluginInfo::new("urn:openplugin:test-gain", "Test Gain", "OpenGrid", "1.4.2-beta", Category::Reverb, &MORE)
+                .with_url("https://github.com/MistaMin/OpenPluginSDK")
+                .with_email("contact@mistamin.com");
         struct Wide;
         impl Plugin for Wide {
             fn info(&self) -> &'static PluginInfo {
@@ -2237,7 +2255,7 @@ mod tests {
             fn param(&self, _: &str) -> Option<f32> {
                 None
             }
-            fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+            fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
             fn lv2_uri(&self) -> Option<&'static str> {
                 Some("https://example.com/plugins/wide")
             }

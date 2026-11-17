@@ -72,12 +72,7 @@ impl SampleRamp {
     }
 
     /// Value at the current sample, then advance one sample.
-    ///
-    /// Not `Iterator::next`: the ramp never ends, is reset per block by
-    /// [`begin`](Self::begin), and yields an `f32` rather than an `Option`.
-    /// The name is public API, so it stays.
-    #[allow(clippy::should_implement_trait)] // public API; iterator semantics do not fit
-    pub fn next(&mut self) -> f32 {
+    pub fn next_value(&mut self) -> f32 {
         self.pull_due();
         let y = if self.cursor < self.count {
             let (at, target) = self.points[self.cursor];
@@ -117,7 +112,7 @@ mod tests {
         assert!(ramp.push(4, 1.0));
         let mut got = [0.0; 8];
         for sample in &mut got {
-            *sample = ramp.next();
+            *sample = ramp.next_value();
         }
         assert!(got[0].abs() < 1e-5);
         assert!((got[2] - 0.5).abs() < 1e-5);

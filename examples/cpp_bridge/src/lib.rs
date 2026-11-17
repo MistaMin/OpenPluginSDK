@@ -50,18 +50,16 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.example.cpp-bridge",
-    name: "OpenPlugin C++ Bridge",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "1.0.0-beta",
-    category: Category::Eq,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.example.cpp-bridge",
+    "OpenPlugin C++ Bridge",
+    "OpenGrid",
+    "1.0.0-beta",
+    Category::Eq,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 /// Faults a test can inject (feature `test-faults`).
 #[cfg(feature = "test-faults")]
@@ -133,7 +131,7 @@ impl CppBridge {
         ffi::set_fault(self.dsp.pin_mut(), mode);
     }
 
-    fn run_dsp(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn run_dsp(&mut self, io: &mut [&mut [f32]], frames: usize) {
         #[cfg(feature = "test-faults")]
         if self.panic_in_process {
             panic!("injected Rust panic in process");
@@ -185,7 +183,7 @@ impl Plugin for CppBridge {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         if !self.ready {
             return; // pass-through: the audio is already in `io`
         }
@@ -200,8 +198,8 @@ impl Plugin for CppBridge {
 
     /// Worst case: 16 time constants of the lowest cutoff, enough to fall
     /// 24 dB of gain plus 90 dB below.
-    fn tail_samples(&self) -> usize {
-        (16.0 * self.sample_rate / (std::f32::consts::TAU * PARAMS[0].min)).ceil() as usize
+    fn tail(&self) -> Tail {
+        Tail::from_samples((16.0 * self.sample_rate / (std::f32::consts::TAU * PARAMS[0].min)).ceil() as usize)
     }
 
     fn note_ports(&self) -> NotePorts {

@@ -219,8 +219,8 @@ Where the SDK catches (`std::panic::catch_unwind`):
 
 | Entry | Where | What the host sees |
 | --- | --- | --- |
-| Native shell ABI used by VST3, Audio Unit and AAX (`export_shell!`): `process`, `midi_out`, `reset`, `save_state`, `load_state`, `create`, `select_layout` | [`openplugin-ffi/src/shell.rs`](../crates/openplugin-ffi/src/shell.rs) (`catch_unwind` at each entry) | `process` returns 0 (failure), `save_state` returns `OP_STATE_FAILED`, `reset` returns normally |
-| State save and load beside the audio thread | [`openplugin-ffi/src/lib.rs`](../crates/openplugin-ffi/src/lib.rs) (`try_save_bytes` and `load_bytes` wrap the plugin's `save_state` and `load_state`) | `None` or `false`; the gate is released by a guard, so the audio thread is not blocked afterwards |
+| Native shell ABI used by VST3, Audio Unit and AAX (`export_shell!`): `process`, `midi_out`, `reset`, `save_state`, `load_state`, `create`, `select_layout` | [`openplugin-host/src/shell.rs`](../crates/openplugin-host/src/shell.rs) (`catch_unwind` at each entry) | `process` returns 0 (failure), `save_state` returns `OP_STATE_FAILED`, `reset` returns normally |
+| State save and load beside the audio thread | [`openplugin-host/src/lib.rs`](../crates/openplugin-host/src/lib.rs) (`save_bytes` and `load_bytes` wrap the plugin's `save_state` and `load_state`) | `None` or `false`; the gate is released by a guard, so the audio thread is not blocked afterwards |
 | The worker thread that builds impulses and tables | [`openplugin-core/src/worker.rs`](../crates/openplugin-core/src/worker.rs) | `Loader::failed` counts the job; the live value stays |
 
 The enforcement in the SDK today:
@@ -232,9 +232,9 @@ The enforcement in the SDK today:
   `panic_fails_no_panic` and `failure_is_reproducible_from_seed_and_case` in
   [`openplugin-testing/tests/broken.rs`](../crates/openplugin-testing/tests/broken.rs).
 - **The state gate holds when a state call fails or times out**: `a_call_gives_up_after_a_bounded_wait_and_changes_nothing`
-  in [`shell_state_threads.rs`](../crates/openplugin-ffi/tests/shell_state_threads.rs).
+  in [`shell_state_threads.rs`](../crates/openplugin-host/tests/shell_state_threads.rs).
 - **Hostile input at the boundary does not panic**: the generated-junk tests
-  [`shell_hostile_input.rs`](../crates/openplugin-ffi/tests/shell_hostile_input.rs),
+  [`shell_hostile_input.rs`](../crates/openplugin-host/tests/shell_hostile_input.rs),
   [`clap_hostile_input.rs`](../crates/openplugin-targets/tests/clap_hostile_input.rs),
   [`lv2_hostile_input.rs`](../crates/openplugin-targets/tests/lv2_hostile_input.rs),
   [`lv2_atoms_hostile.rs`](../crates/openplugin-targets/tests/lv2_atoms_hostile.rs) and
@@ -265,7 +265,7 @@ division, no integer overflow in release-profile arithmetic you do not control, 
   [`lv2_panic.rs`](../crates/openplugin-targets/tests/lv2_panic.rs) (run, `set_param` from a control
   port, note, deactivate, activate; the LV2 adapter publishes no state interface).
 - **Containment through the shell is tested.** The shell now also zeroes the outputs when it catches a
-  panic. [`shell_panic.rs`](../crates/openplugin-ffi/tests/shell_panic.rs): `process_events` and
+  panic. [`shell_panic.rs`](../crates/openplugin-host/tests/shell_panic.rs): `process_events` and
   `process` return 0 with silent outputs, state calls return failure, and a later call works.
 - **The floating-point mode comes back after a panic.** Every audio-thread entry (CLAP `process`,
   `params.flush` and `reset`, LV2 `run`, the shell's `process`, `process_events`, `reset` and
@@ -275,7 +275,7 @@ division, no integer overflow in release-profile arithmetic you do not control, 
   [PERFORMANCE.md](PERFORMANCE.md#3-denormals-and-flush-to-zero). Tests: the `a_panic_in_*` cases of
   [`clap_denormals.rs`](../crates/openplugin-targets/tests/clap_denormals.rs),
   [`lv2_denormals.rs`](../crates/openplugin-targets/tests/lv2_denormals.rs) and
-  [`shell_denormals.rs`](../crates/openplugin-ffi/tests/shell_denormals.rs).
+  [`shell_denormals.rs`](../crates/openplugin-host/tests/shell_denormals.rs).
 - **`Biquad::configure` rejects a NaN or infinite parameter** (the previous coefficients stay) and
   `Biquad` flushes its state below 1e-30. Tests in
   [`biquad.rs`](../crates/openplugin-dsp/src/biquad.rs).
@@ -296,7 +296,7 @@ There are three kinds of thread, and the SDK's types say which one may touch wha
 ### State
 
 `save_state` and `load_state` take `&mut self` of the plugin object, which is the same object
-`process` runs on. The SDK's FFI layer ([`openplugin-ffi/src/lib.rs`](../crates/openplugin-ffi/src/lib.rs),
+`process` runs on. The SDK's FFI layer ([`openplugin-host/src/lib.rs`](../crates/openplugin-host/src/lib.rs),
 module documentation) arbitrates with a one-word gate and the audio thread never waits on it:
 
 - `process` and `reset` take the gate with one compare-exchange. If a state call holds or has
@@ -323,10 +323,10 @@ Tests that enforce the gate:
 | A save waits for a block in flight | `a_save_waits_for_a_block_in_flight` |
 | A state call gives up after the bounded wait and changes nothing | `a_call_gives_up_after_a_bounded_wait_and_changes_nothing` |
 | Saves and loads beside `process` never tear | `saves_and_loads_beside_process_never_tear` |
-| (all four above) | [`openplugin-ffi/tests/shell_state_threads.rs`](../crates/openplugin-ffi/tests/shell_state_threads.rs) |
-| Parameter-only plugins never skip a block on save or load | `saves_and_loads_during_playback_never_skip_a_block` in [`state_param_only.rs`](../crates/openplugin-ffi/tests/state_param_only.rs) |
+| (all four above) | [`openplugin-host/tests/shell_state_threads.rs`](../crates/openplugin-host/tests/shell_state_threads.rs) |
+| Parameter-only plugins never skip a block on save or load | `saves_and_loads_during_playback_never_skip_a_block` in [`state_param_only.rs`](../crates/openplugin-host/tests/state_param_only.rs) |
 | A plugin with a chunk stays sound under state calls during playback | `chunk_plugin_state_calls_during_playback_stay_sound` (same file) |
-| The audio thread does not allocate while a save or load runs | `the_audio_thread_does_not_allocate_during_a_save_or_a_load` in [`shell_state_no_alloc.rs`](../crates/openplugin-ffi/tests/shell_state_no_alloc.rs) |
+| The audio thread does not allocate while a save or load runs | `the_audio_thread_does_not_allocate_during_a_save_or_a_load` in [`shell_state_no_alloc.rs`](../crates/openplugin-host/tests/shell_state_no_alloc.rs) |
 | The same, through CLAP | `chunk_state_beside_process_is_never_torn`, `parameter_state_beside_process_is_never_torn_and_never_touches_the_plugin`, `parameter_load_is_applied_whole_or_not_at_all`, `audio_thread_does_not_allocate_during_saves_and_loads` in [`clap_state_concurrency.rs`](../crates/openplugin-targets/tests/clap_state_concurrency.rs) |
 | A state load applies whole or not at all, and corrupt state never touches the plugin | `restore_params_is_all_or_nothing`, `corrupt_session_envelopes_do_not_touch_the_plugin`, `plugin_load_state_rejects_random_and_corrupt_chunks` in [`state_hostile_input.rs`](../crates/openplugin-core/tests/state_hostile_input.rs) |
 
@@ -359,7 +359,7 @@ conformance kit exercises it; the fourth where a test enforces it.
 | What the host does | What your plugin must do | Kit | Test |
 | --- | --- | --- | --- |
 | **Calls `process` with a different frame count every time**: 1, 7, 333, 4096, then 2. Never more than the `max_block` it gave `prepare`, in most hosts; some exceed it | Produce correct output for any `frames <= max_block`; clamp, never index past a buffer; keep no state that assumes a fixed block | `Options::block_sizes` (default 1, 2, 3, 7, 16, 64, 333, 512, 1024, 4096, 8192) and a random-sequence plan inside every session | `block_sizes_that_change_on_every_call_are_fine`, `a_frame_count_larger_than_the_buffers_is_clamped_not_indexed` in [`stable_filter.rs`](../examples/perf_guide/tests/stable_filter.rs) |
-| **Changes the sample rate: calls `prepare` again with a different rate and no `reset`** (a device switch, a project rate change) | Recompute everything that depends on the rate in `prepare`; keep working with the old state, which is a valid state of the same filter; never assume `prepare` runs once | `Options::sample_rates` (22.05 to 384 kHz) runs a *fresh* plugin per rate. A rate change on a live instance is **not** driven by the kit | `a_rate_change_without_a_reset_keeps_working` in [`stable_filter.rs`](../examples/perf_guide/tests/stable_filter.rs). Rates outside the supported range are refused and nothing is substituted: `sample_rate_range.rs` in [core](../crates/openplugin-core/tests/sample_rate_range.rs), [ffi](../crates/openplugin-ffi/tests/sample_rate_range.rs) and [targets](../crates/openplugin-targets/tests/sample_rate_range.rs) |
+| **Changes the sample rate: calls `prepare` again with a different rate and no `reset`** (a device switch, a project rate change) | Recompute everything that depends on the rate in `prepare`; keep working with the old state, which is a valid state of the same filter; never assume `prepare` runs once | `Options::sample_rates` (22.05 to 384 kHz) runs a *fresh* plugin per rate. A rate change on a live instance is **not** driven by the kit | `a_rate_change_without_a_reset_keeps_working` in [`stable_filter.rs`](../examples/perf_guide/tests/stable_filter.rs). Rates outside the supported range are refused and nothing is substituted: `sample_rate_range.rs` in [core](../crates/openplugin-core/tests/sample_rate_range.rs), [ffi](../crates/openplugin-host/tests/sample_rate_range.rs) and [targets](../crates/openplugin-targets/tests/sample_rate_range.rs) |
 | **Calls `process` before `prepare` / before activate** (or after a failed `prepare`) | Not crash and not produce NaN. Either work with defaults, or do nothing | not driven | `process_before_prepare_is_defined` in [`stable_filter.rs`](../examples/perf_guide/tests/stable_filter.rs). In the SDK's FFI layer a block before `prepare` returns `false` (`process_block` and `process_stereo`: `audio.channels == 0`); there is no dedicated test |
 | **Loads state during playback** | `load_state` returns `bool`; never leave half a state; do not assume the engine is stopped | state round-trip, truncated and random bytes into `load_state` (check `state`) | the gate tests in the thread section; `plugin_load_state_rejects_random_and_corrupt_chunks` |
 | **Switches offline (freewheel) rendering on and off** | `set_offline` and `prepare` can arrive between any two blocks; don't allocate or change latency because of it | an `offline` scenario runs a session offline, `prepare`s again online, then offline again, with a random block plan, then a fixed 333, with no `reset` between | kit scenario in [`conformance.rs`](../crates/openplugin-testing/src/conformance.rs); `reprepare` also covers "prepare again with no reset" at one rate |

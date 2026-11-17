@@ -105,7 +105,7 @@ jobs:
 
   # W1 on Linux: build the whole workspace and run every test that needs no
   # window or display (core, DSP, DRI, the CLAP and LV2 targets, the shell ABI in
-  # openplugin-ffi, the plug-in port and the testing crate), then clippy. The
+  # openplugin-host, the plug-in port and the testing crate), then clippy. The
   # macOS-only editor view is compiled out on Linux. GoodLookinDri is a public
   # repository, so the plain checkout needs no token.
   linux:
@@ -137,7 +137,7 @@ jobs:
         run: >
           cargo test --locked
           -p openplugin-core -p openplugin-dsp -p openplugin-dri
-          -p openplugin-targets -p openplugin-ffi -p openplugin-port
+          -p openplugin-targets -p openplugin-host -p openplugin-port
           -p openplugin-testing -p openplugin
           -p example-porting-guides
       - name: Clippy, warnings as errors

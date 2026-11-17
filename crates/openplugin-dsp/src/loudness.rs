@@ -55,6 +55,7 @@ fn rate_of(sample_rate: f32) -> f64 {
 }
 
 /// Mean square energy to LUFS: `-0.691 + 10 log10(energy)`.
+#[doc(hidden)]
 pub fn lufs_of(energy: f64) -> f64 {
     if energy > 0.0 {
         -0.691 + 10.0 * energy.log10()
@@ -64,6 +65,7 @@ pub fn lufs_of(energy: f64) -> f64 {
 }
 
 /// LUFS to mean square energy.
+#[doc(hidden)]
 pub fn energy_of(lufs: f64) -> f64 {
     10f64.powf((lufs + 0.691) / 10.0)
 }
@@ -137,6 +139,7 @@ impl KWeighting {
     }
 
     /// The coefficients `(b, a)` of both stages, `a[0] == 1` left out.
+    #[doc(hidden)]
     pub fn coefficients(&self) -> [([f64; 3], [f64; 2]); 2] {
         [(self.shelf.b, self.shelf.a), (self.high_pass.b, self.high_pass.a)]
     }
@@ -662,6 +665,7 @@ impl LoudnessMatch {
 
 /// The two display scales of EBU Tech 3341 (2.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EbuScale {
     /// -18 LU to +9 LU (-41 to -14 LUFS at the -23 LUFS target). The default.
     Plus9,

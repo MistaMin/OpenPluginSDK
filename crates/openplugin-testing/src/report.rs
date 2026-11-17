@@ -5,6 +5,7 @@ use std::fmt;
 
 /// One conformance check. Each is reported as one line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Check {
     /// No allocation and no free in process, set_param, notes, transport, reset.
     NoAlloc,
@@ -95,6 +96,7 @@ impl Check {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Status {
     Pass,
     Fail,

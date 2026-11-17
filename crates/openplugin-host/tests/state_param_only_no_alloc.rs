@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
-use openplugin_ffi::FfiInstance;
+use openplugin_host::HostSession;
 
 thread_local! {
     static ARMED: Cell<bool> = const { Cell::new(false) };
@@ -44,18 +44,16 @@ unsafe impl GlobalAlloc for Counting {
 static ALLOCATOR: Counting = Counting;
 
 static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.param-only-no-alloc",
-    name: "Param Only No Alloc",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.param-only-no-alloc",
+    "Param Only No Alloc",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 struct Gain(f32);
 
@@ -76,7 +74,7 @@ impl Plugin for Gain {
     fn param(&self, id: &str) -> Option<f32> {
         (id == "gain").then_some(self.0)
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = 10f32.powf(self.0 / 20.0);
         for channel in io {
             for sample in &mut channel[..frames] {
@@ -91,7 +89,7 @@ impl Plugin for Gain {
 
 #[test]
 fn process_does_not_allocate_while_state_is_saved_and_loaded() {
-    let instance = FfiInstance::new(Box::new(Gain(0.0)), 48_000.0, 64, 2);
+    let instance = HostSession::new(Box::new(Gain(0.0)), 48_000.0, 64, 2).unwrap();
     let stop = AtomicBool::new(false);
 
     // Control: the counter sees an allocation on this thread.
@@ -108,7 +106,7 @@ fn process_does_not_allocate_while_state_is_saved_and_loaded() {
             while !stop.load(Ordering::Acquire) {
                 instance.store_param(0, gain);
                 gain = (gain + 0.5) % 12.0;
-                let bytes = instance.save_bytes();
+                let bytes = instance.save_bytes().unwrap();
                 assert!(instance.load_bytes(&bytes));
             }
         });

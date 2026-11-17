@@ -22,18 +22,17 @@ static PARAMS: [ParamInfo; 7] = [
     ParamInfo::new("mono", "Mono", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.synth",
-    name: "Test Synth",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "1.0.0-beta",
-    category: Category::Instrument,
-    params: &PARAMS,
-    is_instrument: true,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.synth",
+    "Test Synth",
+    "OpenGrid",
+    "1.0.0-beta",
+    Category::Instrument,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com")
+.with_instrument(true);
 
 #[derive(Default)]
 struct SynthVoice {
@@ -184,9 +183,11 @@ impl Plugin for TestSynth {
         PARAMS.iter().position(|p| p.id == id).map(|i| self.values[i])
     }
 
-    fn tail_samples(&self) -> usize {
-        // The longest release plus the allocator's retrigger room.
-        (0.5 * self.sample_rate) as usize + 64
+    fn tail(&self) -> openplugin_core::Tail {
+        openplugin_core::Tail::from_samples({
+            // The longest release plus the allocator's retrigger room.
+            (0.5 * self.sample_rate) as usize + 64
+        })
     }
 
     fn note_on(&mut self, offset: usize, note: u8, velocity: u8) {
@@ -233,7 +234,7 @@ impl Plugin for TestSynth {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = 10f32.powf(self.values[0] / 20.0) * 0.25;
         let noise_mix = self.values[5];
         let sr = self.sample_rate;
@@ -313,7 +314,7 @@ fn test_synth_makes_sound_and_stops() {
     s.note_on(0, 69, 100);
     s.note_on(10, 76, 100);
     let mut io = vec![vec![0.0f32; 512], vec![0.0f32; 512]];
-    s.process(&mut io, 512);
+    s.process(&mut openplugin_core::ChannelsMut::new(&mut io), 512);
     assert_eq!(io[0][0], 0.0, "first sample is before any attack");
     let peak = io[0].iter().fold(0.0f32, |m, v| m.max(v.abs()));
     assert!(peak > 0.01, "{peak}");
@@ -321,7 +322,7 @@ fn test_synth_makes_sound_and_stops() {
     s.note_off(0, 69);
     s.note_off(0, 76);
     for _ in 0..4 {
-        s.process(&mut io, 512);
+        s.process(&mut openplugin_core::ChannelsMut::new(&mut io), 512);
     }
     assert!(io[0].iter().all(|v| *v == 0.0), "silent after release");
     assert_eq!(s.voices.active(), 0);

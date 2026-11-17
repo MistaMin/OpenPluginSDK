@@ -5,25 +5,23 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
-use openplugin_ffi::shell::{self, ShellInstance, STATE_OK, STATE_TOO_SMALL};
+use openplugin_host::shell::{self, ShellInstance, STATE_OK, STATE_TOO_SMALL};
 
 pub static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),
     ParamInfo::new("tone", "Tone", 0.0, 1.0, 0.5, Unit::None),
 ];
 
-pub static INFO: PluginInfo = PluginInfo {
-    id: "com.example.shell-state",
-    name: "Shell State",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+pub static INFO: PluginInfo = PluginInfo::new(
+    "com.example.shell-state",
+    "Shell State",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 /// While true, `save_state` spins (a slow save), up to a safety limit.
 pub static HOLD_SAVE: AtomicBool = AtomicBool::new(false);
@@ -86,7 +84,7 @@ impl Plugin for Chunky {
             _ => None,
         }
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         IN_PROCESS.store(true, Ordering::SeqCst);
         spin_while(&HOLD_PROCESS);
         let factor = f32::from(self.program) * 10f32.powf(self.gain_db / 20.0);

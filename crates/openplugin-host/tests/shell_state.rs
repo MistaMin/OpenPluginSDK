@@ -8,7 +8,7 @@ mod common;
 
 use common::*;
 use openplugin_core::encode_params;
-use openplugin_ffi::shell::{self, STATE_OK, STATE_TOO_SMALL};
+use openplugin_host::shell::{self, STATE_OK, STATE_TOO_SMALL};
 
 fn make() -> *mut shell::ShellInstance {
     let instance = shell::create::<Chunky>(48_000.0, 256, 2);

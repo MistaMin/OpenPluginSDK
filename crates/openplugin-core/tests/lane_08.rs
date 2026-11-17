@@ -1,11 +1,11 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 #[test]
 fn stopped_play_locate_follows_curve() {
     let mut lane = AutomationLane::new(0.0, 1.0, 0.0);
     lane.insert_point(0, 0.20);
     lane.insert_point(1000, 0.80);
-    lane.set_mode(LaneMode::Play);
+    lane.set_mode(AutomationMode::Play);
     assert!(!lane.is_rolling());
 
     lane.set_playhead(500);

@@ -1,4 +1,4 @@
-use openplugin_core::{AutomationLane, LaneMode};
+use openplugin_core::{AutomationLane, AutomationMode};
 
 #[test]
 fn write_roll_keeps_hand_set_before_mode_then_hears_curve() {
@@ -8,7 +8,7 @@ fn write_roll_keeps_hand_set_before_mode_then_hears_curve() {
     let points = [(0_u64, 0.20_f32), (48_000, 0.80)];
 
     lane.set_hand(0.30);
-    lane.set_mode(LaneMode::Write);
+    lane.set_mode(AutomationMode::Write);
     lane.set_rolling(true);
     lane.set_playhead(8192);
 
@@ -16,7 +16,7 @@ fn write_roll_keeps_hand_set_before_mode_then_hears_curve() {
     assert_eq!(lane.points(), &points);
 
     lane.set_rolling(false);
-    assert_eq!(lane.mode(), LaneMode::Touch);
+    assert_eq!(lane.mode(), AutomationMode::Touch);
     assert!((lane.heard() - lane.curve(8192)).abs() < 1e-4);
     assert!((lane.curve(8192) - 0.3024).abs() < 1e-4);
     assert_eq!(lane.points(), &points);

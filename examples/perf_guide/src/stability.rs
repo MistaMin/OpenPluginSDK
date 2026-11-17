@@ -209,7 +209,7 @@ pub fn zipper() -> (f32, f32, f32) {
         let x = (std::f32::consts::TAU * 1000.0 * i as f32 / fs).sin();
         let target = if i < 1000 { 0.0 } else { 1.0 };
         let raw = x * target;
-        let smooth = x * pole.next(target);
+        let smooth = x * pole.next_value(target);
         raw_max = raw_max.max((raw - raw_prev).abs());
         smooth_max = smooth_max.max((smooth - smooth_prev).abs());
         sine_max = sine_max.max((x - sine_prev).abs());

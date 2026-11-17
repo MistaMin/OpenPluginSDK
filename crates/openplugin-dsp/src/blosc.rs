@@ -60,6 +60,7 @@
 
 /// Which residual kernel to use: the B-spline width in samples.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BlepOrder {
     /// Width 2 (1 sample latency). Cheapest.
     Two,
@@ -138,6 +139,7 @@ pub fn blamp_residual(order: BlepOrder, x: f64) -> f64 {
 
 /// Waveform of a [`BandlimitedOsc`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BlWave {
     /// Rising ramp, -1 to 1, falling edge at the wrap.
     Saw,

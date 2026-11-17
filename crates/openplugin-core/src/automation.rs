@@ -7,6 +7,7 @@ const RECORD_SPACING: u64 = 64;
 
 /// How the lane chooses what is heard and what a gesture stores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AutomationMode {
     Manual,
     Play,
@@ -17,16 +18,11 @@ pub enum AutomationMode {
 
 /// How [`AutomationLane::curve`] joins neighboring breakpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AutomationInterpolation {
     Linear,
     Discrete,
 }
-
-/// Same five modes. This name is the one the integration tests use.
-pub type LaneMode = AutomationMode;
-
-/// Same two interpolations. This name is the one the integration tests use.
-pub type CurveInterpolation = AutomationInterpolation;
 
 /// Limits, hand, heard value, and an ordered breakpoint list.
 #[derive(Clone, Debug)]

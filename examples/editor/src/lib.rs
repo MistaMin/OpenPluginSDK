@@ -29,7 +29,7 @@ use openplugin::core::{Editor, EditorHost, EditorState, Frame, PresetBank};
 use openplugin::dri::goodlookindri::color::Color as GlColor;
 use openplugin::dri::goodlookindri::scene::{Rect, Scene};
 use openplugin::dri::goodlookindri::{meters, switches};
-use openplugin::dri::{draw_faceplate_code, draw_knob_code, Area, Control, ControlKind, ControlSet, SceneCanvas};
+use openplugin::dri::{draw_faceplate, draw_knob, Area, Color, Control, ControlKind, ControlSet, SceneCanvas};
 use openplugin::prelude::*;
 
 // Two groups, one nested in the other, so every format shows them: CLAP module
@@ -40,18 +40,16 @@ static PARAMS: [ParamInfo; 2] = [
 ];
 const _: () = assert!(openplugin::core::groups_valid(&PARAMS));
 
-pub static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.example.editor-gain",
-    name: "Example Gain",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "",
-    version: "1.0.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: true,
-};
+pub static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.example.editor-gain",
+    "Example Gain",
+    "OpenGrid",
+    "1.0.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_editor(true);
 
 mod files {
     include!(concat!(env!("OUT_DIR"), "/presets.rs"));
@@ -124,7 +122,7 @@ impl Plugin for EditorGain {
             _ => None,
         }
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let mut peak = 0.0f32;
         for channel in io.iter_mut() {
             for s in &mut channel[..frames] {
@@ -392,7 +390,7 @@ impl Editor for GainEditor {
         let lay = layout(self.size.0, self.size.1);
         let (width, height) = (self.size.0 as f32, self.size.1 as f32);
         // The plate is static: painted once per size and scale, then reused under the moving parts.
-        let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate_code(dl, width, height, "Navy");
+        let plate = |dl: &mut openplugin::dri::DrawList| draw_faceplate(dl, width, height, "Navy");
         let damage = self.damage.pending();
         // A part that cannot reach into a damaged rectangle is not even built.
         let touched = |r: &DamageRect| damage.is_none_or(|d| d.iter().any(|x| x.touches(r)));
@@ -403,7 +401,7 @@ impl Editor for GainEditor {
             for (c, _) in controls.iter().zip(&reach).filter(|(_, r)| touched(r)) {
                 let (x, y, w, h) = c.area.bounds();
                 match c.kind {
-                    ControlKind::Knob => draw_knob_code(
+                    ControlKind::Knob => draw_knob(
                         dl,
                         x + w * 0.5,
                         y + h * 0.5,
@@ -412,7 +410,7 @@ impl Editor for GainEditor {
                         "GAIN",
                         &c.info.format(c.value()),
                         "Brit",
-                        Color::BRIT_RED,
+                        Color::RED,
                     ),
                     ControlKind::Toggle => {
                         switches::draw_toggle(&mut parts, rect((x, y, w, h)), c.is_on(), switches::ToggleStyle::Bat, GlColor(0xffe08030));

@@ -86,6 +86,7 @@ pub const MAX_SMOOTH_BINS: usize = 32;
 
 /// What the module does with the learned profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RepairMode {
     /// Per-bin gate: open where the frame exceeds the profile by the threshold.
     Gate,
@@ -95,6 +96,7 @@ pub enum RepairMode {
 
 /// Gain rule for [`RepairMode::Reduce`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GainRule {
     /// Boll 1979 with Berouti et al. 1979 over-subtraction and floor.
     SpectralSubtraction,
@@ -156,6 +158,7 @@ impl Default for RepairParams {
 
 /// Why profile bytes were refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProfileError {
     /// Shorter than the header or than its own counts say.
     Truncated,

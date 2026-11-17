@@ -16,18 +16,14 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("transients", "Transients", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "test.pitchshift",
-    name: "Test Pitch Shift",
-    vendor: "test",
-    url: "",
-    email: "",
-    version: "0",
-    category: Category::Modulation,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "test.pitchshift",
+    "Test Pitch Shift",
+    "test",
+    "0",
+    Category::Modulation,
+    &PARAMS,
+);
 
 struct ShiftPlugin {
     shifter: PitchShifter,
@@ -96,7 +92,7 @@ impl Plugin for ShiftPlugin {
     fn state_is_parameters_only(&self) -> bool {
         true
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for (ch, buf) in io.iter_mut().enumerate().take(self.channels) {
             let n = frames.min(buf.len());
             self.shifter.process(ch, &mut buf[..n]);

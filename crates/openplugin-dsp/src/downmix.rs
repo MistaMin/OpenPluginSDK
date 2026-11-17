@@ -85,6 +85,7 @@ pub const HALF_POWER_DB: f32 = -3.0103;
 
 /// How the matrix is scaled against clipping. See the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Normalize {
     /// Coefficients as listed. Loud input can clip.
     #[default]
@@ -95,6 +96,7 @@ pub enum Normalize {
 
 /// What the surround channels of an upmix carry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum SurroundFill {
     /// Surrounds are silent.
     #[default]
@@ -272,6 +274,7 @@ impl Matrix {
 
 /// Where a downmix goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DownmixTarget {
     /// Two channels, L then R.
     Stereo,

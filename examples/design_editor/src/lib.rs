@@ -19,18 +19,16 @@ static PARAMS: [ParamInfo; 5] = [
     ParamInfo::new("mode", "Mode", 0.0, 2.0, 0.0, Unit::Choice).with_choices(&["Clean", "Soft", "Hard"]),
 ];
 
-pub static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.example.design-editor",
-    name: "Design Editor",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "",
-    version: "1.0.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: true,
-};
+pub static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.example.design-editor",
+    "Design Editor",
+    "OpenGrid",
+    "1.0.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_editor(true);
 
 /// The layout, embedded in the binary.
 pub const DESIGN: &str = include_str!("../design.csv");
@@ -89,7 +87,7 @@ impl Plugin for DesignDemo {
             _ => return None,
         })
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let a = 1.0 - (-std::f32::consts::TAU * self.tone / self.sample_rate.max(1.0)).exp();
         let pre = 1.0 + self.drive * if self.mode == 2 { 12.0 } else { 6.0 };
         for (ch, channel) in io.iter_mut().enumerate() {
@@ -159,7 +157,7 @@ mod tests {
         assert!((p.param("gain").unwrap() - 6.0).abs() < 1e-4);
         assert!(!p.set_param("nope", 1.0));
         let mut io = vec![vec![0.5f32; 64]; 2];
-        p.process(&mut io, 64);
+        p.process(&mut openplugin::core::ChannelsMut::new(&mut io), 64);
         assert!(io.iter().flatten().all(|s| s.is_finite()));
     }
 }

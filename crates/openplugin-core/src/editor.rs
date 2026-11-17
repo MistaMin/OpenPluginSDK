@@ -39,6 +39,7 @@ pub type EditorState = Arc<dyn Any + Send + Sync>;
 
 /// One editor gesture on one parameter, by descriptor index, in plain units.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Gesture {
     Begin(u32),
     Perform(u32, f32),
@@ -165,6 +166,7 @@ impl Modifiers {
 /// these; everything else arrives as [`Key::Char`] (the character the key
 /// types without modifiers, in lower case) or is not delivered at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Key {
     Left,
     Right,
@@ -186,12 +188,20 @@ pub enum Key {
     Char(char),
 }
 
-/// A rendered editor frame. `pixels.len() == width * height`.
+/// A rendered editor frame. `pixels.len() == width * height`, each pixel
+/// `0x00RRGGBB`, rows from the top. The pixel format never changes.
 #[derive(Clone, Copy)]
+#[non_exhaustive]
 pub struct Frame<'a> {
     pub pixels: &'a [u32],
     pub width: usize,
     pub height: usize,
+}
+
+impl<'a> Frame<'a> {
+    pub const fn new(pixels: &'a [u32], width: usize, height: usize) -> Self {
+        Self { pixels, width, height }
+    }
 }
 
 /// A rectangle of the editor in points, origin top left. What [`Editor::damage`]
@@ -398,6 +408,7 @@ impl SizeRange {
 
 /// What a screen reader is told an accessibility node is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AccessRole {
     /// A value along a range: knob, fader, choice.
     Slider,
@@ -409,6 +420,7 @@ pub enum AccessRole {
 
 /// What a screen reader asks a node to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AccessAction {
     /// One step up (VoiceOver: Control-Option-Up).
     Increment,
@@ -488,6 +500,7 @@ pub struct FileDialog {
 /// What the user chose in the SDK's own parameter menu (see
 /// [`Editor::take_param_menu`]).
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum ParamMenuAction {
     /// Set the parameter to its default.
     Reset,
@@ -734,6 +747,7 @@ pub type EditorFactory = fn(EditorHost) -> Option<Box<dyn Editor>>;
 
 /// Remembers the last value given to an editor per parameter, so a bridge
 /// that polls values calls [`Editor::param_changed`] only on a change.
+#[doc(hidden)]
 pub struct ValueMirror {
     seen: Vec<u32>,
     primed: bool,
@@ -771,6 +785,7 @@ impl ValueMirror {
 /// `Arc` shared by the editor (producer, main thread) and the audio thread or
 /// a parameter flush (consumer). Push and pop are wait-free and do not
 /// allocate. A full queue rejects the gesture.
+#[doc(hidden)]
 pub struct GestureQueue {
     words: Box<[AtomicU32]>,
     values: Box<[AtomicU32]>,
@@ -1031,7 +1046,7 @@ mod tests {
             self.0.push((index, plain));
         }
         fn render(&mut self, _: f32) -> Frame<'_> {
-            Frame { pixels: &[0], width: 1, height: 1 }
+            Frame::new(&[0], 1, 1)
         }
     }
 

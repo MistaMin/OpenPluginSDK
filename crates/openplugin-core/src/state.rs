@@ -4,8 +4,8 @@
 //! 2 names every value by its parameter's string id, so it survives a
 //! reordered or extended table; it is written for a table with identity pins
 //! ([`crate::identity::state_is_keyed`]) and read for any table. Decode checks
-//! the whole buffer before it returns, which is the rule OpenGridder uses for
-//! a DAW state chunk: a corrupt document must not change a live value.
+//! the whole buffer before it returns: a corrupt document must not change a
+//! live value.
 //! [`AbCompare`] saves the side being left, matching the insert's A/B switch.
 
 use crate::identity::{state_is_keyed, ParamIdMap, PinFormat};
@@ -284,18 +284,16 @@ mod tests {
 
     static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
 
-    static INFO: PluginInfo = PluginInfo {
-        id: "com.example.state",
-        name: "State",
-        vendor: "Test",
-        url: "https://example.com",
-        email: "a@b.c",
-        version: "0",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    };
+    static INFO: PluginInfo = PluginInfo::new(
+        "com.example.state",
+        "State",
+        "Test",
+        "0",
+        Category::Utility,
+        &PARAMS,
+    )
+        .with_url("https://example.com")
+        .with_email("a@b.c");
 
     struct Gain {
         db: f32,
@@ -317,7 +315,7 @@ mod tests {
         fn param(&self, id: &str) -> Option<f32> {
             (id == "gain").then_some(self.db)
         }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
         fn save_state(&mut self) -> Option<Vec<u8>> {
             Some(encode_params(&INFO, &[self.db]))
         }

@@ -3,6 +3,7 @@
 use std::f64::consts::PI;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FilterType {
     LowPass,
     HighPass,

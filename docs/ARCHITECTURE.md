@@ -22,21 +22,21 @@ L1: Algorithms & DSP (openplugin-dsp)
     - Antiderivative Anti-Aliasing (ADAA1 Residual, ADAA2 Taylor)
     - Polyphase Half-Band Resamplers (2x, 4x Oversampling)
     - Linear-phase 1x/2x/4x oversampler (64-sample latency at 2x and 4x), dry delay, slow RMS gain comp
-    - Note-to-Hz, samples-per-beat, phase oscillator, sample voice, fixed polyphony
+    - Note-to-Hz, samples-per-beat
     - Voice allocator that routes per-note expression and polyphonic modulation to the matching voice, with ramps
 L2: Design Rust Interface (openplugin-dri)
     - Calls GoodLookin DRI for the 47 knob styles, 40 plates, meters, faders, and switches
 L3: Target Format Adapters (openplugin-targets)
     - CLAP instantiates a Plugin, pulls the parameter plane, honours event sample offsets, and can select a surround or ambisonic layout with an optional sidechain. It publishes tail, tells the host about a new latency (`request_restart`, then `latency.changed` in `activate`) or new parameter info (`params.rescan`) through the plugin's `HostNotifier`, and passes transport into `set_transport`
     - LV2 descriptor: ports 0 and 1 in, 2 and 3 out (an instrument: 0 and 1 out), same parameter plane, then freewheel, atom and sidechain ports, and the latency output last
-    - VST3, AU, and AAX layouts in this crate are not loadable. `export_shell!` exports the C ABI. The loadable adapters are `native/vst3`, `native/au`, and `native/aax`. They write the parameter plane and render through scratch. See [SHELL.md](SHELL.md)
-    - openplugin-ffi is a Rust host session. FfiInstance publishes the parameter
+    - `export_shell!` exports the C ABI. The loadable VST3, AU and AAX adapters are `native/vst3`, `native/au`, and `native/aax`. They write the parameter plane and render through scratch. See [SHELL.md](SHELL.md)
+    - openplugin-host is a Rust host session. HostSession publishes the parameter
       plane, renders stereo, planar, interleaved, and sidechain blocks through scratch
       allocated in prepare (up to 64 channels), applies factory presets, and saves an OPCH
       session that still accepts an OPST plane.
       Faceplate rasters stay in the product.
 L4: Public Facade (openplugin)
-    - Single-entrypoint prelude and ergonomics
+    - One dependency for a plugin, and a small prelude: the plugin and editor contracts, the descriptors and the export macros
 ```
 
 ## Real-Time Safety Guarantees

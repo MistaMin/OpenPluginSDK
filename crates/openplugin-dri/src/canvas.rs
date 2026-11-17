@@ -1,6 +1,6 @@
 //! 2D canvas. [`DrawList::scene`] is the GoodLookin DRI command list: every command,
 //! including the gradients, shadows and lit-knob images of GoodLookin DRI 0.2. Replay it
-//! with [`crate::SceneCanvas`]. `commands` is a flattened copy for hosts that only draw
+//! with [`crate::SceneCanvas`]. [`DrawList::commands`] is a flattened copy for hosts that only draw
 //! rectangles, ellipses, lines, arcs, and text: GoodLookin DRI's `Scene::lower_basic`,
 //! with each lit knob drawn again in the classic tier, since a basic host has no images.
 
@@ -10,7 +10,9 @@ use goodlookindri::scene::{Cmd, Scene};
 
 use crate::styles::Color;
 
+/// One shape of the flattened list ([`DrawList::commands`]).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum DrawCmd {
     FillRect { x: f32, y: f32, w: f32, h: f32, color: Color },
     StrokeRect { x: f32, y: f32, w: f32, h: f32, color: Color, stroke_width: f32 },
@@ -25,15 +27,14 @@ pub enum DrawCmd {
 
 #[derive(Debug, Clone)]
 pub struct DrawList {
-    pub commands: Vec<DrawCmd>,
-    /// Full GoodLookin DRI scene. This is the drawing the knob and plate styles actually produce.
-    pub scene: Scene,
+    pub(crate) commands: Vec<DrawCmd>,
+    pub(crate) scene: Scene,
     /// The tier knobs are drawn in: [`KnobMode::Lit`] (the default, per-pixel shaded),
     /// [`KnobMode::Classic`] (the vector drawing of GoodLookin DRI 0.1) or [`KnobMode::Flat`].
     /// A `lit_`, `flat_` style prefix still overrides it for one knob.
-    pub knob_tier: KnobMode,
+    pub(crate) knob_tier: KnobMode,
     /// The colour the knobs stand on, for the lit tier's reflections. A faceplate sets it.
-    pub floor: Option<u32>,
+    pub(crate) floor: Option<u32>,
 }
 
 impl Default for DrawList {
@@ -56,6 +57,25 @@ impl DrawList {
         Self { commands: Vec::with_capacity(512), scene: Scene::new(), knob_tier: KnobMode::Lit, floor: None }
     }
 
+    /// The flattened drawing, for a host that only replays simple shapes.
+    pub fn commands(&self) -> &[DrawCmd] {
+        &self.commands
+    }
+
+    /// The full GoodLookin DRI scene: the drawing the knob and plate styles actually produce.
+    pub fn scene(&self) -> &Scene {
+        &self.scene
+    }
+
+    /// The tier knobs are drawn in ([`crate::KnobTier`]; lit by default).
+    pub fn knob_tier(&self) -> KnobMode {
+        self.knob_tier
+    }
+
+    pub fn set_knob_tier(&mut self, tier: KnobMode) {
+        self.knob_tier = tier;
+    }
+
     /// Empty the lists. The tier and the floor colour stay.
     pub fn clear(&mut self) {
         self.commands.clear();
@@ -71,6 +91,7 @@ impl DrawList {
 
     /// [`Self::append`], with `basic` standing in for `scene` in [`Self::commands`]
     /// (a lit knob, whose image a basic host cannot draw, as its classic drawing).
+    #[doc(hidden)]
     pub fn append_with_basic(&mut self, scene: Scene, basic: &Scene) {
         let has_image = scene.cmds.iter().any(|c| matches!(c, Cmd::Image { .. }));
         if has_image {

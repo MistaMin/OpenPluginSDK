@@ -30,7 +30,7 @@ fn dc_settles_to_the_gain() {
     let mut io = block(512, 0.25);
     for _ in 0..40 {
         io = block(512, 0.25);
-        p.process(&mut io, 512);
+        p.process(&mut openplugin::core::ChannelsMut::new(&mut io), 512);
     }
     let want = 0.25 * 10f32.powf(6.0 / 20.0);
     assert!((io[1][511] - want).abs() < 1e-3, "{} vs {want}", io[1][511]);
@@ -43,7 +43,7 @@ fn a_cpp_exception_in_prepare_becomes_an_error_and_a_passthrough() {
     assert!(!p.is_ready());
     assert!(p.last_error().unwrap().contains("channel count"), "{:?}", p.last_error());
     let mut io = block(64, 0.5);
-    p.process(&mut io, 64);
+    p.process(&mut openplugin::core::ChannelsMut::new(&mut io), 64);
     assert!(io[0].iter().all(|&s| s == 0.5), "pass-through leaves audio alone");
     // A later good prepare recovers.
     p.prepare(48_000.0, 512, 2);

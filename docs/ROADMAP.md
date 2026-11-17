@@ -16,7 +16,7 @@ The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin
 | Editor | One Rust `Editor` in every format, resizable, with hit-testing, keyboard focus, damage-only repaint, design-file editors, the host parameter menu, typing a value, tooltips, file drops and accessibility (0.5, 0.7). Views: `NSView` on macOS, HWND with UI Automation on Windows, X11 on Linux (X11 under XWayland on Wayland). |
 | Drawing | GoodLookin DRI 0.2: lit knobs by default, `SceneCanvas` with a cached plate layer and damaged-rectangle repaint. |
 | Proofs | Unit, hostile-input and no-allocation suites in every format; the native VST3, AU and AAX shell proofs; format parity sample for sample across all five formats; `clap-validator`, `lv2_validate`, lilv, `auval -strict`, pluginval at strictness 10 and Avid's AAX Validator (locally). CI runs the workspace and the headless proofs on macOS, Linux and Windows. Host runs: REAPER and OpenGrid9 on macOS, Pro Tools with AAX on macOS, REAPER on Windows ([HOST_TESTS.md](HOST_TESTS.md)). |
-| Not claimed | The API is not frozen yet. The VST3 shell on Linux; a Linux DAW; PACE signing and Pro Tools on Windows; Logic, Cubase and Bitwig sessions. A track's colour and kind in the Audio Unit and AAX, and any track info in LV2: those formats have no call for it. |
+| Not claimed | The API review is applied, but the surface is frozen only when 1.0 is tagged, which is the owner's decision. The VST3 shell on Linux; a Linux DAW; PACE signing and Pro Tools on Windows; Logic, Cubase and Bitwig sessions. A track's colour and kind in the Audio Unit and AAX, and any track info in LV2: those formats have no call for it. |
 
 ## Minimum Rust version
 
@@ -71,7 +71,7 @@ Tasks 1 to 5 are done: plugin state reaches VST3 (a versioned trailer), the Audi
 1. **Plugin state in VST3.** `getState`/`setState` carry the `op_shell_save_state` blob after the parameter values and the bypass flag, versioned; a state written by 0.3.x still loads. Owns `native/vst3/*`. Proof: a plugin with its own chunk round-trips through the VST3 component, old states load, corrupt ones are refused unchanged.
 2. **Plugin state in the Audio Unit.** The class-info dictionary carries the blob under its own key; an old preset without it still loads. Owns `native/au/*`. Same proof through `kAudioUnitProperty_ClassInfo`.
 3. **Plugin state in AAX.** Chunk version 2 carries the blob; version 1 still loads. Owns `native/aax/*`. Same proof through the chunk calls.
-4. **No dry block for parameter-only plugins.** A plugin whose state is its parameters alone saves and loads from the parameter plane without the gate, so a host saving during playback never hears a dry block. Owns `crates/openplugin-ffi`, `crates/openplugin-core`. Proof: a parameter-only plugin's audio is untouched by saves during playback; a plugin with a chunk still round-trips.
+4. **No dry block for parameter-only plugins.** A plugin whose state is its parameters alone saves and loads from the parameter plane without the gate, so a host saving during playback never hears a dry block. Owns `crates/openplugin-host`, `crates/openplugin-core`. Proof: a parameter-only plugin's audio is untouched by saves during playback; a plugin with a chunk still round-trips.
 5. **CLAP state beside the audio thread.** The CLAP adapter calls `save_state`/`load_state` from the main thread without synchronisation, the race the shell gate fixed. Give CLAP the same guarantee. Owns `crates/openplugin-targets/src/clap.rs`. Proof: a concurrency test with `process` running during saves and loads.
 6. **Host smoke tests.** A scripted REAPER run with the example (CLAP and VST3) that loads it from a build folder through a separate REAPER configuration, automates a parameter, saves the project, reopens it and checks the value, opens and closes the editor. Nothing is installed into plug-in folders; the Audio Unit run waits for an install the owner approves. Owns `scripts/host_smoke/*`, `docs/HOST_TESTS.md`.
 
@@ -94,7 +94,7 @@ Status: all six tasks are done (task 5: editors report damage and `SceneCanvas` 
 
 The Rust `Plugin` trait already has notes, MIDI output, transport, sidechain, channel layouts and offline rendering, and CLAP passes them all through. The shell ABI (`native/include/op_shell.h`) carries audio, parameters, state, latency and tail only, so VST3, the Audio Unit and AAX get none of them, and the LV2 entry has no MIDI or time either. 1.0 freezes the shell ABI, so this comes first.
 
-1. **Shell ABI: events, transport, buses and kind.** `op_shell.h` gains a sample-offset event list into `op_shell_process` (note on and off, raw MIDI, parameter changes), MIDI output pulled after the block, a transport struct, a sidechain input, layout queries and selection over `supported_layouts`, an offline flag, and the plugin's kind (effect, instrument, note effect) from `PluginInfo`. Versioned so a shell built for 0.5 refuses a mismatched library. Owns `native/include/op_shell.h`, `crates/openplugin-ffi`, `PluginInfo` in `openplugin-core`. Proof: FFI host tests drive notes, MIDI out, transport, sidechain and offline through the ABI with no allocation.
+1. **Shell ABI: events, transport, buses and kind.** `op_shell.h` gains a sample-offset event list into `op_shell_process` (note on and off, raw MIDI, parameter changes), MIDI output pulled after the block, a transport struct, a sidechain input, layout queries and selection over `supported_layouts`, an offline flag, and the plugin's kind (effect, instrument, note effect) from `PluginInfo`. Versioned so a shell built for 0.5 refuses a mismatched library. Owns `native/include/op_shell.h`, `crates/openplugin-host`, `PluginInfo` in `openplugin-core`. Proof: FFI host tests drive notes, MIDI out, transport, sidechain and offline through the ABI with no allocation.
 2. **VST3 parity.** Event bus in and out (`IEventList`), `ProcessContext` to the transport, an aux input bus for the sidechain, `setBusArrangements` over the plugin's layouts, `kOffline` process mode, the instrument or note-effect category from the kind. Owns `native/vst3/*`. After task 1. Proof: `vst3_proof` plays notes, reads MIDI out, checks the transport and the sidechain; pluginval strictness 10.
 3. **Audio Unit parity.** `aumu` and `aumf` types from the kind, `MusicDeviceMIDIEvent` and `kAudioUnitProperty_MIDIOutputCallback`, transport from `HostCallbackInfo`, a sidechain input element, channel layouts through `SupportedNumChannels` and `AudioChannelLayout`, `kAudioUnitProperty_OfflineRender`. Owns `native/au/*`. After task 1. Proof: `au_proof` and `auval -strict` for an effect, an instrument and a note effect.
 4. **AAX parity.** MIDI input and output nodes, `AAX_ITransport`, a sidechain input, stem formats from the layouts, the plugin category from the kind. Owns `native/aax/*`. After task 1. Proof: the AAX proofs and `scripts/aax_validate.sh`.
@@ -144,16 +144,17 @@ Then **0.7.0**.
 
 Status: tasks 1, 2, 4, 5, 6, 7 and 8 are done (6: `scripts/format_parity`, every format matches the Rust engine exactly on the example, with negative controls; 8: every format builds universal and every proof passes on both slices, x86_64 under Rosetta) (7: `--pkg`, `scripts/make_pkg.sh`, `scripts/test_pkg.sh`; signing and notarising the package proven only as a dry run). Task 3 comes last, after 0.7, because it touches every public item.
 
+Done since: **the API freeze** is applied from the decisions in [API_REVIEW.md](API_REVIEW.md) (renames, hidden items, removals, `#[non_exhaustive]`), with the frozen surface stated in [VERSIONING.md](VERSIONING.md#the-frozen-surface) and each breaking change in the changelog.
+
 Remaining 1.0 work, open:
 
 - **API documentation** (task 3): `missing_docs` on every public item, compiled doc examples, docs.rs metadata.
-- **The API freeze**, applied from the decisions in [API_REVIEW.md](API_REVIEW.md): renames, hidden items and removals as decided there.
 - **Porting scaffolding** (porting toolkit task 8). The guides (task 5) are done.
 - **No C++ runtime dependency on Windows**: the shells link the C and C++ runtime statically, so no VC++ redistributable is needed.
 
 Done from this list: the shell follow-ups of 0.6 task 7 (shell ABI 9, see its status).
 
-The freeze itself and the crates.io publish are the owner's decisions.
+Tagging 1.0 and the crates.io publish are the owner's decisions.
 
 ## DSP library: building blocks for good products
 

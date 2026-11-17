@@ -32,22 +32,20 @@ const WET_GAIN: f32 = 0.5;
 
 static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("level", "Level", 0.0, 1.0, 1.0, Unit::None),
-    ParamInfo::new("bypass", "Bypass", 0.0, 1.0, 0.0, Unit::Toggle).flag(ParamFlags::BYPASS),
+    ParamInfo::new("bypass", "Bypass", 0.0, 1.0, 0.0, Unit::Toggle).with_flag(ParamFlags::BYPASS),
 ];
 const BYPASS_ID: u32 = 1;
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.bypass",
-    name: "Bypass Proof",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "0.0.1",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.bypass",
+    "Bypass Proof",
+    "OpenGrid",
+    "0.0.1",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 /// What the plugin saw, shared with the test.
 #[derive(Default)]
@@ -123,7 +121,7 @@ impl Plugin for Delayed {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let length = self.ring[0].len();
         for (channel, data) in io.iter_mut().enumerate().take(2) {
             self.dry[channel][..frames].copy_from_slice(&data[..frames]);

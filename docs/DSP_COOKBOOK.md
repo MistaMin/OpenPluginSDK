@@ -26,7 +26,7 @@ impl MyPlugin {
         self.dither.reset();
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         // ... all other processing first ...
         for (channel, buf) in io.iter_mut().enumerate() {
             self.dither.process(channel, &mut buf[..frames]);
@@ -323,7 +323,7 @@ use openplugin_dsp::{Svf, SvfMode};
 let mut filter = Svf::new();
 for x in block.iter_mut() {
     // cutoff follows a smoothed parameter, every sample
-    filter.configure(SvfMode::LowPass, sample_rate, smoothed_cutoff.next(target), q, 0.0);
+    filter.configure(SvfMode::LowPass, sample_rate, smoothed_cutoff.next_value(target), q, 0.0);
     *x = filter.process_sample(*x);
 }
 ```
@@ -450,7 +450,7 @@ impl Plugin for Lowpass {
         self.stft.latency() as u32 // 2048 samples
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let cut = self.cutoff_bin;
         for (ch, buf) in io.iter_mut().enumerate() {
             let mut zero_above = |_: usize, bins: &mut [Complex<f32>]| {
@@ -502,7 +502,7 @@ impl MyChorus {
         self.chorus.set_transport(transport); // once per block, before process
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for (channel, buf) in io.iter_mut().enumerate() {
             self.chorus.process(channel, &mut buf[..frames]);
         }
@@ -671,7 +671,7 @@ vu.process(left);
 
 - `PpmType` carries the integration and return time of each IEC 60268-10 type (Din and Nordic 5 ms and 20 dB in 1.7 s; Ebu and Bbc 10 ms and 24 dB in 2.8 s) and the scale mapping. The requirements, the model and the measured readings are in "PPM ballistics" below.
 - The K-meter reads RMS over 600 ms with a +3 dB offset so a full-scale sine reads 0 dBFS; zones are green to 0, yellow to +4, red above (`KZone`).
-- Use `VuIec` where the 300 ms rise matters; the older `VuMeter` is a one-pole and takes about 1.4 s to reach 99 %.
+- Use `VuIec` where the 300 ms rise matters; the older `VuMeter` (deprecated) is a one-pole and takes about 1.4 s to reach 99 %.
 
 ### PPM ballistics
 
@@ -824,7 +824,7 @@ impl MyReverb {
         early.set_level(0.4);
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let [l, r, ..] = io else { return };
         for i in 0..frames {
             let (wl, wr) = self.reverb.process_frame(l[i], r[i]);
@@ -838,7 +838,7 @@ impl MyReverb {
         if self.reverb.is_frozen() {
             openplugin_core::Tail::Infinite
         } else {
-            openplugin_core::Tail::Finite(self.reverb.tail_samples() as u32)
+            openplugin_core::Tail::from_samples(self.reverb.tail_samples())
         }
     }
 }
@@ -1086,7 +1086,7 @@ let tone = v.expression(Expression::Brightness) + v.modulation(0);
 
 - Routing (`NoteRef::matches`, the CLAP wildcard rule): by note id when the event and the voice both have one, else by port, channel and key with `-1` matching anything. MPE gives each note its own channel, so channel and key find it; a key held on two channels is two voices.
 - Each value ramps linearly over `set_expression_smoothing` (5 ms by default) as `advance` runs; one sent before the voice's first sample (at the note-on's own sample, or MPE's initial bend, pressure and CC 74) is taken at once, so the note does not swoop. A new note starts neutral: unity volume, centre pan, no detune, zero for the rest.
-- `NoteExpressions` is the per-voice table on its own, for a voice list of your own; `Polyphony` has `note_on_ref` and `matching` too.
+- `NoteExpressions` is the per-voice table on its own, for a voice list of your own.
 - The format side (CLAP, VST3, MPE) is in [EXPRESSION.md](EXPRESSION.md); `examples/expression_synth` is a complete synth, proven in every format.
 
 ### Sample playback

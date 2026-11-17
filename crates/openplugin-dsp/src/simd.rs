@@ -73,6 +73,7 @@ use std::sync::OnceLock;
 
 /// The instruction set a [`Kernels`] table runs on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Isa {
     /// Plain Rust, the reference.
     Scalar,

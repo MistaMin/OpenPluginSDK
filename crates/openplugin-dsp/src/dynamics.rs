@@ -1,6 +1,8 @@
 //! Feed-forward log-domain dynamics processor.
+#![allow(deprecated)] // this module defines the deprecated items
 
 #[derive(Debug, Clone)]
+#[deprecated(since = "1.0.0", note = "use `Dynamics`, the compressor, expander and gate with a soft knee and a sidechain")]
 pub struct Compressor {
     sample_rate: f32,
     envelope_db: f32,

@@ -29,18 +29,14 @@ static PORT_PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),
 ];
 
-static PORT_INFO: PluginInfo = PluginInfo {
-    id: "com.example.ported-gain",
-    name: "Ported Gain",
-    vendor: "Example",
-    url: "",
-    email: "",
-    version: "1.0.0",
-    category: Category::Utility,
-    params: &PORT_PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static PORT_INFO: PluginInfo = PluginInfo::new(
+    "com.example.ported-gain",
+    "Ported Gain",
+    "Example",
+    "1.0.0",
+    Category::Utility,
+    &PORT_PARAMS,
+);
 
 const OWN_MAGIC: &[u8; 4] = b"PGv1";
 
@@ -188,7 +184,7 @@ impl Plugin for PortedGain {
     fn param(&self, id: &str) -> Option<f32> {
         PORT_PARAMS.iter().position(|p| p.id == id).map(|i| self.values[i])
     }
-    fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {}
+    fn process(&mut self, _io: &mut [&mut [f32]], _frames: usize) {}
 
     fn save_state(&mut self) -> Option<Vec<u8>> {
         Some(self.save_own())

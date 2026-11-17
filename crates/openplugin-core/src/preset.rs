@@ -18,6 +18,9 @@
 //! `Off`, or a number with a unit. A parameter the file leaves out keeps its
 //! default.
 //!
+//! The format has no version line and is frozen as it is: a file written for
+//! one release of a plugin keeps loading.
+//!
 //! Parsing allocates; it is for start-up, never the audio thread.
 //! [`crate::build::embed_files`] puts the files into the binary at build time.
 
@@ -30,6 +33,37 @@ pub struct Preset {
     pub name: String,
     pub values: Vec<f32>,
 }
+
+/// Why [`parse`] refused a preset file. `line` counts from 1; the message
+/// names it.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum PresetError {
+    /// A line is not `key = value`.
+    Syntax { line: usize },
+    /// `name =` with nothing after it.
+    EmptyName { line: usize },
+    /// The key names no parameter, by id or by display name.
+    UnknownParameter { line: usize, key: String },
+    /// [`crate::ParamInfo::parse`] did not read the value.
+    BadValue { line: usize, param: &'static str, value: String },
+    /// No `name` line, and the fallback name is empty.
+    NoName,
+}
+
+impl std::fmt::Display for PresetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Syntax { line } => write!(f, "line {line}: expected key = value"),
+            Self::EmptyName { line } => write!(f, "line {line}: empty name"),
+            Self::UnknownParameter { line, key } => write!(f, "line {line}: no parameter '{key}'"),
+            Self::BadValue { line, param, value } => write!(f, "line {line}: '{value}' is not a value for {param}"),
+            Self::NoName => write!(f, "the preset has no name"),
+        }
+    }
+}
+
+impl std::error::Error for PresetError {}
 
 fn fold(key: &str) -> String {
     key.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
@@ -49,7 +83,7 @@ pub fn param_index(info: &PluginInfo, key: &str) -> Option<usize> {
 
 /// Parse one preset file. The error names the line at fault. A file with no
 /// `name` line takes `fallback_name` (pass the file name).
-pub fn parse(info: &PluginInfo, text: &str, fallback_name: &str) -> Result<Preset, String> {
+pub fn parse(info: &PluginInfo, text: &str, fallback_name: &str) -> Result<Preset, PresetError> {
     let mut name = None;
     let mut values: Vec<f32> = info.params.iter().map(|p| p.clamp(p.default)).collect();
     for (n, raw) in text.lines().enumerate() {
@@ -58,22 +92,24 @@ pub fn parse(info: &PluginInfo, text: &str, fallback_name: &str) -> Result<Prese
             continue;
         }
         let at = n + 1;
-        let (key, value) = line.split_once('=').ok_or_else(|| format!("line {at}: expected key = value"))?;
+        let (key, value) = line.split_once('=').ok_or(PresetError::Syntax { line: at })?;
         let (key, value) = (key.trim(), value.trim());
         if key.eq_ignore_ascii_case("name") {
             if value.is_empty() {
-                return Err(format!("line {at}: empty name"));
+                return Err(PresetError::EmptyName { line: at });
             }
             name = Some(value.to_string());
             continue;
         }
-        let index = param_index(info, key).ok_or_else(|| format!("line {at}: no parameter '{key}'"))?;
+        let index = param_index(info, key).ok_or_else(|| PresetError::UnknownParameter { line: at, key: key.to_string() })?;
         let param = &info.params[index];
-        values[index] = param.parse(value).ok_or_else(|| format!("line {at}: '{value}' is not a value for {}", param.name))?;
+        values[index] = param
+            .parse(value)
+            .ok_or_else(|| PresetError::BadValue { line: at, param: param.name, value: value.to_string() })?;
     }
     let name = name.unwrap_or_else(|| fallback_name.to_string());
     if name.is_empty() {
-        return Err("the preset has no name".into());
+        return Err(PresetError::NoName);
     }
     Ok(Preset { name, values })
 }
@@ -102,7 +138,7 @@ pub struct PresetBank {
 impl PresetBank {
     /// Parse `(file name, text)` pairs (what [`crate::build::embed_files`]
     /// writes). A file that does not parse is left out and reported in the
-    /// second result, so a test can insist that list is empty. Presets keep
+    /// second result as `file: error`, so a test can insist that list is empty. Presets keep
     /// the order of `files`.
     pub fn parse_all(info: &PluginInfo, files: &[(&str, &str)]) -> (Self, Vec<String>) {
         let mut bank = Self::default();
@@ -157,18 +193,7 @@ mod tests {
         ParamInfo::new("high_cut", "High Cut", 1_000.0, 20_000.0, 12_000.0, Unit::Hz),
         ParamInfo::new("freeze", "Freeze", 0.0, 1.0, 0.0, Unit::Toggle),
     ];
-    static INFO: PluginInfo = PluginInfo {
-        id: "test.verb",
-        name: "Verb",
-        vendor: "Test",
-        url: "",
-        email: "",
-        version: "1.0.0",
-        category: Category::Reverb,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: false,
-    };
+    static INFO: PluginInfo = PluginInfo::new("test.verb", "Verb", "Test", "1.0.0", Category::Reverb, &PARAMS);
 
     #[test]
     fn keys_match_ids_and_names_loosely() {
@@ -187,9 +212,10 @@ mod tests {
 
     #[test]
     fn errors_name_the_line() {
-        assert_eq!(parse(&INFO, "name = X\nsize = 3", "f").unwrap_err(), "line 2: no parameter 'size'");
-        assert!(parse(&INFO, "mode = cathedral", "f").unwrap_err().starts_with("line 1:"));
-        assert!(parse(&INFO, "just words", "f").unwrap_err().contains("key = value"));
+        assert_eq!(parse(&INFO, "name = X\nsize = 3", "f").unwrap_err().to_string(), "line 2: no parameter 'size'");
+        assert_eq!(parse(&INFO, "size = 3", "f"), Err(PresetError::UnknownParameter { line: 1, key: "size".into() }));
+        assert!(parse(&INFO, "mode = cathedral", "f").unwrap_err().to_string().starts_with("line 1:"));
+        assert!(parse(&INFO, "just words", "f").unwrap_err().to_string().contains("key = value"));
     }
 
     #[test]

@@ -70,18 +70,15 @@ const fn same(layout: SpeakerLayout) -> IoConfig {
 // One parameter: the VST3 shell refuses a library without any.
 static PARAMS: [ParamInfo; 1] = [ParamInfo::new("spare", "Spare", 0.0, 1.0, 0.0, Unit::Toggle)];
 
-pub static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.role-tags",
-    name: "Role Tags",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "",
-    version: "1.0.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+pub static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.role-tags",
+    "Role Tags",
+    "OpenGrid",
+    "1.0.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK");
 
 pub struct RoleTags {
     layout: IoConfig,
@@ -140,7 +137,7 @@ impl Plugin for RoleTags {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let channels = self.layout.main_channels().min(io.len());
         for (index, channel) in io.iter_mut().enumerate().take(channels) {
             let expected = in_tag(code_at(self.layout.input, index));

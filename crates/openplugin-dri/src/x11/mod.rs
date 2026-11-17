@@ -127,6 +127,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
 pub use clipboard::CLIPBOARD_WAIT_MS;
+#[doc(hidden)]
 pub use menu::{MenuHook, PARAM_MENU_ITEMS};
 pub use tooltip::TOOLTIP_DELAY_MS;
 use x11rb::connection::{Connection, RequestConnection};

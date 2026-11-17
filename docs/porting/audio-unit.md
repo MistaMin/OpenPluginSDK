@@ -24,9 +24,9 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `Initialize`, `Cleanup` | `allocateRenderResourcesAndReturnError`, `deallocateRenderResources` | `prepare(sample_rate, max_block, channels)` | Allocate here |
 | The stream format's sample rate; `kAudioUnitProperty_MaximumFramesPerSlice` | The bus `format`; `maximumFramesToRender` | The arguments of `prepare` | |
 | `Reset` | `reset` | `reset()` | Must not allocate. The shell runs it on the render thread before the next block |
-| `ProcessBufferLists`, or the kernel's `Process(inSource, inDest, inFrames, ...)` | `internalRenderBlock` | `process(io: &mut [Vec<f32>], frames)` | In place, planar: `io[channel][..frames]` |
+| `ProcessBufferLists`, or the kernel's `Process(inSource, inDest, inFrames, ...)` | `internalRenderBlock` | `process(io: &mut [&mut [f32]], frames)` | In place, planar: `io[channel][..frames]` |
 | `GetLatency`, `kAudioUnitProperty_Latency` | `latency` | `Plugin::latency` | Samples, not seconds |
-| `SupportsTail`, `GetTailTime` | `tailTime` | `Plugin::tail_samples`, or `Plugin::tail` | Samples. Build the shell with `--tail` |
+| `SupportsTail`, `GetTailTime` | `tailTime` | `Plugin::tail` | `Tail::from_samples(n)`. Build the shell with `--tail` |
 | `kAudioUnitProperty_BypassEffect` | `shouldBypassEffect` | `Plugin::set_host_bypass` | The shell owns bypass: the input delayed by the reported latency, crossfaded over 10 ms |
 | `kAudioUnitProperty_OfflineRender` | `renderingOffline` | `Plugin::set_offline` | |
 | `kAudioUnitProperty_ContextName` | `contextName` | `Plugin::track_info_changed`, `Editor::track_info` | The track's name; an Audio Unit host gives no colour or kind |
@@ -42,8 +42,8 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `unit`: `kAudioUnitParameterUnit_Decibels`, `_Hertz`, `_Milliseconds`, `_Percent`, `_Boolean`, `_Generic` | The same units | `Unit::Db`, `Unit::Hz`, `Unit::Ms`, `Unit::Percent`, `Unit::Toggle`, `Unit::None` | |
 | `kAudioUnitParameterUnit_Indexed` with `GetParameterValueStrings` | `valueStrings` | `.with_choices(&[...])` | |
 | `kAudioUnitParameterFlag_DisplayLogarithmic` | The same flag | `.with_taper(Taper::Log)` | |
-| `kAudioUnitParameterFlag_IsWritable` cleared | The same flag | `.flag(ParamFlags::READ_ONLY)` | |
-| `kAudioUnitParameterFlag_NonRealTime` | The same flag | `.flag(ParamFlags::NOT_REALTIME)` | |
+| `kAudioUnitParameterFlag_IsWritable` cleared | The same flag | `.with_flag(ParamFlags::READ_ONLY)` | |
+| `kAudioUnitParameterFlag_NonRealTime` | The same flag | `.with_flag(ParamFlags::NOT_REALTIME)` | |
 | `kAudioUnitParameterFlag_HasClump`, `clumpID`, the clump name | Parameter groups in the tree | `.with_group("Filter/Envelope")` | One clump per path |
 | `kAudioUnitProperty_ParameterStringFromValue`, `ParameterValueFromString` | `implementorStringFromValueCallback`, `implementorValueFromStringCallback` | `ParamInfo::format`, `ParamInfo::parse` | By unit and choice names; see the list at the end |
 | `GetParameter(id)` read in the kernel | The DSP's copy, written by `implementorValueObserver` | A field of the plugin, written in `set_param` | Plain units, clamped by `ParamInfo::clamp` |
@@ -120,18 +120,15 @@ static PARAMS: [ParamInfo; 3] = [
     ParamInfo::new("q", "Q", 0.3, 10.0, 1.0, Unit::None),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.ported-band",
-    name: "Ported Band",
-    vendor: "Example Audio",
-    url: "https://example.com",
-    email: "",
-    version: "2.0.0",
-    category: Category::Eq,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.ported-band",
+    "Ported Band",
+    "Example Audio",
+    "2.0.0",
+    Category::Eq,
+    &PARAMS,
+)
+.with_url("https://example.com");
 
 // `SupportedNumChannels`: {2, 2} and {1, 1}. The first is the default.
 static LAYOUTS: [IoConfig; 2] = [
@@ -225,7 +222,7 @@ impl Plugin for PortedBand {
     }
 
     // The kernels' `Process`, in place. `io` has one channel in the mono layout.
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         if self.stale {
             self.stale = false;
             for filter in &mut self.filters {
@@ -239,8 +236,8 @@ impl Plugin for PortedBand {
         }
     }
 
-    fn tail_samples(&self) -> usize {
-        self.tail
+    fn tail(&self) -> Tail {
+        Tail::from_samples(self.tail)
     }
 
     // An `aufx` effect: no MIDI.
@@ -275,7 +272,7 @@ fn gain_db_at(plugin: &mut PortedBand, hz: f32, channels: usize) -> f32 {
                 channel[i] = x;
             }
         }
-        plugin.process(&mut io, 64);
+        plugin.process(&mut ChannelsMut::new(&mut io), 64);
         if block >= 200 {
             peak = io[channels - 1].iter().fold(peak, |p, s| p.max(s.abs()));
         }
@@ -301,10 +298,14 @@ fn main() {
     // A narrow boost low down rings for longer than a broad one high up.
     plugin.set_param("frequency", 50.0);
     plugin.set_param("q", 10.0);
-    let narrow = plugin.tail_samples();
+    let samples = |tail| match tail {
+        Tail::Finite(n) => n,
+        _ => 0,
+    };
+    let narrow = samples(plugin.tail());
     plugin.set_param("frequency", 5_000.0);
     plugin.set_param("q", 0.5);
-    assert!(narrow > 100 * plugin.tail_samples());
+    assert!(narrow > 100 * samples(plugin.tail()));
 
     // The unit showed "1.00 kHz"; so does the port, and it reads it back.
     assert_eq!(PARAMS[0].format(1_000.0), "1.00 kHz");
@@ -319,7 +320,7 @@ What moved where:
 - The class and its kernels became one `struct` with a filter per channel. `SupportedNumChannels` became `LAYOUTS`, and `process` filters as many channels as it is given.
 - `GetParameterInfo` became the `PARAMS` table. The order is the old parameter id order, so a host's automation still points at the right parameter. `kAudioUnitParameterFlag_DisplayLogarithmic` is `Taper::Log`.
 - The kernels read the parameters on every call and compared them with the last values. Here `set_param` marks the coefficients stale and `process` recomputes them once. The shell cuts a block at every scheduled parameter event, so a change still lands on its sample.
-- `GetTailTime` became `tail_samples`, kept up to date in `set_param` because the shell reads it once per block on the render thread.
+- `GetTailTime` became `tail`, kept up to date in `set_param` because the shell reads it once per block on the render thread.
 - There is no state code, because the parameters are the whole state.
 
 ### The old unit's sessions and presets
@@ -333,7 +334,7 @@ That holds for a unit whose state was only its parameters. If the old unit added
 - **A version 3 app extension.** The shell is a version 2 component. An iOS or sandboxed extension target is not built.
 - **Parameters outside the global scope.** Parameter ids that are not `0..n` in table order are kept with `ParamInfo::with_au_id` (see [Identity pinning](../PORTING.md#identity-pinning)).
 - **Custom keys in the class info dictionary.** The old unit's own keys do not reach `load_state` through the Audio Unit shell. Same task.
-- **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`; the shell does not publish `kAudioUnitProperty_FactoryPresets`.
+- **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`; the shell does not publish `kAudioUnitProperty_FactoryPresets`.
 - **True parameter ramps.** A ramped event arrives as steps 16 frames apart.
 - **Custom value text.** A parameter prints and parses by its `Unit` and its choice names.
 - **More than one output element, or more than one sidechain.**

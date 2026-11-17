@@ -123,6 +123,7 @@ const OUT_GAIN: f32 = 0.6;
 
 /// A delay line of the tank that table 2 taps, with the paper's node name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PlateLine {
     /// `node24_30`: the 4453 delay of the left half.
     LeftDelay1,

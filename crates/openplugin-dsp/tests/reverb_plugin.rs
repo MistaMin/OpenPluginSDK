@@ -16,18 +16,16 @@ static PARAMS: [ParamInfo; 3] = [
     ParamInfo::new("engine", "Engine", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.reverb",
-    name: "Test Reverb",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "1.0.0-beta",
-    category: Category::Reverb,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.reverb",
+    "Test Reverb",
+    "OpenGrid",
+    "1.0.0-beta",
+    Category::Reverb,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 struct TestReverb {
     fdn: FdnReverb,
@@ -85,7 +83,7 @@ impl Plugin for TestReverb {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         match io {
             [l, r, ..] => {
                 let (l, r) = (&mut l[..frames], &mut r[..frames]);
@@ -109,15 +107,11 @@ impl Plugin for TestReverb {
         }
     }
 
-    fn tail_samples(&self) -> usize {
-        if self.plate_engine { self.plate.tail_samples() } else { self.fdn.tail_samples() }
-    }
-
     fn tail(&self) -> Tail {
         if self.freeze {
             Tail::Infinite
         } else {
-            Tail::Finite(self.tail_samples().min(u32::MAX as usize) as u32)
+            Tail::from_samples(if self.plate_engine { self.plate.tail_samples() } else { self.fdn.tail_samples() })
         }
     }
 }
@@ -143,7 +137,7 @@ fn render(p: &mut TestReverb, seconds: f32, fs: f32) -> Vec<f32> {
             io[1][0] = 1.0;
             first = false;
         }
-        p.process(&mut io, block);
+        p.process(&mut openplugin_core::ChannelsMut::new(&mut io), block);
         out.extend_from_slice(&io[0]);
     }
     out
@@ -213,7 +207,7 @@ fn trait_surface_behaves() {
     let mut io = vec![vec![f32::NAN; 256]];
     io[0][3] = f32::INFINITY;
     for _ in 0..10 {
-        p.process(&mut io, 256);
+        p.process(&mut openplugin_core::ChannelsMut::new(&mut io), 256);
         assert!(io[0].iter().all(|v| v.is_finite()));
         io[0].fill(f32::NAN);
     }
@@ -222,6 +216,6 @@ fn trait_surface_behaves() {
     assert_eq!(p.param("decay"), Some(2.0));
     p.reset();
     let mut io = vec![vec![0.0f32; 256]; 2];
-    p.process(&mut io, 256);
+    p.process(&mut openplugin_core::ChannelsMut::new(&mut io), 256);
     assert!(io.iter().flatten().all(|v| *v == 0.0), "silence in, silence out after reset");
 }

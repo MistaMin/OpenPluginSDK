@@ -84,6 +84,7 @@ use crate::voice::NoteExpressions;
 
 /// Which voice to take when all are busy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StealPolicy {
     Oldest,
     Quietest,
@@ -92,6 +93,7 @@ pub enum StealPolicy {
 
 /// Polyphonic, or monophonic with or without envelope retrigger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VoiceMode {
     Poly,
     Mono,
@@ -100,6 +102,7 @@ pub enum VoiceMode {
 
 /// When glide applies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GlideMode {
     Off,
     /// Every new note glides from the previous pitch.
@@ -110,6 +113,7 @@ pub enum GlideMode {
 
 /// Life cycle of a voice slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VoicePhase {
     Free,
     Held,

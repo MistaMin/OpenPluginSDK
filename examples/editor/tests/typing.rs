@@ -45,7 +45,7 @@ mod mac {
     use super::a11y_support::*;
     use example_editor::{layout, make_editor, HEIGHT, WIDTH};
     use openplugin::core::editor::FileDialog;
-    use openplugin::dri::cocoa::Id;
+    use openplugin::dri::cocoa::NSViewPtr as Id;
     use openplugin::core::{Editor, EditorHost, Frame};
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -351,7 +351,7 @@ mod mac {
         }
         fn param_changed(&mut self, _: usize, _: f32) {}
         fn render(&mut self, _: f32) -> Frame<'_> {
-            Frame { pixels: &[0], width: 1, height: 1 }
+            Frame::new(&[0], 1, 1)
         }
         fn wants_drops(&self) -> bool {
             true

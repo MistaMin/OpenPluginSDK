@@ -10,24 +10,17 @@ static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, U
 
 /// The same parameter in a group path no host can show (an empty name).
 static BAD_GROUP_PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, Unit::None).with_group("Filter//Env")];
-static BAD_GROUP_INFO: PluginInfo = PluginInfo { params: &BAD_GROUP_PARAMS, ..INFO };
+static BAD_GROUP_INFO: PluginInfo = info(&BAD_GROUP_PARAMS);
 
 /// The same parameter pinned to a VST3 id the shell keeps for its own bypass.
 static BAD_PIN_PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", 0.0, 2.0, 1.0, Unit::None).with_vst3_id(0x4259_5053)];
-static BAD_PIN_INFO: PluginInfo = PluginInfo { params: &BAD_PIN_PARAMS, ..INFO };
+static BAD_PIN_INFO: PluginInfo = info(&BAD_PIN_PARAMS);
 
-static INFO: PluginInfo = PluginInfo {
-    id: "test.faulty",
-    name: "Faulty",
-    vendor: "test",
-    url: "",
-    email: "",
-    version: "0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+const fn info(params: &'static [ParamInfo]) -> PluginInfo {
+    PluginInfo::new("test.faulty", "Faulty", "test", "0", Category::Utility, params)
+}
+
+static INFO: PluginInfo = info(&PARAMS);
 
 #[derive(Clone, Copy, PartialEq)]
 enum Fault {
@@ -93,7 +86,7 @@ impl Plugin for Faulty {
     fn note_ports(&self) -> NotePorts {
         NotePorts { input: false, output: false }
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         self.calls += 1;
         match self.fault {
             Fault::Alloc => {
@@ -176,13 +169,15 @@ impl Plugin for Faulty {
             _ => 0,
         }
     }
-    fn tail_samples(&self) -> usize {
-        match self.fault {
-            Fault::NeverDecays => 1000,
-            Fault::PoisonedByNan => 64,
-            Fault::LatencyLies => 32,
-            _ => 0,
-        }
+    fn tail(&self) -> Tail {
+        Tail::from_samples({
+            match self.fault {
+                Fault::NeverDecays => 1000,
+                Fault::PoisonedByNan => 64,
+                Fault::LatencyLies => 32,
+                _ => 0,
+            }
+        })
     }
     fn save_state(&mut self) -> Option<Vec<u8>> {
         (self.fault == Fault::WrongState).then(|| self.gain.to_le_bytes().to_vec())
@@ -318,7 +313,7 @@ fn skipped_rates_are_reported() {
         fn param(&self, id: &str) -> Option<f32> {
             self.0.param(id)
         }
-        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
             self.0.process(io, frames)
         }
         fn note_ports(&self) -> NotePorts {
@@ -370,7 +365,7 @@ fn the_bench_keeps_an_instrument_playing() {
         fn param(&self, _: &str) -> Option<f32> {
             Some(1.0)
         }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
         fn note_on(&mut self, _: usize, _: u8, _: u8) {
             NOTES.fetch_add(1, Ordering::Relaxed);
         }

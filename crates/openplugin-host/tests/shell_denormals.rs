@@ -4,7 +4,7 @@
 //!
 //! Every call that enters the audio side holds the guard: `process_events`,
 //! the simple `process`, `reset` (the Audio Unit calls it from its render
-//! thread) and `midi_out`; the Rust `FfiInstance::process_*` calls go through
+//! thread) and `midi_out`; the Rust `HostSession::process_*` calls go through
 //! the same gate. For each host mode from `host_mode::hosts()` the test sets
 //! the mode, calls the entry and checks what `FpProbe` saw inside and the mode
 //! afterwards, also after a panic in `process`, and with
@@ -15,8 +15,8 @@ mod fp_probe;
 
 use fp_probe::*;
 use openplugin_core::denormal::host_mode;
-use openplugin_ffi::shell::{self, *};
-use openplugin_ffi::FfiInstance;
+use openplugin_host::shell::{self, *};
+use openplugin_host::HostSession;
 
 const FRAMES: usize = 64;
 
@@ -120,7 +120,7 @@ fn reset_and_midi_out_restore_the_host_mode() {
 
 #[test]
 fn the_rust_host_session_runs_flushed_too() {
-    let session = FfiInstance::new(Box::new(FpProbe::default()), 48_000.0, FRAMES, 2);
+    let session = HostSession::new(Box::new(FpProbe::default()), 48_000.0, FRAMES, 2).unwrap();
     for (name, word) in host_mode::hosts() {
         let mut left = vec![0.5f32; FRAMES];
         let mut right = vec![0.5f32; FRAMES];

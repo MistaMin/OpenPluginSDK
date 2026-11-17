@@ -36,6 +36,7 @@ use crate::filters::{Butterworth, ButterworthKind};
 
 /// Linkwitz-Riley order: slope per band edge is 12, 24 or 48 dB/octave.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LrOrder {
     Lr2,
     Lr4,

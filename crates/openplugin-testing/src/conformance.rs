@@ -3,7 +3,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use openplugin_core::{
-    decode_params, encode_params, restore_params, IoConfig, ParamFlags, ParamInfo, Plugin, PluginInfo, Tail,
+    decode_params, encode_params, restore_params, Channels, ChannelsMut, IoConfig, ParamFlags, ParamInfo, Plugin, PluginInfo, Tail,
     Transport, STEREO_LAYOUTS,
 };
 
@@ -556,36 +556,36 @@ impl<'s, P: Plugin> Session<'s, P> {
             let dens = [0u32, 4, 8, u32::MAX];
             let poss = [i64::MIN, i64::MAX, -1, 0];
             let wild = [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 1e300, 0.0];
-            Transport {
-                playing: r.chance(0.5),
-                recording: r.chance(0.5),
-                tempo: tempos[r.below(tempos.len())],
-                numerator: nums[r.below(nums.len())],
-                denominator: dens[r.below(dens.len())],
-                sample_pos: poss[r.below(poss.len())],
-                seconds: wild[r.below(wild.len())],
-                quarter_notes: wild[r.below(wild.len())],
-                bar_start: wild[r.below(wild.len())],
-                bar_number: if r.chance(0.5) { i64::MIN } else { i64::MAX },
-            }
+            let mut t = Transport::default();
+            t.playing = r.chance(0.5);
+            t.recording = r.chance(0.5);
+            t.tempo = tempos[r.below(tempos.len())];
+            t.numerator = nums[r.below(nums.len())];
+            t.denominator = dens[r.below(dens.len())];
+            t.sample_pos = poss[r.below(poss.len())];
+            t.seconds = wild[r.below(wild.len())];
+            t.quarter_notes = wild[r.below(wild.len())];
+            t.bar_start = wild[r.below(wild.len())];
+            t.bar_number = if r.chance(0.5) { i64::MIN } else { i64::MAX };
+            t
         } else {
             if self.rng.chance(0.2) {
                 self.pos = self.rng.below(1 << 30) as i64;
             }
             let seconds = self.pos as f64 / f64::from(self.rate);
             let tempo = 60.0 + 120.0 * f64::from(self.rng.unit());
-            Transport {
-                playing: self.rng.chance(0.8),
-                recording: self.rng.chance(0.1),
-                tempo,
-                numerator: 4,
-                denominator: 4,
-                sample_pos: self.pos,
-                seconds,
-                quarter_notes: seconds * tempo / 60.0,
-                bar_start: (seconds * tempo / 240.0).floor() * 4.0,
-                bar_number: (seconds * tempo / 240.0) as i64,
-            }
+            let mut t = Transport::default();
+            t.playing = self.rng.chance(0.8);
+            t.recording = self.rng.chance(0.1);
+            t.tempo = tempo;
+            t.numerator = 4;
+            t.denominator = 4;
+            t.sample_pos = self.pos;
+            t.seconds = seconds;
+            t.quarter_notes = seconds * tempo / 60.0;
+            t.bar_start = (seconds * tempo / 240.0).floor() * 4.0;
+            t.bar_number = (seconds * tempo / 240.0) as i64;
+            t
         };
         self.pos = self.pos.saturating_add(frames as i64);
         self.guarded("set_transport", |p| p.set_transport(&t));
@@ -651,10 +651,11 @@ impl<'s, P: Plugin> Session<'s, P> {
             let mut io = std::mem::take(&mut self.io);
             let side = std::mem::take(&mut self.side);
             if via_buses {
-                let sc: Option<&[Vec<f32>]> = if has_side { Some(&side) } else { None };
-                self.guarded("process_buses", |p| p.process_buses(&mut io, sc, n));
+                let side = Channels::new(&side);
+                let sc = has_side.then_some(&*side);
+                self.guarded("process_buses", |p| p.process_buses(&mut ChannelsMut::new(&mut io), sc, n));
             } else {
-                self.guarded("process", |p| p.process(&mut io, n));
+                self.guarded("process", |p| p.process(&mut ChannelsMut::new(&mut io), n));
             }
             self.io = io;
             self.side = side;
@@ -668,10 +669,11 @@ impl<'s, P: Plugin> Session<'s, P> {
                 dst[..n].copy_from_slice(&src[a..b]);
             }
             if via_buses {
-                let sc: Option<&[Vec<f32>]> = if has_side { Some(&scratch_side) } else { None };
-                self.guarded("process_buses", |p| p.process_buses(&mut scratch, sc, n));
+                let side = Channels::new(&scratch_side);
+                let sc = has_side.then_some(&*side);
+                self.guarded("process_buses", |p| p.process_buses(&mut ChannelsMut::new(&mut scratch), sc, n));
             } else {
-                self.guarded("process", |p| p.process(&mut scratch, n));
+                self.guarded("process", |p| p.process(&mut ChannelsMut::new(&mut scratch), n));
             }
             for (dst, src) in self.io.iter_mut().zip(&scratch) {
                 dst[a..b].copy_from_slice(&src[..n]);
@@ -908,7 +910,7 @@ impl<'s, P: Plugin> Session<'s, P> {
         let n = match tail {
             Tail::None => 0usize,
             Tail::Finite(n) => n as usize,
-            Tail::Unknown | Tail::Infinite => {
+            _ => {
                 self.rec.note(Check::Tail, format!("skipped for a {tail:?} tail"));
                 return;
             }

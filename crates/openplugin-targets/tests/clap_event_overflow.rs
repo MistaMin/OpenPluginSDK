@@ -12,18 +12,17 @@ use openplugin_targets::ClapAdapter;
 const FRAMES: u32 = 512;
 const NOTES: usize = 150;
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.overflow",
-    name: "Event Overflow",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "0.0.1",
-    category: Category::Utility,
-    params: &[],
-    is_instrument: true,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.overflow",
+    "Event Overflow",
+    "OpenGrid",
+    "0.0.1",
+    Category::Utility,
+    &[],
+)
+    .with_url("https://github.com/MistaMin/OpenPluginSDK")
+    .with_email("contact@mistamin.com")
+    .with_instrument(true);
 
 #[derive(Default)]
 struct Seen {
@@ -45,7 +44,7 @@ impl Plugin for Synth {
     fn param(&self, _: &str) -> Option<f32> {
         None
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     fn note_on_ref(&mut self, _: usize, note: NoteRef, _: u8) {
         self.0.lock().unwrap().sounding.insert((note.channel as u8, note.key as u8));
     }

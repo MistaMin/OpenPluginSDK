@@ -5,25 +5,22 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use openplugin_core::{AaxIds, Category, EditorState, ParamInfo, Plugin, PluginInfo, Tail, Unit};
-use openplugin_ffi::shell::{self, OpShellInfo};
+use openplugin_host::shell::{self, OpShellInfo};
 
 static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("decay", "Decay", 0.1, 10.0, 2.0, Unit::Seconds),
     ParamInfo::new("freeze", "Freeze", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.verb",
-    name: "Test Verb",
-    vendor: "OpenGrid",
-    url: "",
-    email: "",
-    version: "0.0.1",
-    category: Category::Reverb,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: true,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.verb",
+    "Test Verb",
+    "OpenGrid",
+    "0.0.1",
+    Category::Reverb,
+    &PARAMS,
+)
+.with_editor(true);
 
 /// What the engine shows its editor.
 struct Shared {
@@ -66,7 +63,7 @@ impl Plugin for Verb {
             _ => None,
         }
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {
         self.shared.blocks.fetch_add(1, Ordering::Relaxed);
     }
     fn tail(&self) -> Tail {

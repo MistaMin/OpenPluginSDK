@@ -19,17 +19,17 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | CLAP | OpenPluginSDK | Notes |
 |---|---|---|
 | `clap_plugin_entry`, `clap_plugin_factory` | `export_clap!(MyPlugin)` | One plugin per binary |
-| `clap_plugin_descriptor`: `id`, `name`, `vendor`, `url`, `version` | `PluginInfo { id, name, vendor, url, version, .. }` | Keep the old `id`: hosts find the plugin by it |
+| `clap_plugin_descriptor`: `id`, `name`, `vendor`, `url`, `version` | `PluginInfo::new(..)`, `with_url` | Keep the old `id`: hosts find the plugin by it |
 | `clap_plugin_descriptor::features` | `PluginInfo::category`, `PluginInfo::is_instrument` | |
 | `clap_plugin::init`, `destroy` | `Default::default`, `Drop` | |
 | `activate(sample_rate, min_frames_count, max_frames_count)` | `prepare(sample_rate, max_block, channels)` | Allocate here. A rate the plugin refuses in `accepts_sample_rate` fails the activation |
 | `deactivate`, `start_processing`, `stop_processing` | Nothing to write | |
 | `reset` | `reset()` | Must not allocate |
-| `process(const clap_process*)`: `audio_inputs[0].data32`, `audio_outputs[0].data32`, `frames_count` | `process(io: &mut [Vec<f32>], frames)` | In place, planar: `io[channel][..frames]` |
+| `process(const clap_process*)`: `audio_inputs[0].data32`, `audio_outputs[0].data32`, `frames_count` | `process(io: &mut [&mut [f32]], frames)` | In place, planar: `io[channel][..frames]` |
 | `data64` | Not available | `process` is `f32`; see the list at the end |
 | The return value: `CLAP_PROCESS_CONTINUE`, `CLAP_PROCESS_TAIL`, `CLAP_PROCESS_SLEEP` | Nothing to return | The entry answers from `Plugin::tail` |
 | `clap_plugin_latency::get`, `clap_host_latency::changed` | `Plugin::latency` | The entry asks for the restart CLAP requires when the value changes. `HostNotifier::latency_changed` reports a change made outside `process` |
-| `clap_plugin_tail::get` | `Plugin::tail_samples`, or `Plugin::tail` returning `Tail::Finite(n)` or `Tail::Infinite` | |
+| `clap_plugin_tail::get` | `Plugin::tail` returning `Tail::Finite(n)` or `Tail::Infinite` (`Tail::from_samples(n)` for a count) | |
 | `clap_plugin_render::set`, `CLAP_RENDER_OFFLINE` | `Plugin::set_offline` | |
 | `clap_process::transport`: `flags`, `tempo`, `song_pos_beats`, `bar_start`, `bar_number`, `tsig_num`, `tsig_denom` | `Plugin::set_transport(&Transport)` | Called before each block; keep the fields you use |
 | `get_extension(id)` | Nothing to write | The entry offers an extension when the plugin has something to say through it |
@@ -44,9 +44,9 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `min_value`, `max_value`, `default_value` | `ParamInfo::new(id, name, min, max, default, unit)` | Plain values in both |
 | `CLAP_PARAM_IS_AUTOMATABLE` | The default | |
 | `CLAP_PARAM_IS_STEPPED`, `CLAP_PARAM_IS_ENUM` | `.with_steps(n)`, `Unit::Toggle`, `.with_choices(&[...])` | |
-| `CLAP_PARAM_IS_HIDDEN`, `CLAP_PARAM_IS_READONLY` | `.flag(ParamFlags::HIDDEN)`, `.flag(ParamFlags::READ_ONLY)` | |
+| `CLAP_PARAM_IS_HIDDEN`, `CLAP_PARAM_IS_READONLY` | `.with_flag(ParamFlags::HIDDEN)`, `.with_flag(ParamFlags::READ_ONLY)` | |
 | `CLAP_PARAM_IS_BYPASS` | `Plugin::set_host_bypass`, or a parameter with `ParamFlags::BYPASS` | |
-| `CLAP_PARAM_IS_MODULATABLE`, `CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID` | `.flag(ParamFlags::MODULATABLE)`, `.flag(ParamFlags::POLY_MODULATION)` | |
+| `CLAP_PARAM_IS_MODULATABLE`, `CLAP_PARAM_IS_MODULATABLE_PER_NOTE_ID` | `.with_flag(ParamFlags::MODULATABLE)`, `.with_flag(ParamFlags::POLY_MODULATION)` | |
 | `clap_param_info::cookie` | `set_param_index(index, value)` | Override it to skip the string match |
 | `get_value` | `param(id)` | |
 | `value_to_text`, `text_to_value` | `ParamInfo::format`, `ParamInfo::parse` | By unit and choice names; see the list at the end |
@@ -134,18 +134,15 @@ static PARAMS: [ParamInfo; 3] = [
 ];
 
 // The descriptor. The id is the old one.
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.note-gate",
-    name: "Ported Note Gate",
-    vendor: "Example Audio",
-    url: "https://example.com",
-    email: "",
-    version: "2.0.0",
-    category: Category::Dynamics,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.note-gate",
+    "Ported Note Gate",
+    "Example Audio",
+    "2.0.0",
+    Category::Dynamics,
+    &PARAMS,
+)
+.with_url("https://example.com");
 
 pub struct PortedNoteGate {
     attack_ms: f32,
@@ -253,7 +250,7 @@ impl Plugin for PortedNoteGate {
     }
 
     // The part of `process` between two events.
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let target = if self.held != 0 { 1.0 } else { self.floor() };
         for i in 0..frames {
             let gain = self.gain.step(target);
@@ -282,7 +279,7 @@ fn after(plugin: &mut PortedNoteGate, seconds: f32) -> f32 {
     for _ in 0..(seconds * 100.0) as usize {
         io[0].fill(1.0);
         io[1].fill(1.0);
-        plugin.process(&mut io, 480);
+        plugin.process(&mut ChannelsMut::new(&mut io), 480);
     }
     io[0][479]
 }
@@ -340,7 +337,7 @@ What moved where:
 - **Nothing for parameter ids.** A plugin that used ids other than `0..n` in table order (hashes, sparse numbers) keeps them with `ParamInfo::with_clap_id`, and its automation links with them (see [Identity pinning](../PORTING.md#identity-pinning)).
 - **Custom value text.** A parameter prints and parses by its `Unit` and its choice names.
 - **`mark_dirty`.** A change to state that is not a parameter cannot be reported to the host.
-- **Presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-ffi`; the CLAP entry has no `preset-load` and no preset discovery.
+- **Presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`; the CLAP entry has no `preset-load` and no preset discovery.
 - **64-bit audio buffers** (`data64`).
 - **More than one output port, or more than one sidechain.** An `IoConfig` is one main input, one main output and one optional sidechain.
 - **SysEx and MIDI 2.** MIDI reaches the plugin as messages of up to three bytes.

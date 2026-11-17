@@ -48,6 +48,7 @@ use rustfft::FftPlanner;
 
 /// Why a [`WavetableSet`] could not be built.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WavetableError {
     /// The table size is not a power of two in 64..=65536.
     BadSize,

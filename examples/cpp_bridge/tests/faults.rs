@@ -38,8 +38,8 @@ macro_rules! forward {
         fn reset(&mut self) { self.0.reset() }
         fn set_param(&mut self, id: &str, v: f32) -> bool { self.0.set_param(id, v) }
         fn param(&self, id: &str) -> Option<f32> { self.0.param(id) }
-        fn process(&mut self, io: &mut [Vec<f32>], n: usize) { self.0.process(io, n) }
-        fn tail_samples(&self) -> usize { self.0.tail_samples() }
+        fn process(&mut self, io: &mut [&mut [f32]], n: usize) { self.0.process(io, n) }
+        fn tail(&self) -> Tail { self.0.tail() }
         fn note_ports(&self) -> NotePorts { self.0.note_ports() }
         fn save_state(&mut self) -> Option<Vec<u8>> { self.0.save_state() }
         fn load_state(&mut self, d: &[u8]) -> bool { self.0.load_state(d) }
@@ -115,8 +115,8 @@ fn raw_cpp_malloc_is_invisible_to_the_kit_but_visible_to_malloc_logger() {
     clean.prepare(48_000.0, 256, 2);
     dirty.prepare(48_000.0, 256, 2);
     let mut io = vec![vec![0.1f32; 256]; 2];
-    let clean_count = count_mallocs(|| clean.process(&mut io, 256));
-    let dirty_count = count_mallocs(|| dirty.process(&mut io, 256));
+    let clean_count = count_mallocs(|| clean.process(&mut openplugin::core::ChannelsMut::new(&mut io), 256));
+    let dirty_count = count_mallocs(|| dirty.process(&mut openplugin::core::ChannelsMut::new(&mut io), 256));
     assert_eq!(clean_count, 0, "the clean path makes no malloc");
     assert_eq!(dirty_count, 2, "one malloc per channel");
 }
@@ -155,9 +155,9 @@ fn a_rust_panic_in_process_is_caught_and_the_plugin_passes_audio_through() {
     p.prepare(48_000.0, 256, 2);
     p.inject_fault(Fault::RustPanic);
     let mut io = vec![vec![0.5f32; 64]; 2];
-    p.process(&mut io, 64);
+    p.process(&mut openplugin::core::ChannelsMut::new(&mut io), 64);
     assert!(!p.is_ready());
     assert_eq!(p.last_error(), Some("panic in process"));
-    p.process(&mut io, 64);
+    p.process(&mut openplugin::core::ChannelsMut::new(&mut io), 64);
     assert!(io[0].iter().all(|&s| s == 0.5));
 }

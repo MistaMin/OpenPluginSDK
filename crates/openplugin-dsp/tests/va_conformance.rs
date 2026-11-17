@@ -16,18 +16,7 @@ static PARAMS: [ParamInfo; 4] = [
     ParamInfo::new("poles", "Poles", 1.0, 4.0, 4.0, Unit::None),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "test.ladder",
-    name: "Test Ladder",
-    vendor: "test",
-    url: "",
-    email: "",
-    version: "0",
-    category: Category::Eq,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new("test.ladder", "Test Ladder", "test", "0", Category::Eq, &PARAMS);
 
 struct LadderPlugin {
     filters: Vec<TransistorLadder>,
@@ -96,7 +85,7 @@ impl Plugin for LadderPlugin {
     fn state_is_parameters_only(&self) -> bool {
         true
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for (ch, buf) in io.iter_mut().enumerate().take(self.channels) {
             let n = frames.min(buf.len());
             self.filters[ch].process(&mut buf[..n]);

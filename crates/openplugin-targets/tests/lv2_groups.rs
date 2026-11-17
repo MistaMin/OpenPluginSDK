@@ -13,21 +13,22 @@ static PARAMS: [ParamInfo; 5] = [
     ParamInfo::new("broken", "Broken", 0.0, 1.0, 0.0, Unit::None).with_group("Filter//Envelope"),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:test-grouped",
-    name: "Test Grouped",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:test-grouped",
+    "Test Grouped",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 static PLAIN_PARAMS: [ParamInfo; 1] = [ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None)];
-static PLAIN_INFO: PluginInfo = PluginInfo { id: "urn:openplugin:test-plain", name: "Test Plain", params: &PLAIN_PARAMS, ..INFO };
+static PLAIN_INFO: PluginInfo =
+    PluginInfo::new("urn:openplugin:test-plain", "Test Plain", "Test", "0.1.0", Category::Utility, &PLAIN_PARAMS)
+        .with_url("https://example.com")
+        .with_email("a@b.c");
 
 struct Grouped(&'static PluginInfo);
 
@@ -43,7 +44,7 @@ impl Plugin for Grouped {
     fn param(&self, id: &str) -> Option<f32> {
         self.0.param(id).map(|p| p.default)
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
 }
 
 /// The control port block of the parameter with `symbol`.

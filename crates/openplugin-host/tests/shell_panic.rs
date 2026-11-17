@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use openplugin_core::layout::NotePorts;
 use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
-use openplugin_ffi::shell::{self, *};
+use openplugin_host::shell::{self, *};
 
 const NONE: u32 = 0;
 const PROCESS: u32 = 1;
@@ -33,18 +33,16 @@ fn armed(mode: u32) -> bool {
 
 static PARAMS: [ParamInfo; 1] = [ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None)];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.example.shell-bomb",
-    name: "Shell Bomb",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.example.shell-bomb",
+    "Shell Bomb",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 #[derive(Default)]
 struct Bomb {
@@ -96,7 +94,7 @@ impl Plugin for Bomb {
         }
         data == [1, 2, 3]
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         if armed(PROCESS) {
             panic!("bomb: process");
         }

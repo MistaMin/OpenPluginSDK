@@ -83,6 +83,7 @@ pub const MEMBRANE_ZEROS: [(u8, u8, f64); 28] = [
 
 /// A family of mode frequencies.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum ModalPreset {
     /// Free-free ideal bar (xylophone, marimba, glockenspiel bars).
     BarFreeFree,
@@ -388,6 +389,7 @@ impl ModalBank {
 
 /// What an [`Exciter`] produces on a strike.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Strike {
     /// One sample of amplitude `velocity`.
     Impulse,

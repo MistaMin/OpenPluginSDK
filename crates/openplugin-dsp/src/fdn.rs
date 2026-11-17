@@ -75,6 +75,7 @@ const OUT_GAIN: f32 = 0.5;
 
 /// Feedback matrix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FdnMatrix {
     /// `I - (2/N) 1 1^T`: a reflection, O(N) per sample.
     Householder,

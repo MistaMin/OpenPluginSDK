@@ -1,8 +1,8 @@
 //! Host rate and oversampling factor check.
 //!
-//! Water Channel's rate planner refuses a zero host rate, a factor other than
-//! 1, 2, or 4, and a product that overflows. The model-file inventory stays in
-//! the plugin. This is only the rate arithmetic a plugin needs before `prepare`.
+//! The rate planner refuses a zero host rate, a factor other than 1, 2, or 4,
+//! and a product that overflows. This is only the rate arithmetic a plugin
+//! needs before `prepare`.
 
 /// The rate a DSP block computes its coefficients for: a finite `sample_rate`
 /// clamped to the SDK's range ([`openplugin_core::MIN_SAMPLE_RATE`] 1 kHz to
@@ -26,6 +26,7 @@ pub struct RatePlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RateError {
     InvalidRate,
     UnsupportedFactor,

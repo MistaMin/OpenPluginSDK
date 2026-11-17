@@ -68,18 +68,16 @@ pub const OUT: f32 = 0.25;
 
 pub static PARAMS: [ParamInfo; 1] = [ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None)];
 
-pub static INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:test-fp-probe",
-    name: "FP Probe",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+pub static INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:test-fp-probe",
+    "FP Probe",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 pub struct FpProbe {
     level: f32,
@@ -118,7 +116,7 @@ impl Plugin for FpProbe {
     fn flush_denormals(&self) -> bool {
         self.flush
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         PROCESS.with(|c| c.set(Some(look())));
         if PANIC.with(|c| c.get()) {
             panic!("fp probe: process");

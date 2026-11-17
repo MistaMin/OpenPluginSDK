@@ -118,18 +118,16 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("mute", "Mute", 0.0, 1.0, 0.0, Unit::Toggle),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.opengrid.test.clap-no-alloc",
-    name: "CLAP No Alloc",
-    vendor: "OpenGrid",
-    url: "https://github.com/MistaMin/OpenPluginSDK",
-    email: "contact@mistamin.com",
-    version: "0.3.0-beta",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.opengrid.test.clap-no-alloc",
+    "CLAP No Alloc",
+    "OpenGrid",
+    "0.3.0-beta",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://github.com/MistaMin/OpenPluginSDK")
+.with_email("contact@mistamin.com");
 
 /// A gain and a toggle. Both setter paths clamp, so the measured blocks also
 /// cover the clamped parameter plane feeding `set_param_index`.
@@ -183,7 +181,7 @@ impl Plugin for GainToggle {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = if self.muted { 0.0 } else { self.linear };
         for channel in io {
             for sample in &mut channel[..frames] {

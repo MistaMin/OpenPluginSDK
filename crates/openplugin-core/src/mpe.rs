@@ -154,6 +154,7 @@ pub struct ZoneChannel {
 
 /// What the receiver hands on, in order.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum MpeEvent {
     NoteOn { note: NoteRef, velocity: u8 },
     NoteOff { note: NoteRef, velocity: u8 },

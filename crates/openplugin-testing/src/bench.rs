@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 use std::hint::black_box;
 use std::time::Instant;
 
-use openplugin_core::{IoConfig, Plugin};
+use openplugin_core::{Channels, ChannelsMut, IoConfig, Plugin};
 
 use crate::json::{self, Value};
 use crate::rng::Rng;
@@ -177,11 +177,14 @@ fn measure_case<P: Plugin>(plugin: &mut P, mut case: BenchCase, overhead: f64, o
         for (dst, src) in io.iter_mut().zip(&ring[i % ring_len]) {
             dst.copy_from_slice(src);
         }
+        // The slices are made outside the timed region.
+        let mut channels = ChannelsMut::new(&mut io);
+        let side_channels = Channels::new(&side);
         let start = Instant::now();
         if has_side {
-            plugin.process_buses(black_box(&mut io), Some(&side), block);
+            plugin.process_buses(black_box(&mut channels), Some(&side_channels), block);
         } else {
-            plugin.process(black_box(&mut io), block);
+            plugin.process(black_box(&mut channels), block);
         }
         let elapsed = start.elapsed().as_secs_f64();
         black_box(&io);
@@ -282,6 +285,7 @@ impl BenchReport {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Verdict {
     Same,
     Faster,

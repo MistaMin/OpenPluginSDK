@@ -510,18 +510,17 @@ mod tests {
 
     static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
 
-    static INFO: PluginInfo = PluginInfo {
-        id: "com.opengrid.test.x11gui",
-        name: "X11 Gui",
-        vendor: "OpenGrid",
-        url: "https://github.com/MistaMin/OpenPluginSDK",
-        email: "contact@mistamin.com",
-        version: "0.1.0",
-        category: Category::Utility,
-        params: &PARAMS,
-        is_instrument: false,
-        has_editor: true,
-    };
+    static INFO: PluginInfo = PluginInfo::new(
+        "com.opengrid.test.x11gui",
+        "X11 Gui",
+        "OpenGrid",
+        "0.1.0",
+        Category::Utility,
+        &PARAMS,
+    )
+    .with_url("https://github.com/MistaMin/OpenPluginSDK")
+    .with_email("contact@mistamin.com")
+    .with_editor(true);
 
     impl Plugin for Quiet {
         fn info(&self) -> &'static PluginInfo { &INFO }
@@ -529,7 +528,7 @@ mod tests {
         fn reset(&mut self) {}
         fn set_param(&mut self, _: &str, _: f32) -> bool { false }
         fn param(&self, _: &str) -> Option<f32> { None }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     }
 
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -702,7 +701,7 @@ mod tests {
             }
         }
         fn render(&mut self, _scale: f32) -> Frame<'_> {
-            Frame { pixels: &self.pixels, width: 0, height: 0 }
+            Frame::new(&self.pixels, 0, 0)
         }
     }
 

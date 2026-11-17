@@ -64,7 +64,7 @@
 //! Every parameter is linked: `set_param` goes to every engine; `param`,
 //! `meters`, `bus_meters`, `latency`, `tail`, `save_state` come from the first
 //! engine (the front pair on a surround layout, so the meters show the front
-//! pair only); `load_state` loads into all. `gain_reduction_db` is the
+//! pair only); `load_state` loads into all. The `reduction_db` of `meters` is the
 //! largest of any engine, so a meter shows the deepest reduction. All engines
 //! have the same latency, so the first one's is the bus latency. MIDI and
 //! transport go to every engine, and so do the per-note calls (`note_on_ref`,
@@ -105,7 +105,7 @@
 use std::sync::Mutex;
 
 use openplugin_core::{
-    AaxIds, BusMeters, EditorState, Expression, ExpressionSet, HostNotifier, IoConfig, MeterFrame,
+    AaxIds, BusMeters, ChannelsMut, EditorState, Expression, ExpressionSet, HostNotifier, IoConfig, MeterFrame,
     MpeZones, NoteRef, NotePorts, Plugin, PluginInfo, SpeakerLayout, Tail, TrackInfo, Transport,
     VoiceInfo, MAX_AUDIO_CHANNELS,
 };
@@ -130,6 +130,7 @@ pub trait LinkedDetector {
 
 /// What happens to the LFE channel on a surround layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum LfeMode {
     /// Run a mono engine on it.
     #[default]
@@ -477,15 +478,14 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
     }
 
     fn meters(&self) -> MeterFrame {
-        self.engines[0].plugin.meters()
+        let mut frame = self.engines[0].plugin.meters();
+        // The first engine's levels, with the deepest reduction of any engine.
+        frame.reduction_db = self.engines.iter().map(|e| e.plugin.meters().reduction_db).fold(0.0, f32::max);
+        frame
     }
 
     fn bus_meters(&self) -> BusMeters {
         self.engines[0].plugin.bus_meters()
-    }
-
-    fn gain_reduction_db(&self) -> f32 {
-        self.engines.iter().map(|e| e.plugin.gain_reduction_db()).fold(0.0, f32::max)
     }
 
     fn latency(&self) -> usize {
@@ -494,10 +494,6 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
 
     fn max_latency(&self) -> Option<usize> {
         self.engines[0].plugin.max_latency()
-    }
-
-    fn tail_samples(&self) -> usize {
-        self.engines[0].plugin.tail_samples()
     }
 
     fn tail(&self) -> Tail {
@@ -525,7 +521,7 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         match self.mode {
             Mode::Native => self.engines[0].plugin.process(io, frames),
             Mode::Surround => self.process_surround(io, frames),
@@ -533,7 +529,7 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
         }
     }
 
-    fn process_buses(&mut self, io: &mut [Vec<f32>], sidechain: Option<&[Vec<f32>]>, frames: usize) {
+    fn process_buses(&mut self, io: &mut [&mut [f32]], sidechain: Option<&[&[f32]]>, frames: usize) {
         match self.mode {
             Mode::Native => self.engines[0].plugin.process_buses(io, sidechain, frames),
             _ => self.process(io, frames),
@@ -707,8 +703,8 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
 }
 
 impl<P: Plugin, F: Fn() -> P + Send + 'static> SurroundAdapter<P, F> {
-    fn process_surround(&mut self, io: &mut [Vec<f32>], frames: usize) {
-        let frames = frames.min(io.iter().map(Vec::len).min().unwrap_or(0));
+    fn process_surround(&mut self, io: &mut [&mut [f32]], frames: usize) {
+        let frames = frames.min(io.iter().map(|c| c.len()).min().unwrap_or(0));
         let cap = self.max_block.max(1);
         let step = if self.link.is_some() { self.link_interval.min(cap) } else { cap };
         if self.lfe == LfeMode::Mute {
@@ -738,19 +734,19 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> SurroundAdapter<P, F> {
                     Kind::Pair(l, r) if l < io.len() && r < io.len() => {
                         e.scratch[0][..n].copy_from_slice(&io[l][start..end]);
                         e.scratch[1][..n].copy_from_slice(&io[r][start..end]);
-                        e.plugin.process(&mut e.scratch, n);
+                        e.plugin.process(&mut ChannelsMut::new(&mut e.scratch), n);
                         io[l][start..end].copy_from_slice(&e.scratch[0][..n]);
                         io[r][start..end].copy_from_slice(&e.scratch[1][..n]);
                     }
                     Kind::Mono(c) if c < io.len() => {
                         e.scratch[0][..n].copy_from_slice(&io[c][start..end]);
-                        e.plugin.process(&mut e.scratch, n);
+                        e.plugin.process(&mut ChannelsMut::new(&mut e.scratch), n);
                         io[c][start..end].copy_from_slice(&e.scratch[0][..n]);
                     }
                     Kind::Dup(c) if c < io.len() => {
                         e.scratch[0][..n].copy_from_slice(&io[c][start..end]);
                         e.scratch[1][..n].copy_from_slice(&io[c][start..end]);
-                        e.plugin.process(&mut e.scratch, n);
+                        e.plugin.process(&mut ChannelsMut::new(&mut e.scratch), n);
                         io[c][start..end].copy_from_slice(&e.scratch[0][..n]);
                     }
                     _ => {}
@@ -769,10 +765,10 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> SurroundAdapter<P, F> {
         }
     }
 
-    fn process_fold(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process_fold(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let Some(downmix) = &self.downmix else { return };
         let nin = downmix.input_channels();
-        let frames = frames.min(io.iter().map(Vec::len).min().unwrap_or(0));
+        let frames = frames.min(io.iter().map(|c| c.len()).min().unwrap_or(0));
         if io.len() < nin.max(2) {
             for ch in io.iter_mut() {
                 ch[..frames].fill(0.0);
@@ -794,7 +790,7 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> SurroundAdapter<P, F> {
                 let mut outs: [&mut [f32]; 2] = [&mut a[0][..n], &mut b[0][..n]];
                 downmix.process(&ins[..nin], &mut outs);
             }
-            engine.plugin.process(&mut self.fold_scratch, n);
+            engine.plugin.process(&mut ChannelsMut::new(&mut self.fold_scratch), n);
             for ch in io.iter_mut().skip(2) {
                 ch[start..end].fill(0.0);
             }

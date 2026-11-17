@@ -61,6 +61,7 @@ fn flush(x: f64) -> f64 {
 
 /// Smoothing topology, see the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Topology {
     Branching,
     Decoupled,
@@ -68,6 +69,7 @@ pub enum Topology {
 
 /// Domain in which the level is smoothed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Domain {
     Linear,
     Log,
@@ -75,6 +77,7 @@ pub enum Domain {
 
 /// What is measured before the ballistics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Detection {
     /// Rectified sample, `|x|`.
     Peak,

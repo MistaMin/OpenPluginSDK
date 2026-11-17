@@ -1,7 +1,7 @@
 # OpenPluginSDK
 
 > **Universal, zero-allocation digital audio plugin development framework with GoodLookin Design Rust Interface (DRI).**  
-> Targets **CLAP**, **VST3**, **Audio Unit (AU)**, **Avid AAX**, and **Standalone**.
+> Targets **CLAP**, **LV2**, **VST3**, **Audio Unit (AU)** and **Avid AAX**, with a standalone editor window for development.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
@@ -15,9 +15,9 @@
 
 It combines:
 1. **Realtime-safe DSP core:** Zero-allocation processing loop (`process()`), hostile parameter sanitization, and no panics.
-2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, overlap-save convolution for impulses up to 1024 taps (`BlockConvolver`), log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, ANSI standard ballistic VU meters, BS.1770-4 loudness (`Loudness`), loudness-matched auto gain (`LoudnessMatch`), and Delta listening (`Delta`).
+2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, overlap-save convolution for impulses up to 1024 taps (`BlockConvolver`), log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, IEC 60268-17 VU and PPM meters, BS.1770-4 loudness (`Loudness`), loudness-matched auto gain (`LoudnessMatch`), and Delta listening (`Delta`).
 3. **GoodLookin Design Rust Interface (DRI) 0.2:** procedural hardware drawing with no bitmaps: 47 knob styles, 40 faceplate finishes, meters, switches and the spectrum. Knobs are lit by default, shaded per pixel from a light rig, and the classic and flat tiers remain. `SceneCanvas` rasterises a scene, with the static plate cached, into the pixels an editor shows. No JUCE dependency or license. See [docs/DRI_GUIDE.md](docs/DRI_GUIDE.md).
-4. **Format bridges:** CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX are macOS native shells over `export_shell!`. Standalone is a CPAL window. The shell contract is [docs/SHELL.md](docs/SHELL.md).
+4. **Format bridges:** CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX are macOS native shells over `export_shell!`. A standalone build opens the editor in a window of its own, without audio. The shell contract is [docs/SHELL.md](docs/SHELL.md).
 5. **One editor in every format:** a plugin writes one `Editor` and passes `editor = make_editor` to the export macros. CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), VST3, Audio Unit and AAX all host it in a Rust `NSView`. See [docs/EDITOR.md](docs/EDITOR.md) and [`examples/editor`](examples/editor).
 
 ---
@@ -69,7 +69,7 @@ It combines:
    │                                   Format Target Bridges                                   │
    ├───────────────┬───────────────┬───────────────────────────┬───────────────┬───────────────┤
    │     CLAP      │     VST3      │      AU (Audio Unit)      │      AAX      │  Standalone   │
-   │ (Rust entry)  │ (native shell)│      (native shell)       │(native shell) │  (CPAL audio) │
+   │ (Rust entry)  │ (native shell)│      (native shell)       │(native shell) │ (editor only) │
    └───────────────┴───────────────┴───────────────────────────┴───────────────┴───────────────┘
 ```
 
@@ -79,12 +79,12 @@ It combines:
 
 | Crate | Role |
 |---|---|
-| [`openplugin`](crates/openplugin) | Top-level facade and prelude |
+| [`openplugin`](crates/openplugin) | Top-level facade, and a small prelude (the plugin and editor contracts, the descriptors, the export macros) |
 | [`openplugin-core`](crates/openplugin-core) | Core `Plugin` trait, `ParamInfo` (format and parse), tapers, transport, MIDI, the `Editor` contract, and text presets (`PresetBank`, `build::embed_files`) |
 | [`openplugin-dsp`](crates/openplugin-dsp) | Realtime-safe DSP: RBJ biquads, `BlockConvolver`, dynamics, saturation, VU metering. See [docs/CONVOLVE.md](docs/CONVOLVE.md) |
 | [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knob tiers, faceplates, meters), `SceneCanvas` (scene to pixels, cached plate layer), and the macOS `EditorView`. Drawing lives in GoodLookin DRI |
 | [`openplugin-targets`](crates/openplugin-targets) | CLAP and LV2 entries with their editors, the LV2 `.ttl` writer, and `export_shell!` with `op_editor_*`. See [docs/SHELL.md](docs/SHELL.md) |
-| [`openplugin-ffi`](crates/openplugin-ffi) | Rust host session and the `op_shell_*` ABI: parameter plane, scratch render, presets, OPST snapshot |
+| [`openplugin-host`](crates/openplugin-host) | Rust host session (`HostSession`): parameter plane, scratch render, presets, session state. Also holds the Rust side of the `op_shell_*` ABI |
 
 ---
 
@@ -115,23 +115,24 @@ static PARAMS: [ParamInfo; 2] = [
     ParamInfo::new("drive", "Drive", 1.0, 10.0, 1.0, Unit::None).with_taper(Taper::Log),
 ];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "com.vendor.saturator",
-    name: "Console Saturator",
-    vendor: "AudioCraft",
-    url: "https://example.com",
-    email: "support@example.com",
-    version: "1.0.0",
-    category: Category::Harmonic,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: true,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "com.vendor.saturator",
+    "Console Saturator",
+    "AudioCraft",
+    "1.0.0",
+    Category::Harmonic,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("support@example.com")
+.with_editor(true);
 ```
 
 ### 2. Implement DSP
 
 ```rust
+use openplugin::dsp::{saturate_sample, SaturationMode};
+
 pub struct SaturatorPlugin {
     linear_gain: f32,
     drive: f32,
@@ -170,7 +171,7 @@ impl Plugin for SaturatorPlugin {
         }
     }
 
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         for ch in io.iter_mut() {
             for sample in &mut ch[..frames] {
                 *sample = saturate_sample(*sample * self.linear_gain, self.drive, SaturationMode::Tape);
@@ -185,19 +186,21 @@ impl Plugin for SaturatorPlugin {
 Create authentic analogue console faceplates and hardware knobs without bitmap assets:
 
 ```rust
+use openplugin::dri::{draw_faceplate, draw_knob, draw_vu_meter, Color, DrawList, MeterStyle};
+
 impl SaturatorPlugin {
     pub fn render_gui(&self, dl: &mut DrawList) {
         // 1. Draw vintage British console chassis
-        draw_faceplate(dl, 320.0, 180.0, FaceplateStyle::BritishConsole);
+        draw_faceplate(dl, 320.0, 180.0, "Navy");
 
         // 2. Draw fluted Bakelite drive knob
         let drive_norm = PARAMS[1].to_normalized(self.drive);
-        draw_knob(dl, 80.0, 80.0, 32.0, drive_norm, "DRIVE", &PARAMS[1].format(self.drive), KnobStyle::Bakelite, Color::BAKELITE_BROWN);
+        draw_knob(dl, 80.0, 80.0, 32.0, drive_norm, "DRIVE", &PARAMS[1].format(self.drive), "Bk", Color::BAKELITE_BROWN);
 
         // 3. Draw output level knob
         let gain_db = 20.0 * self.linear_gain.log10();
         let gain_norm = PARAMS[0].to_normalized(gain_db);
-        draw_knob(dl, 240.0, 80.0, 32.0, gain_norm, "OUTPUT", &PARAMS[0].format(gain_db), KnobStyle::Brit, Color::BRIT_RED);
+        draw_knob(dl, 240.0, 80.0, 32.0, gain_norm, "OUTPUT", &PARAMS[0].format(gain_db), "Brit", Color::RED);
 
         // 4. Draw illuminated analog VU meter
         draw_vu_meter(dl, 130.0, 45.0, 60.0, 45.0, gain_db, MeterStyle::AnalogVu);
@@ -210,7 +213,7 @@ impl SaturatorPlugin {
 ## Target Format Support
 
 ### CLAP
-Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. Exposes standard C ABI via `openplugin_targets::clap`. With `export_clap!(P, editor = make_editor)` it also offers `clap.gui` on macOS. `text_to_value` reads choice names, On/Off and units (`ParamInfo::parse`).
+Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. `export_clap!(P)` exports the entry. With `export_clap!(P, editor = make_editor)` it also offers `clap.gui` on macOS. `text_to_value` reads choice names, On/Off and units (`ParamInfo::parse`).
 
 ### LV2
 `export_lv2!` gives two stereo audio ports each way (an instrument has outputs only) and one control port per parameter, then a `freeWheeling` port (`set_offline`), a MIDI/`time:Position` atom input when the plugin takes notes, a MIDI atom output when it sends them, and an `lv2:isSideChain` input per sidechain channel. Port order is in [docs/FORMATS.md](docs/FORMATS.md#lv2-ports). `editor = make_editor` adds a `ui:CocoaUI`. `lv2::write_bundle` writes `manifest.ttl` and the plugin `.ttl` from the parameter table. `Plugin::lv2_uri` sets a fixed URI.
@@ -225,7 +228,7 @@ A thin `AUEffectBase` adapter in `native/au` calls the same ABI. The proof loads
 An unsigned native adapter in `native/aax` links an external Avid SDK and calls the same ABI. The proof runs the process callback and checks the ACF exports. It is not a Pro Tools session, and the build does not sign or install the bundle. Set fixed IDs with `Plugin::aax_ids` before a release.
 
 ### Standalone
-Desktop application executable powered by `cpal` for zero-friction testing and live hardware performance.
+The plugin's own binary opens its editor in a window with `run_window` (`openplugin::dri::cocoa`, `win32` or `x11`), and `scripts/build_plugin.sh --standalone-bin` wraps it as an application. It opens no audio device: it is for working on the editor, not for performance.
 
 ---
 
@@ -245,7 +248,7 @@ Changes release by release: [CHANGELOG.md](CHANGELOG.md).
 
 What counts as a breaking change, and how versions and deprecations work: [docs/VERSIONING.md](docs/VERSIONING.md).
 
-Every public item with a keep, rename, hide or remove recommendation for the 1.0 freeze: [docs/API_REVIEW.md](docs/API_REVIEW.md).
+The API review for the 1.0 freeze, every public item with what was decided and done: [docs/API_REVIEW.md](docs/API_REVIEW.md). What is frozen: [docs/VERSIONING.md](docs/VERSIONING.md#the-frozen-surface).
 
 Guides for plugin developers: testing a plugin with the conformance kit and the benchmark harness, [docs/TESTING_PLUGINS.md](docs/TESTING_PLUGINS.md); making it cheap (real-time rules, denormals, vectorising, fast approximations, oversampling cost, with measured before/after examples), [docs/PERFORMANCE.md](docs/PERFORMANCE.md); and keeping it from breaking (stable filters, NaN policy, panics, threads, host behaviours, soak and fuzz, with the test that enforces each rule), [docs/STABILITY.md](docs/STABILITY.md). The measured examples are in [`examples/perf_guide`](examples/perf_guide).
 

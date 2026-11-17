@@ -10,8 +10,8 @@ mod shift;
 use std::sync::Arc;
 
 use openplugin_core::HostNotifier;
-use openplugin_ffi::shell::{self, ShellInstance, CHANGE_LATENCY, CHANGE_PARAM_INFO};
-use openplugin_ffi::FfiInstance;
+use openplugin_host::shell::{self, ShellInstance, CHANGE_LATENCY, CHANGE_PARAM_INFO};
+use openplugin_host::HostSession;
 use shift::{Calls, Shift, AFTER_LATENCY};
 
 const LOOKAHEAD: u32 = 0;
@@ -90,7 +90,7 @@ fn new_parameter_names_are_reported_once() {
 #[test]
 fn a_latency_that_moves_by_itself_is_reported() {
     let calls = Arc::new(Calls::default());
-    let ffi = FfiInstance::new(Box::new(Shift::new(calls.clone()).after_blocks(3)), 48_000.0, FRAMES, 2);
+    let ffi = HostSession::new(Box::new(Shift::new(calls.clone()).after_blocks(3)), 48_000.0, FRAMES, 2).unwrap();
     let (mut left, mut right) = (vec![0.0f32; FRAMES], vec![0.0f32; FRAMES]);
     assert!(ffi.process_stereo(&mut left, &mut right));
     assert!(ffi.process_stereo(&mut left, &mut right));
@@ -254,7 +254,7 @@ fn a_pointer_that_is_not_a_live_instance_reads_the_first_table() {
 #[test]
 fn a_rename_outside_a_block_is_read_before_it_is_reported() {
     let shared = Arc::new(FlipShared::default());
-    let ffi = FfiInstance::new(Box::new(Flip(shared.clone())), 48_000.0, FRAMES, 2);
+    let ffi = HostSession::new(Box::new(Flip(shared.clone())), 48_000.0, FRAMES, 2).unwrap();
     assert_eq!(ffi.current_info().params[0].name, "Lookahead");
     shared.renamed.store(true, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(ffi.take_changes(), 0, "a table the plugin never announced is not read");
@@ -285,7 +285,7 @@ impl openplugin_core::Plugin for Flip {
     fn param(&self, _id: &str) -> Option<f32> {
         Some(0.0)
     }
-    fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {}
+    fn process(&mut self, _io: &mut [&mut [f32]], _frames: usize) {}
     fn set_host_notifier(&mut self, notifier: HostNotifier) {
         *self.0.notifier.lock().unwrap() = Some(notifier);
     }
@@ -313,9 +313,9 @@ fn the_largest_latency_and_a_read_that_is_not_the_hosts() {
 /// A plugin that declares no largest latency: its latency is the largest.
 #[test]
 fn without_a_declaration_the_largest_latency_is_the_latency() {
-    let ffi = FfiInstance::new(Box::new(Shift::default()), 48_000.0, FRAMES, 2);
+    let ffi = HostSession::new(Box::new(Shift::default()), 48_000.0, FRAMES, 2).unwrap();
     assert_eq!(ffi.max_latency(), shift::MAX_LOOKAHEAD as u32);
-    let quiet = FfiInstance::new(Box::new(NoMax), 48_000.0, FRAMES, 2);
+    let quiet = HostSession::new(Box::new(NoMax), 48_000.0, FRAMES, 2).unwrap();
     assert_eq!(quiet.max_latency(), 7);
 }
 
@@ -333,7 +333,7 @@ impl openplugin_core::Plugin for NoMax {
     }
     fn prepare(&mut self, _sample_rate: f32, _max_block: usize, _channels: usize) {}
     fn reset(&mut self) {}
-    fn process(&mut self, _io: &mut [Vec<f32>], _frames: usize) {}
+    fn process(&mut self, _io: &mut [&mut [f32]], _frames: usize) {}
     fn latency(&self) -> usize {
         7
     }

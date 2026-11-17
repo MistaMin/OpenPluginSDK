@@ -73,6 +73,7 @@ fn latin1(text: &str) -> Vec<u8> {
 impl EditorView {
     /// The text the view has on the clipboard: what it last put there, until
     /// another client takes the clipboard over.
+    #[doc(hidden)]
     pub fn clipboard_text(&self) -> Option<String> {
         self.clip.owned.clone()
     }
@@ -80,6 +81,7 @@ impl EditorView {
     /// Put `text` on the clipboard: the view owns the selection and serves
     /// the text from then on. False when the view has no window yet or the
     /// server did not make it the owner.
+    #[doc(hidden)]
     pub fn set_clipboard_text(&mut self, text: &str) -> bool {
         if !self.usable() {
             return false;
@@ -98,6 +100,7 @@ impl EditorView {
     /// Use another selection than `CLIPBOARD` (by atom name) from now on.
     /// For tests, which then leave the user's clipboard alone. False when the
     /// server gives no atom.
+    #[doc(hidden)]
     pub fn set_clipboard_selection(&mut self, name: &str) -> bool {
         let atom = self.atom(name.as_bytes());
         if atom == 0 {

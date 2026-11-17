@@ -4,7 +4,7 @@ members = [
     "crates/openplugin-dsp",
     "crates/openplugin-dri",
     "crates/openplugin-targets",
-    "crates/openplugin-ffi",
+    "crates/openplugin-host",
     "crates/openplugin-testing",
     "crates/openplugin",
     "crates/openplugin-port",
@@ -41,7 +41,7 @@ openplugin-core = { path = "crates/openplugin-core", version = "1.0.0-beta" }
 openplugin-dsp = { path = "crates/openplugin-dsp", version = "1.0.0-beta" }
 openplugin-dri = { path = "crates/openplugin-dri", version = "1.0.0-beta" }
 openplugin-targets = { path = "crates/openplugin-targets", version = "1.0.0-beta" }
-openplugin-ffi = { path = "crates/openplugin-ffi", version = "1.0.0-beta" }
+openplugin-host = { path = "crates/openplugin-host", version = "1.0.0-beta" }
 openplugin-testing = { path = "crates/openplugin-testing", version = "1.0.0-beta" }
 openplugin = { path = "crates/openplugin", version = "1.0.0-beta" }
 goodlookindri = { path = "../GoodLookinDri", version = "0.2.0" }
@@ -50,7 +50,6 @@ goodlookindri-shell = { path = "../GoodLookinDri/shell", version = "0.2.0" }
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 rustfft = "6.2"
-raw-window-handle = "0.6"
 
 [profile.release]
 opt-level = 3

@@ -10,18 +10,13 @@
 //!
 //! `new` and `set_sample_rate` allocate (they design the filter). The two
 //! process calls do not, and process the frames both buffers can hold.
+#![allow(deprecated)] // this module defines the deprecated items
 
 use crate::halfband_min::MinPhaseHalfband;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OversampleFactor {
-    None = 1,
-    X2 = 2,
-    X4 = 4,
-}
-
 /// 2x up and down sampling with one minimum-phase anti-imaging / anti-alias filter.
 #[derive(Debug, Clone)]
+#[deprecated(since = "1.0.0", note = "use `MinPhaseHalfband`, or `LinearPhaseOversampler` for linear phase")]
 pub struct Oversampler2x {
     filter: MinPhaseHalfband,
 }

@@ -36,18 +36,16 @@ fn armed(mode: u32) -> bool {
 
 pub static PARAMS: [ParamInfo; 1] = [ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None)];
 
-pub static INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:test-bomb",
-    name: "Test Bomb",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Utility,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+pub static INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:test-bomb",
+    "Test Bomb",
+    "Test",
+    "0.1.0",
+    Category::Utility,
+    &PARAMS,
+)
+.with_url("https://example.com")
+.with_email("a@b.c");
 
 #[derive(Default)]
 pub struct Bomb {
@@ -103,7 +101,7 @@ impl Plugin for Bomb {
         self.level = f32::from_le_bytes(bytes);
         true
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         if armed(PROCESS) {
             panic!("bomb: process");
         }

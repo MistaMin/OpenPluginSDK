@@ -1,4 +1,4 @@
-use openplugin_core::{AutomationLane, CurveInterpolation};
+use openplugin_core::{AutomationLane, AutomationInterpolation};
 
 fn assert_curve(lane: &AutomationLane, samples: &[(u64, f32)]) {
     for &(sample, value) in samples {
@@ -31,7 +31,7 @@ fn linear_default_then_discrete_curve() {
         ],
     );
 
-    lane.set_interpolation(CurveInterpolation::Discrete);
+    lane.set_interpolation(AutomationInterpolation::Discrete);
     assert_curve(
         &lane,
         &[

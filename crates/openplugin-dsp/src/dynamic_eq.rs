@@ -55,6 +55,7 @@ const SINE_PEAK_DB: f32 = 3.0103;
 
 /// Shape of the band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DynEqKind {
     Bell,
     LowShelf,
@@ -63,6 +64,7 @@ pub enum DynEqKind {
 
 /// When the band reacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DynEqMode {
     /// Engages as the detected level rises above the threshold.
     Above,

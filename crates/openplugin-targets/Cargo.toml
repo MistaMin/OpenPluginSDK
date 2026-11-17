@@ -1,6 +1,6 @@
 [package]
 name = "openplugin-targets"
-description = "Export targets and format bridges for OpenPluginSDK: CLAP, VST3, AU, AAX, Standalone"
+description = "Format entries for OpenPluginSDK: CLAP and LV2 in Rust, and the C ABI for the VST3, Audio Unit and AAX shells"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,8 +15,7 @@ categories.workspace = true
 
 [dependencies]
 openplugin-core = { workspace = true }
-openplugin-ffi = { workspace = true }
-log = { workspace = true }
+openplugin-host = { workspace = true }
 
 # The Cocoa editor view is the only user of the DRI shell.
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -33,12 +32,3 @@ openplugin-dri = { workspace = true }
 [dev-dependencies]
 openplugin-dsp = { workspace = true }
 openplugin-testing = { workspace = true }
-
-[features]
-default = ["clap", "vst3", "au", "aax", "standalone"]
-clap = []
-vst3 = []
-au = []
-aax = []
-# No device I/O yet: the runner has no audio backend, so the feature gates no extra dependency.
-standalone = []

@@ -3,8 +3,10 @@
 //! `dasp_window` and `dasp_rms` (MIT OR Apache-2.0) are these two shapes.
 //! The RMS window is allocated in [`WindowRms::new`]. `push` does not allocate.
 //! This is a sliding average of squares, not the ballistic meter in `MeterBank`.
+#![allow(deprecated)] // this module defines the deprecated items
 
 /// Raised cosine. `phase` is the 0..1 position in the window.
+#[deprecated(since = "1.0.0", note = "use `WindowKind::Hann`")]
 pub fn hann(phase: f32) -> f32 {
     if !phase.is_finite() {
         return 0.0;

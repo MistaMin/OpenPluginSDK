@@ -1,8 +1,8 @@
 //! One-pole parameter smoother.
 //!
-//! OpenGridder ramps console gains with a 10 ms one-pole so a host parameter
-//! event does not step the audio. The coefficient is computed in `set_time`,
-//! which is not realtime. [`OnePole::next`] only multiplies and adds.
+//! A 10 ms one-pole on a gain keeps a host parameter event from stepping the
+//! audio. The coefficient is computed in `set_time`,
+//! which is not realtime. [`OnePole::next_value`] only multiplies and adds.
 
 #[derive(Clone, Copy, Debug)]
 pub struct OnePole {
@@ -44,7 +44,7 @@ impl OnePole {
     }
 
     #[inline]
-    pub fn next(&mut self, target: f32) -> f32 {
+    pub fn next_value(&mut self, target: f32) -> f32 {
         let target = if target.is_finite() { target } else { self.y };
         self.y += self.coeff * (target - self.y);
         self.y
@@ -62,10 +62,10 @@ mod tests {
         pole.reset(0.0);
         let mut last = 0.0;
         for _ in 0..48_000 {
-            last = pole.next(1.0);
+            last = pole.next_value(1.0);
         }
         assert!((last - 1.0).abs() < 1e-3);
-        let held = pole.next(f32::NAN);
+        let held = pole.next_value(f32::NAN);
         assert!((held - last).abs() < 1e-4);
     }
 
@@ -73,6 +73,6 @@ mod tests {
     fn zero_time_snaps() {
         let mut pole = OnePole::new();
         pole.set_time(48_000.0, 0.0);
-        assert_eq!(pole.next(0.25), 0.25);
+        assert_eq!(pole.next_value(0.25), 0.25);
     }
 }
