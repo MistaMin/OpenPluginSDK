@@ -169,7 +169,7 @@ Plugin traits and descriptors, the host plane, state, MIDI, layouts, the editor 
 
 | Item | Rec. | Reason | Applied |
 |---|---|---|---|
-| `ParamPlane` (new, len, is_empty, infos, revision, store, store_id, load, load_id, seed_from), `ParamCursor` (new, invalidate, pull) | keep, mark | Lock-free parameter exchange between threads; a Rust host needs it and `Plugin::editor_state`-style code reads it. `store`/`load` by index, `*_id` by name: clear. | Kept; the module docs state the index and id forms. |
+| `ParamPlane` (new, len, is_empty, infos, revision, store, store_id, load, load_id, seed_from), `ParamCursor` (new, invalidate, pull) | keep, mark | Lock-free parameter exchange between threads; a Rust host needs it and `Plugin::editor_state`-style code reads it. `store`/`load` by index, `*_id` by name: clear. | Kept; the module docs state the index and id forms. `ParamCursor::pulled`, `mark_pulled` and `pull_index` (added after the review, used by the CLAP bridge) are kept public: additive, and a Rust host applying one parameter needs the same. |
 
 ### `preset`
 
