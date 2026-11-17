@@ -75,6 +75,8 @@ use openplugin_core::{
 
 use openplugin_core::EditorState;
 
+use crate::clap::{enter_state, AudioGate, GATE_AUDIO};
+
 type CreateFn = fn() -> Box<dyn Plugin>;
 
 static CREATOR: Mutex<Option<CreateFn>> = Mutex::new(None);
@@ -191,6 +193,9 @@ struct Urids {
     frame: u32,
     object: u32,
     blank: u32,
+    /// `state:interface`: the key the chunk is stored under, and its type.
+    state_chunk: u32,
+    chunk: u32,
 }
 
 #[repr(C)]
@@ -232,6 +237,8 @@ impl Urids {
             frame: get(c"http://lv2plug.in/ns/ext/time#frame"),
             object: get(c"http://lv2plug.in/ns/ext/atom#Object"),
             blank: get(c"http://lv2plug.in/ns/ext/atom#Blank"),
+            state_chunk: get(STATE_KEY),
+            chunk: get(c"http://lv2plug.in/ns/ext/atom#Chunk"),
         }
     }
 
@@ -757,6 +764,11 @@ struct Instance {
     /// [`Plugin::flush_denormals`], read once at instantiation: `run` holds a
     /// [`DenormalGuard`] while it is inside the plugin.
     flush_denormals: bool,
+    /// `!Plugin::state_is_parameters_only()`, read once: only then does `state:interface`
+    /// call `save_state` and `load_state`.
+    has_chunk: bool,
+    /// Keeps `run` and a `state:interface` call out of the plugin object at the same time.
+    gate: AtomicU32,
 }
 
 const PREPARED: usize = 8192;
@@ -841,6 +853,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
     let editor_state = inner.editor_state();
     let mpe = MpeReceiver::for_plugin(inner.as_ref());
     let flush_denormals = inner.flush_denormals();
+    let has_chunk = !inner.state_is_parameters_only();
     let controls = vec![std::ptr::null(); plane.len()];
     let sidechain = map.sidechain as usize;
     Some(Box::new(Instance {
@@ -872,6 +885,8 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
         handle_key: 0,
         mpe,
         flush_denormals,
+        has_chunk,
+        gate: AtomicU32::new(0),
     }))
 }
 
@@ -1133,6 +1148,14 @@ extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
     if instance.is_null() {
         return;
     }
+    // Only the gate is touched before the block owns the instance: `state:interface`
+    // `save` may be inside the plugin object, and then this block passes the input through.
+    let gate = unsafe { &*std::ptr::addr_of!((*(instance as *const Instance)).gate) };
+    if gate.compare_exchange(0, GATE_AUDIO, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        dry_block(instance as *const Instance, sample_count as usize);
+        return;
+    }
+    let _held = AudioGate(gate);
     if unsafe { &*(instance as *const Instance) }.poisoned {
         silence_outputs(instance as *mut Instance, sample_count as usize);
         return;
@@ -1147,6 +1170,22 @@ extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
             instance.poisoned = true;
         }
         silence_outputs(instance as *mut Instance, sample_count as usize);
+    }
+}
+
+/// Copy the host's inputs to its outputs (zero without an input), reading only the ports.
+fn dry_block(instance: *const Instance, frames: usize) {
+    let ports = unsafe { *std::ptr::addr_of!((*instance).ports) };
+    for (src, dst) in ports[..2].iter().zip(&ports[2..]) {
+        if dst.is_null() {
+            continue;
+        }
+        // The ports may be the same buffer (in place), so `copy`, not `copy_nonoverlapping`.
+        if src.is_null() {
+            unsafe { std::ptr::write_bytes(*dst, 0, frames) };
+        } else {
+            unsafe { std::ptr::copy(*src, *dst, frames) };
+        }
     }
 }
 
@@ -1234,10 +1273,125 @@ extern "C" fn lv2_cleanup(instance: *mut c_void) {
 
 extern "C" fn lv2_extension(uri: *const c_char) -> *const c_void {
     guarded(std::ptr::null(), || {
-        if !uri.is_null() && unsafe { CStr::from_ptr(uri) }.to_bytes() == WORKER_INTERFACE {
-            return (&WORKER_IFACE as *const WorkerInterface).cast();
+        if uri.is_null() {
+            return std::ptr::null();
         }
-        std::ptr::null()
+        match unsafe { CStr::from_ptr(uri) }.to_bytes() {
+            WORKER_INTERFACE => (&WORKER_IFACE as *const WorkerInterface).cast(),
+            STATE_INTERFACE => (&STATE_IFACE as *const StateInterface).cast(),
+            _ => std::ptr::null(),
+        }
+    })
+}
+
+const STATE_INTERFACE: &[u8] = b"http://lv2plug.in/ns/ext/state#interface";
+/// The one property a plugin's chunk is stored under.
+const STATE_KEY: &CStr = c"urn:openplugin:state#chunk";
+const STATE_SUCCESS: u32 = 0;
+const STATE_ERR_UNKNOWN: u32 = 1;
+const STATE_ERR_BAD_TYPE: u32 = 2;
+const STATE_ERR_NO_FEATURE: u32 = 4;
+/// `LV2_STATE_IS_POD | LV2_STATE_IS_PORTABLE`: plain bytes, the same on every machine.
+const STATE_FLAGS: u32 = 1 | 2;
+
+type StoreFn = unsafe extern "C" fn(*mut c_void, u32, *const c_void, usize, u32, u32) -> u32;
+type RetrieveFn = unsafe extern "C" fn(*mut c_void, u32, *mut usize, *mut u32, *mut u32) -> *const c_void;
+
+#[repr(C)]
+struct StateInterface {
+    save: unsafe extern "C" fn(*mut c_void, Option<StoreFn>, *mut c_void, u32, *const *const Lv2Feature) -> u32,
+    restore: unsafe extern "C" fn(*mut c_void, Option<RetrieveFn>, *mut c_void, u32, *const *const Lv2Feature) -> u32,
+}
+
+static STATE_IFACE: StateInterface = StateInterface { save: lv2_state_save, restore: lv2_state_restore };
+
+/// The instance behind a state call, if it has a chunk and the host mapped its URIs.
+/// Read through field pointers: `save` may run while `run` owns the instance.
+unsafe fn state_target(handle: *mut c_void) -> Result<Option<*mut Instance>, u32> {
+    let raw = handle as *mut Instance;
+    if raw.is_null() || unsafe { *std::ptr::addr_of!((*raw).magic) } != MAGIC {
+        return Err(STATE_ERR_UNKNOWN);
+    }
+    if !unsafe { *std::ptr::addr_of!((*raw).has_chunk) } {
+        return Ok(None);
+    }
+    let urids = unsafe { *std::ptr::addr_of!((*raw).urids) };
+    if urids.state_chunk == 0 || urids.chunk == 0 {
+        return Err(STATE_ERR_NO_FEATURE);
+    }
+    Ok(Some(raw))
+}
+
+/// `state:interface` `save`: the plugin's chunk as one `atom:Chunk` property. A plugin
+/// without a chunk stores nothing; the control ports are its state.
+unsafe extern "C" fn lv2_state_save(
+    handle: *mut c_void,
+    store: Option<StoreFn>,
+    store_handle: *mut c_void,
+    _flags: u32,
+    _features: *const *const Lv2Feature,
+) -> u32 {
+    guarded_on(handle, STATE_ERR_UNKNOWN, || {
+        let raw = match unsafe { state_target(handle) } {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return STATE_SUCCESS,
+            Err(status) => return status,
+        };
+        let Some(store) = store else { return STATE_ERR_UNKNOWN };
+        let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
+        let Some(held) = enter_state(gate) else { return STATE_ERR_UNKNOWN };
+        let chunk = unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.save_state();
+        drop(held);
+        let Some(bytes) = chunk else { return STATE_SUCCESS };
+        let urids = unsafe { *std::ptr::addr_of!((*raw).urids) };
+        unsafe { store(store_handle, urids.state_chunk, bytes.as_ptr().cast(), bytes.len(), urids.chunk, STATE_FLAGS) }
+    })
+}
+
+/// `state:interface` `restore`: hands a stored chunk to `load_state`. A session without
+/// one (saved before this, or by a plugin without a chunk) leaves the plugin as it is.
+unsafe extern "C" fn lv2_state_restore(
+    handle: *mut c_void,
+    retrieve: Option<RetrieveFn>,
+    retrieve_handle: *mut c_void,
+    _flags: u32,
+    _features: *const *const Lv2Feature,
+) -> u32 {
+    guarded_on(handle, STATE_ERR_UNKNOWN, || {
+        let raw = match unsafe { state_target(handle) } {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return STATE_SUCCESS,
+            Err(status) => return status,
+        };
+        let Some(retrieve) = retrieve else { return STATE_ERR_UNKNOWN };
+        let urids = unsafe { *std::ptr::addr_of!((*raw).urids) };
+        let (mut size, mut kind, mut flags) = (0usize, 0u32, 0u32);
+        let value = unsafe { retrieve(retrieve_handle, urids.state_chunk, &mut size, &mut kind, &mut flags) };
+        if value.is_null() {
+            return STATE_SUCCESS;
+        }
+        if kind != urids.chunk {
+            return STATE_ERR_BAD_TYPE;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(value as *const u8, size) };
+        // `restore` is never called during `run`; the gate only guards a host that does.
+        let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
+        let Some(_held) = enter_state(gate) else { return STATE_ERR_UNKNOWN };
+        let instance = unsafe { &mut *raw };
+        // Loaders made while loading run on the host's worker, as at instantiation.
+        let loaded = match instance.schedule {
+            Some(_) => worker::with_executor(Arc::new(BridgeHandle(instance.bridge.clone())), || {
+                instance.inner.load_state(bytes)
+            }),
+            None => instance.inner.load_state(bytes),
+        };
+        if !loaded {
+            return STATE_ERR_UNKNOWN;
+        }
+        // The chunk changed the plugin directly: republish its values to the plane.
+        instance.plane.seed_from(instance.inner.as_ref());
+        instance.cursor.invalidate();
+        STATE_SUCCESS
     })
 }
 
@@ -1685,6 +1839,7 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
         ("pprop", "http://lv2plug.in/ns/ext/port-props#"),
         ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
         ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
+        ("state", "http://lv2plug.in/ns/ext/state#"),
         ("time", "http://lv2plug.in/ns/ext/time#"),
         ("ui", "http://lv2plug.in/ns/extensions/ui#"),
         ("units", "http://lv2plug.in/ns/extensions/units#"),
@@ -1712,7 +1867,7 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
     let _ = writeln!(out, "    lv2:minorVersion {minor} ;");
     let _ = writeln!(out, "    lv2:microVersion {micro} ;");
     out.push_str("    lv2:optionalFeature lv2:hardRTCapable , work:schedule ;\n");
-    out.push_str("    lv2:extensionData work:interface ;\n");
+    out.push_str("    lv2:extensionData work:interface , state:interface ;\n");
     let map = PortMap::of(plugin);
     if map.notes_in || map.notes_out {
         out.push_str("    lv2:requiredFeature urid:map ;\n");

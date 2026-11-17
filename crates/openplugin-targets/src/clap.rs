@@ -804,13 +804,13 @@ fn flushes(plugin: *const clap_plugin) -> bool {
     !data.is_null() && unsafe { *std::ptr::addr_of!((*data).flush_denormals) }
 }
 
-const GATE_AUDIO: u32 = 1;
+pub(crate) const GATE_AUDIO: u32 = 1;
 const GATE_STATE: u32 = 2;
 /// How long a state call waits for a block in flight before it gives up.
 const STATE_WAIT: Duration = Duration::from_millis(250);
 
 /// Held by the audio thread for the length of one block.
-struct AudioGate<'a>(&'a AtomicU32);
+pub(crate) struct AudioGate<'a>(pub(crate) &'a AtomicU32);
 
 impl Drop for AudioGate<'_> {
     fn drop(&mut self) {
@@ -819,7 +819,7 @@ impl Drop for AudioGate<'_> {
 }
 
 /// Held by a state call while it is inside the plugin object.
-struct StateGate<'a>(&'a AtomicU32);
+pub(crate) struct StateGate<'a>(&'a AtomicU32);
 
 impl Drop for StateGate<'_> {
     fn drop(&mut self) {
@@ -830,7 +830,7 @@ impl Drop for StateGate<'_> {
 /// Takes the plugin object for a state call. Announces itself first, so a block that
 /// starts from now on is skipped (the audio thread never waits), then waits a bounded
 /// time for the block already running to end. `None` after `STATE_WAIT`.
-fn enter_state(gate: &AtomicU32) -> Option<StateGate<'_>> {
+pub(crate) fn enter_state(gate: &AtomicU32) -> Option<StateGate<'_>> {
     gate.fetch_or(GATE_STATE, Ordering::AcqRel);
     let deadline = Clock::now() + STATE_WAIT;
     let mut spins = 0u32;
