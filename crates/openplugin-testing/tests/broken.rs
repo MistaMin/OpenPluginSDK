@@ -365,7 +365,7 @@ fn the_bench_keeps_an_instrument_playing() {
         fn param(&self, _: &str) -> Option<f32> {
             Some(1.0)
         }
-        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
         fn note_on(&mut self, _: usize, _: u8, _: u8) {
             NOTES.fetch_add(1, Ordering::Relaxed);
         }

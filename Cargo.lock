@@ -314,11 +314,11 @@ dependencies = [
 
 [[package]]
 name = "goodlookindri"
-version = "0.2.1"
+version = "0.2.0"
 
 [[package]]
 name = "goodlookindri-shell"
-version = "0.2.1"
+version = "0.2.0"
 dependencies = [
  "fontdue",
  "goodlookindri",
