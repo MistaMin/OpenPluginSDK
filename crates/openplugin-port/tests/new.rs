@@ -107,7 +107,7 @@ fn scan_then_new_gives_a_crate_that_builds_and_nulls_against_the_original() {
     assert!(read("Cargo.toml").contains("name = \"example-gain\""));
     let params = read("src/params.rs");
     assert!(params.contains(r#"ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),"#), "{params}");
-    assert!(params.contains(r#"id: "com.opengrid.example.editor-gain","#), "{params}");
+    assert!(params.contains(r#"PluginInfo::new("com.opengrid.example.editor-gain","#), "{params}");
     let lib = read("src/lib.rs");
     assert!(lib.contains("pub struct ExampleGainPort"));
     assert!(lib.contains("TODO(porting): no AAX ids in the scan"), "a CLAP scan has no AAX ids: {lib}");
@@ -180,7 +180,7 @@ fn new_refuses_what_it_cannot_read() {
 
 use example_pinned::PinnedA;
 use openplugin_core::Plugin;
-use openplugin_ffi::shell::{self, AU_MANUFACTURER, AU_SUBTYPE, HOST_VST3, OpShellInfo};
+use openplugin_host::shell::{self, AU_MANUFACTURER, AU_SUBTYPE, HOST_VST3, OpShellInfo};
 use openplugin_port::manifest::{self as mf, SAMPLE_POINTS, SCHEMA_VERSION, hex16};
 
 /// The ids a plugin's shell exports report: what the VST3, Audio Unit and AAX

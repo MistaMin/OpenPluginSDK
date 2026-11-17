@@ -366,7 +366,7 @@ Added after the review and publishable, so part of the surface.
 
 ### `openplugin-port`
 
-Not published (`publish = false`): a command-line tool and its library, outside the frozen surface. The table it writes uses the frozen API (`PluginInfo::new`, `with_flag`).
+Not published (`publish = false`): a command-line tool and its library, outside the frozen surface. The table it writes uses the frozen API (`PluginInfo::new`, `with_flag`), and so does the crate `openplugin-port new` writes (`scaffold`): `process` takes channel slices, and the identity pins and state helpers are imported by name beside the prelude.
 
 ## What was not reviewed
 
