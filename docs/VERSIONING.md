@@ -63,7 +63,7 @@ Anything a host stores for a plugin and hands back later, possibly years later, 
 |---|---|---|
 | OPST parameter snapshot | `encode_params` / `decode_params`, CLAP and LV2 state, shell parameter state | magic `OPST`; version 1 (`SNAPSHOT_VERSION`, positional) for a table without identity pins, version 2 (`SNAPSHOT_VERSION_KEYED`, each value under its parameter's string id) for a table with pins. Both are read; a version 1 plane with fewer values than an unpinned table has parameters is an older build's and fills the first parameters |
 | VST3 component state head | `native/vst3` `getState` / `setState` / `setComponentState` | version 1 (positional) without pinned parameter ids, version 2 (by `ParamID`) with them; a pinned shell reads both, and an unpinned one reads a version 1 head with fewer values as an older build's |
-| OPCH session chunk | `encode_session` / `decode_session`, `op_shell_save_state`, `HostSession::save_bytes` | magic `OPCH`, version 1 (`SESSION_VERSION`) |
+| OPCH session chunk | `encode_session` / `decode_session`, `op_shell_save_state`, `HostSession::save_bytes`, CLAP state of a plugin with a chunk | magic `OPCH`, version 1 (`SESSION_VERSION`) |
 | AAX state chunk | `native/aax` | version 1 (version 2 is planned in [ROADMAP.md](ROADMAP.md)) |
 | Preset text | `key = value` files read by `PresetBank` and `preset::parse` | the format of the `openplugin_core::preset` module. It has no version line and is frozen as it is: a new key or value form may be accepted, and every file that parses today keeps parsing to the same values |
 

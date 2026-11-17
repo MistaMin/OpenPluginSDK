@@ -20,6 +20,8 @@ pub mod denormal;
 pub mod editor;
 pub mod expression;
 pub mod foreign_state;
+#[doc(hidden)]
+pub mod gate;
 pub mod identity;
 pub mod layout;
 pub mod midi;
@@ -47,6 +49,8 @@ pub use editor::{
 };
 #[doc(hidden)]
 pub use editor::{GestureQueue, ValueMirror};
+#[doc(hidden)]
+pub use gate::{has_state_chunk, AudioHold, PluginGate, StateHold};
 pub use expression::{Expression, ExpressionSet, NoteRef, VoiceInfo};
 pub use identity::{AuIds, ParamIdMap, ParamPins, PinError, PinFormat, Vst3Ids};
 pub use mpe::{MpeReceiver, MpeZones};
@@ -1065,19 +1069,19 @@ pub trait Plugin: Send + 'static {
     ///
     /// Return `true` only when [`Plugin::save_state`] always returns `None`
     /// and [`Plugin::load_state`] is never needed: nothing outside the
-    /// parameter values has to be saved or restored. The default is `false`,
-    /// because the SDK cannot tell from outside whether a plugin overrides
-    /// the two state methods, and a wrong guess would silently drop a
-    /// plugin's chunk.
+    /// parameter values has to be saved or restored. A plugin that keeps the
+    /// default `save_state` need not override this: the SDK also treats a
+    /// plugin as parameters-only when its `save_state` returns `None` on the
+    /// fresh instance ([`has_state_chunk`]).
     ///
-    /// The shells (VST3, Audio Unit, AAX) save and load state from a host
-    /// thread while the audio thread may be running. A plugin that answers
-    /// `false` has its state methods called on the plugin object, so a block
-    /// that starts during a save or load is passed through unprocessed (a
-    /// dry block). A plugin that answers `true` is never touched by a save
-    /// or load: the SDK reads and writes the parameter values it already
-    /// shares with the audio thread, so no block is skipped. The engine
-    /// picks up loaded values on its next block.
+    /// The format entries save and load state from a host thread while the
+    /// audio thread may be running. A plugin with a chunk has its state
+    /// methods called on the plugin object, so a block that starts during a
+    /// save or load is passed through unprocessed (a dry block; its notes and
+    /// MIDI are delivered at the start of the next block). A parameters-only
+    /// plugin is never touched by a save or load: the SDK reads and writes
+    /// the parameter values it already shares with the audio thread, so no
+    /// block is skipped. The engine picks up loaded values on its next block.
     ///
     /// With `true`, a chunk found in a saved session is ignored; the
     /// parameter values are still restored. The answer must not change
@@ -1086,7 +1090,14 @@ pub trait Plugin: Send + 'static {
         false
     }
 
-    /// Serializes plugin state into an opaque byte buffer.
+    /// Serializes plugin state into an opaque byte buffer. The SDK saves the
+    /// parameter values beside it, so the chunk need not hold them.
+    ///
+    /// A plugin that ever saves a chunk must return `Some` from a newly
+    /// constructed instance, before `prepare`: the format entries call this
+    /// once at creation, and a plugin that answers `None` then is treated as
+    /// parameters-only for its whole life. Its `save_state` and `load_state`
+    /// are not called again.
     fn save_state(&mut self) -> Option<Vec<u8>> {
         None
     }

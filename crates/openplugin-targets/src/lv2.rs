@@ -71,12 +71,12 @@ use openplugin_core::DenormalGuard;
 use openplugin_core::{
     Channels, ChannelsMut,
     sample_rate_supported, Category, EditorFactory, IoConfig, MeterFrame, ParamCursor, ParamInfo, ParamPlane,
-    Plugin, Seqlock, Taper, Transport, Unit,
+    Plugin, PluginGate, Seqlock, Taper, Transport, Unit,
 };
 
 use openplugin_core::EditorState;
 
-use crate::clap::{enter_state, AudioGate, GATE_AUDIO};
+use crate::clap::STATE_WAIT;
 
 type CreateFn = fn() -> Box<dyn Plugin>;
 
@@ -772,11 +772,11 @@ struct Instance {
     /// [`Plugin::flush_denormals`], read once at instantiation: `run` holds a
     /// [`DenormalGuard`] while it is inside the plugin.
     flush_denormals: bool,
-    /// `!Plugin::state_is_parameters_only()`, read once: only then does `state:interface`
+    /// [`openplugin_core::has_state_chunk`], asked once: only then does `state:interface`
     /// call `save_state` and `load_state`.
     has_chunk: bool,
     /// Keeps `run` and a `state:interface` call out of the plugin object at the same time.
-    gate: AtomicU32,
+    gate: PluginGate,
 }
 
 const PREPARED: usize = 8192;
@@ -861,7 +861,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
     let editor_state = inner.editor_state();
     let mpe = MpeReceiver::for_plugin(inner.as_ref());
     let flush_denormals = inner.flush_denormals();
-    let has_chunk = !inner.state_is_parameters_only();
+    let has_chunk = openplugin_core::has_state_chunk(inner.as_mut());
     let controls = vec![std::ptr::null(); plane.len()];
     let sidechain = map.sidechain as usize;
     Some(Box::new(Instance {
@@ -894,7 +894,7 @@ fn new_instance(sample_rate: f64, features: *const *const Lv2Feature) -> Option<
         mpe,
         flush_denormals,
         has_chunk,
-        gate: AtomicU32::new(0),
+        gate: PluginGate::new(),
     }))
 }
 
@@ -1160,11 +1160,10 @@ extern "C" fn lv2_run(instance: *mut c_void, sample_count: u32) {
     // Only the gate is touched before the block owns the instance: `state:interface`
     // `save` may be inside the plugin object, and then this block passes the input through.
     let gate = unsafe { &*std::ptr::addr_of!((*(instance as *const Instance)).gate) };
-    if gate.compare_exchange(0, GATE_AUDIO, Ordering::Acquire, Ordering::Relaxed).is_err() {
+    let Some(_held) = gate.enter_audio() else {
         dry_block(instance as *const Instance, sample_count as usize);
         return;
-    }
-    let _held = AudioGate(gate);
+    };
     if unsafe { &*(instance as *const Instance) }.poisoned {
         silence_outputs(instance as *mut Instance, sample_count as usize);
         return;
@@ -1348,7 +1347,7 @@ unsafe extern "C" fn lv2_state_save(
         };
         let Some(store) = store else { return STATE_ERR_UNKNOWN };
         let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
-        let Some(held) = enter_state(gate) else { return STATE_ERR_UNKNOWN };
+        let Some(held) = gate.enter_state(STATE_WAIT) else { return STATE_ERR_UNKNOWN };
         let chunk = unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.save_state();
         drop(held);
         let Some(bytes) = chunk else { return STATE_SUCCESS };
@@ -1385,7 +1384,7 @@ unsafe extern "C" fn lv2_state_restore(
         let bytes = unsafe { std::slice::from_raw_parts(value as *const u8, size) };
         // `restore` is never called during `run`; the gate only guards a host that does.
         let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
-        let Some(_held) = enter_state(gate) else { return STATE_ERR_UNKNOWN };
+        let Some(_held) = gate.enter_state(STATE_WAIT) else { return STATE_ERR_UNKNOWN };
         let instance = unsafe { &mut *raw };
         // Loaders made while loading run on the host's worker, as at instantiation.
         let loaded = match instance.schedule {

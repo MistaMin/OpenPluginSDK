@@ -31,6 +31,8 @@ pub static IN_SAVE: AtomicBool = AtomicBool::new(false);
 pub static HOLD_PROCESS: AtomicBool = AtomicBool::new(false);
 /// Set by `process` once it is running.
 pub static IN_PROCESS: AtomicBool = AtomicBool::new(false);
+/// The notes the plugin was given, oldest first, two bits each: 1 a note-on, 2 a note-off.
+pub static NOTE_TRACE: AtomicU32 = AtomicU32::new(0);
 /// Times `load_state` ran.
 pub static LOADS: AtomicU32 = AtomicU32::new(0);
 
@@ -83,6 +85,12 @@ impl Plugin for Chunky {
             "tone" => Some(self.tone),
             _ => None,
         }
+    }
+    fn note_on_channel(&mut self, _: usize, _: u8, _: u8, _: u8) {
+        NOTE_TRACE.store(NOTE_TRACE.load(Ordering::SeqCst) << 2 | 1, Ordering::SeqCst);
+    }
+    fn note_off(&mut self, _: usize, _: u8) {
+        NOTE_TRACE.store(NOTE_TRACE.load(Ordering::SeqCst) << 2 | 2, Ordering::SeqCst);
     }
     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         IN_PROCESS.store(true, Ordering::SeqCst);
