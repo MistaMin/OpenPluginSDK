@@ -78,7 +78,7 @@ fn the_pins_of_the_test_plugin_are_usable() {
 fn a_pinned_processor_id_replaces_the_derived_one_and_nothing_else() {
     let mut info = unsafe { std::mem::zeroed::<OpShellInfo>() };
     assert_eq!(unsafe { shell::write_info::<Ids>(&mut info) }, 1);
-    assert_eq!(info.abi, 9);
+    assert_eq!(info.abi, 10);
     assert_eq!(hex(&info.processor_cid), PROCESSOR);
     // The controller id and the development AAX codes are still the ones derived from
     // the plugin id and vendor: the pin does not seed them. (Computed apart from this

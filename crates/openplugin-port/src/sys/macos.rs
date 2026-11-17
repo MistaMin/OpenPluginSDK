@@ -300,6 +300,8 @@ pub struct AUPreset {
 #[link(name = "CoreFoundation", kind = "framework")]
 unsafe extern "C" {
     pub fn CFPropertyListCreateData(alloc: CFAllocatorRef, plist: CFTypeRef, format: isize, options: usize, error: *mut CFTypeRef) -> CFDataRef;
+    pub fn CFPropertyListCreateWithData(alloc: CFAllocatorRef, data: CFDataRef, options: usize, format: *mut isize, error: *mut CFTypeRef) -> CFTypeRef;
+    pub fn CFDataCreate(alloc: CFAllocatorRef, bytes: *const u8, length: isize) -> CFDataRef;
     pub fn CFDataGetLength(data: CFDataRef) -> isize;
     pub fn CFDataGetBytePtr(data: CFDataRef) -> *const u8;
 }

@@ -333,6 +333,31 @@ pub fn capture(job: &Job, sink: &mut Sink) -> Result<(), String> {
         }
     }
 
+    // A saved session restored the way a host does it.
+    if job.load_component.is_some() || job.load_controller.is_some() {
+        let s = open(job)?;
+        let mut notes = Vec::new();
+        if let Some(path) = &job.load_component {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut stream = MemStream::new(bytes);
+            let r = call!(s.comp, ComponentVtbl, set_state, stream.ptr());
+            notes.push(format!("IComponent::setState returned {r}"));
+            stream.pos = 0;
+            let r = call!(s.controller, ControllerVtbl, set_component_state, stream.ptr());
+            notes.push(format!("IEditController::setComponentState returned {r}"));
+        }
+        if let Some(path) = &job.load_controller {
+            let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut stream = MemStream::new(bytes);
+            let r = call!(s.controller, ControllerVtbl, set_state, stream.ptr());
+            notes.push(format!("IEditController::setState returned {r}"));
+        }
+        match s.blobs() {
+            Ok(blobs) => sink.add("loaded", "loaded", None, blobs, s.values(), notes)?,
+            Err(e) => sink.notes.push(format!("state after loading: {e}")),
+        }
+    }
+
     // Program lists.
     let units = query(first.controller, &IID_UNIT_INFO);
     if units.is_null() {

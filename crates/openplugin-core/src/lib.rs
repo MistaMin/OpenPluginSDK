@@ -1226,6 +1226,23 @@ pub trait Plugin: Send + 'static {
     fn load_state(&mut self, _data: &[u8]) -> bool {
         false
     }
+
+    /// The containers [`Self::load_foreign_state`] reads. The shells ask once, before any instance
+    /// exists, and offer a state the shell did not write only for a kind listed here; a plugin that
+    /// lists none costs a host nothing. The default lists none.
+    fn foreign_state_kinds(&self) -> &'static [foreign_state::ForeignStateKind] {
+        &[]
+    }
+
+    /// Restores a state the plugin this one replaces saved, in that plugin's own container
+    /// (`kind` says which). The VST3, Audio Unit and AAX shells call it when the bytes a host
+    /// hands them are not a state the shell wrote. Return true only when `data` was recognised,
+    /// read whole and applied; return false, having changed nothing, for anything else. The
+    /// parameter values the plugin holds afterwards are the ones the host sees. The default
+    /// refuses every foreign state. See docs/PORTING.md, "Foreign state import".
+    fn load_foreign_state(&mut self, _kind: foreign_state::ForeignStateKind, _data: &[u8]) -> bool {
+        false
+    }
 }
 
 /// The four AAX codes: manufacturer, product, and the mono and stereo plug-in
