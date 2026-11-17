@@ -27,7 +27,9 @@ impl<T: Copy> Seqlock<T> {
 
     /// Publish `value`. The sequence only moves forward.
     pub fn publish(&self, value: T) {
-        self.seq.fetch_add(1, Ordering::Release);
+        // Release orders only earlier accesses; the fence keeps the slot write after the odd sequence.
+        self.seq.fetch_add(1, Ordering::Relaxed);
+        fence(Ordering::Release);
         unsafe {
             self.slot.get().write(value);
         }

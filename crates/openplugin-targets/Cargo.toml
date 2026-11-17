@@ -32,6 +32,7 @@ openplugin-dri = { workspace = true }
 
 [dev-dependencies]
 openplugin-dsp = { workspace = true }
+openplugin-testing = { workspace = true }
 
 [features]
 default = ["clap", "vst3", "au", "aax", "standalone"]
