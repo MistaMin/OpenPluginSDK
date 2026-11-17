@@ -343,8 +343,11 @@ impl BiquadBank4 {
     }
 
     /// Replace the coefficients of one section (no allocation, state kept).
+    /// An `index` past the last section does nothing.
     pub fn set_section(&mut self, index: usize, c: [f32; 5]) {
-        self.coeffs[index] = c;
+        if let Some(section) = self.coeffs.get_mut(index) {
+            *section = c;
+        }
     }
 
     /// Clear the state.
@@ -1526,6 +1529,16 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn set_section_ignores_an_index_past_the_end() {
+        let mut bank = BiquadBank4::new(&[[1.0, 0.0, 0.0, 0.0, 0.0]]);
+        bank.set_section(1, [0.5, 0.0, 0.0, 0.0, 0.0]);
+        bank.set_section(0, [0.5, 0.0, 0.0, 0.0, 0.0]);
+        let mut io = [1.0f32; 4];
+        bank.process_interleaved(&mut io);
+        assert_eq!(io, [0.5; 4]);
     }
 
     fn sections_n(n: usize) -> Vec<[f32; 5]> {

@@ -3,7 +3,7 @@
 //! ignored CPU benchmark
 //! (`cargo test --release -p openplugin-dsp --test neural -- --ignored --nocapture`).
 
-use openplugin_dsp::neural::{Model, ModelError};
+use openplugin_dsp::neural::{Activation, Conv1d, Layer, Model, ModelError};
 use serde_json::{json, Value};
 use std::time::Instant;
 
@@ -436,6 +436,46 @@ fn huge_sizes_are_refused_without_allocating_them() {
     // Deep nesting does not crash the parser.
     let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
     assert!(matches!(err(&deep), ModelError::Json(_)));
+}
+
+#[test]
+fn conv_history_counts_against_the_budget() {
+    // 65 weights each, but a history ring of 258,049 values: 200 of them are 202 MiB.
+    let layer = json!({"type":"conv1d","in":1,"out":1,"kernel":64,"dilation":4096,
+        "activation":"tanh","weights":vec![0.0; 64],"bias":[0.0]});
+    let text = model_json(1, false, vec![layer; 200]);
+    assert!(text.len() < 100_000, "{}", text.len());
+    assert!(matches!(err(&text), ModelError::Size(_)));
+    // The same through the constructors.
+    let layers = (0..16)
+        .map(|_| {
+            Layer::Conv1d(Conv1d::new(1, 1, 64, 4096, Activation::Tanh, vec![0.0; 64], vec![0.0]).unwrap())
+        })
+        .collect();
+    assert!(matches!(Model::new(1, 48_000.0, false, layers), Err(ModelError::Size(_))));
+}
+
+#[test]
+fn at_most_256_layers() {
+    let layer = json!({"type":"dense","in":1,"out":1,"activation":"identity","weights":[1.0],"bias":[0.0]});
+    assert!(Model::from_json(&model_json(1, false, vec![layer.clone(); 256])).is_ok());
+    assert!(matches!(err(&model_json(1, false, vec![layer; 257])), ModelError::Size(_)));
+}
+
+#[test]
+fn a_huge_sample_does_not_silence_a_recurrent_model() {
+    for (ty, g) in [("gru", 3), ("lstm", 4)] {
+        // The dense layer turns 3e30 into +inf and -inf; their sum in the cell is NaN.
+        let text = model_json(1, false, vec![
+            json!({"type":"dense","in":1,"out":2,"activation":"identity","weights":[1e9,-1e9],"bias":[0.0,0.0]}),
+            json!({"type":ty,"in":2,"hidden":1,"w_x":vec![1e-9; 2*g],"w_h":vec![0.5; g],"b":vec![0.1; g]}),
+            json!({"type":"dense","in":1,"out":1,"activation":"identity","weights":[1.0],"bias":[0.0]}),
+        ]);
+        let mut m = Model::from_json(&text).unwrap();
+        assert!(m.process_sample(0.5, 0.0) != 0.0);
+        m.process_sample(3e30, 0.0);
+        assert!(m.process_sample(0.5, 0.0) != 0.0, "{ty} stays silent after one huge sample");
+    }
 }
 
 // ---------- CPU ----------

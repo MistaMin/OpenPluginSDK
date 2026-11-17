@@ -1149,7 +1149,7 @@ if let Some(model) = slot.get_mut() {
     { "type": "dense", "in": 2, "out": 1, "activation": "identity", "weights": [2], "bias": [1] } ] }
 ```
 
-Matrices are flat, row-major, one row per output unit. GRU row blocks are z, r, n; LSTM blocks are i, f, g, o; a `conv1d` weight is `out x kernel x in`, tap 0 (the current sample) first. Unknown or missing fields, NaN or infinite numbers, wrong lengths, sizes over 512 (kernel 64, dilation 4096, 4 million weights, 64 MiB of text) and layers that do not chain are errors. A complete example is `crates/openplugin-dsp/tests/data/tiny_model.json`.
+Matrices are flat, row-major, one row per output unit. GRU row blocks are z, r, n; LSTM blocks are i, f, g, o; a `conv1d` weight is `out x kernel x in`, tap 0 (the current sample) first. Unknown or missing fields, NaN or infinite numbers, wrong lengths, sizes over 512 (kernel 64, dilation 4096, 256 layers, 4 million weights counting the history each `conv1d` layer keeps, 64 MiB of text) and layers that do not chain are errors. A complete example is `crates/openplugin-dsp/tests/data/tiny_model.json`.
 
 ### Sample rate
 

@@ -424,9 +424,12 @@ pub struct DiodePair {
     p: DiodeParams,
 }
 impl DiodePair {
-    /// A pair with the given parameters.
+    /// A pair with the given parameters. A constant that is not finite and
+    /// positive is replaced by the 1N4148's.
     pub fn new(p: DiodeParams) -> Self {
-        Self { p }
+        let ok = |v: f64, fallback: f64| if v.is_finite() && v > 0.0 { v } else { fallback };
+        let d = DiodeParams::D1N4148;
+        Self { p: DiodeParams { is: ok(p.is, d.is), nvt: ok(p.nvt, d.nvt) } }
     }
     /// Reflected wave for incident `a` on a port of resistance `r`.
     pub fn reflect(&self, a: f64, r: f64) -> f64 {
@@ -586,6 +589,17 @@ mod tests {
             let i = (a - b) / (2.0 * r);
             let id = 2.0 * 2.52e-9 * (v / (1.752 * 0.02585)).sinh();
             assert!((i - id).abs() <= 1e-9 * i.abs().max(1e-9) + 1e-15, "a={a} i={i} id={id}");
+        }
+    }
+
+    #[test]
+    fn diode_pair_with_bad_constants_falls_back_to_the_1n4148() {
+        let good = DiodePair::new(DiodeParams::D1N4148).reflect(0.5, 2200.0);
+        for bad in [0.0, -0.045, f64::NAN, f64::INFINITY] {
+            let d = DiodePair::new(DiodeParams { nvt: bad, ..DiodeParams::D1N4148 });
+            assert_eq!(d.reflect(0.5, 2200.0), good, "nvt = {bad}");
+            let d = DiodePair::new(DiodeParams { is: bad, ..DiodeParams::D1N4148 });
+            assert_eq!(d.reflect(0.5, 2200.0), good, "is = {bad}");
         }
     }
 }

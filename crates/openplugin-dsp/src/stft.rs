@@ -279,11 +279,12 @@ impl Stft {
         }
     }
 
-    /// One sample in, one sample out (delayed by [`Stft::latency`]).
+    /// One sample in, one sample out (delayed by [`Stft::latency`]). A
+    /// `channel` the transform was not made with gives 0.
     pub fn tick<P: SpectralProcessor>(&mut self, channel: usize, x: f32, processor: &mut P) -> f32 {
         let x = if x.is_finite() { x } else { 0.0 };
         let n = self.n;
-        let c = &mut self.channels[channel];
+        let Some(c) = self.channels.get_mut(channel) else { return 0.0 };
         let pos = c.pos;
         c.input[pos] = x;
         let y = c.acc[pos];
@@ -356,5 +357,15 @@ mod tests {
             out.push(s.tick(0, if t == 3 { 1.0 } else { 0.0 }, &mut Identity));
         }
         assert!((out[19] - 1.0).abs() < 1e-5, "{out:?}");
+    }
+
+    #[test]
+    fn a_channel_that_does_not_exist_gives_silence() {
+        let mut s = Stft::new(2, StftConfig::hann(16)).unwrap();
+        assert_eq!(s.tick(2, 1.0, &mut Identity), 0.0);
+        let mut out = [1.0_f32; 40];
+        s.process(2, &[1.0; 40], &mut out, &mut Identity);
+        assert_eq!(out, [0.0; 40]);
+        s.process_in_place(usize::MAX, &mut out, &mut Identity);
     }
 }

@@ -631,8 +631,9 @@ impl LoudnessMatch {
     /// Measure `reference` and `io` (the processed signal, before this
     /// gain), then apply the gain to `io` in place. One slice per channel;
     /// one or two channels are measured, every channel of `io` gets the gain.
+    /// Channels of different lengths are processed up to the shortest.
     pub fn process(&mut self, reference: &[&[f32]], io: &mut [&mut [f32]]) {
-        let frames = io.first().map(|c| c.len()).unwrap_or(0);
+        let frames = io.iter().map(|c| c.len()).min().unwrap_or(0);
         for frame in 0..frames {
             if !self.frozen {
                 let r = self.reference.push(reference, frame);
@@ -930,5 +931,14 @@ mod tests {
         let mut nan = vec![f32::NAN; 64];
         auto.process(&[&nan.clone()], &mut [&mut nan]);
         assert!(nan.iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn match_takes_the_shortest_channel() {
+        let mut auto = LoudnessMatch::new(48_000.0);
+        let reference = [0.5f32; 64];
+        let (mut l, mut r) = ([0.5f32; 64], [0.5f32; 16]);
+        auto.process(&[&reference], &mut [&mut l, &mut r]);
+        auto.process(&[&reference], &mut [&mut r, &mut l]);
     }
 }
