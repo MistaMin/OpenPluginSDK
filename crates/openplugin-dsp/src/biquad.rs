@@ -1,6 +1,6 @@
 //! Robert Bristow-Johnson (RBJ) audio EQ cookbook biquad filter.
 
-use std::f32::consts::PI;
+use std::f64::consts::PI;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilterType {
@@ -13,17 +13,19 @@ pub enum FilterType {
     HighShelf,
 }
 
+/// Coefficients and state are `f64`: in `f32` a 20 to 40 Hz shelf or
+/// low-pass is off by up to 1 dB at 96 and 192 kHz.
 #[derive(Debug, Clone, Default)]
 pub struct Biquad {
-    b0: f32,
-    b1: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-    x1: f32,
-    x2: f32,
-    y1: f32,
-    y2: f32,
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
 }
 
 impl Biquad {
@@ -54,18 +56,20 @@ impl Biquad {
         if !(sample_rate.is_finite() && freq.is_finite() && q.is_finite() && gain_db.is_finite()) {
             return;
         }
-        let sr = sample_rate.max(1000.0);
-        let f0 = freq.clamp(10.0, sr * 0.499);
-        let q = q.max(0.01);
+        let sr = f64::from(sample_rate.max(1000.0));
+        let f0 = f64::from(freq).clamp(10.0, sr * 0.499);
+        let q = f64::from(q.max(0.01));
         let w0 = 2.0 * PI * f0 / sr;
         let cos_w0 = w0.cos();
         let sin_w0 = w0.sin();
+        // 1 - cos(w0) without the cancellation near w0 = 0.
+        let one_minus_cos = 2.0 * (0.5 * w0).sin().powi(2);
         let alpha = sin_w0 / (2.0 * q);
-        let a = 10.0_f32.powf(gain_db / 40.0);
+        let a = 10.0_f64.powf(f64::from(gain_db) / 40.0);
 
         let (b0, b1, b2, a0, a1, a2) = match filter_type {
             FilterType::LowPass => {
-                let b1 = 1.0 - cos_w0;
+                let b1 = one_minus_cos;
                 let b0 = b1 * 0.5;
                 let b2 = b0;
                 let a0 = 1.0 + alpha;
@@ -150,21 +154,21 @@ impl Biquad {
     /// so one bad sample cannot silence the filter until the host resets it.
     #[inline]
     pub fn process_sample(&mut self, x: f32) -> f32 {
-        let x = if x.is_finite() { x } else { 0.0 };
+        let x = if x.is_finite() { f64::from(x) } else { 0.0 };
         let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
             - self.a1 * self.y1
             - self.a2 * self.y2;
-        if !y.is_finite() {
+        if !(y as f32).is_finite() {
             self.reset();
             return 0.0;
         }
         // Denormal prevention: flush every state variable below 1e-30.
-        let flush = |v: f32| if v.abs() < 1e-30 { 0.0 } else { v };
+        let flush = |v: f64| if v.abs() < 1e-30 { 0.0 } else { v };
         self.x2 = self.x1;
         self.x1 = flush(x);
         self.y2 = self.y1;
         self.y1 = flush(y);
-        self.y1
+        self.y1 as f32
     }
 }
 
@@ -212,6 +216,36 @@ mod tests {
         assert_eq!(b.y1, 0.0);
         b.process_sample(0.0);
         assert_eq!((b.x1, b.x2, b.y1, b.y2), (0.0, 0.0, 0.0, 0.0));
+    }
+
+    /// Steady-state DC gain in dB, from the coefficients.
+    fn dc_db(b: &Biquad) -> f64 {
+        20.0 * ((b.b0 + b.b1 + b.b2) / (1.0 + b.a1 + b.a2)).abs().log10()
+    }
+
+    #[test]
+    fn low_frequency_shelves_and_low_pass_hold_their_dc_gain_at_high_rates() {
+        // Measured with f32 coefficients: +6.93, -11.01 and +1.18 dB.
+        for (kind, rate, freq, gain, want) in [
+            (FilterType::LowShelf, 192_000.0, 40.0, 6.0, 6.0),
+            (FilterType::LowShelf, 48_000.0, 30.0, -12.0, -12.0),
+            (FilterType::LowShelf, 192_000.0, 30.0, -12.0, -12.0),
+            (FilterType::LowPass, 192_000.0, 20.0, 0.0, 0.0),
+            (FilterType::LowPass, 96_000.0, 20.0, 0.0, 0.0),
+            (FilterType::Peaking, 192_000.0, 30.0, 6.0, 0.0),
+        ] {
+            let mut b = Biquad::new();
+            b.configure(kind, rate, freq, 0.707, gain);
+            let got = dc_db(&b);
+            assert!((got - want).abs() < 0.01, "{kind:?} {freq} Hz at {rate}: {got} dB");
+            // And through the audio path: a long run of 1.0 settles there.
+            let mut y = 0.0;
+            for _ in 0..(rate as usize * 2) {
+                y = b.process_sample(1.0);
+            }
+            let audio = 20.0 * f64::from(y).abs().log10();
+            assert!((audio - want).abs() < 0.01, "{kind:?} {freq} Hz at {rate}: {audio} dB");
+        }
     }
 
     #[test]

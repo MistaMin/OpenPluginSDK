@@ -132,6 +132,7 @@
 //! EBU Tech 3205-E (its table 8 compares the types) and the table in
 //! Wikipedia's "Peak programme meter".
 
+use crate::windows::bessel_i0;
 use std::f64::consts::PI;
 
 /// Which PPM.
@@ -192,20 +193,6 @@ const KAISER_BETA: f64 = 7.0;
 const DETECTOR_RATE: f32 = 352_800.0;
 /// A stage below this (-240 dB) is set to zero, so silence leaves no denormals.
 const STAGE_FLOOR: f64 = 1.0e-12;
-
-fn bessel_i0(x: f64) -> f64 {
-    let mut sum = 1.0;
-    let mut term = 1.0;
-    let q = x * x / 4.0;
-    for k in 1..80 {
-        term *= q / (k as f64 * k as f64);
-        sum += term;
-        if term < 1e-18 * sum {
-            break;
-        }
-    }
-    sum
-}
 
 /// Kaiser-windowed sinc interpolator, cut-off at the input Nyquist rate, each
 /// phase normalised to unity gain at DC. `[p][k]` multiplies the `k`-th newest

@@ -71,8 +71,10 @@
 //! ([`VoiceAllocator::free`]) or taken for a different note (a steal, a
 //! same-note tail reused, a mono or legato change, a held key retriggered
 //! with a new note id). A key retriggered with the same note does not end
-//! it. [`VoiceAllocator::reset`] forgets voices and the list alike. At most
-//! [`ENDED_CAPACITY`] wait; drain them every block. [`VoiceAllocator::voice_info`]
+//! it. [`VoiceAllocator::reset`] forgets voices and the list alike. Up to `N`
+//! plus [`ENDED_CAPACITY`] wait, so every voice can end in one block; drain
+//! them every block. Ends beyond that are dropped and counted
+//! ([`VoiceAllocator::ended_dropped`]). [`VoiceAllocator::voice_info`]
 //! is the matching CLAP `voice-info`.
 
 use openplugin_core::{Expression, NoteRef, VoiceInfo};
@@ -277,7 +279,9 @@ pub struct NoteOff {
 
 const MAX_HELD: usize = 32;
 
-/// Ended notes that can wait for [`VoiceAllocator::pop_ended`]; more are dropped.
+/// Ended notes that can wait for [`VoiceAllocator::pop_ended`] beyond the
+/// voice count `N` (steals can end more notes than there are voices); more
+/// are dropped and counted.
 pub const ENDED_CAPACITY: usize = 64;
 
 /// Expression ramp when none is set: 5 ms.
@@ -299,10 +303,11 @@ pub struct VoiceAllocator<S, const N: usize> {
     held_len: usize,
     pedal: bool,
     smoothing: f32,
-    /// Ended notes, a ring of `ended_len` from `ended_head`.
-    ended: [NoteRef; ENDED_CAPACITY],
+    /// Ended notes, a ring of `ended_len` from `ended_head`; `N + ENDED_CAPACITY` long.
+    ended: Vec<NoteRef>,
     ended_head: usize,
     ended_len: usize,
+    ended_dropped: u64,
     /// The note of the voice `allocate` or `mono_on` just took, if it was sounding.
     displaced: Option<NoteRef>,
 }
@@ -338,9 +343,10 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
             held_len: 0,
             pedal: false,
             smoothing: DEFAULT_SMOOTHING,
-            ended: [NoteRef::ALL; ENDED_CAPACITY],
+            ended: vec![NoteRef::ALL; N + ENDED_CAPACITY],
             ended_head: 0,
             ended_len: 0,
+            ended_dropped: 0,
             displaced: None,
         };
         this.apply_smoothing();
@@ -489,7 +495,7 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
             return None;
         }
         let note = self.ended[self.ended_head];
-        self.ended_head = (self.ended_head + 1) % ENDED_CAPACITY;
+        self.ended_head = (self.ended_head + 1) % self.ended.len();
         self.ended_len -= 1;
         Some(note)
     }
@@ -499,10 +505,18 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         self.ended_len
     }
 
+    /// Ended notes dropped because the list was full, since the last reset.
+    pub fn ended_dropped(&self) -> u64 {
+        self.ended_dropped
+    }
+
     fn push_ended(&mut self, note: NoteRef) {
-        if self.ended_len < ENDED_CAPACITY {
-            self.ended[(self.ended_head + self.ended_len) % ENDED_CAPACITY] = note;
+        let cap = self.ended.len();
+        if self.ended_len < cap {
+            self.ended[(self.ended_head + self.ended_len) % cap] = note;
             self.ended_len += 1;
+        } else {
+            self.ended_dropped += 1;
         }
     }
 
@@ -799,6 +813,7 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         self.last_pitch = None;
         self.ended_head = 0;
         self.ended_len = 0;
+        self.ended_dropped = 0;
     }
 }
 
@@ -1148,14 +1163,29 @@ mod tests {
     #[test]
     fn the_ended_list_is_bounded_and_voice_info_follows_the_limit() {
         let mut a = Alloc4::new(48_000.0);
-        for n in 0..(ENDED_CAPACITY as i32 + 10) {
+        for n in 0..(4 + ENDED_CAPACITY as i32 + 10) {
             a.note_on_ref(NoteRef::new(n, 0, 0, 60), 100);
             a.free(0);
         }
-        assert_eq!(a.ended_len(), ENDED_CAPACITY);
+        assert_eq!(a.ended_len(), 4 + ENDED_CAPACITY);
+        assert_eq!(a.ended_dropped(), 10, "drops are counted");
         assert_eq!(a.pop_ended(), Some(NoteRef::new(0, 0, 0, 60)), "oldest first; the newest are dropped");
         assert_eq!(a.voice_info(), VoiceInfo::new(4, 4));
         a.set_max_voices(2);
         assert_eq!(a.voice_info(), VoiceInfo::new(2, 4));
+    }
+
+    #[test]
+    fn every_voice_of_a_large_allocator_can_end_in_one_block() {
+        // 128 voices released together: a 64-entry list lost half the NOTE_ENDs.
+        let mut a = VoiceAllocator::<(), 128>::new(48_000.0);
+        for n in 0..128 {
+            a.note_on_ref(NoteRef::new(n, 0, 0, n as i16), 100);
+        }
+        for v in 0..128 {
+            a.free(v);
+        }
+        assert_eq!(a.ended_len(), 128);
+        assert_eq!(a.ended_dropped(), 0);
     }
 }

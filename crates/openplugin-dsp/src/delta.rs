@@ -10,100 +10,72 @@
 //! difference before that gain, so Delta shows the processing and not the
 //! level change; call [`Delta::process`] at that point in the chain.
 
+use crate::bypass::DelayFade;
+
 /// Latency-aligned `processed - dry`, gliding in and out. No allocation after
 /// [`Delta::prepare`].
 pub struct Delta {
-    rings: Vec<Vec<f32>>,
-    write: usize,
-    latency: usize,
-    amount: f32,
-    target: f32,
-    step: f32,
+    line: DelayFade,
 }
 
 impl Delta {
     /// `max_latency` is the longest delay [`Self::set_latency`] may ask for, in
     /// samples; `glide_ms` is the switching time (20 ms is a good default).
     pub fn prepare(channels: usize, max_latency: usize, sample_rate: f32, glide_ms: f32) -> Self {
-        let channels = channels.clamp(1, 64);
-        let cap = max_latency.saturating_add(1).max(1);
-        let rate = crate::rate::effective_rate(sample_rate);
         let glide = if glide_ms.is_finite() { glide_ms.max(0.0) } else { 20.0 };
-        Self {
-            rings: vec![vec![0.0; cap]; channels],
-            write: 0,
-            latency: 0,
-            amount: 0.0,
-            target: 0.0,
-            step: 1.0 / (rate * glide * 0.001).max(1.0),
-        }
+        Self { line: DelayFade::new(channels, max_latency, sample_rate, glide * 0.001, 0.0) }
     }
 
     pub fn set_latency(&mut self, latency: usize) {
-        let cap = self.rings.first().map(|ring| ring.len()).unwrap_or(1);
-        self.latency = latency.min(cap.saturating_sub(1));
+        self.line.set_latency(latency);
     }
 
     pub fn latency(&self) -> usize {
-        self.latency
+        self.line.latency()
     }
 
     /// Glide toward the difference (`true`) or the processed signal.
     pub fn set_enabled(&mut self, enabled: bool) {
-        self.target = if enabled { 1.0 } else { 0.0 };
+        self.line.target = if enabled { 1.0 } else { 0.0 };
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.target > 0.5
+        self.line.target > 0.5
     }
 
     /// Jump to the target at once.
     pub fn snap(&mut self) {
-        self.amount = self.target;
+        self.line.value = self.line.target;
     }
 
     /// How much of the dry signal is being subtracted, 0 to 1.
     pub fn amount(&self) -> f32 {
-        self.amount
+        self.line.value
     }
 
     pub fn reset(&mut self) {
-        for ring in &mut self.rings {
-            ring.fill(0.0);
-        }
-        self.write = 0;
+        self.line.reset();
     }
 
     /// Replace `processed` with `processed - amount * delayed dry`. Every
     /// block must pass `dry`, even while disabled, so the delay stays full.
     pub fn process(&mut self, dry: &[&[f32]], processed: &mut [&mut [f32]]) {
-        let Some(length) = self.rings.first().map(|ring| ring.len()) else { return };
         let frames = processed.first().map(|channel| channel.len()).unwrap_or(0);
-        let latency = self.latency.min(length - 1);
-        let idle = self.amount == 0.0 && self.target == 0.0;
+        let idle = self.line.value == 0.0 && self.line.target == 0.0;
         for frame in 0..frames {
-            let read = (self.write + length - latency) % length;
-            for (index, ring) in self.rings.iter_mut().enumerate() {
+            let amount = self.line.value;
+            for index in 0..self.line.channels() {
                 let input = dry.get(index).and_then(|c| c.get(frame)).copied().unwrap_or(0.0);
-                ring[self.write] = if input.is_finite() { input } else { 0.0 };
+                let delayed = self.line.push(index, input);
                 if idle {
                     continue;
                 }
-                let delayed = ring[read];
                 if let Some(sample) = processed.get_mut(index).and_then(|c| c.get_mut(frame)) {
                     let wet = if sample.is_finite() { *sample } else { 0.0 };
-                    *sample = wet - self.amount * delayed;
+                    *sample = wet - amount * delayed;
                 }
             }
-            self.write += 1;
-            if self.write == length {
-                self.write = 0;
-            }
-            if self.amount < self.target {
-                self.amount = (self.amount + self.step).min(self.target);
-            } else if self.amount > self.target {
-                self.amount = (self.amount - self.step).max(self.target);
-            }
+            self.line.advance();
         }
     }
 }

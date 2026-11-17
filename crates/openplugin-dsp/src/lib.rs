@@ -34,6 +34,15 @@
 //! - [`PluckedString`], [`WaveguideString`], [`WaveguideBore`], [`ModalBank`]: physical models (Karplus-Strong with the Jaffe-Smith extensions, digital waveguides, modal resonators with bar, plate and membrane presets).
 //! - [`TimeStretch`], [`PitchShifter`] (phase vocoder with identity phase locking and onset phase reset), [`DelayPitchShifter`] (low-latency modulated-delay taps), [`YinDetector`], [`MpmDetector`] (pitch detection with confidence).
 //! - [`BandlimitedOsc`], [`WavetableOsc`], [`Adsr`], [`PinkNoise`], [`VoiceAllocator`], [`SincKernel`]: synthesis (PolyBLEP/BLAMP oscillators with hard sync, mip-mapped wavetables, envelopes, noise, voice stealing and glide, a windowed-sinc resampler).
+//!
+//! # Denormals
+//!
+//! Most blocks flush their own recursive state. [`VuIec`], [`MeterBank`],
+//! [`GainComp`], [`ScopeWriter`], [`BlockLevel`], [`KWeighting`] and
+//! [`simd::BiquadBank4`] do not: they rely on the flush-to-zero the format entries
+//! set around every audio-thread call (`Plugin::flush_denormals`, on by
+//! default). A plugin that turns that off, or code that uses this crate
+//! outside a format entry, should run them under a [`DenormalGuard`].
 
 pub mod adaa;
 pub mod adsr;
