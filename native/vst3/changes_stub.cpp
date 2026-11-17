@@ -8,18 +8,33 @@
 //   - a block or reset that moves the latency raises OP_CHANGE_LATENCY;
 //     op_shell_latency remembers what it returned, and op_shell_take_changes
 //     drops a latency the host already read;
-//   - op_stub_changes_rename() raises OP_CHANGE_PARAM_INFO, as a plugin's
-//     HostNotifier::param_info_changed does.
+//   - op_stub_changes_rename() renames the newest engine's table and raises
+//     OP_CHANGE_PARAM_INFO, as a plugin's HostNotifier::param_info_changed
+//     does. The renamed table (ABI 9, op_shell_instance_param*) calls the
+//     parameter "Lookahead (renamed)" in unit "smp" and shows its value as the
+//     latency it gives ("128 smp (renamed)"); the calls without an instance
+//     keep the first table ("Lookahead", the stand-ins' text);
+//   - op_shell_max_latency is 256, the largest latency the parameter gives, as
+//     a plugin's Plugin::max_latency declares it. op_stub_changes_declare_max(0)
+//     makes engines made after it declare none (the largest is then the
+//     latency), as a plugin without the declaration: the negative control of
+//     the bypass that follows the latency.
 // op_stub_changes_* are test hooks: the proof reads which threads called
 // op_shell_take_changes and op_shell_latency.
 #include "op_shell.h"
 #include <atomic>
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <mutex>
 #include <new>
 #include <pthread.h>
+#include <vector>
 
 #define OP_STUB_OWN_CHANGES 1
+#define OP_STUB_OWN_ABI9 1
 
 namespace {
 constexpr double kMaxLookahead = 256.0;
@@ -28,6 +43,8 @@ struct Stub {
     std::atomic<uint32_t> latency{0};  // applied
     std::atomic<uint32_t> told{0};     // what op_shell_latency last returned
     std::atomic<uint32_t> flags{0};
+    std::atomic<bool> renamed{false};
+    bool declaresMax = true;
     float level = 1.0f;
     void apply() {
         const float v = value.load();
@@ -37,6 +54,24 @@ struct Stub {
 };
 std::atomic<Stub*> gLast{nullptr};
 std::atomic<uint32_t> gTakesMain{0}, gTakesOther{0}, gCreated{0};
+std::atomic<bool> gDeclareMax{true};
+// Engines alive now: an ABI 9 call reads an instance's table only when it is one of them.
+std::mutex gLiveLock;
+std::vector<const void*> gLive;
+bool renamed(const void* instance) {
+    std::lock_guard<std::mutex> lock(gLiveLock);
+    if (std::find(gLive.begin(), gLive.end(), instance) == gLive.end()) return false;
+    return static_cast<const Stub*>(instance)->renamed.load();
+}
+size_t put_text(const char* text, char* buf, size_t cap) {
+    const size_t length = std::strlen(text);
+    if (buf && cap > 0) {
+        const size_t count = length < cap - 1 ? length : cap - 1;
+        std::memcpy(buf, text, count);
+        buf[count] = 0;
+    }
+    return length;
+}
 void put(char* dst, size_t size, const char* src) {
     std::memset(dst, 0, size);
     std::strncpy(dst, src, size - 1);
@@ -50,7 +85,18 @@ extern "C" {
 OP_STUB_EXPORT uint32_t op_stub_changes_rename(void) {
     Stub* stub = gLast.load();
     if (!stub) return 0;
+    stub->renamed.store(true);
     stub->flags.fetch_or(OP_CHANGE_PARAM_INFO);
+    return 1;
+}
+// Whether engines made from now on declare their largest latency (default 1).
+OP_STUB_EXPORT void op_stub_changes_declare_max(uint32_t on) { gDeclareMax.store(on != 0); }
+// The name of parameter 0 through the call without an instance (op_shell_param): the
+// first table, whatever an engine was renamed to. Writes at most `cap` bytes with the NUL.
+OP_STUB_EXPORT uint32_t op_stub_changes_type_name(char* buf, uint32_t cap) {
+    OpParamDesc desc{};
+    if (!buf || cap == 0 || !op_shell_param(0, &desc)) return 0;
+    put(buf, cap, desc.name);
     return 1;
 }
 // How many op_shell_take_changes calls came from the main thread and from others.
@@ -101,6 +147,11 @@ double op_shell_to_normalized(uint32_t, double plain) { return plain; }
 void* op_shell_create(double, uint32_t, uint32_t) {
     Stub* stub = new (std::nothrow) Stub;
     if (stub) {
+        stub->declaresMax = gDeclareMax.load();
+        {
+            std::lock_guard<std::mutex> lock(gLiveLock);
+            gLive.push_back(stub);
+        }
         gLast.store(stub);
         gCreated.fetch_add(1);
     }
@@ -110,6 +161,10 @@ void op_shell_destroy(void* instance) {
     Stub* stub = static_cast<Stub*>(instance);
     Stub* expected = stub;
     gLast.compare_exchange_strong(expected, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(gLiveLock);
+        gLive.erase(std::remove(gLive.begin(), gLive.end(), static_cast<const void*>(stub)), gLive.end());
+    }
     delete stub;
 }
 void op_shell_reset(void* instance) {
@@ -158,5 +213,36 @@ uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t lengt
 #if OP_HAS_TAIL
 double op_shell_tail_seconds(void*) { return 0.0; }
 #endif
+// ---- ABI 9 ----
+uint32_t op_shell_instance_param(const void* instance, uint32_t index, OpParamDesc* out) {
+    if (!op_shell_param(index, out)) return 0;
+    if (renamed(instance)) {
+        put(out->name, sizeof(out->name), "Lookahead (renamed)");
+        put(out->unit, sizeof(out->unit), "smp");
+    }
+    return 1;
+}
+size_t op_shell_instance_param_format(const void* instance, uint32_t index, double plain, char* buf, size_t cap) {
+    if (!renamed(instance)) return op_shell_param_format(index, plain, buf, cap);
+    if (index != 0) return put_text("", buf, cap);
+    char text[64];
+    std::snprintf(text, sizeof(text), "%.0f smp (renamed)", std::fmin(std::fmax(plain, 0.0), 1.0) * kMaxLookahead);
+    return put_text(text, buf, cap);
+}
+int op_shell_instance_param_parse(const void* instance, uint32_t index, const char* text, double* out_plain) {
+    if (!renamed(instance)) return op_shell_param_parse(index, text, out_plain);
+    if (index != 0 || !text || !out_plain) return 0;
+    char* end = nullptr;
+    const double samples = std::strtod(text, &end);
+    if (end == text || !std::isfinite(samples)) return 0;
+    *out_plain = std::fmin(std::fmax(samples / kMaxLookahead, 0.0), 1.0);
+    return 1;
+}
+uint32_t op_shell_max_latency(const void* instance) {
+    if (!instance) return 0;
+    const Stub& stub = *static_cast<const Stub*>(instance);
+    return stub.declaresMax ? static_cast<uint32_t>(kMaxLookahead) : stub.latency.load();
+}
+uint32_t op_shell_latency_now(const void* instance) { return instance ? static_cast<const Stub*>(instance)->latency.load() : 0; }
 }
 #include "stub_abi2.h"

@@ -38,7 +38,8 @@ PacketBuffer defaults() {
 // The plugin's own parameter text (shell ABI 3), not the SDK's number display. Main
 // thread only: both ABI calls may allocate, and AAX asks for parameter text through
 // the data model's main-thread entry points, never from the audio callback.
-std::string shellText(uint32_t index, double plain) { return op_shell_calls::param_text(index, plain); }
+std::string shellText(const void* engine, uint32_t index, double plain) { return op_shell_calls::instance_param_text(engine, index, plain); }
+std::string shellText(uint32_t index, double plain) { return shellText(nullptr, index, plain); }
 // The ABI has no short form of a parameter's text, so a short request is answered
 // from the full text, in this order, taking the first that fits `maxChars` bytes:
 // the whole text; the text without spaces ("6.0 dB" -> "6.0dB"); the number alone
@@ -74,25 +75,29 @@ namespace {
 // Display delegate of every shell parameter. The real value is the plain value, so the
 // plugin's text for it is exactly what its own display shows (choice and toggle labels
 // included). The taper stays the SDK's linear or log one.
+// The text is the engine's (ABI 9), so a renamed table shows its own text; `state` is the
+// effect's process state, which outlives every parameter, and its engine may be replaced.
 class ShellDisplay final : public AAX_IDisplayDelegate<float> {
     uint32_t index_;
+    const ProcessState* state_;
 public:
-    explicit ShellDisplay(uint32_t index) : index_(index) {}
+    ShellDisplay(uint32_t index, const ProcessState* state) : index_(index), state_(state) {}
     ShellDisplay* Clone() const override { return new ShellDisplay(*this); }
+    const void* engine() const { return state_ ? state_->engine : nullptr; }
     bool ValueToString(float value, AAX_CString* out) const override {
         if (!out) return false;
-        *out = AAX_CString(shellText(index_, value));
+        *out = AAX_CString(shellText(engine(), index_, value));
         return true;
     }
     bool ValueToString(float value, int32_t maxNumChars, AAX_CString* out) const override {
         std::string fitted;
-        if (!out || !fitText(shellText(index_, value), maxNumChars, &fitted)) return false;
+        if (!out || !fitText(shellText(engine(), index_, value), maxNumChars, &fitted)) return false;
         *out = AAX_CString(fitted);
         return true;
     }
     bool StringToValue(const AAX_CString& text, float* value) const override {
         double plain = 0.0;
-        if (!value || !op_shell_param_parse(index_, text.Get(), &plain) || !std::isfinite(plain)) return false;
+        if (!value || !op_shell_instance_param_parse(engine(), index_, text.Get(), &plain) || !std::isfinite(plain)) return false;
         *value = static_cast<float>(plain);
         return true;
     }
@@ -224,20 +229,20 @@ public:
                 parameter = std::make_unique<AAX_CParameter<float>>(
                     ids_[i].c_str(), AAX_CString(desc.name), initial,
                     AAX_CLogTaperDelegate<float, 0>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
-                    ShellDisplay(i), true);
+                    ShellDisplay(i, &state_), true);
                 parameter->SetType(AAX_eParameterType_Continuous);
             } else if ((desc.flags & OP_PARAM_DISCRETE) && desc.steps > 1) {
                 parameter = std::make_unique<AAX_CParameter<float>>(
                     ids_[i].c_str(), AAX_CString(desc.name), initial,
                     AAX_CLinearTaperDelegate<float>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
-                    ShellDisplay(i), true);
+                    ShellDisplay(i, &state_), true);
                 parameter->SetNumberOfSteps(static_cast<uint32_t>(desc.steps));
                 parameter->SetType(AAX_eParameterType_Discrete);
             } else {
                 parameter = std::make_unique<AAX_CParameter<float>>(
                     ids_[i].c_str(), AAX_CString(desc.name), initial,
                     AAX_CLinearTaperDelegate<float>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
-                    ShellDisplay(i), true);
+                    ShellDisplay(i, &state_), true);
                 // The step count stays at the AAX default for a continuous parameter.
                 // The AAX Validator rejects 10001 ("Number of parameter steps exceeds limit").
                 parameter->SetType(AAX_eParameterType_Continuous);
@@ -432,6 +437,12 @@ public:
         const uint32_t flags = op_shell_take_changes(state_.engine) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
         if (flags & OP_CHANGE_LATENCY) controller->SetSignalLatency(static_cast<int32_t>(op_shell_latency(state_.engine)));
         if (flags & OP_CHANGE_PARAM_INFO) {
+            // The engine's names first (ABI 9), so the host reads the renamed table when it hears.
+            for (uint32_t i = 0; i < ids_.size(); ++i) {
+                OpParamDesc desc{};
+                AAX_IParameter* parameter = mParameterManager.GetParameterByID(ids_[i].c_str());
+                if (parameter && op_shell_instance_param(state_.engine, i, &desc)) parameter->SetName(AAX_CString(desc.name));
+            }
             for (const std::string& id : ids_)
                 controller->SendNotification(AAX_eNotificationEvent_ParameterNameChanged, id.c_str(), static_cast<uint32_t>(id.size() + 1));
         }

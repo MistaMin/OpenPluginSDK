@@ -492,6 +492,10 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> Plugin for SurroundAdapter<P, F> 
         self.engines[0].plugin.latency()
     }
 
+    fn max_latency(&self) -> Option<usize> {
+        self.engines[0].plugin.max_latency()
+    }
+
     fn tail_samples(&self) -> usize {
         self.engines[0].plugin.tail_samples()
     }

@@ -23,6 +23,11 @@ template <class Call> std::string text(Call call) {
 inline std::string param_text(uint32_t index, double plain) {
     return text([=](char* buffer, size_t capacity) { return op_shell_param_format(index, plain, buffer, capacity); });
 }
+// The same from the table of `instance` (ABI 9: a renamed table shows its own text);
+// a NULL or unknown instance reads the plugin type's first table.
+inline std::string instance_param_text(const void* instance, uint32_t index, double plain) {
+    return text([=](char* buffer, size_t capacity) { return op_shell_instance_param_format(instance, index, plain, buffer, capacity); });
+}
 // The group path of parameter `index` ("Filter/Envelope"; "" is the top level).
 inline std::string param_group(uint32_t index) {
     return text([=](char* buffer, size_t capacity) { return op_shell_param_group(index, buffer, capacity); });

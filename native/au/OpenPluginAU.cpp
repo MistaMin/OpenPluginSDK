@@ -59,13 +59,13 @@ bool isNumberText(const std::string& text) {
 }
 // A choice parameter has whole steps from min to max, no unit, and labels that are words. The ABI
 // has no "choice" flag, so a stepped number (labels like "3") stays an ordinary stepped parameter.
-std::vector<std::string> choiceLabels(uint32_t index, const OpParamDesc& desc) {
+std::vector<std::string> choiceLabels(const void* engine, uint32_t index, const OpParamDesc& desc) {
     std::vector<std::string> labels;
     if (!(desc.flags & OP_PARAM_DISCRETE) || desc.unit[0] != '\0' || desc.steps < 3 || desc.steps > 256) return labels;
     if (desc.max - desc.min != static_cast<double>(desc.steps - 1) || desc.min != std::floor(desc.min)) return labels;
     bool allNumbers = true;
     for (uint32_t step = 0; step < desc.steps; ++step) {
-        labels.push_back(op_shell_calls::param_text(index, desc.min + step));
+        labels.push_back(op_shell_calls::instance_param_text(engine, index, desc.min + step));
         if (!isNumberText(labels.back())) allNumbers = false;
     }
     if (allNumbers) labels.clear();
@@ -253,7 +253,7 @@ public:
             for (uint32_t i = 0; i < info.param_count; ++i) {
                 if (!op_shell_param(i, &params_[i].desc)) continue;
                 this->Globals()->SetParameter(ids_[i], static_cast<float>(params_[i].desc.default_plain));
-                params_[i].labels = choiceLabels(i, params_[i].desc);
+                params_[i].labels = choiceLabels(nullptr, i, params_[i].desc);
                 // Clumps are flat: one per distinct group path, named by the whole path.
                 const std::string group = op_shell_calls::param_group(i);
                 if (group.empty()) continue;
@@ -393,7 +393,7 @@ public:
             if (index < 0) return kAudioUnitErr_InvalidParameter;
             const double plain = request->inValue ? static_cast<double>(*request->inValue) : static_cast<double>(this->Globals()->GetParameter(request->inParamID));
             if (!std::isfinite(plain)) return kAudioUnitErr_InvalidParameterValue;
-            const std::string text = op_shell_calls::param_text(static_cast<uint32_t>(index), plain);
+            const std::string text = op_shell_calls::instance_param_text(engine_, static_cast<uint32_t>(index), plain);
             // The host releases the string.
             request->outString = CFStringCreateWithBytes(nullptr, reinterpret_cast<const UInt8*>(text.data()), static_cast<CFIndex>(text.size()), kCFStringEncodingUTF8, false);
             return request->outString ? OSStatus(noErr) : OSStatus(kAudioUnitErr_InvalidPropertyValue);
@@ -407,7 +407,7 @@ public:
             std::string text(static_cast<size_t>(room), '\0');
             if (!CFStringGetCString(request->inString, text.data(), room, kCFStringEncodingUTF8)) return kAudioUnitErr_InvalidPropertyValue;
             double plain = 0.0;
-            if (!op_shell_param_parse(static_cast<uint32_t>(index), text.c_str(), &plain) || !std::isfinite(plain)) return kAudioUnitErr_InvalidPropertyValue;
+            if (!op_shell_instance_param_parse(engine_, static_cast<uint32_t>(index), text.c_str(), &plain) || !std::isfinite(plain)) return kAudioUnitErr_InvalidPropertyValue;
             request->outValue = static_cast<AudioUnitParameterValue>(plain);
             return noErr;
         }
@@ -608,12 +608,15 @@ public:
         }
         if (pthread_main_np()) deliverTrack();
         // Everything the render thread uses is sized here, on the message thread, so it never allocates.
+        // The bypass delay holds the largest latency the plugin may report (ABI 9), so the render
+        // thread follows a latency that changes at run time by moving its read point alone.
         latency_ = op_shell_latency(engine_);
+        delayCap_ = std::min(op_shell_max_latency(engine_), kMaxBypassDelay);
         delayPos_ = 0;
         delay_.clear();
         dry_.clear();
         if (hasMainIn_) {
-            delay_.assign(static_cast<size_t>(plan.outChannels) * latency_, 0.0f);
+            if (delayCap_ > 0) delay_.assign(static_cast<size_t>(plan.outChannels) * (delayCap_ + 1), 0.0f);
             dry_.assign(static_cast<size_t>(plan.outChannels) * frames, 0.0f);
         }
         mix_ = bypass_.load(std::memory_order_relaxed) ? 0.0f : 1.0f;
@@ -1197,7 +1200,10 @@ private:
             for (uint32_t j = 0; j < nSc; ++j) canSc[plan_.scPerm[j]] = static_cast<const float*>(scList->mBuffers[j].mData) + base;
 
             const float target = bypass_.load(std::memory_order_relaxed) ? 0.0f : 1.0f;
-            const bool settledWet = !bypassable || (mix_ == 1.0f && target == 1.0f && latency_ == 0);
+            const bool settledWet = !bypassable || (mix_ == 1.0f && target == 1.0f && delayCap_ == 0);
+            // The latency now (ABI 9; not the host's read, so no change is lost to it), within the
+            // delay sized at Initialize.
+            latency_ = std::min(op_shell_latency_now(engine_), delayCap_);
             // The dry copy is taken before the plugin runs: the host may pass the same buffer for both.
             if (!settledWet) delayDry(nIn, nOut, hostIn, count);
 
@@ -1245,27 +1251,32 @@ private:
         flags &= ~kAudioUnitRenderAction_OutputIsSilence;
         return noErr;
     }
-    // dry_[ch] gets the input delayed by the reported latency. The ring holds the last
-    // latency_ samples of each channel and is written on every block, bypassed or not,
-    // so it is already full when bypass starts. An output channel without an input is dry silence.
+    // dry_[ch] gets the input delayed by latency_, the latency now. The ring holds the last
+    // delayCap_ + 1 samples of each channel (the largest latency the plugin may report, sized at
+    // Initialize) and is written on every block, bypassed or not, so it is already full when
+    // bypass starts or the latency moves: a new latency only moves the read point. An output
+    // channel without an input is dry silence.
     void delayDry(uint32_t nIn, uint32_t nOut, const float* const* in, uint32_t count) {
+        const size_t size = static_cast<size_t>(delayCap_) + 1;
         for (uint32_t ch = 0; ch < nOut; ++ch) {
             const float* src = ch < nIn ? in[ch] : nullptr;
             float* dry = dry_.data() + static_cast<size_t>(ch) * maxFrames_;
-            if (latency_ == 0) {
+            if (delayCap_ == 0) {
                 if (src) std::memcpy(dry, src, count * sizeof(float));
                 else std::memset(dry, 0, count * sizeof(float));
                 continue;
             }
-            float* ring = delay_.data() + static_cast<size_t>(ch) * latency_;
+            float* ring = delay_.data() + static_cast<size_t>(ch) * size;
             size_t pos = delayPos_;
+            size_t read = pos >= latency_ ? pos - latency_ : pos + size - latency_;
             for (uint32_t i = 0; i < count; ++i) {
-                dry[i] = ring[pos];
                 ring[pos] = src ? src[i] : 0.0f;
-                if (++pos == latency_) pos = 0;
+                dry[i] = ring[read];
+                if (++pos == size) pos = 0;
+                if (++read == size) read = 0;
             }
         }
-        if (latency_ > 0) delayPos_ = (delayPos_ + count) % latency_;
+        if (delayCap_ > 0) delayPos_ = (delayPos_ + count) % size;
     }
     // Moves mix_ (0 dry, 1 plugin) toward the target over about 10 ms and writes the blend.
     // Settled bypass is the delayed input exactly; settled processing leaves the output alone.
@@ -1358,6 +1369,14 @@ private:
         const uint32_t flags = op_shell_take_changes(engine_) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
         if (flags & OP_CHANGE_LATENCY) this->PropertyChanged(kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0);
         if (flags & OP_CHANGE_PARAM_INFO) {
+            // The engine's table first (ABI 9): names, units and choice labels, so the host
+            // reads the renamed table when it hears.
+            for (uint32_t i = 0; i < params_.size(); ++i) {
+                OpParamDesc desc{};
+                if (!op_shell_instance_param(engine_, i, &desc)) continue;
+                params_[i].desc = desc;
+                params_[i].labels = choiceLabels(engine_, i, desc);
+            }
             this->PropertyChanged(kAudioUnitProperty_ParameterList, kAudioUnitScope_Global, 0);
             for (uint32_t i = 0; i < params_.size(); ++i) this->PropertyChanged(kAudioUnitProperty_ParameterInfo, kAudioUnitScope_Global, ids_[i]);
         }
@@ -1438,7 +1457,12 @@ private:
     UInt32 maxFrames_ = 512;
     static constexpr double kCrossfadeSeconds = 0.010;
     std::atomic<bool> bypass_{false};
+    // The bypass delay of this render (the latency now, at most delayCap_), and the largest
+    // latency the delay holds, sized at Initialize. Larger than this is not a latency: past
+    // it the shell delays the bypassed signal by the cap.
+    static constexpr uint32_t kMaxBypassDelay = 1u << 22;
     uint32_t latency_ = 0;
+    uint32_t delayCap_ = 0;
     size_t delayPos_ = 0;
     float mix_ = 1.0f;
     float mixStep_ = 1.0f;

@@ -35,7 +35,7 @@
 
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -133,6 +133,11 @@ struct Audio {
 }
 
 /// A tail in seconds: infinity for an endless tail, zero for none or unknown.
+/// [`Plugin::max_latency`] as a `u32` (0 for none).
+fn declared_max(plugin: &dyn Plugin) -> u32 {
+    plugin.max_latency().unwrap_or(0).min(u32::MAX as usize) as u32
+}
+
 fn tail_seconds_of(tail: Tail, rate: f32) -> f64 {
     match tail {
         Tail::Infinite => f64::INFINITY,
@@ -146,6 +151,9 @@ pub const STATE_WAIT: Duration = Duration::from_secs(2);
 
 const GATE_AUDIO: u32 = 1;
 const GATE_STATE: u32 = 2;
+/// Held for one read of [`Plugin::info`] by [`FfiInstance::take_changes`]:
+/// blocks and state calls wait for it as for a block (it lasts one call).
+const GATE_PEEK: u32 = 4;
 
 /// Releases the audio side of the gate when a block (or reset) ends. While it
 /// lives the thread runs with denormals flushed ([`Plugin::flush_denormals`]);
@@ -185,6 +193,18 @@ pub struct FfiInstance {
     latency_moved: AtomicBool,
     /// The plugin's [`HostNotifier`] (a clone of the one it was given).
     notifier: HostNotifier,
+    /// [`Plugin::max_latency`] as of the last `prepare` (0 when the plugin
+    /// declares none): what [`FfiInstance::max_latency`] adds to the latency.
+    declared_max_latency: AtomicU32,
+    /// The table [`Plugin::info`] returned the last time the plugin object was
+    /// reached (after every block, a reset, a state or track call): the names
+    /// and text a host should show now. `info` stays the table of creation,
+    /// which fixes the ids, ranges and order.
+    current_info: AtomicPtr<PluginInfo>,
+    /// The plugin raised [`HostNotifier::PARAM_INFO`] (or `current_info`
+    /// moved) and the host has not been told yet: it is told once
+    /// `current_info` has been read after the change.
+    info_pending: AtomicBool,
     offline: AtomicU32,
     preset: AtomicI32,
     info: &'static PluginInfo,
@@ -197,7 +217,8 @@ pub struct FfiInstance {
     /// Seconds of tail as `f64` bits, refreshed after every block.
     tail: AtomicU64,
     /// `GATE_AUDIO` while a block runs, `GATE_STATE` while a state call holds
-    /// or has asked for the plugin object.
+    /// or has asked for the plugin object, `GATE_PEEK` while `take_changes`
+    /// reads the plugin's table.
     gate: AtomicU32,
     /// Serialises state calls with each other (message thread only).
     state_lock: Mutex<()>,
@@ -248,6 +269,7 @@ impl FfiInstance {
         let mut cursor = ParamCursor::new(plane.len());
         cursor.pull(&plane, plugin.as_mut());
         let latency = plugin.latency() as u32;
+        let declared_max_latency = declared_max(plugin.as_ref());
         let tail = tail_seconds_of(plugin.tail(), rate);
         let expressions = plugin.note_expressions();
         let mpe = openplugin_core::MpeReceiver::for_plugin(plugin.as_ref());
@@ -276,6 +298,9 @@ impl FfiInstance {
             told_latency: AtomicU32::new(latency),
             latency_moved: AtomicBool::new(false),
             notifier,
+            declared_max_latency: AtomicU32::new(declared_max_latency),
+            current_info: AtomicPtr::new(info as *const PluginInfo as *mut PluginInfo),
+            info_pending: AtomicBool::new(false),
             offline: AtomicU32::new(0),
             preset: AtomicI32::new(-1),
             info,
@@ -318,7 +343,7 @@ impl FfiInstance {
         let _request = StateGuard(&self.gate);
         let deadline = Instant::now() + STATE_WAIT;
         let mut spins = 0u32;
-        while self.gate.load(Ordering::SeqCst) & GATE_AUDIO != 0 {
+        while self.gate.load(Ordering::SeqCst) & (GATE_AUDIO | GATE_PEEK) != 0 {
             if Instant::now() >= deadline {
                 return None;
             }
@@ -412,10 +437,25 @@ impl FfiInstance {
     /// so a new engine that comes up with the latency the host already
     /// knows is quiet. Each change is reported once. Any thread (the shells
     /// call it on their main thread); never blocks, never allocates.
+    ///
+    /// [`HostNotifier::PARAM_INFO`] is reported only once the table the
+    /// plugin now returns has been read ([`FfiInstance::current_info`]): at the
+    /// end of a block, or here when no block is running (taken in one
+    /// non-blocking step; a block that starts in that instant is passed
+    /// through dry). A change raised while a block runs waits for the next
+    /// call, so a host that reads the names at once reads the new ones.
     pub fn take_changes(&self) -> u32 {
         let mut flags = self.notifier.take();
         if self.latency_moved.swap(false, Ordering::AcqRel) {
             flags |= HostNotifier::LATENCY;
+        }
+        if flags & HostNotifier::PARAM_INFO != 0 {
+            self.info_pending.store(true, Ordering::Release);
+        }
+        flags &= !HostNotifier::PARAM_INFO;
+        if self.info_pending.load(Ordering::Acquire) && self.try_read_info() {
+            self.info_pending.store(false, Ordering::Release);
+            flags |= HostNotifier::PARAM_INFO;
         }
         if flags & HostNotifier::LATENCY != 0
             && self.latency.load(Ordering::Acquire) == self.told_latency.load(Ordering::Acquire)
@@ -423,6 +463,74 @@ impl FfiInstance {
             flags &= !HostNotifier::LATENCY;
         }
         flags
+    }
+
+    /// The largest latency this instance may report until the next
+    /// `prepare`: [`Plugin::max_latency`], or the latency, whichever is
+    /// larger. Any thread; never blocks, never allocates.
+    pub fn max_latency(&self) -> u32 {
+        self.declared_max_latency
+            .load(Ordering::Acquire)
+            .max(self.latency.load(Ordering::Acquire))
+    }
+
+    /// The latency as of the last block, without counting as the host's read
+    /// (unlike [`FfiInstance::latency`]). Any thread, the audio thread
+    /// included; never blocks, never allocates.
+    pub fn latency_now(&self) -> u32 {
+        self.latency.load(Ordering::Acquire)
+    }
+
+    /// The parameter table the host should show now: what [`Plugin::info`]
+    /// returned the last time the plugin object was reached. Its parameters
+    /// are those of [`FfiInstance::param_spec`], in the same order, with the
+    /// same ids and ranges; only names, units and value text may differ.
+    /// Any thread; never blocks.
+    pub fn current_info(&self) -> &'static PluginInfo {
+        // Only ever set from a `&'static PluginInfo`.
+        unsafe { &*self.current_info.load(Ordering::Acquire) }
+    }
+
+    /// Remember the table the plugin returns now, with the plugin object in
+    /// hand (a block, a reset, a state or track call). A table that moved is
+    /// reported as [`HostNotifier::PARAM_INFO`] at the next
+    /// [`FfiInstance::take_changes`]. A table whose parameter count differs
+    /// from the first is ignored: parameters cannot be added or removed at
+    /// run time. No allocation.
+    fn note_info(&self, info: &'static PluginInfo) {
+        if info.params.len() != self.info.params.len() {
+            return;
+        }
+        let next = info as *const PluginInfo as *mut PluginInfo;
+        if self.current_info.swap(next, Ordering::AcqRel) != next {
+            self.info_pending.store(true, Ordering::Release);
+        }
+    }
+
+    /// Read the plugin's table now if no block or state call has the plugin
+    /// object, without waiting. True when it was read. Message thread.
+    fn try_read_info(&self) -> bool {
+        // Only from an idle gate: no block, no state call holds or wants the
+        // plugin object. A state call that asks meanwhile waits for this read.
+        if self
+            .gate
+            .compare_exchange(0, GATE_PEEK, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return false;
+        }
+        struct PeekGuard<'a>(&'a AtomicU32);
+        impl Drop for PeekGuard<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_and(!GATE_PEEK, Ordering::SeqCst);
+            }
+        }
+        let _release = PeekGuard(&self.gate);
+        let audio = unsafe { &*self.audio.get() };
+        if let Ok(info) = catch_unwind(AssertUnwindSafe(|| audio.inner.info())) {
+            self.note_info(info);
+        }
+        true
     }
 
     /// Store the plugin's latency and note whether it moved. No allocation.
@@ -470,6 +578,7 @@ impl FfiInstance {
             self.with_exclusive(|audio| {
                 audio.inner.track_info_changed(info);
                 self.note_latency(audio.inner.latency());
+                self.note_info(audio.inner.info());
             })
             .is_some()
         }))
@@ -518,6 +627,8 @@ impl FfiInstance {
         audio.cursor.pull(&self.plane, audio.inner.as_mut());
         self.latency
             .store(audio.inner.latency() as u32, Ordering::Release);
+        self.declared_max_latency
+            .store(declared_max(audio.inner.as_ref()), Ordering::Release);
         self.tail
             .store(tail_seconds_of(audio.inner.tail(), rate).to_bits(), Ordering::Release);
         true
@@ -538,6 +649,7 @@ impl FfiInstance {
                     buffer.fill(0.0);
                 }
                 self.note_latency(audio.inner.latency());
+                self.note_info(audio.inner.info());
             }
             None => self.reset_pending.store(true, Ordering::Release),
         }
@@ -612,6 +724,7 @@ impl FfiInstance {
             // The chunk may have moved plugin parameters; push the plane again.
             audio.cursor.invalidate();
             self.note_latency(audio.inner.latency());
+            self.note_info(audio.inner.info());
             true
         })
         .unwrap_or(false)
@@ -831,6 +944,7 @@ impl FfiInstance {
         let tail = tail_seconds_of(audio.inner.tail(), audio.rate);
         self.tail.store(tail.to_bits(), Ordering::Release);
         self.note_latency(latency);
+        self.note_info(audio.inner.info());
         self.meters.publish(meters);
         self.bus_meters.publish(bus);
     }

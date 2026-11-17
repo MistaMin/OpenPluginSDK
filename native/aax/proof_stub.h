@@ -44,6 +44,11 @@ void op_stub_seen(void* instance, StubSeen* out);
 void op_stub_set_latency(void* instance, uint32_t samples);
 void op_stub_raise_changes(void* instance, uint32_t flags);
 uint32_t op_stub_takes(void);
+// ABI 9: rename the engine's table (op_shell_instance_param* show "Param N (renamed)" and
+// "0.500 renamed") and raise OP_CHANGE_PARAM_INFO; make the engines made from now on declare
+// `samples` as their largest latency (op_shell_max_latency; 0: none, the default).
+void op_stub_rename(void* instance);
+void op_stub_set_max_latency(uint32_t samples);
 uint32_t op_stub_param_count(void);
 // ABI 4: what op_shell_set_track_info was told, call by call (0 is the first).
 typedef struct StubTrack {

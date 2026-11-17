@@ -16,10 +16,21 @@
 //  - a wakeup with nothing new says nothing; a latency the host already read
 //    is not told again;
 //  - with no controller (the data model's own TimerWakeup in a proof) nothing
-//    is taken, so the change waits for a wakeup that can tell it.
+//    is taken, so the change waits for a wakeup that can tell it;
+//  - ABI 9, a renamed table: after the plugin renames its parameters the host
+//    reads the new names (GetParameterName) and the new value text
+//    (GetParameterValueString) and typed text is read by the new table; before
+//    the wakeup that tells it, and through the calls without an instance, the
+//    first table stays (the negative controls);
+//  - ABI 9, the bypass follows the latency: a plugin that declares its largest
+//    latency (256) and moves its latency mid-session, while bypassed, outputs
+//    the input delayed by exactly the new latency (0 -> 100 -> 30 -> 256);
+//    without the declaration the delay stays at the latency of prepare (the
+//    negative control: delayed by 0, not by 100).
 #include "OpenPluginAAX.h"
 #include "proof_stub.h"
 #include "AAX_CEffectParameters.h"
+#include "AAX_CString.h"
 #include "AAX_IController.h"
 #include <atomic>
 #include <cstdio>
@@ -118,6 +129,68 @@ uint32_t wakeup(AAX_CEffectParameters* parameters, FakeController& host, std::th
     thread.join();
     return told;
 }
+
+// What the host reads as a parameter's name.
+std::string nameOf(AAX_CEffectParameters* parameters, const char* id) {
+    AAX_CString name;
+    require(parameters->GetParameterName(id, &name) == AAX_SUCCESS, "GetParameterName");
+    return name.Get();
+}
+std::string textOf(AAX_CEffectParameters* parameters, uint32_t index, double normalized) {
+    std::string text;
+    require(proofText(parameters, index, normalized, 64, &text), "GetParameterValueString");
+    return text;
+}
+
+// Bypassed blocks of 512 frames through the real process callback, a latency set before
+// each one. Returns the input and output of channel 0.
+struct Bypassed {
+    std::vector<float> in, out;
+};
+Bypassed bypassed(ProcessState& state, const std::vector<uint32_t>& latencyPerBlock) {
+    constexpr int32_t kBlock = 512;
+    PacketBuffer packet(3);
+    for (uint32_t i = 0; i < 3; ++i) {
+        OpParamDesc desc{};
+        require(op_shell_param(i, &desc) != 0, "param");
+        packet.plain()[i] = static_cast<float>(desc.default_plain);
+    }
+    packet.get()->bypass = 1;
+    Bypassed r;
+    uint32_t x = 99;
+    for (uint32_t latency : latencyPerBlock) {
+        op_stub_set_latency(state.engine, latency);
+        std::vector<float> a[2], b[2];
+        float* input[2];
+        float* output[2];
+        for (int c = 0; c < 2; ++c) {
+            a[c].resize(kBlock);
+            for (auto& v : a[c]) {
+                x = x * 1664525u + 1013904223u;
+                v = static_cast<float>((x >> 8) & 0xFFFF) / 65536.0f - 0.5f;
+            }
+            b[c].assign(kBlock, 0.f);
+            input[c] = a[c].data();
+            output[c] = b[c].data();
+        }
+        int32_t frames = kBlock;
+        auto* statePtr = &state;
+        Context context{input, output, &frames, packet.get(), &statePtr};
+        Context* contexts[] = {&context};
+        process(contexts, contexts + 1);
+        r.in.insert(r.in.end(), a[0].begin(), a[0].end());
+        r.out.insert(r.out.end(), b[0].begin(), b[0].end());
+    }
+    return r;
+}
+// Is block `block` the input delayed by `latency`, sample for sample?
+bool delayedBy(const Bypassed& r, size_t block, uint32_t latency) {
+    for (size_t n = block * 512; n < (block + 1) * 512; ++n) {
+        const float want = n >= latency ? r.in[n - latency] : 0.f;
+        if (r.out[n] != want) return false;
+    }
+    return true;
+}
 }
 
 int main() {
@@ -176,6 +249,46 @@ int main() {
     op_stub_raise_changes(engine, OP_CHANGE_PARAM_INFO);
     require(wakeup(parameters.get(), host, nullptr) == (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO), "both in one wakeup");
     require(host.latencySets == 3 && host.published == 30 && host.renamed.size() == 6, "both told");
+
+    // 5. ABI 9: a renamed table. The host reads the names and text again when told.
+    require(nameOf(parameters.get(), "p0") == "Param 0" && textOf(parameters.get(), 0, 0.5) == "0.500", "the first table before the rename");
+    op_stub_rename(engine);
+    require(nameOf(parameters.get(), "p0") == "Param 0", "negative control: the name stays until the host is told");
+    require(wakeup(parameters.get(), host, nullptr) == OP_CHANGE_PARAM_INFO && host.renamed.size() == 9, "the rename is told");
+    for (uint32_t i = 0; i < 3; ++i) {
+        const std::string id = "p" + std::to_string(i);
+        require(nameOf(parameters.get(), id.c_str()) == "Param " + std::to_string(i) + " (renamed)", "the host reads the renamed name");
+    }
+    require(textOf(parameters.get(), 0, 0.5) == "0.500 renamed", "the host reads the renamed value text");
+    double typed = -1.0;
+    require(proofValue(parameters.get(), 1, "0.250 renamed", &typed) && typed == 0.25, "typed text is read by the renamed table");
+    require(shellText(0, 0.5) == "0.500", "negative control: the call without an instance keeps the first table");
+    std::printf("AAX changes: renamed table -> GetParameterName reads \"%s\", GetParameterValueString \"%s\"; the first table stays without an instance\n",
+                nameOf(parameters.get(), "p0").c_str(), textOf(parameters.get(), 0, 0.5).c_str());
+
+    // 6. ABI 9: the bypass follows a latency that changes mid-session.
+    {
+        op_stub_set_max_latency(256);
+        ProcessState state;
+        require(state.prepare(48000.0, 2) && state.delayCap == 256 && state.line[0].size() == 257, "the delay holds the declared largest latency");
+        // Blocks 0-1 at 0; 2-4 at 100; 5-7 at 30; 8-10 at 256. The first block of each new latency
+        // is the switch; the blocks after it are compared.
+        const auto r = bypassed(state, {0, 0, 100, 100, 100, 30, 30, 30, 256, 256, 256});
+        require(delayedBy(r, 1, 0), "latency 0: the input itself");
+        require(delayedBy(r, 3, 100) && delayedBy(r, 4, 100), "latency 100: delayed by 100");
+        require(!delayedBy(r, 3, 0), "control: the check tells 100 from 0");
+        require(delayedBy(r, 6, 30) && delayedBy(r, 7, 30), "latency 30: delayed by 30");
+        require(!delayedBy(r, 6, 100), "control: the check tells 30 from 100");
+        require(delayedBy(r, 9, 256) && delayedBy(r, 10, 256), "latency 256: delayed by 256");
+        std::printf("AAX changes: bypassed output follows the latency 0 -> 100 -> 30 -> 256, delayed exactly by each\n");
+        // Negative control: no declaration. The delay was sized for the latency at prepare (0).
+        op_stub_set_max_latency(0);
+        ProcessState plain;
+        require(plain.prepare(48000.0, 2) && plain.delayCap == 0, "undeclared: the delay holds the latency of prepare");
+        const auto q = bypassed(plain, {0, 100, 100, 100});
+        require(!delayedBy(q, 2, 100) && delayedBy(q, 2, 0), "negative control: undeclared, the bypass stays at the old latency");
+        std::printf("AAX changes: negative control: without a declared largest latency the bypass keeps 0 after a change to 100\n");
+    }
     std::printf("AAX changes proof passed\n");
     return 0;
 }

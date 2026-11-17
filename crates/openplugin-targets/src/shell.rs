@@ -25,6 +25,8 @@ pub use openplugin_ffi::shell::{
     expression_format, expression_info, expression_parse, expressions, OpExpressionInfo,
     // ABI 8: identity pins.
     au_code, identity, param_aax_id, param_host_id,
+    // ABI 9: the instance's own parameter table, and its largest latency.
+    instance_param, instance_param_format, instance_param_parse, latency_now, max_latency,
 };
 
 #[cfg(any(target_os = "macos", windows))]
@@ -676,6 +678,62 @@ macro_rules! export_shell {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_au_code(which: u32) -> u32 {
             $crate::shell::au_code::<$plugin>(which)
+        }
+
+        // ---- ABI 9: the instance's own parameter table, and its largest latency ----
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_instance_param(
+            instance: *const ::std::ffi::c_void,
+            index: u32,
+            out: *mut $crate::shell::OpParamDesc,
+        ) -> u32 {
+            unsafe { $crate::shell::instance_param::<$plugin>(instance as *const $crate::shell::ShellInstance, index, out) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_instance_param_format(
+            instance: *const ::std::ffi::c_void,
+            index: u32,
+            plain: f64,
+            buf: *mut ::std::ffi::c_char,
+            cap: usize,
+        ) -> usize {
+            unsafe {
+                $crate::shell::instance_param_format::<$plugin>(
+                    instance as *const $crate::shell::ShellInstance,
+                    index,
+                    plain,
+                    buf as *mut u8,
+                    cap,
+                )
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_instance_param_parse(
+            instance: *const ::std::ffi::c_void,
+            index: u32,
+            text: *const ::std::ffi::c_char,
+            out_plain: *mut f64,
+        ) -> i32 {
+            unsafe {
+                $crate::shell::instance_param_parse::<$plugin>(
+                    instance as *const $crate::shell::ShellInstance,
+                    index,
+                    text,
+                    out_plain,
+                )
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_max_latency(instance: *const ::std::ffi::c_void) -> u32 {
+            unsafe { $crate::shell::max_latency(instance as *const $crate::shell::ShellInstance) }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_latency_now(instance: *const ::std::ffi::c_void) -> u32 {
+            unsafe { $crate::shell::latency_now(instance as *const $crate::shell::ShellInstance) }
         }
 
         #[unsafe(no_mangle)]

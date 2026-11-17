@@ -11,6 +11,7 @@
 // Run from the native build (see native/CMakeLists.txt):
 //   ctest --test-dir build-shell -R aax_alloc_proof --output-on-failure
 #include "OpenPluginAAX.h"
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -377,6 +378,27 @@ int main() {
         stereoFx.output = st;
         op_stub_configure(OP_KIND_EFFECT, 0, 1, &stereoFx);
     }
+    // ABI 9: the latency moves at run time while bypassed and while crossfading. The delay was
+    // sized in prepare for the largest latency the plugin declares (256 samples); each block only
+    // moves its read point, with the counters armed.
+    {
+        op_stub_set_max_latency(256);
+        for (int32_t blockFrames : {512, 1, 3000}) {
+            Fixture rig(2, blockFrames);
+            require(rig.state.delayCap == 256, "the delay holds the declared largest latency");
+            char what[96];
+            const uint32_t latencies[] = {37, 200, 0, 256, 5, 128, 999};
+            for (int i = 0; i < 28; ++i) {
+                const uint32_t latency = latencies[i % 7];
+                op_stub_set_latency(rig.state.engine, latency);
+                rig.packet.get()->bypass = (i / 7) % 2 == 0 ? 1u : 0u;
+                std::snprintf(what, sizeof what, "stereo %d frames, latency %u, bypass %s", blockFrames, latency, rig.packet.get()->bypass ? "on" : "off");
+                expect_clean(rig.call(), what);
+                require(rig.state.latency == std::min(latency, 256u), "the delay follows the latency, within the declared largest");
+            }
+        }
+        op_stub_set_max_latency(0);
+    }
 #endif
 
     malloc_logger = nullptr;
@@ -385,6 +407,6 @@ int main() {
         Fixture probe(1, 1);
         std::printf("AAX allocation proof: reported latency %u samples, %u parameters\n", op_shell_latency(probe.state.engine), info.param_count);
     }
-    std::printf("AAX allocation proof: %lu armed process calls (mono and stereo%s; 1, 512 and 3000 frames; default, changing, non-finite and oversized packets; bypass on and off, crossfades across calls, bypassed refused packets), 0 allocations by operator new and by malloc: PASS\n", g_calls, kExtra);
+    std::printf("AAX allocation proof: %lu armed process calls (mono and stereo%s; 1, 512 and 3000 frames; default, changing, non-finite and oversized packets; bypass on and off, crossfades across calls, bypassed refused packets, and on the stand-in the latency moving under the bypass delay), 0 allocations by operator new and by malloc: PASS\n", g_calls, kExtra);
     return 0;
 }

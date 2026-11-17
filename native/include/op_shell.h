@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 8,
+    OP_SHELL_ABI = 9,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -397,6 +397,37 @@ size_t op_shell_param_aax_id(uint32_t index, char* buf, size_t cap);
 // Info.plist, so native/CMakeLists.txt asks at configure time (au/kind_probe.c).
 uint32_t op_shell_au_code(uint32_t which);
 // ---- end of ABI 8 -----------------------------------------------------------
+
+// ---- ABI 9: the instance's own parameter table, and its largest latency -------
+// A plugin may rename its parameters at run time (new names, units or value
+// text; never new ids, ranges or order) and raise OP_CHANGE_PARAM_INFO. The
+// calls of ABI 1 and 3 (op_shell_param, op_shell_param_format,
+// op_shell_param_parse) take no instance, so they keep answering from the
+// plugin type's first table. These answer from the table the instance's plugin
+// returned last: the one a host should show after OP_CHANGE_PARAM_INFO, which
+// op_shell_take_changes reports only once that table has been read. An
+// `instance` that is NULL or not a live instance of this library (a pointer
+// from another process, a destroyed one) answers from the first table, as the
+// calls without an instance do. Main thread; the text calls allocate.
+//
+// op_shell_param with the instance's name and unit; the other fields (ranges,
+// default, steps, flags, id) are always the first table's.
+uint32_t op_shell_instance_param(const void* instance, uint32_t index, OpParamDesc* out);
+// op_shell_param_format and op_shell_param_parse with the instance's text.
+size_t op_shell_instance_param_format(const void* instance, uint32_t index, double plain, char* buf, size_t cap);
+int op_shell_instance_param_parse(const void* instance, uint32_t index, const char* text, double* out_plain);
+// The largest latency, in samples, the instance may report until it is next
+// prepared (op_shell_create, op_shell_set_layout): the plugin's own
+// Plugin::max_latency, or op_shell_latency if larger. A shell sizes its bypass
+// delay for it off the audio thread. 0 for a NULL instance. Any thread; never
+// blocks, never allocates.
+uint32_t op_shell_max_latency(const void* instance);
+// The latency as of the last block, like op_shell_latency, but not counted as
+// the host's read: a latency read here is still reported by
+// op_shell_take_changes. For the audio thread (a bypass delay that follows the
+// latency). 0 for a NULL instance. Any thread; never blocks, never allocates.
+uint32_t op_shell_latency_now(const void* instance);
+// ---- end of ABI 9 -----------------------------------------------------------
 
 #if OP_HAS_TAIL
 // Optional, with -DOP_TAIL=ON: how long the output rings after the input

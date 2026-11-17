@@ -458,8 +458,18 @@ static std::string strip_unit(const std::string& text, const char* unit) {
 class ShellParameter final : public Parameter {
 public:
     // `tag` is the ID the host stores, `index` the parameter's place in the ABI.
-    ShellParameter(const TChar* title, const TChar* units, ParamID tag, uint32_t index, ParamValue normalized, int32 stepCount, int32 flags)
-        : Parameter(title, tag, units, normalized, stepCount, flags), index_(index) {}
+    // `engine` is the controller's pointer to the processor's engine (null until
+    // announced, or when the halves are in different processes): the text and
+    // the unit come from that engine's table (ABI 9), so a rename shows.
+    ShellParameter(const TChar* title, const TChar* units, ParamID tag, uint32_t index, ParamValue normalized, int32 stepCount, int32 flags,
+                   void* const* engine)
+        : Parameter(title, tag, units, normalized, stepCount, flags), index_(index), engine_(engine) {}
+    // The name and unit of the engine's table, after OP_CHANGE_PARAM_INFO. UI thread.
+    void rename(const OpParamDesc& desc) {
+        utf8_to_utf16(desc.name, strnlen(desc.name, sizeof(desc.name)), info.title, 128);
+        utf8_to_utf16(desc.name, strnlen(desc.name, sizeof(desc.name)), info.shortTitle, 128);
+        utf8_to_utf16(desc.unit, strnlen(desc.unit, sizeof(desc.unit)), info.units, 128);
+    }
     ParamValue toPlain(ParamValue normalized) const SMTG_OVERRIDE { return op_shell_to_plain(index_, normalized); }
     ParamValue toNormalized(ParamValue plain) const SMTG_OVERRIDE { return op_shell_to_normalized(index_, plain); }
     // The plugin's own text for the plain value ("6.0 dB"), not the
@@ -467,15 +477,15 @@ public:
     // VST3 hosts print the parameter's units after this string, so a trailing
     // unit the plugin's text already carries is dropped ("6.0 dB" -> "6.0").
     void toString(ParamValue normalized, String128 string) const SMTG_OVERRIDE {
-        std::string text = op_shell_calls::param_text(index_, toPlain(normalized));
+        std::string text = op_shell_calls::instance_param_text(*engine_, index_, toPlain(normalized));
         OpParamDesc desc{};
-        if (op_shell_param(index_, &desc)) text = strip_unit(text, desc.unit);
+        if (op_shell_instance_param(*engine_, index_, &desc)) text = strip_unit(text, desc.unit);
         utf8_to_utf16(text.data(), text.size(), string, 128);
     }
     bool fromString(const TChar* string, ParamValue& normalized) const SMTG_OVERRIDE {
         const std::string text = utf16_to_utf8(string);
         double plain = 0.0;
-        if (!op_shell_param_parse(index_, text.c_str(), &plain) || !std::isfinite(plain)) return false;
+        if (!op_shell_instance_param_parse(*engine_, index_, text.c_str(), &plain) || !std::isfinite(plain)) return false;
         const double value = toNormalized(plain);
         if (!std::isfinite(value)) return false;
         normalized = std::min(1.0, std::max(0.0, value));
@@ -484,6 +494,7 @@ public:
     OBJ_METHODS(ShellParameter, Parameter)
 private:
     uint32_t index_;
+    void* const* engine_;
 };
 
 // Bypass reads "Off" and "On" instead of 0.0000 and 1.0000.
@@ -512,9 +523,9 @@ public:
 // Length of the switch between processed and bypassed audio.
 constexpr double kBypassFadeSeconds = 0.010;
 
-#if OP_HAS_EDITOR
+// Processor to controller: the engine the controller's editor shows and whose
+// parameter table it reads (ABI 9). Attribute "engine" (int, the pointer).
 constexpr const char* kEngineMessage = "openplugin.engine";
-#endif
 // Processor to controller (ABI 6): the plugin's latency or parameter info
 // changed. Attribute "flags" (int, OP_CHANGE_*). Sent from the processor's
 // main-thread timer; the controller answers with restartComponent.
@@ -1468,18 +1479,15 @@ public:
 private:
     void startPolling() { ChangesTimer<Processor>::shared().add(this); }
     void stopPolling() { ChangesTimer<Processor>::shared().remove(this); }
-    // Tells the controller which engine an open editor should show. The pointer
-    // only means something in this process, and the editor checks it is live.
+    // Tells the controller which engine an open editor should show and whose
+    // parameter table it reads (ABI 9). The pointer only means something in this
+    // process; the editor and the library check it is live before they use it.
     void announce(void* engine) {
-#if OP_HAS_EDITOR
         if (IPtr<IMessage> message = owned(allocateMessage())) {
             message->setMessageID(kEngineMessage);
             message->getAttributes()->setInt("engine", static_cast<int64>(reinterpret_cast<intptr_t>(engine)));
             sendMessage(message);
         }
-#else
-        (void)engine;
-#endif
     }
     // Gives the host's track to the engine, if there is one and the host has told.
     void applyTrack() {
@@ -1713,7 +1721,7 @@ public:
             utf8_to_utf16(desc.unit, std::strlen(desc.unit), unit, 128);
             int32 steps = desc.steps > 1 ? static_cast<int32>(desc.steps - 1) : 0;
             int32 flags = (desc.flags & OP_PARAM_AUTOMATABLE) ? ParameterInfo::kCanAutomate : 0;
-            auto* parameter = new ShellParameter(title, unit, ids_.id(i), i, desc.default_normalized, steps, flags);
+            auto* parameter = new ShellParameter(title, unit, ids_.id(i), i, desc.default_normalized, steps, flags, &engine_);
             if (i < units_.unitOf.size()) parameter->setUnitID(units_.unitOf[i]);
             parameters.addParameter(parameter);
         }
@@ -1761,26 +1769,35 @@ public:
             tellHost(static_cast<uint32_t>(flags));
             return kResultOk;
         }
-#if OP_HAS_EDITOR
         if (id && std::strcmp(id, kEngineMessage) == 0) {
             int64 value = 0;
-            if (message->getAttributes()->getInt("engine", value) == kResultOk) {
+            if (message->getAttributes() && message->getAttributes()->getInt("engine", value) == kResultOk) {
                 engine_ = reinterpret_cast<void*>(static_cast<intptr_t>(value));
+#if OP_HAS_EDITOR
                 if (editor_) op_editor_bind(editor_, engine_);
+#endif
             }
             return kResultOk;
         }
-#endif
         return EditController::notify(message);
     }
     // The plugin's latency or parameter info changed: one restartComponent with
     // every flag it needs. A new latency makes the host deactivate and activate
     // the component and read getLatencySamples; new parameter info makes it
     // read getParameterInfo and the values again. UI thread.
+    // New parameter info is read from the engine's table first (ABI 9), so the
+    // host's getParameterInfo and getParamStringByValue see the renamed table.
     void tellHost(uint32_t flags) {
         int32 restart = 0;
         if (flags & OP_CHANGE_LATENCY) restart |= kLatencyChanged;
-        if (flags & OP_CHANGE_PARAM_INFO) restart |= kParamTitlesChanged | kParamValuesChanged;
+        if (flags & OP_CHANGE_PARAM_INFO) {
+            restart |= kParamTitlesChanged | kParamValuesChanged;
+            for (uint32_t i = 0; i < count_; ++i) {
+                OpParamDesc desc{};
+                auto* parameter = static_cast<ShellParameter*>(parameters.getParameter(ids_.id(i)));
+                if (parameter && op_shell_instance_param(engine_, i, &desc)) parameter->rename(desc);
+            }
+        }
         if (restart && componentHandler) componentHandler->restartComponent(restart);
     }
 #if OP_HAS_EDITOR
@@ -1863,7 +1880,6 @@ private:
     }
     void* editor_ = nullptr;
     const void* owner_ = nullptr;
-    void* engine_ = nullptr;
 #else
     IPlugView* PLUGIN_API createView(FIDString) SMTG_OVERRIDE { return nullptr; }
 #endif
@@ -1888,6 +1904,9 @@ private:
 #endif
     }
     TrackState track_;
+    // The processor's engine, from its kEngineMessage; null before, between
+    // engines, and when the halves are not in one process.
+    void* engine_ = nullptr;
     uint32_t count_ = 0;
     ParamIds ids_;
     bool midiIn_ = false;
