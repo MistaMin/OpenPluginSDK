@@ -963,7 +963,7 @@ pub unsafe fn expression_parse(id: u32, text: *const std::ffi::c_char, out_value
 // ---- ABI 9: the instance's own parameter table, and its largest latency ----
 
 /// The table the host should show for the instance at `ptr`: the one its
-/// plugin returned last ([`FfiInstance::current_info`]), or the plugin type's
+/// plugin returned last ([`HostSession::current_info`]), or the plugin type's
 /// first table when `ptr` is null or not a live instance. Message thread.
 fn table_of<P: Plugin + Default>(ptr: *const ShellInstance) -> &'static PluginInfo {
     with_live(ptr, |instance| instance.ffi.current_info()).unwrap_or_else(plugin_info::<P>)
@@ -1013,7 +1013,7 @@ pub unsafe fn instance_param_parse<P: Plugin + Default>(ptr: *const ShellInstanc
 }
 
 /// `op_shell_max_latency`: the largest latency the instance may report until
-/// it is prepared again ([`FfiInstance::max_latency`]); 0 for a null
+/// it is prepared again ([`HostSession::max_latency`]); 0 for a null
 /// instance. Any thread; never blocks, never allocates.
 ///
 /// # Safety

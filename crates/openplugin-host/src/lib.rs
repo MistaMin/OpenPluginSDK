@@ -129,7 +129,7 @@ pub const STATE_WAIT: Duration = Duration::from_secs(2);
 
 const GATE_AUDIO: u32 = 1;
 const GATE_STATE: u32 = 2;
-/// Held for one read of [`Plugin::info`] by [`FfiInstance::take_changes`]:
+/// Held for one read of [`Plugin::info`] by [`HostSession::take_changes`]:
 /// blocks and state calls wait for it as for a block (it lasts one call).
 const GATE_PEEK: u32 = 4;
 
@@ -172,7 +172,7 @@ pub struct HostSession {
     /// The plugin's [`HostNotifier`] (a clone of the one it was given).
     notifier: HostNotifier,
     /// [`Plugin::max_latency`] as of the last `prepare` (0 when the plugin
-    /// declares none): what [`FfiInstance::max_latency`] adds to the latency.
+    /// declares none): what [`HostSession::max_latency`] adds to the latency.
     declared_max_latency: AtomicU32,
     /// The table [`Plugin::info`] returned the last time the plugin object was
     /// reached (after every block, a reset, a state or track call): the names
@@ -422,7 +422,7 @@ impl HostSession {
     /// call it on their main thread); never blocks, never allocates.
     ///
     /// [`HostNotifier::PARAM_INFO`] is reported only once the table the
-    /// plugin now returns has been read ([`FfiInstance::current_info`]): at the
+    /// plugin now returns has been read ([`HostSession::current_info`]): at the
     /// end of a block, or here when no block is running (taken in one
     /// non-blocking step; a block that starts in that instant is passed
     /// through dry). A change raised while a block runs waits for the next
@@ -458,7 +458,7 @@ impl HostSession {
     }
 
     /// The latency as of the last block, without counting as the host's read
-    /// (unlike [`FfiInstance::latency`]). Any thread, the audio thread
+    /// (unlike [`HostSession::latency`]). Any thread, the audio thread
     /// included; never blocks, never allocates.
     pub fn latency_now(&self) -> u32 {
         self.latency.load(Ordering::Acquire)
@@ -466,7 +466,7 @@ impl HostSession {
 
     /// The parameter table the host should show now: what [`Plugin::info`]
     /// returned the last time the plugin object was reached. Its parameters
-    /// are those of [`FfiInstance::param_spec`], in the same order, with the
+    /// are those of [`HostSession::param_info`], in the same order, with the
     /// same ids and ranges; only names, units and value text may differ.
     /// Any thread; never blocks.
     pub fn current_info(&self) -> &'static PluginInfo {
@@ -477,7 +477,7 @@ impl HostSession {
     /// Remember the table the plugin returns now, with the plugin object in
     /// hand (a block, a reset, a state or track call). A table that moved is
     /// reported as [`HostNotifier::PARAM_INFO`] at the next
-    /// [`FfiInstance::take_changes`]. A table whose parameter count differs
+    /// [`HostSession::take_changes`]. A table whose parameter count differs
     /// from the first is ignored: parameters cannot be added or removed at
     /// run time. No allocation.
     fn note_info(&self, info: &'static PluginInfo) {

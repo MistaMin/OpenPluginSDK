@@ -295,7 +295,7 @@ The review was written at 0.3.1-beta. These are the public items added between t
 | Item | Decision | Applied |
 |---|---|---|
 | `channels::{ChannelsMut, Channels}` | keep | Added with this change: the channel slices `process` takes, over buffers a host owns, without allocation. |
-| `Plugin`: `note_expressions`, `mpe_input`, `note_on_ref`, `note_off_ref`, `note_expression`, `param_modulation`, `voice_info`, `pull_note_end`, `flush_denormals`, `track_info_changed`, `set_host_notifier`, `clap_id`, `vst3_ids`, `au_ids`, `state_is_parameters_only` | keep | All provided methods whose default is the behaviour before they existed. |
+| `Plugin`: `note_expressions`, `mpe_input`, `note_on_ref`, `note_off_ref`, `note_expression`, `param_modulation`, `voice_info`, `pull_note_end`, `flush_denormals`, `track_info_changed`, `set_host_notifier`, `clap_id`, `vst3_ids`, `au_ids`, `state_is_parameters_only`, `max_latency` | keep | All provided methods whose default is the behaviour before they existed. `max_latency` (default `None`) came with shell ABI 9; `SurroundAdapter` forwards it. |
 | `ParamInfo`: `group`, `pins`, `with_group`, `with_host_id`, `with_clap_id`, `with_vst3_id`, `with_au_id`, `with_aax_id`, `host_group`, `group_names`; `check_group`, `groups_valid`, `group_paths`, `group_parent`, `group_name`, `GroupError`, `GROUP_SEPARATOR`, `GROUP_MAX_BYTES` | keep, mark | `GroupError` is `#[non_exhaustive]`. The group rules are what hosts are shown: frozen. |
 | `TrackInfo` (name, colour, kind; `IS_RETURN`, `IS_BUS`, `IS_MASTER`, `is_return`, `is_bus`, `is_master`, `rgb`) | keep, mark | `#[non_exhaustive]`: a host adapter starts from `TrackInfo::default()`. |
 | `identity`: `ParamPins`, `ParamIdMap`, `Vst3Ids`, `AuIds`, `PinError`, `PinFormat`, `check_pins`, `clap_id_valid`, `param_host_ids`, `param_aax_ids`, `params_pinned`, `state_is_keyed`, the reserved-id constants | keep, mark | `PinError` and `PinFormat` are `#[non_exhaustive]`. How a pin becomes what a host sees is identity (VERSIONING section 4). |
@@ -342,14 +342,14 @@ Every module below was added after the review. All are kept. Every public enum o
 |---|---|---|
 | `lv2::PortMap`, `plugin_ttl_sized`, `write_bundle_for_editor` | keep | The port layout is part of the plugin's LV2 identity (VERSIONING section 4). |
 | `lv2::layout_of`, `instance_state`, `worker_stats`, `WorkerStats` | hide | Bridge and test support. |
-| `shell`: the ABI 4 to 8 additions (layouts, events, MIDI out, changes, expression, identity, track info) and `shell::editor`'s resize, context-menu and track calls | hide | With the module (F4). `OP_SHELL_ABI` 8 and `op_editor.h` are the contract. |
+| `shell`: the ABI 4 to 9 additions (layouts, events, MIDI out, changes, expression, identity, track info, the instance's table and largest latency) and `shell::editor`'s resize, context-menu and track calls | hide | With the module (F4). `OP_SHELL_ABI` 9 and `op_editor.h` are the contract. |
 | The CLAP and LV2 editor bridges for X11 and Win32 (`clap_gui_x11`, `clap_gui_win32`, `lv2_ui_x11`, `lv2_ui_win32`) | hide | Private modules of the hidden bridges. |
 
 ### `openplugin-host` (was `openplugin-ffi`)
 
 | Item | Decision | Applied |
 |---|---|---|
-| `HostSession::take_changes`, `set_track_info`, `select_layout`, `layout_index`, `layout`, `take_midi_dropped` | keep | |
+| `HostSession::take_changes`, `set_track_info`, `select_layout`, `layout_index`, `layout`, `take_midi_dropped`, `max_latency`, `latency_now`, `current_info` | keep | The last three came with shell ABI 9: a Rust host sizes its bypass delay and reads a renamed table through them. |
 | `HostSession::process_block`, `pull_midi_out` | hide | They take the C ABI's own structs (`OpProcess`, `OpMidiEvent`). A typed way for a Rust host to send events and transport is an addition for after 1.0. |
 | `block` (`OpProcess`, `OpEvent`, `OpTransport`, `OpMidiEvent`, the `EVENT_*` and `TRANSPORT_*` constants) | hide | The Rust spelling of `op_shell.h` (F4). |
 | `UnsupportedRate` | keep | Added with this change: the error of `HostSession::new`. |
