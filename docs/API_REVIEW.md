@@ -321,7 +321,7 @@ Every module below was added after the review. All are kept. Every public enum o
 | Meters: `kmeter`, `ppm`, `true_peak_meter`, `scope`, `spectrum`; `meter::VuIec`; `loudness::{EbuMeter, EbuScale, Target, bs1770_weight}` | keep, mark | `VuIec` supersedes `VuMeter`. |
 | Time and modulation: `moddelay`, `lfo`, `chorus`, `flanger`, `phaser`, `delay_pitch`, `vocoder`, `pitch_detect`, `stft`, `windows` | keep, mark | `WindowKind::Hann` supersedes `window::hann`. |
 | Reverb and convolution: `fdn`, `plate`, `early`, `partitioned` | keep, mark | |
-| Virtual analog and physical models: `ladder`, `korg35`, `wdf`, `tape`, `pluck`, `waveguide`, `modal`, `neural` | keep, mark | |
+| Virtual analog and physical models: `ladder`, `korg35`, `wdf`, `tape`, `pluck`, `waveguide`, `modal`, `neural` | keep, mark | `neural::MAX_LAYERS` (the loader's cap, added after the review) is kept: raising it is not a break. |
 | Synthesis: `blosc`, `wavetable`, `adsr`, `noise`, `resample`, `voice_alloc`; `voice::{NoteExpressions, MOD_SLOTS}` | keep, mark | `BandlimitedOsc`, `WavetableOsc`, `VoiceAllocator` and `SincPlayer` supersede `Oscillator`, `Polyphony` and `SampleVoice`. `VoiceAllocator::ended_dropped` (a counter, added after the review) is kept. |
 | Surround and utilities: `downmix`, `surround_adapter`, `dither`, `spectral_repair`, `utility`, `simd` | keep, mark | `SurroundAdapter` follows `Plugin::process`; its `meters` carries the deepest gain reduction of its engines, which `gain_reduction_db` gave before. |
 
