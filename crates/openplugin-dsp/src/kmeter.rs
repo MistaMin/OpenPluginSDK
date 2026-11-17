@@ -71,6 +71,8 @@ struct Channel {
     ring: Box<[f32]>,
     pos: usize,
     sum: f64,
+    /// The squares written since the ring last wrapped, summed in ring order.
+    fresh: f64,
     peak: f32,
     held: f32,
     hold_left: u32,
@@ -93,6 +95,7 @@ impl KMeter {
             ring: vec![0.0; len].into_boxed_slice(),
             pos: 0,
             sum: 0.0,
+            fresh: 0.0,
             peak: 0.0,
             held: 0.0,
             hold_left: 0,
@@ -118,6 +121,7 @@ impl KMeter {
             ch.ring.fill(0.0);
             ch.pos = 0;
             ch.sum = 0.0;
+            ch.fresh = 0.0;
             ch.peak = 0.0;
             ch.held = 0.0;
             ch.hold_left = 0;
@@ -134,11 +138,14 @@ impl KMeter {
             let sq = x * x;
             ch.sum += f64::from(sq) - f64::from(ch.ring[ch.pos]);
             ch.ring[ch.pos] = sq;
+            ch.fresh += f64::from(sq);
             ch.pos += 1;
             if ch.pos == ch.ring.len() {
                 ch.pos = 0;
-                // Re-sum once per window so rounding cannot accumulate.
-                ch.sum = ch.ring.iter().map(|&v| f64::from(v)).sum();
+                // `fresh` now holds the whole window summed afresh, the same as
+                // re-adding the ring, so rounding cannot accumulate; spread over samples.
+                ch.sum = ch.fresh;
+                ch.fresh = 0.0;
             }
             let a = x.abs();
             ch.peak = ch.peak.max(a);
@@ -237,6 +244,19 @@ mod tests {
         assert!((m.rms_dbfs(0) - -3.01).abs() < 0.1, "{}", m.rms_dbfs(0));
         m.process(0, &vec![0.0; 14_400 + 10]);
         assert_eq!(m.rms_dbfs(0), FLOOR_DB);
+    }
+
+    #[test]
+    fn running_sum_equals_a_re_sum_at_every_wrap() {
+        let mut m = KMeter::new(1000.0, KScale::K20, 1);
+        let x: Vec<f32> = (0..2400).map(|n| ((n * 7919 % 1000) as f32 / 500.0 - 1.0) * 0.8).collect();
+        for _ in 0..3 {
+            m.process(0, &x);
+            let ch = &m.channels[0];
+            assert_eq!(ch.pos, 0);
+            let want: f64 = ch.ring.iter().map(|&v| f64::from(v)).sum();
+            assert_eq!(ch.sum, want);
+        }
     }
 
     #[test]

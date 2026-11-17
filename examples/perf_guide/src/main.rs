@@ -103,7 +103,7 @@ fn perf(filter: Option<&str>) {
     add("sin", "fast_sin (after)", &|| measure(|| Map { f: fast_sin, pre: 20.0 }));
 
     add("oversampling", "1x", &|| measure(|| Sat1x));
-    add("oversampling", "2x IIR half-band (Oversampler2x)", &|| measure(SatIir2x::new));
+    add("oversampling", "2x min-phase half-band (Oversampler2x)", &|| measure(SatIir2x::new));
     add("oversampling", "2x linear phase", &|| measure(|| SatLinearPhase::new(2)));
     add("oversampling", "4x linear phase", &|| measure(|| SatLinearPhase::new(4)));
 

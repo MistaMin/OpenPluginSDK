@@ -472,7 +472,7 @@ impl Kernel for Sat1x {
     }
 }
 
-/// The saturator at 2x through the IIR half-band pair of `Oversampler2x`.
+/// The saturator at 2x through `Oversampler2x` (a minimum-phase half-band FIR).
 pub struct SatIir2x {
     os: Vec<Oversampler2x>,
     up: Vec<f32>,

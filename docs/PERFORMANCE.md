@@ -521,23 +521,43 @@ price has three parts: the non-linear stage runs 2 or 4 times as often, the two 
 down) cost per *oversampled* sample, and the filters add latency that the plugin must report.
 
 [`Sat1x`, `SatIir2x`, `SatLinearPhase`](../examples/perf_guide/src/kernels.rs): the same
-`tanh(4x)` saturator at 1x, through the SDK's IIR half-band `Oversampler2x`, and through the SDK's
+`tanh(4x)` saturator at 1x, through the SDK's minimum-phase half-band `Oversampler2x` (a
+[`MinPhaseHalfband`](../crates/openplugin-dsp/src/halfband_min.rs) at 0.45 fs and 80 dB), and through the SDK's
 linear-phase `LinearPhaseOversampler` at 2x and 4x (64 samples of latency). Stereo, a 4096-frame block
 (85.3 ms of audio):
 
 | Case | us/block | ns/frame | Share of one core, per instance |
 | --- | ---: | ---: | ---: |
-| 1x | 47.54 | 11.6 | 0.06 % |
-| 2x IIR half-band (`Oversampler2x`) | 315.46 | 77.0 | 0.37 % |
-| 2x linear phase | 2827.63 | 690.3 | 3.3 % |
-| 4x linear phase | 10006.33 | 2443.0 | 11.7 % |
+| 1x | 47.96 | 11.7 | 0.06 % |
+| 2x minimum-phase half-band (`Oversampler2x`) | 701.17 | 171.2 | 0.82 % |
+| 2x linear phase | 1585.00 | 387.0 | 1.9 % |
+| 4x linear phase | 3272.25 | 798.9 | 3.8 % |
 
-- 2x through the IIR pair costs 6.6 times the 1x saturator; 2x linear phase costs 59 times.
+- 2x through the minimum-phase pair costs 15 times the 1x saturator; 2x linear phase costs 33 times.
   Oversampling is where plugins spend their CPU. Measure it before you ship it as a default.
-- The linear-phase resampler is dominated by its filter, not by the saturator: it convolves with a
-  long windowed sinc at every oversampled sample. Choose it when phase linearity is the requirement
-  (a mastering chain, a parallel path that must null) and offer the IIR path or no oversampling as the
-  default; consider making the factor a parameter with 1x as the default, as most plugins do.
+- `Oversampler2x` was two RBJ low-passes until this release: cheaper (about 315 us/block here), but a
+  48 kHz round trip lost 8.8 dB at 20 kHz and left the image of a 20 kHz tone only 16 dB down. Its
+  filter now passes to 0.45 fs flat and rejects images and fold-back by 80 dB, with a few samples of
+  frequency-dependent delay.
+- The linear-phase resampler is dominated by its filter, not by the saturator. It runs in polyphase form
+  (the up side meets only the non-zero samples of the zero-stuffed signal) over contiguous histories, so
+  each base-rate sample costs about two passes over the 129 or 257 taps. Choose it when phase linearity
+  is the requirement (a mastering chain, a parallel path that must null) and offer the minimum-phase path
+  or no oversampling as the default; consider making the factor a parameter with 1x as the default, as
+  most plugins do.
+
+Measured with `cargo test --release -p openplugin-dsp --test dsp_speed_bench -- --ignored --nocapture`
+(share of one core, stereo, 512-frame blocks, the fastest of five runs; Apple Silicon, other builds
+running), before and after the polyphase rewrite of `LinearPhaseOversampler`:
+
+| Case | 48 kHz before | 48 kHz after | 192 kHz before | 192 kHz after |
+| --- | ---: | ---: | ---: | ---: |
+| `LinearPhaseOversampler` 2x | 1.84 % | 0.60 % | 7.34 % | 2.34 % |
+| `LinearPhaseOversampler` 4x | 8.01 % | 1.19 % | 32.19 % | 4.78 % |
+| `TruePeakClipper` 4x | 11.12 % | 3.97 % | 48.94 % | 16.37 % |
+
+The output is bit for bit the same as before (`polyphase_matches_the_direct_form` in `linear_phase.rs`).
+
 - Oversample only the non-linear stage, not the whole plugin. Filters that run at the host rate stay
   at the host rate.
 - An alternative that costs nothing in latency: anti-derivative anti-aliasing for a few memoryless
