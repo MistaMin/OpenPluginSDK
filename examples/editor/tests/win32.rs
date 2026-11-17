@@ -559,7 +559,7 @@ mod win {
         fn render(&mut self, scale: f32) -> openplugin::core::Frame<'_> {
             let (w, h) = ((40.0 * scale).round() as usize, (30.0 * scale).round() as usize);
             self.pixels.resize(w * h, 0);
-            openplugin::core::Frame { pixels: &self.pixels, width: w, height: h }
+            openplugin::core::Frame::new(&self.pixels, w, h)
         }
         fn right_mouse_down(&mut self, _x: f32, _y: f32) -> bool {
             let call = self.callback.borrow_mut().take();

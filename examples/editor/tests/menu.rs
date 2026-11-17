@@ -286,7 +286,7 @@ mod mac {
         fn render(&mut self, _scale: f32) -> Frame<'_> {
             let mut seen = self.seen.borrow_mut();
             seen.nested += u32::from(seen.inside);
-            Frame { pixels: &self.pixels, width: 40, height: 30 }
+            Frame::new(&self.pixels, 40, 30)
         }
         fn right_mouse_down(&mut self, _x: f32, _y: f32) -> bool {
             self.seen.borrow_mut().inside = true;
