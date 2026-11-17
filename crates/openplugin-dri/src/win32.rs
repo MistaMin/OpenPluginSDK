@@ -355,6 +355,7 @@ unsafe extern "system" {
     fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut Handle) -> i32;
     fn GlobalAlloc(flags: u32, bytes: usize) -> Handle;
     fn GlobalLock(mem: Handle) -> *mut c_void;
+    fn GlobalSize(mem: Handle) -> usize;
     fn GlobalUnlock(mem: Handle) -> i32;
     fn GlobalFree(mem: Handle) -> Handle;
     fn GetCurrentProcessId() -> u32;
@@ -544,6 +545,12 @@ struct State {
     pending: Option<(u32, u32, bool)>,
     /// A paint or an invalidation that came in while `busy`.
     repaint: bool,
+    /// View code that uses this state is on the stack ([`Hold`]).
+    held: u32,
+    /// The view was dropped while `held`: the state goes with the last hold.
+    closing: bool,
+    /// An unused key is at the parent: one that comes back is not sent again.
+    forwarding: bool,
     /// The view is changing its own window size.
     in_frame: bool,
     /// The scale the host set, if it set one.
@@ -619,17 +626,45 @@ unsafe fn client_size(hwnd: Hwnd) -> (i32, i32) {
     (rc.right - rc.left, rc.bottom - rc.top)
 }
 
+/// Keeps the state allocated while view code that uses it is on the stack: a
+/// host callback or a modal loop in there may drop the view, and the state is
+/// then freed with the last hold.
+struct Hold(*mut State);
+
+impl Hold {
+    unsafe fn new(sp: *mut State) -> Hold {
+        unsafe { (*sp).held += 1 };
+        Hold(sp)
+    }
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.0).held -= 1;
+            if (*self.0).held == 0 && (*self.0).closing {
+                drop(Box::from_raw(self.0));
+            }
+        }
+    }
+}
+
 /// Run an editor call. A resize that arrived meanwhile is applied after it.
-/// False, and no call, when the editor is already inside a call.
+/// False, and no call, when the editor is already inside a call or the view
+/// was dropped.
 unsafe fn guarded(sp: *mut State, call: impl FnOnce(&mut State)) -> bool {
     unsafe {
         let st = &mut *sp;
-        if st.busy {
+        if st.busy || st.closing {
             return false;
         }
+        let _hold = Hold::new(sp);
         st.busy = true;
         call(st);
         st.busy = false;
+        if st.closing {
+            return true;
+        }
         if let Some((w, h, frame)) = st.pending.take() {
             apply(st, w, h, frame);
         }
@@ -872,6 +907,10 @@ fn typed_char(vk: u32) -> Option<char> {
 unsafe fn key_event(sp: *mut State, msg: u32, w: usize, l: isize, down: bool) -> isize {
     unsafe {
         let hwnd = (*sp).hwnd;
+        // A parent that hands the key it was sent back to the focused child would recurse without end.
+        if (*sp).forwarding {
+            return DefWindowProcW(hwnd, msg, w, l);
+        }
         // While the text field is open, nothing typed reaches the editor or the host.
         if (*sp).text_field.is_some() {
             return 0;
@@ -893,7 +932,10 @@ unsafe fn key_event(sp: *mut State, msg: u32, w: usize, l: isize, down: bool) ->
         // transport keys; the system keys (Alt, F10) keep their default handling.
         let parent = GetParent(hwnd);
         if (msg == WM_KEYDOWN || msg == WM_KEYUP) && !parent.is_null() {
-            SendMessageW(parent, msg, w, l)
+            (*sp).forwarding = true;
+            let result = SendMessageW(parent, msg, w, l);
+            (*sp).forwarding = false;
+            result
         } else {
             DefWindowProcW(hwnd, msg, w, l)
         }
@@ -959,7 +1001,7 @@ unsafe fn tick(sp: *mut State) {
                 st.editor.file_dialog_done(tag, paths);
             }
         });
-        if !ran {
+        if !ran || !alive(hwnd, sp) {
             return;
         }
         // A window moved to a display of another scale, in a host that sent no message.
@@ -1071,24 +1113,29 @@ unsafe fn show_param_menu(sp: *mut State, menu: ParamMenu) {
     }
 }
 
+/// The text in a global block of UTF-16: up to the first NUL, and never past
+/// the block (another process made it, and may have left the NUL out).
+unsafe fn global_text(data: Handle) -> Option<String> {
+    unsafe {
+        let p = GlobalLock(data) as *const u16;
+        if p.is_null() {
+            return None;
+        }
+        let block = std::slice::from_raw_parts(p, GlobalSize(data) / 2);
+        let len = block.iter().position(|&c| c == 0).unwrap_or(block.len());
+        let text = String::from_utf16_lossy(&block[..len]);
+        GlobalUnlock(data);
+        Some(text)
+    }
+}
+
 unsafe fn clipboard_text(owner: Hwnd) -> Option<String> {
     unsafe {
         if OpenClipboard(owner) == 0 {
             return None;
         }
-        let mut out = None;
         let data = GetClipboardData(CF_UNICODETEXT);
-        if !data.is_null() {
-            let p = GlobalLock(data) as *const u16;
-            if !p.is_null() {
-                let mut len = 0;
-                while *p.add(len) != 0 {
-                    len += 1;
-                }
-                out = Some(String::from_utf16_lossy(std::slice::from_raw_parts(p, len)));
-                GlobalUnlock(data);
-            }
-        }
+        let out = if data.is_null() { None } else { global_text(data) };
         CloseClipboard();
         out
     }
@@ -1276,6 +1323,7 @@ unsafe extern "system" fn field_proc(field: Hwnd, msg: u32, w: usize, l: isize) 
         if sp.is_null() || (*sp).text_field != Some(field) {
             return own(msg, w, l);
         }
+        let _hold = Hold::new(sp);
         match msg {
             WM_GETDLGCODE => own(msg, w, l) | DLGC_WANTALLKEYS,
             WM_KEYDOWN if w == 0x0D => {
@@ -1471,6 +1519,7 @@ unsafe fn view_message(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> isize {
         if sp.is_null() {
             return DefWindowProcW(hwnd, msg, w, l);
         }
+        let _hold = Hold::new(sp);
         match msg {
             WM_NCDESTROY => {
                 // The host destroyed the parent: the window is gone, the editor stays
@@ -1675,6 +1724,9 @@ impl EditorView {
             busy: false,
             pending: None,
             repaint: false,
+            held: 0,
+            closing: false,
+            forwarding: false,
             in_frame: false,
             host_scale: None,
             scale: unsafe { window_scale(null_mut()) },
@@ -1933,10 +1985,17 @@ impl Drop for EditorView {
                 // The field and the tooltip control are the window's own and go with it.
                 DestroyWindow(hwnd);
             }
+            st.text_field = None;
             if !st.field_font.is_null() {
-                DeleteObject(st.field_font);
+                DeleteObject(std::mem::replace(&mut st.field_font, null_mut()));
             }
-            drop(Box::from_raw(self.state));
+            // Dropped from a host callback or a modal loop inside the view's own
+            // code: the last `Hold` frees the state.
+            if st.held > 0 {
+                st.closing = true;
+            } else {
+                drop(Box::from_raw(self.state));
+            }
         }
         release_classes();
     }
@@ -2487,6 +2546,32 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_text_block_without_a_nul_is_read_to_its_end_only() {
+        unsafe {
+            let text: Vec<u16> = "12.5 dB".encode_utf16().collect();
+            // GMEM_MOVEABLE, as a clipboard block is; exactly the text, no terminator.
+            let mem = GlobalAlloc(0x0002, text.len() * 2);
+            assert!(!mem.is_null());
+            let p = GlobalLock(mem) as *mut u16;
+            std::ptr::copy_nonoverlapping(text.as_ptr(), p, text.len());
+            GlobalUnlock(mem);
+            // The heap may round the block up: what follows the text is not text.
+            let read = global_text(mem).unwrap();
+            assert!(read.starts_with("12.5 dB") && read.encode_utf16().count() <= GlobalSize(mem) / 2, "{read:?}");
+            GlobalFree(mem);
+
+            let mut ended: Vec<u16> = "3 dB".encode_utf16().collect();
+            ended.extend([0, u16::from(b'x')]);
+            let mem = GlobalAlloc(0x0002, ended.len() * 2);
+            let p = GlobalLock(mem) as *mut u16;
+            std::ptr::copy_nonoverlapping(ended.as_ptr(), p, ended.len());
+            GlobalUnlock(mem);
+            assert_eq!(global_text(mem).as_deref(), Some("3 dB"));
+            GlobalFree(mem);
+        }
+    }
 
     #[test]
     fn points_and_pixels_round_trip_at_every_common_scale() {

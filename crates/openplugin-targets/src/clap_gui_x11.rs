@@ -46,6 +46,8 @@ pub(super) trait View {
     /// The descriptor to watch, or negative for none.
     fn fd(&self) -> RawFd;
     fn pump(&mut self);
+    /// The view lost its display: `fd` must no longer be watched.
+    fn dead(&self) -> bool;
     /// Physical pixels per editor point.
     fn scale(&self) -> f64;
 }
@@ -74,6 +76,9 @@ impl View for x11::EditorView {
     }
     fn pump(&mut self) {
         x11::EditorView::pump(self)
+    }
+    fn dead(&self) -> bool {
+        x11::EditorView::dead(self)
     }
     fn scale(&self) -> f64 {
         f64::from(x11::EditorView::scale(self))
@@ -117,17 +122,26 @@ pub(super) struct Gui {
     /// there waits in `pending` until the pump returns.
     pumping: bool,
     pending: Option<(u32, u32)>,
+    /// `destroy` came inside `view.pump()`: the pump drops the gui when it returns.
+    closing: bool,
     pub(super) view: Box<dyn View>,
 }
 
-impl Drop for Gui {
-    /// The host stops calling before the view closes its connection.
-    fn drop(&mut self) {
+impl Gui {
+    /// Have the host stop watching the view's descriptor.
+    fn unwatch(&mut self) {
         if let (Some(fd), Some(fds)) = (self.fd.take(), unsafe { self.fds.as_ref() }) {
             if let Some(unregister) = fds.unregister_fd {
                 unsafe { unregister(self.host, fd) };
             }
         }
+    }
+}
+
+impl Drop for Gui {
+    /// The host stops calling before the view closes its connection.
+    fn drop(&mut self) {
+        self.unwatch();
         if let Some(timers) = unsafe { self.timers.as_ref() } {
             if let Some(unregister) = timers.unregister_timer {
                 unsafe { unregister(self.host, self.timer) };
@@ -179,6 +193,9 @@ pub(super) fn create_with(
     }
     let Some(instance) = instance(plugin) else { return false };
     let Some(factory) = factory else { return false };
+    if instance.gui.as_ref().is_some_and(|gui| gui.pumping) {
+        return false;
+    }
     instance.gui = None;
     let host = instance.host;
     // Without the host's timer nothing would ever pump the view.
@@ -222,6 +239,7 @@ pub(super) fn create_with(
         scale,
         known,
         pumping: false,
+        closing: false,
         pending: None,
         view,
     };
@@ -248,7 +266,11 @@ unsafe extern "C" fn create(plugin: *const clap_plugin, api: *const c_char, floa
 unsafe extern "C" fn destroy(plugin: *const clap_plugin) {
     guarded(std::ptr::null(), (), || {
         if let Some(instance) = instance(plugin) {
-            instance.gui = None;
+            match instance.gui.as_mut().filter(|gui| gui.pumping) {
+                // The view's pump is on the stack and still uses the gui.
+                Some(gui) => gui.closing = true,
+                None => instance.gui = None,
+            }
         }
     })
 }
@@ -265,6 +287,14 @@ fn pump(plugin: *const clap_plugin) {
     gui.pumping = true;
     gui.view.pump();
     gui.pumping = false;
+    if gui.closing {
+        inst.gui = None;
+        return;
+    }
+    if gui.view.dead() {
+        // A lost connection stays readable: the host would call `on_fd` without end.
+        gui.unwatch();
+    }
     if let Some((w, h)) = gui.pending.take() {
         gui.view.resize(w, h);
         gui.known = gui.view.size();
@@ -628,6 +658,10 @@ mod tests {
         /// The editor takes this size by itself at the next tick.
         grow_to: Option<(u32, u32)>,
         made: u32,
+        /// The plugin whose gui the host destroys from inside the next tick.
+        destroy_in_tick: Option<usize>,
+        /// The fake view lost its display.
+        dead: bool,
     }
 
     thread_local! {
@@ -659,6 +693,12 @@ mod tests {
         fn tick(&mut self, _dt: f32) {
             if let Some(size) = probe(|p| p.grow_to.take()) {
                 self.size = size;
+            }
+            if let Some(plugin) = probe(|p| p.destroy_in_tick.take()) {
+                unsafe { destroy(plugin as *const clap_plugin) };
+                // The view and this editor are still in use by the pump.
+                assert!(has_gui(plugin as *const clap_plugin), "the gui outlives the call it was destroyed in");
+                self.pixels.push(0);
             }
         }
         fn render(&mut self, _scale: f32) -> Frame<'_> {
@@ -704,6 +744,9 @@ mod tests {
             probe(|p| p.pumps += 1);
             (self.poll)(self.editor.as_mut());
             self.editor.tick(0.033);
+        }
+        fn dead(&self) -> bool {
+            probe(|p| p.dead)
         }
         fn scale(&self) -> f64 {
             1.0
@@ -929,6 +972,40 @@ mod tests {
         assert_eq!(host.calls(), vec![Call::RequestResize(500, 250)]);
         unsafe { on_timer(plugin, TIMER_ID) };
         assert_eq!(host.calls().len(), 1, "asked once");
+    }
+
+    #[test]
+    fn a_destroy_during_a_pump_waits_for_the_pump() {
+        let host = FakeHost::new(true, true);
+        let ch = host.clap_host();
+        let adapter = unsafe { ClapAdapter::with_host(Quiet, &ch) };
+        let plugin = adapter.as_plugin();
+        assert!(create_fake(plugin));
+        probe(|p| p.destroy_in_tick = Some(plugin as usize));
+        unsafe { on_timer(plugin, TIMER_ID) };
+        assert!(probe(|p| p.destroy_in_tick.is_none()), "the editor ticked");
+        assert!(!has_gui(plugin), "gone once the pump returned");
+        assert!(host.balanced(), "{:?}", host.calls());
+    }
+
+    #[test]
+    fn a_dead_view_has_its_descriptor_unregistered_once() {
+        let host = FakeHost::new(true, true);
+        let ch = host.clap_host();
+        let adapter = unsafe { ClapAdapter::with_host(Quiet, &ch) };
+        let plugin = adapter.as_plugin();
+        assert!(create_fake(plugin));
+        unsafe { on_fd(plugin, FAKE_FD, POSIX_FD_READ) };
+        assert_eq!(host.calls().len(), 2, "a live view stays registered");
+        probe(|p| p.dead = true);
+        unsafe { on_fd(plugin, FAKE_FD, POSIX_FD_READ) };
+        assert_eq!(host.calls()[2..], [Call::UnregisterFd(FAKE_FD)]);
+        // The descriptor is no longer ours; the timer still pumps.
+        unsafe { on_fd(plugin, FAKE_FD, POSIX_FD_READ) };
+        unsafe { on_timer(plugin, TIMER_ID) };
+        assert_eq!(probe(|p| p.pumps), 3);
+        unsafe { destroy(plugin) };
+        assert_eq!(host.calls()[2..], [Call::UnregisterFd(FAKE_FD), Call::UnregisterTimer(TIMER_ID)]);
     }
 
     #[test]

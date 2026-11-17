@@ -98,8 +98,14 @@ fn fixed_editor(_host: EditorHost) -> Option<Box<dyn Editor>> {
     Some(Box::new(Fixed))
 }
 
+/// Plugins the UI entry constructed.
+static BUILT: AtomicUsize = AtomicUsize::new(0);
+
 fn install() -> *const Lv2UiDescriptor {
-    lv2::set_creator(|| Box::new(Probe));
+    lv2::set_creator(|| {
+        BUILT.fetch_add(1, Ordering::SeqCst);
+        Box::new(Probe)
+    });
     lv2::set_editor(make_editor);
     lv2::lv2ui_descriptor(0)
 }
@@ -215,6 +221,28 @@ fn instantiate(desc: *const Lv2UiDescriptor, plugin: &CStr, features: &[(&CStr, 
         )
     };
     (handle, widget)
+}
+
+#[test]
+fn opening_the_ui_again_constructs_no_plugin() {
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let desc = install();
+    let plugin = c"urn:openplugin:test-x11-ui";
+    let features = [(c"http://lv2plug.in/ns/extensions/ui#parent", 0x7fff_fff0 as *mut c_void)];
+    let open = || {
+        let made = MADE.load(Ordering::SeqCst);
+        let (handle, _) = instantiate(desc, plugin, &features);
+        assert_eq!(MADE.load(Ordering::SeqCst), made + 1, "the open got as far as the editor");
+        if !handle.is_null() {
+            unsafe { ((*desc).cleanup)(handle) };
+        }
+    };
+    // The first open reads what it needs from the plugin once.
+    open();
+    let built = BUILT.load(Ordering::SeqCst);
+    open();
+    open();
+    assert_eq!(BUILT.load(Ordering::SeqCst), built, "no plugin constructed for a later open");
 }
 
 #[test]

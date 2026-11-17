@@ -1138,10 +1138,15 @@ mod linux {
             }
         }
 
+        /// The host's idle call: 0 while the UI is alive.
+        fn idle(&self) -> i32 {
+            unsafe { (self.idle)(self.handle) }
+        }
+
         /// One turn of the host's loop: its idle call, every few milliseconds.
         fn turn(&self) {
             wait_on(&[], 5);
-            assert_eq!(unsafe { (self.idle)(self.handle) }, 0, "idle says the UI is alive");
+            assert_eq!(self.idle(), 0, "idle says the UI is alive");
         }
 
         fn port_event(&self, port: u32, value: f32) {
@@ -1233,12 +1238,14 @@ mod linux {
         until("the second UI's frame", || ui.turn(), || desk.image(window).is_some_and(|i| !i.is_blank()));
         desk.close(parent);
         assert!(!desk.exists(window), "the view's window went with its parent");
+        // Once the view has seen its window go, idle tells the host the UI is gone.
+        until("idle to say the UI is gone", || wait_on(&[], 5).clear(), || ui.idle() != 0);
         for _ in 0..10 {
-            ui.turn();
+            assert_ne!(ui.idle(), 0, "idle keeps saying the UI is gone");
         }
         ui.port_event(AUDIO_PORTS, -6.0);
         assert_eq!(ui.resize(desk.px(LARGE_SIZE)), 0);
-        ui.turn();
+        assert_ne!(ui.idle(), 0);
         ui.close();
         desk.no_errors("lv2 ui");
         println!("lv2 ui: ok");

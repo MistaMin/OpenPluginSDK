@@ -257,7 +257,7 @@ impl SceneCanvas {
 
     /// Clamp the scale, tell GoodLookin DRI about it, and size the framebuffer.
     fn begin(&mut self, scale: f32) -> (f32, usize, usize) {
-        let scale = if scale.is_finite() { scale.clamp(1.0, 4.0) } else { 2.0 };
+        let scale = capped_scale(scale, self.width, self.height);
         draw::set_knob_scale(scale);
         hardware::set_device_scale(scale);
         let w = (self.width * scale).round().max(1.0) as usize;
@@ -272,6 +272,15 @@ impl SceneCanvas {
     pub fn last_scene(&self) -> &goodlookindri::scene::Scene {
         &self.list.scene
     }
+}
+
+/// The most pixels a frame may have: 256 MB of framebuffer, and as much again for the layer.
+const MAX_PIXELS: f32 = 64.0 * 1024.0 * 1024.0;
+
+/// The scale a frame is drawn at: 1 to 4, lowered for a design too large for [`MAX_PIXELS`].
+fn capped_scale(scale: f32, width: f32, height: f32) -> f32 {
+    let scale = if scale.is_finite() { scale.clamp(1.0, 4.0) } else { 2.0 };
+    scale.min((MAX_PIXELS / (width * height).max(1.0)).sqrt())
 }
 
 /// `damage` in device pixels: rounded outwards, cut to the frame, merged where
@@ -310,6 +319,18 @@ fn pixel_rects(damage: &[DamageRect], scale: f32, width: usize, height: usize) -
 mod tests {
     use super::*;
     use crate::{draw_faceplate_code, draw_knob_code, Color, KnobTier};
+
+    #[test]
+    fn an_oversized_surface_is_drawn_at_a_lower_scale() {
+        let side = 16384.0 * capped_scale(2.0, 16384.0, 16384.0);
+        assert!(side * side <= MAX_PIXELS && side >= 8000.0, "{side}");
+        let scale = capped_scale(4.0, 16384.0, 2000.0);
+        assert!(16384.0 * scale * 2000.0 * scale <= MAX_PIXELS * 1.001, "{scale}");
+        // A design of ordinary size keeps the scale it asked for.
+        assert_eq!(capped_scale(2.0, 1200.0, 800.0), 2.0);
+        assert_eq!(capped_scale(9.0, 1200.0, 800.0), 4.0);
+        assert_eq!(capped_scale(f32::NAN, 1200.0, 800.0), 2.0);
+    }
 
     #[test]
     fn lit_knob_reaches_the_pixels() {

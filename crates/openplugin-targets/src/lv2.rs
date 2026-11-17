@@ -782,6 +782,13 @@ fn param_count() -> usize {
     *COUNT.get_or_init(|| creator().map(|create| create().info().params.len()).unwrap_or(0))
 }
 
+/// Index of the first parameter port of the installed plugin, read once.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+fn first_param() -> u32 {
+    static FIRST: OnceLock<u32> = OnceLock::new();
+    *FIRST.get_or_init(|| creator().map(|create| PortMap::of(create().as_ref()).first_param()).unwrap_or(AUDIO_PORTS))
+}
+
 /// The rate a new LV2 instance is prepared at.
 ///
 /// An LV2 host that does not know the rate yet passes `0.0`, which uses the
@@ -1439,7 +1446,7 @@ mod ui {
                     true
                 }
             };
-            let first = creator().map(|create| PortMap::of(create().as_ref()).first_param()).unwrap_or(AUDIO_PORTS);
+            let first = first_param();
             let Some(mut editor) = factory(host_for(Link { write, controller, touch, first }).with_resize(ask)) else {
                 return std::ptr::null_mut();
             };

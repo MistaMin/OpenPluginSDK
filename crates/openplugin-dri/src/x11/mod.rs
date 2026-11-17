@@ -724,8 +724,14 @@ impl EditorView {
     }
 
     /// The window can take requests.
-    fn usable(&self) -> bool {
+    pub fn usable(&self) -> bool {
         self.created && self.alive && !self.dead
+    }
+
+    /// The connection to the X server is lost: [`EditorView::fd`] stays
+    /// readable for good and should no longer be watched.
+    pub fn dead(&self) -> bool {
+        self.dead
     }
 
     /// Make the window inside `parent`, unmapped. False when the server refuses.

@@ -113,12 +113,21 @@ unsafe extern "C" fn host_resizes(handle: *mut c_void, width: i32, height: i32) 
 }
 
 /// The host's idle call: handle X events and tick the editor. 0 while the UI
-/// is alive; non-zero tells the host the UI is gone.
+/// is alive; non-zero tells the host the UI is gone (closed, or its display lost).
 unsafe extern "C" fn idle(handle: *mut c_void) -> i32 {
     guarded(1, || {
         let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return 1 };
+        if ui.idling {
+            return 0;
+        }
+        ui.idling = true;
         ui.view.pump();
-        0
+        ui.idling = false;
+        if ui.closing {
+            drop(unsafe { Box::from_raw(handle as *mut Ui) });
+            return 1;
+        }
+        i32::from(!ui.view.usable())
     })
 }
 
@@ -126,6 +135,10 @@ struct Ui {
     view: EditorView,
     count: usize,
     first: u32,
+    /// Inside `view.pump()`.
+    idling: bool,
+    /// `cleanup` came inside `view.pump()`: `idle` frees the UI when the pump returns.
+    closing: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -223,7 +236,7 @@ unsafe extern "C" fn instantiate(
                 true
             }
         };
-        let first = creator().map(|create| PortMap::of(create().as_ref()).first_param()).unwrap_or(AUDIO_PORTS);
+        let first = first_param();
         let Some(mut editor) = factory(host_for(Link { write, controller, touch, first }).with_resize(ask)) else {
             return std::ptr::null_mut();
         };
@@ -250,13 +263,16 @@ unsafe extern "C" fn instantiate(
         if !widget.is_null() {
             unsafe { *widget = window as usize as *mut c_void };
         }
-        Box::into_raw(Box::new(Ui { view, count, first })) as *mut c_void
+        Box::into_raw(Box::new(Ui { view, count, first, idling: false, closing: false })) as *mut c_void
     })
 }
 
 unsafe extern "C" fn cleanup(handle: *mut c_void) {
     guarded((), || {
-        if !handle.is_null() {
+        let Some(ui) = (unsafe { (handle as *mut Ui).as_mut() }) else { return };
+        if ui.idling {
+            ui.closing = true;
+        } else {
             drop(unsafe { Box::from_raw(handle as *mut Ui) });
         }
     })

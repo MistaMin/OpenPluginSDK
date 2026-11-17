@@ -49,7 +49,9 @@ fn main() {
     win::clap_gui_lifecycle();
     win::clap_gui_floats();
     win::lv2_ui_lifecycle();
-    println!("win32: 7 passed");
+    win::closing_the_view_inside_a_host_callback_waits_for_the_call();
+    win::a_key_the_parent_hands_back_is_not_sent_again();
+    println!("win32: 9 passed");
 }
 
 #[cfg(windows)]
@@ -77,6 +79,8 @@ mod win {
         fn SetWindowTextW(hwnd: Hwnd, text: *const u16) -> i32;
         fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
         fn GetClassNameW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
+        fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
+        fn CallWindowProcW(previous: isize, hwnd: Hwnd, msg: u32, w: usize, l: isize) -> isize;
     }
 
     const WM_CLOSE: u32 = 0x0010;
@@ -521,6 +525,114 @@ mod win {
             testing::destroy_window(parent);
         }
         println!("view menu, tooltips and files: ok");
+    }
+
+    /// What a [`Modal`] editor saw.
+    #[derive(Default)]
+    struct Seen {
+        dropped: bool,
+        /// The editor was dropped before its own call returned.
+        dropped_inside: bool,
+    }
+
+    type Callback = Rc<RefCell<Option<Box<dyn FnMut()>>>>;
+
+    /// An editor whose right click runs `callback` the way a host's modal
+    /// context menu runs its own loop inside the editor's call.
+    struct Modal {
+        seen: Rc<RefCell<Seen>>,
+        callback: Callback,
+        pixels: Vec<u32>,
+    }
+
+    impl Drop for Modal {
+        fn drop(&mut self) {
+            self.seen.borrow_mut().dropped = true;
+        }
+    }
+
+    impl openplugin::core::Editor for Modal {
+        fn size(&self) -> (u32, u32) {
+            (40, 30)
+        }
+        fn param_changed(&mut self, _: usize, _: f32) {}
+        fn render(&mut self, scale: f32) -> openplugin::core::Frame<'_> {
+            let (w, h) = ((40.0 * scale).round() as usize, (30.0 * scale).round() as usize);
+            self.pixels.resize(w * h, 0);
+            openplugin::core::Frame { pixels: &self.pixels, width: w, height: h }
+        }
+        fn right_mouse_down(&mut self, _x: f32, _y: f32) -> bool {
+            let call = self.callback.borrow_mut().take();
+            if let Some(mut call) = call {
+                call();
+            }
+            let mut seen = self.seen.borrow_mut();
+            seen.dropped_inside = seen.dropped;
+            true
+        }
+    }
+
+    fn modal_view() -> (EditorView, Rc<RefCell<Seen>>, Callback) {
+        let seen: Rc<RefCell<Seen>> = Rc::default();
+        let callback: Callback = Rc::default();
+        let editor = Modal { seen: seen.clone(), callback: callback.clone(), pixels: Vec::new() };
+        let view = EditorView::new(Box::new(editor), None).expect("a view");
+        assert!(view.set_scale(1.0));
+        (view, seen, callback)
+    }
+
+    /// The host closes the editor from inside its own menu, which the editor
+    /// opened from a right click: the editor is dropped when that call has ended.
+    pub fn closing_the_view_inside_a_host_callback_waits_for_the_call() {
+        unsafe {
+            let (view, seen, callback) = modal_view();
+            let parent = testing::parent_window("OpenPlugin closing", 400, 300, 40, 30);
+            assert!(view.attach(parent));
+            let hwnd = view.raw();
+            let mut owned = Some(view);
+            *callback.borrow_mut() = Some(Box::new(move || drop(owned.take())));
+            testing::send(hwnd, 0x0204, 2, testing::mouse_lparam(5, 5));
+            assert!(!testing::is_window(hwnd), "the window went at once");
+            assert!(!seen.borrow().dropped_inside, "the editor outlives its own call");
+            assert!(seen.borrow().dropped, "and is dropped when the call has ended");
+            testing::destroy_window(parent);
+        }
+        println!("closing inside a host callback: ok");
+    }
+
+    static PARENT_PROC: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+    static HANDED_BACK: AtomicU32 = AtomicU32::new(0);
+
+    /// A parent that gives every key it gets to its child, as some wrapper hosts do.
+    unsafe extern "system" fn hands_keys_back(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> isize {
+        unsafe {
+            if msg == WM_KEYDOWN {
+                HANDED_BACK.fetch_add(1, Ordering::SeqCst);
+                let child = GetWindow(hwnd, GW_CHILD);
+                if !child.is_null() {
+                    return testing::send(child, msg, w, l);
+                }
+            }
+            CallWindowProcW(PARENT_PROC.load(Ordering::SeqCst), hwnd, msg, w, l)
+        }
+    }
+
+    pub fn a_key_the_parent_hands_back_is_not_sent_again() {
+        unsafe {
+            let (view, _seen, _callback) = modal_view();
+            let parent = testing::parent_window("OpenPlugin keys", 400, 300, 40, 30);
+            assert!(view.attach(parent));
+            // GWLP_WNDPROC
+            let proc: unsafe extern "system" fn(Hwnd, u32, usize, isize) -> isize = hands_keys_back;
+            PARENT_PROC.store(SetWindowLongPtrW(parent, -4, proc as usize as isize), Ordering::SeqCst);
+            // The editor takes no keys: Q goes to the parent, which sends it straight back.
+            testing::send(view.raw(), WM_KEYDOWN, 0x51, 0);
+            assert_eq!(HANDED_BACK.load(Ordering::SeqCst), 1, "the parent heard the key once");
+            SetWindowLongPtrW(parent, -4, PARENT_PROC.load(Ordering::SeqCst));
+            drop(view);
+            testing::destroy_window(parent);
+        }
+        println!("a key handed back: ok");
     }
 
     static FLUSHES: AtomicU32 = AtomicU32::new(0);
