@@ -352,3 +352,31 @@ fn a_deliberate_slowdown_is_detected_by_compare() {
     assert_eq!(back.cases.len(), base.cases.len());
     assert_eq!(back.to_json(), base.to_json());
 }
+
+#[test]
+fn the_bench_keeps_an_instrument_playing() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NOTES: AtomicUsize = AtomicUsize::new(0);
+    struct Synth;
+    impl Plugin for Synth {
+        fn info(&self) -> &'static PluginInfo {
+            &INFO
+        }
+        fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+        fn reset(&mut self) {}
+        fn set_param(&mut self, _: &str, _: f32) -> bool {
+            true
+        }
+        fn param(&self, _: &str) -> Option<f32> {
+            Some(1.0)
+        }
+        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+        fn note_on(&mut self, _: usize, _: u8, _: u8) {
+            NOTES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // 48 kHz in 64-sample blocks: 350 blocks are 0.47 s, so a note every 100 ms is 5 notes.
+    let options = bench::BenchOptions { sample_rates: vec![48_000.0], block_sizes: vec![64], channel_counts: Some(vec![2]), iterations: 300, warmup_blocks: 50, ..Default::default() };
+    bench::bench(|| Synth, &options);
+    assert_eq!(NOTES.load(Ordering::Relaxed), 5);
+}

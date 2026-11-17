@@ -52,6 +52,10 @@ int main(int argc, char** argv) {
     CHECK(!proof_value_of(unit, kMode, "Loud", &plain));
     // Steps: five whole numbers are a stepped parameter, not a choice.
     CHECK(info(kSteps).unit == kAudioUnitParameterUnit_Generic);
+    // A name that is not UTF-8 is shown as the parameter's id, never as a NULL name.
+    const AudioUnitParameterInfo steps = info(kSteps);
+    CHECK(steps.cfNameString && std::string(steps.name) == "steps");
+    CFRelease(steps.cfNameString);
     CHECK(!proof_value_strings(unit, kSteps, &labels));
     const AudioUnitParameterValue three = 3.0f;
     CHECK(proof_text_of(unit, kSteps, &three) == "3");
@@ -73,6 +77,6 @@ int main(int argc, char** argv) {
     UInt32 clumpSize = sizeof(clump);
     CHECK(AudioUnitGetProperty(unit, kAudioUnitProperty_ParameterClumpName, kAudioUnitScope_Global, 0, &clump, &clumpSize) != noErr);
     CHECK(AudioComponentInstanceDispose(unit) == noErr);
-    std::puts("AU text proof: choice labels (indexed), toggle labels, dB text and typed values through the plug-in, stepped numbers not indexed, bad requests refused, no clumps without groups: PASS");
+    std::puts("AU text proof: choice labels (indexed), toggle labels, dB text and typed values through the plug-in, stepped numbers not indexed, a non-UTF-8 name falls back to the id, bad requests refused, no clumps without groups: PASS");
     return 0;
 }

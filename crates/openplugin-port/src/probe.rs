@@ -35,10 +35,15 @@ pub fn run_helper<T: serde::de::DeserializeOwned>(helper: &Path, args: &[std::ff
         .spawn()
         .map_err(|e| format!("cannot start the probe process {}: {e}", helper.display()))?;
     let mut stdout = child.stdout.take().ok_or("no probe stdout")?;
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stdout.read_to_end(&mut bytes);
-        bytes
+    // A process the plugin starts can inherit stdout and hold it open for good, so nothing waits for EOF.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        while let Ok(n @ 1..) = stdout.read(&mut chunk) {
+            if tx.send(chunk[..n].to_vec()).is_err() {
+                break;
+            }
+        }
     });
     let start = Instant::now();
     let status = loop {
@@ -47,14 +52,19 @@ pub fn run_helper<T: serde::de::DeserializeOwned>(helper: &Path, args: &[std::ff
             Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = reader.join();
                 return Err(format!("timed out after {} s; the plugin was killed", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(15)),
             Err(e) => return Err(format!("waiting for the probe: {e}")),
         }
     };
-    let bytes = reader.join().unwrap_or_default();
+    let mut bytes = Vec::new();
+    while !has_result(&bytes) {
+        match rx.recv_timeout(timeout.saturating_sub(start.elapsed())) {
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(_) => break,
+        }
+    }
     let text = String::from_utf8_lossy(&bytes);
     let line = text.lines().rev().find_map(|l| l.strip_prefix(MARK));
     match line {
@@ -64,6 +74,11 @@ pub fn run_helper<T: serde::de::DeserializeOwned>(helper: &Path, args: &[std::ff
         },
         None => Err(describe_exit(&status)),
     }
+}
+
+/// True once `bytes` holds a whole result line.
+fn has_result(bytes: &[u8]) -> bool {
+    bytes.split(|&b| b == b'\n').rev().skip(1).any(|line| line.starts_with(MARK.as_bytes()))
 }
 
 #[cfg(unix)]
@@ -140,5 +155,30 @@ fn child_probe(args: &[String]) -> Result<ProbeResult, String> {
         "au" => au::probe(&path),
         "aax" => aax::probe(&path),
         other => Err(format!("unknown format {other}")),
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn sh(script: &str, timeout: Duration) -> (Result<u32, String>, Duration) {
+        let start = Instant::now();
+        let result = run_helper::<u32>(Path::new("/bin/sh"), &["-c".into(), script.into()], timeout, &[]);
+        (result, start.elapsed())
+    }
+
+    #[test]
+    fn a_grandchild_holding_stdout_does_not_outlast_the_timeout() {
+        let (result, took) = sh("sleep 5 & exec sleep 5", Duration::from_millis(300));
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(took < Duration::from_secs(4), "{took:?}");
+    }
+
+    #[test]
+    fn a_grandchild_holding_stdout_does_not_hide_the_result() {
+        let (result, took) = sh(&format!("sleep 5 & echo '{MARK}{{\"Ok\":7}}'"), Duration::from_secs(4));
+        assert_eq!(result, Ok(7));
+        assert!(took < Duration::from_secs(4), "{took:?}");
     }
 }

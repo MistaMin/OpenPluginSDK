@@ -398,12 +398,16 @@ pub fn run_null(opts: &NullOptions) -> Result<NullReport, String> {
     let (work, own_work) = match &opts.work_dir {
         Some(w) => (w.clone(), false),
         None => {
-            static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            (std::env::temp_dir().join(format!("openplugin-port-null-{}-{n}", std::process::id())), true)
+            use std::hash::{BuildHasher, Hasher};
+            let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
+            (std::env::temp_dir().join(format!("openplugin-port-null-{}-{random:016x}", std::process::id())), true)
         }
     };
-    std::fs::create_dir_all(&work).map_err(|e| format!("cannot create {}: {e}", work.display()))?;
+    if own_work {
+        private_dir(&work)?;
+    } else {
+        std::fs::create_dir_all(&work).map_err(|e| format!("cannot create {}: {e}", work.display()))?;
+    }
     let in_file = work.join("input.f32");
     write_raw(&in_file, &input.channels)?;
 
@@ -459,9 +463,32 @@ pub fn run_null(opts: &NullOptions) -> Result<NullReport, String> {
     })
 }
 
+/// A new folder only this user can open. One that already exists in the shared temp folder may be
+/// another user's, who could swap the job file under the child, so it is refused.
+fn private_dir(path: &Path) -> Result<(), String> {
+    let builder = &mut std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(builder, 0o700);
+    builder.create(path).map_err(|e| format!("cannot create {}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_work_folder_is_new_and_private() {
+        let dir = std::env::temp_dir().join(format!("openplugin-port-null-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir(&dir);
+        private_dir(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        assert!(private_dir(&dir).is_err(), "a folder that already exists is refused");
+        std::fs::remove_dir(&dir).unwrap();
+    }
 
     #[test]
     fn automation_parses() {

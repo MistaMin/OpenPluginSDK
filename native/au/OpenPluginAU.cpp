@@ -767,8 +767,11 @@ public:
         const auto id = static_cast<size_t>(index);
         std::memset(&info, 0, sizeof(info));
         const OpParamDesc& desc = params_[id].desc;
-        // The host releases the CFString.
-        this->FillInParameterName(info, CFStringCreateWithCString(nullptr, desc.name, kCFStringEncodingUTF8), true);
+        // The host releases the CFString. A name that is not UTF-8 gives NULL, which the SDK would read.
+        CFStringRef name = CFStringCreateWithCString(nullptr, desc.name, kCFStringEncodingUTF8);
+        if (!name) name = CFStringCreateWithCString(nullptr, desc.id, kCFStringEncodingUTF8);
+        if (!name) return kAudioUnitErr_InvalidPropertyValue;
+        this->FillInParameterName(info, name, true);
         info.minValue = static_cast<float>(desc.min);
         info.maxValue = static_cast<float>(desc.max);
         info.defaultValue = static_cast<float>(desc.default_plain);

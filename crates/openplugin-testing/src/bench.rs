@@ -164,12 +164,16 @@ fn measure_case<P: Plugin>(plugin: &mut P, mut case: BenchCase, overhead: f64, o
     let mut io: Vec<Vec<f32>> = vec![vec![0.0; block]; case.channels];
     let side: Vec<Vec<f32>> = vec![vec![0.1; block]; layout.sidechain_channels()];
     let has_side = layout.sidechain.is_some() && options.channel_counts.is_none();
-    if plugin.note_ports().input {
-        plugin.note_on(0, 60, 100);
-    }
+    let instrument = plugin.note_ports().input;
+    // A new note every 100 ms of audio, so a decaying voice is measured playing, not idle.
+    let retrigger = (case.sample_rate as usize / 10 / block).max(1);
     let real_time = block as f64 / f64::from(case.sample_rate);
     let mut loads = Vec::with_capacity(options.iterations);
     for i in 0..options.warmup_blocks + options.iterations {
+        if instrument && i % retrigger == 0 {
+            plugin.note_off(0, 60);
+            plugin.note_on(0, 60, 100);
+        }
         for (dst, src) in io.iter_mut().zip(&ring[i % ring_len]) {
             dst.copy_from_slice(src);
         }
