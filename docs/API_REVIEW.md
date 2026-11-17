@@ -195,6 +195,7 @@ Plugin traits and descriptors, the host plane, state, MIDI, layouts, the editor 
 | `encode_session`, `decode_session`, `Session` (values, chunk), `SESSION_MAGIC`, `SESSION_VERSION` | keep | OPCH v1. | Kept. |
 | `restore_params` | keep | Applies a decoded snapshot. | Kept. |
 | `AbCompare` (new, on_b, toggle) | keep | Holds two opaque state blobs and swaps them; independent of the plugin. | Kept. |
+| `gate`: `PluginGate` (new, enter_audio, enter_state), `AudioHold`, `StateHold`, `has_state_chunk` | hide | Added since the review. Only the SDK's format entries (`clap.rs`, `lv2.rs`, `openplugin-host`) use them, to keep a block and a state call out of the plugin at the same time; a plugin does not need them. | Applied: `#[doc(hidden)]`. |
 
 ## `openplugin-dsp`
 

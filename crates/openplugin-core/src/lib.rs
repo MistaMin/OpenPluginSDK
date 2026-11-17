@@ -20,6 +20,7 @@ pub mod denormal;
 pub mod editor;
 pub mod expression;
 pub mod foreign_state;
+#[doc(hidden)]
 pub mod gate;
 pub mod identity;
 pub mod layout;
@@ -48,6 +49,7 @@ pub use editor::{
 };
 #[doc(hidden)]
 pub use editor::{GestureQueue, ValueMirror};
+#[doc(hidden)]
 pub use gate::{has_state_chunk, AudioHold, PluginGate, StateHold};
 pub use expression::{Expression, ExpressionSet, NoteRef, VoiceInfo};
 pub use identity::{AuIds, ParamIdMap, ParamPins, PinError, PinFormat, Vst3Ids};
