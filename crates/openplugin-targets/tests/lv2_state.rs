@@ -21,18 +21,16 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 
 static PARAMS: [ParamInfo; 1] = [ParamInfo::new("level", "Level", 0.0, 1.0, 0.5, Unit::None)];
 
-static INFO: PluginInfo = PluginInfo {
-    id: "urn:openplugin:test-state",
-    name: "Test State",
-    vendor: "Test",
-    url: "https://example.com",
-    email: "a@b.c",
-    version: "0.1.0",
-    category: Category::Dynamics,
-    params: &PARAMS,
-    is_instrument: false,
-    has_editor: false,
-};
+static INFO: PluginInfo = PluginInfo::new(
+    "urn:openplugin:test-state",
+    "Test State",
+    "Test",
+    "0.1.0",
+    Category::Dynamics,
+    &PARAMS,
+)
+    .with_url("https://example.com")
+    .with_email("a@b.c");
 
 /// Holds data no parameter carries, as a loaded impulse response would be.
 /// Its output is the input times the data's length, so the audio shows what was loaded.
@@ -54,7 +52,7 @@ impl Plugin for Loaded {
     fn param(&self, _: &str) -> Option<f32> {
         Some(0.5)
     }
-    fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         let gain = self.data.len() as f32;
         for channel in io.iter_mut() {
             for sample in &mut channel[..frames] {
