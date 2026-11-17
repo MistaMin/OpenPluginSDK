@@ -27,7 +27,7 @@ use std::time::{Duration, Instant as Clock};
 use openplugin_core::DenormalGuard;
 use openplugin_core::{
     decode_params, encode_params, identity::clap_id_valid, mpe, release_momentary, sample_rate_supported, BusMeters, EditorFactory, EditorState, Expression,
-    ExpressionSet, Gesture, GestureQueue, HostNotifier, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamIdMap, ParamInfo, ParamPlane, PinFormat, Plugin, PluginInfo, PortKind,
+    ExpressionSet, Gesture, GestureQueue, HostNotifier, HostSpace, IoConfig, MpeReceiver, NoteRef, MeterFrame, ParamCursor, ParamFlags, ParamIdMap, ParamInfo, ParamPlane, PinFormat, Plugin, PluginInfo, PortKind,
     Seqlock, SpeakerLayout, Tail, TrackInfo, Transport, MAX_AUDIO_CHANNELS,
 };
 
@@ -375,11 +375,12 @@ fn collect_events(instance: &mut Instance, events: *const clap_input_events) {
                 let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_value) };
                 // An id the plugin does not have is not a parameter of this build.
                 let Some(index) = instance.ids.index(event.param_id) else { continue };
+                let value = host_to_plain(instance.inner.info(), index, event.value);
                 push_sched(instance, Sched {
                     time: header.time,
                     kind: KIND_PARAM,
                     param: index as u32,
-                    value: event.value as f32,
+                    value,
                     ..Sched::empty()
                 });
             }
@@ -814,7 +815,7 @@ unsafe fn skipped_block(plane: &ParamPlane, ids: &ParamIdMap, process: &clap_pro
                 if header.type_ == EVENT_PARAM_VALUE && header.space_id == 0 {
                     let event = unsafe { &*(header as *const clap_event_header as *const clap_event_param_value) };
                     if let Some(index) = ids.index(event.param_id) {
-                        plane.store(index, event.value as f32);
+                        plane.store(index, host_to_plain_infos(plane.infos(), index, event.value));
                     }
                 }
             }
@@ -1101,9 +1102,10 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
             copy_cstr(&mut info.name, param.name);
             // The group path is CLAP's module path ("Filter/Envelope"); empty is the top level.
             copy_cstr(&mut info.module, param.host_group());
-            info.min_value = param.min as f64;
-            info.max_value = param.max as f64;
-            info.default_value = param.default as f64;
+            let (min, max, default) = param.host_range(HostSpace::CLAP);
+            info.min_value = min as f64;
+            info.max_value = max as f64;
+            info.default_value = default as f64;
         }
         true
     })
@@ -1112,10 +1114,12 @@ unsafe extern "C" fn params_get_info(plugin: *const clap_plugin, index: u32, inf
 unsafe extern "C" fn params_get_value(plugin: *const clap_plugin, param_id: u32, out_value: *mut f64) -> bool {
     guarded(std::ptr::null(), false, || {
         let Some(instance) = instance(plugin) else { return false };
-        let Some(value) = instance.ids.index(param_id).and_then(|index| instance.plane.load(index)) else { return false };
+        let Some(index) = instance.ids.index(param_id) else { return false };
+        let Some(value) = instance.plane.load(index) else { return false };
         if out_value.is_null() {
             return false;
         }
+        let value = instance.inner.info().params.get(index).map_or(value, |p| p.to_host(HostSpace::CLAP, value));
         unsafe { *out_value = value as f64 };
         true
     })
@@ -1128,7 +1132,7 @@ unsafe extern "C" fn params_value_to_text(plugin: *const clap_plugin, param_id: 
         if out_buffer.is_null() || capacity == 0 {
             return false;
         }
-        let text = param.format(value as f32);
+        let text = param.format(param.from_host(HostSpace::CLAP, value as f32));
         let dst = unsafe { std::slice::from_raw_parts_mut(out_buffer, capacity as usize) };
         copy_cstr(dst, &text);
         true
@@ -1144,7 +1148,7 @@ unsafe extern "C" fn params_text_to_value(plugin: *const clap_plugin, param_id: 
         let Some(param) = instance.ids.index(param_id).and_then(|index| instance.inner.info().params.get(index)) else { return false };
         let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
         let Some(value) = param.parse(&text) else { return false };
-        unsafe { *out_value = value as f64 };
+        unsafe { *out_value = param.to_host(HostSpace::CLAP, value) as f64 };
         true
     })
 }
@@ -1187,7 +1191,7 @@ fn report_gestures(instance: &Instance, out: *const clap_output_events) {
                     port_index: -1,
                     channel: -1,
                     key: -1,
-                    value: info.clamp(value) as f64,
+                    value: info.to_host(HostSpace::CLAP, info.clamp(value)) as f64,
                 };
                 unsafe { push(out, &event.header) };
             }
@@ -1253,6 +1257,9 @@ unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_
             // The plugin owns state beyond its parameters: take it between blocks.
             let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
             let Some(_held) = enter_state(gate) else { return false };
+            // A value the host set outside a processed block (flush, skipped block) is in the
+            // plane only: hand it to the plugin first, or the chunk misses it.
+            pull_params(unsafe { &mut *raw });
             unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.save_state()
         } else {
             None
@@ -1340,11 +1347,21 @@ static STATE: clap_plugin_state = clap_plugin_state {
     load: Some(state_load),
 };
 
+/// The plain value for a CLAP host's value of parameter `index` ([`HostSpace::CLAP`]).
+fn host_to_plain(info: &PluginInfo, index: usize, value: f64) -> f32 {
+    host_to_plain_infos(info.params, index, value)
+}
+
+fn host_to_plain_infos(params: &[ParamInfo], index: usize, value: f64) -> f32 {
+    params.get(index).map_or(value as f32, |p| p.from_host(HostSpace::CLAP, value as f32))
+}
+
 fn clap_param_flags(param: &ParamInfo) -> u32 {
-    let stepped = param.flags.contains(ParamFlags::STEPPED)
+    // A parameter shown normalized is continuous travel to the host, as in the SDK it came from.
+    let stepped = !param.normalized_in.contains(HostSpace::CLAP) && (param.flags.contains(ParamFlags::STEPPED)
         || param.steps > 1
         || !param.choices.is_empty()
-        || matches!(param.unit, openplugin_core::Unit::Toggle | openplugin_core::Unit::Choice);
+        || matches!(param.unit, openplugin_core::Unit::Toggle | openplugin_core::Unit::Choice));
     let mut flags = 0;
     if stepped {
         flags |= PARAM_IS_STEPPED;
@@ -3449,6 +3466,62 @@ mod tests {
             assert_eq!(value, 6.0);
             assert!(!(*params).text_to_value.unwrap()(plugin, 0, c"loud".as_ptr(), &mut value));
             assert!(!(*params).text_to_value.unwrap()(plugin, 3, c"1".as_ptr(), &mut value));
+        }
+    }
+
+    fn hz_text(v: f32) -> String { format!("{} Hz", v.round()) }
+    fn hz_parse(t: &str) -> Option<f32> { t.trim_end_matches("Hz").trim().parse().ok() }
+
+    struct Normalized;
+
+    static NORMALIZED_PARAMS: [ParamInfo; 2] = [
+        ParamInfo::new("freq", "Freq", 20.0, 1000.0, 100.0, Unit::Hz)
+            .with_taper(Taper::Log)
+            .with_normalized_in(HostSpace::CLAP)
+            .with_text(hz_text, hz_parse),
+        ParamInfo::new("mode", "Mode", 0.0, 4.0, 1.0, Unit::Choice)
+            .with_choices(&["A", "B", "C", "D", "E"])
+            .with_normalized_in(HostSpace::CLAP),
+    ];
+
+    static NORMALIZED_INFO: PluginInfo = PluginInfo { id: "com.opengrid.test.normalized", name: "Normalized", params: &NORMALIZED_PARAMS, ..INFO };
+
+    impl Plugin for Normalized {
+        fn info(&self) -> &'static PluginInfo { &NORMALIZED_INFO }
+        fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+        fn reset(&mut self) {}
+        fn set_param(&mut self, id: &str, _: f32) -> bool { NORMALIZED_INFO.param(id).is_some() }
+        fn param(&self, id: &str) -> Option<f32> { NORMALIZED_INFO.param(id).map(|p| p.default) }
+        fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    }
+
+    #[test]
+    fn a_parameter_shown_normalized_speaks_0_to_1_to_the_host() {
+        let adapter = ClapAdapter::new(Normalized);
+        let plugin = adapter.as_plugin();
+        unsafe {
+            let params = plugin_extension(plugin, EXT_PARAMS.as_ptr() as *const c_char) as *const clap_plugin_params;
+            let mut info = std::mem::zeroed::<clap_param_info>();
+            assert!((*params).get_info.unwrap()(plugin, 0, &mut info));
+            assert_eq!((info.min_value, info.max_value), (0.0, 1.0));
+            let expect = ((100.0f64 / 20.0).ln() / 50.0f64.ln()) as f32;
+            assert!((info.default_value as f32 - expect).abs() < 1e-6);
+            assert!((*params).get_info.unwrap()(plugin, 1, &mut info));
+            assert_eq!((info.min_value, info.max_value, info.default_value), (0.0, 1.0, 0.25));
+            assert_eq!(info.flags & PARAM_IS_STEPPED, 0, "continuous travel, as the source SDK showed it");
+
+            // the plane holds plain units; the host reads and writes 0..1
+            adapter.plane().unwrap().store(0, 1000.0);
+            let mut value = 0.0f64;
+            assert!((*params).get_value.unwrap()(plugin, 0, &mut value));
+            assert!((value - 1.0).abs() < 1e-6);
+            let mut text = [0 as c_char; 64];
+            assert!((*params).value_to_text.unwrap()(plugin, 0, 0.0, text.as_mut_ptr(), 64));
+            assert_eq!(CStr::from_ptr(text.as_ptr()).to_str().unwrap(), "20 Hz", "own text, from the host's value");
+            assert!((*params).text_to_value.unwrap()(plugin, 0, c"1000 Hz".as_ptr(), &mut value));
+            assert!((value - 1.0).abs() < 1e-6, "typed text comes back as the host's value");
+            assert!((*params).value_to_text.unwrap()(plugin, 1, 0.5, text.as_mut_ptr(), 64));
+            assert_eq!(CStr::from_ptr(text.as_ptr()).to_str().unwrap(), "C");
         }
     }
 

@@ -9,7 +9,7 @@ use std::sync::{Mutex, OnceLock};
 
 use openplugin_core::identity::{param_aax_ids, state_is_keyed};
 use openplugin_core::{
-    sample_rate_supported, AaxIds, AuIds, Category, EditorState, Expression, IoConfig, NotePorts, ParamFlags,
+    sample_rate_supported, AaxIds, AuIds, Category, EditorState, Expression, HostSpace, IoConfig, NotePorts, ParamFlags,
     ParamIdMap, ParamInfo, PinFormat, PluginInfo, PortKind, SpeakerLayout, Taper, Unit, Vst3Ids,
 };
 
@@ -161,6 +161,11 @@ fn fourcc(bytes: &[u8]) -> u32 {
 fn plugin_info<P: Plugin + Default>() -> &'static PluginInfo {
     static SLOT: OnceLock<&'static PluginInfo> = OnceLock::new();
     SLOT.get_or_init(|| P::default().info())
+}
+
+/// The plugin's parameter table (one plugin per binary).
+pub fn params<P: Plugin + Default>() -> &'static [ParamInfo] {
+    plugin_info::<P>().params
 }
 
 /// [`Plugin::aax_ids`], when the plugin sets valid ones.
@@ -621,14 +626,18 @@ fn flags_of(param: &ParamInfo, steps: u32) -> u32 {
 }
 
 fn fill_desc(param: &ParamInfo, out: &mut OpParamDesc) {
-    let steps = steps_of(param);
+    // A parameter shown normalized in the shells is continuous 0..1 travel there ([`HostSpace::SHELLS`]).
+    let normalized = param.normalized_in.contains(HostSpace::SHELLS);
+    let steps = if normalized { 0 } else { steps_of(param) };
+    let (min, max, default) = param.host_range(HostSpace::SHELLS);
+    let flags = if normalized { flags_of(param, steps) & !(PARAM_LOG | PARAM_DISCRETE) } else { flags_of(param, steps) };
     *out = OpParamDesc {
-        min: f64::from(param.min),
-        max: f64::from(param.max),
-        default_plain: f64::from(param.default),
+        min: f64::from(min),
+        max: f64::from(max),
+        default_plain: f64::from(default),
         default_normalized: f64::from(param.to_normalized(param.default)),
         steps,
-        flags: flags_of(param, steps),
+        flags,
         name: [0; 64],
         unit: [0; 16],
         id: [0; 64],
@@ -717,14 +726,14 @@ pub fn to_plain<P: Plugin + Default>(index: u32, normalized: f64) -> f64 {
     } else {
         0.0
     };
-    f64::from(param.from_normalized(travel))
+    f64::from(param.to_host(HostSpace::SHELLS, param.from_normalized(travel)))
 }
 
 pub fn to_normalized<P: Plugin + Default>(index: u32, plain: f64) -> f64 {
     let Some(param) = plugin_info::<P>().params.get(index as usize) else {
         return f64::NAN;
     };
-    let value = if plain.is_finite() { plain as f32 } else { param.default };
+    let value = if plain.is_finite() { param.from_host(HostSpace::SHELLS, plain as f32) } else { param.default };
     f64::from(param.to_normalized(value))
 }
 
@@ -732,7 +741,7 @@ pub fn to_normalized<P: Plugin + Default>(index: u32, plain: f64) -> f64 {
 pub const PARSE_MAX: usize = 1024;
 
 fn display_value(param: &ParamInfo, plain: f64) -> f32 {
-    if plain.is_finite() { plain as f32 } else { param.default }
+    if plain.is_finite() { param.from_host(HostSpace::SHELLS, plain as f32) } else { param.default }
 }
 
 /// The plugin's own text for the plain value `plain` of parameter `index`
@@ -823,7 +832,8 @@ pub unsafe fn param_parse<P: Plugin + Default>(index: u32, text: *const std::ffi
     }));
     match parsed {
         Ok(Some(value)) if value.is_finite() => {
-            unsafe { *out_plain = f64::from(value) };
+            let param = &plugin_info::<P>().params[index as usize];
+            unsafe { *out_plain = f64::from(param.to_host(HostSpace::SHELLS, value)) };
             1
         }
         _ => 0,
@@ -1012,7 +1022,7 @@ pub unsafe fn set_plain(ptr: *mut ShellInstance, index: u32, plain: f32) -> u32 
     if ptr.is_null() || !plain.is_finite() {
         return 0;
     }
-    u32::from(unsafe { (*ptr).ffi.store_param(index as usize, plain) })
+    u32::from(unsafe { (*ptr).ffi.store_host(index as usize, plain) })
 }
 
 /// # Safety
@@ -1021,7 +1031,7 @@ pub unsafe fn get_plain(ptr: *const ShellInstance, index: u32) -> f32 {
     if ptr.is_null() {
         0.0
     } else {
-        unsafe { (*ptr).ffi.load_param(index as usize) }
+        unsafe { (*ptr).ffi.load_host(index as usize) }
     }
 }
 

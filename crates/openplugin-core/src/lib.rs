@@ -133,6 +133,73 @@ pub enum Unit {
 pub enum Taper {
     Linear,
     Log,
+    /// Travel is the linear proportion raised to the skew: `t = ((v - min) / (max - min)) ^ skew`,
+    /// so a skew below 1 gives the low end more travel. The skewed ranges many plugin SDKs offer;
+    /// a port keeps the old curve, and with it the meaning of saved normalized automation.
+    Skew(Skew),
+}
+
+/// The exponent of [`Taper::Skew`], kept as `f32` bits so a taper stays `Eq` and `Hash`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Skew(u32);
+
+impl Skew {
+    pub const fn new(skew: f32) -> Self {
+        Self(skew.to_bits())
+    }
+
+    pub fn get(self) -> f32 {
+        f32::from_bits(self.0)
+    }
+}
+
+/// The formats in which a parameter shows hosts its normalized 0..1 travel instead of plain units
+/// ([`ParamInfo::with_normalized_in`]). The plugin, its editor and `set_param` still see plain values;
+/// only the host-facing value, range and default change. It is the value space of a plugin from an
+/// SDK that published normalized values, so automation saved with that plugin replays on a port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
+pub struct HostSpace(u8);
+
+impl HostSpace {
+    /// Plain units in every format (the default).
+    pub const PLAIN: Self = Self(0);
+    /// CLAP `param_info`, values, events and text.
+    pub const CLAP: Self = Self(1);
+    /// The VST3, Audio Unit and AAX shells (`op_shell_*` and the editor bridge). VST3 and AAX
+    /// automation is normalized anyway; the Audio Unit's values and ranges become 0..1.
+    pub const SHELLS: Self = Self(4);
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0 && other.0 != 0
+    }
+
+    pub const fn is_plain(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+/// A parameter's own value text: how a plain value prints and how typed text reads back
+/// ([`ParamInfo::with_text`]). `parse` returns a plain value; the result is clamped afterwards.
+#[derive(Clone, Copy)]
+pub struct ParamText {
+    pub format: fn(f32) -> String,
+    pub parse: fn(&str) -> Option<f32>,
+}
+
+impl std::fmt::Debug for ParamText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ParamText")
+    }
+}
+
+impl PartialEq for ParamText {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::fn_addr_eq(self.format, other.format) && std::ptr::fn_addr_eq(self.parse, other.parse)
+    }
 }
 
 /// Separates the names in a [`ParamInfo::group`] path.
@@ -269,6 +336,12 @@ pub struct ParamInfo {
     /// forms.
     #[serde(skip_serializing_if = "ParamPins::is_empty")]
     pub pins: ParamPins,
+    /// Formats that show hosts normalized values ([`ParamInfo::with_normalized_in`]).
+    #[serde(skip_serializing_if = "HostSpace::is_plain")]
+    pub normalized_in: HostSpace,
+    /// The parameter's own value text ([`ParamInfo::with_text`]); `None` prints by [`Unit`].
+    #[serde(skip)]
+    pub text: Option<ParamText>,
 }
 
 impl ParamInfo {
@@ -293,12 +366,45 @@ impl ParamInfo {
             flags: ParamFlags::AUTOMATABLE,
             group: "",
             pins: ParamPins::NONE,
+            normalized_in: HostSpace::PLAIN,
+            text: None,
         }
     }
 
     pub const fn with_taper(mut self, taper: Taper) -> Self {
         self.taper = taper;
         self
+    }
+
+    /// Show hosts normalized 0..1 values in `formats` ([`HostSpace`]).
+    pub const fn with_normalized_in(mut self, formats: HostSpace) -> Self {
+        self.normalized_in = formats;
+        self
+    }
+
+    /// Print and read values with the plugin's own functions instead of by [`Unit`].
+    pub const fn with_text(mut self, format: fn(f32) -> String, parse: fn(&str) -> Option<f32>) -> Self {
+        self.text = Some(ParamText { format, parse });
+        self
+    }
+
+    /// The value a host in `format` sees for the plain value `plain`.
+    pub fn to_host(&self, format: HostSpace, plain: f32) -> f32 {
+        if self.normalized_in.contains(format) { self.to_normalized(plain) } else { plain }
+    }
+
+    /// The plain value for a value a host in `format` sent, clamped.
+    pub fn from_host(&self, format: HostSpace, value: f32) -> f32 {
+        if self.normalized_in.contains(format) { self.from_normalized(value) } else { self.clamp(value) }
+    }
+
+    /// Minimum, maximum and default as a host in `format` sees them.
+    pub fn host_range(&self, format: HostSpace) -> (f32, f32, f32) {
+        if self.normalized_in.contains(format) {
+            (0.0, 1.0, self.to_normalized(self.default))
+        } else {
+            (self.min, self.max, self.default)
+        }
     }
 
     /// Snap the value to `steps` positions, including both endpoints.
@@ -430,6 +536,10 @@ impl ParamInfo {
             Taper::Log if self.min > 0.0 => {
                 ((v / self.min).ln() / (self.max / self.min).ln()).clamp(0.0, 1.0)
             }
+            Taper::Skew(s) if s.get() > 0.0 && s.get().is_finite() => {
+                let p = ((v - self.min) / span).clamp(0.0, 1.0);
+                if p > 0.0 { (p.ln() * s.get()).exp().clamp(0.0, 1.0) } else { 0.0 }
+            }
             _ => ((v - self.min) / span).clamp(0.0, 1.0),
         }
     }
@@ -439,6 +549,10 @@ impl ParamInfo {
         let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
         let v = match self.taper {
             Taper::Log if self.min > 0.0 => self.min * (self.max / self.min).powf(t),
+            Taper::Skew(s) if s.get() > 0.0 && s.get().is_finite() => {
+                let p = if t > 0.0 { (t.ln() / s.get()).exp() } else { 0.0 };
+                self.min + (self.max - self.min) * p
+            }
             _ => self.min + (self.max - self.min) * t,
         };
         self.clamp(v)
@@ -455,6 +569,9 @@ impl ParamInfo {
         let t = text.trim();
         if t.is_empty() {
             return None;
+        }
+        if let Some(own) = self.text {
+            return (own.parse)(t).filter(|v| v.is_finite()).map(|v| self.clamp(v));
         }
         // `format` names a choice by its value, so the position is the value.
         if let Some(i) = self.choices.iter().position(|c| c.trim().eq_ignore_ascii_case(t)) {
@@ -512,6 +629,9 @@ impl ParamInfo {
     /// Formats a parameter value for display with appropriate units.
     pub fn format(&self, value: f32) -> String {
         let v = self.clamp(value);
+        if let Some(own) = self.text {
+            return (own.format)(v);
+        }
         match self.unit {
             Unit::Choice => self
                 .choices
@@ -1041,6 +1161,52 @@ pub fn release_momentary(plugin: &mut dyn Plugin) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn skew_taper_follows_proportion_to_the_power() {
+        let q = ParamInfo::new("q", "Q", 0.1, 10.0, 0.707, Unit::None).with_taper(Taper::Skew(Skew::new(0.5)));
+        let v = 2.5f32;
+        assert!((q.to_normalized(v) - ((v - 0.1) / 9.9).sqrt()).abs() < 1e-6);
+        for k in 0..=20 {
+            let t = k as f32 / 20.0;
+            assert!((q.to_normalized(q.from_normalized(t)) - t).abs() < 1e-5);
+        }
+        assert_eq!(q.to_normalized(0.1), 0.0);
+        assert_eq!(q.from_normalized(1.0), 10.0);
+        // an unusable skew is linear travel
+        let bad = ParamInfo::new("b", "B", 0.0, 1.0, 0.0, Unit::None).with_taper(Taper::Skew(Skew::new(0.0)));
+        assert_eq!(bad.to_normalized(0.25), 0.25);
+    }
+
+    #[test]
+    fn host_space_is_plain_unless_asked() {
+        let p = ParamInfo::new("f", "F", 20.0, 1000.0, 100.0, Unit::Hz).with_taper(Taper::Log);
+        assert_eq!(p.host_range(HostSpace::CLAP), (20.0, 1000.0, 100.0));
+        assert_eq!(p.to_host(HostSpace::SHELLS, 500.0), 500.0);
+        let n = p.clone().with_normalized_in(HostSpace::CLAP);
+        assert_eq!(n.host_range(HostSpace::SHELLS), (20.0, 1000.0, 100.0), "only the formats named");
+        let (lo, hi, def) = n.host_range(HostSpace::CLAP);
+        assert_eq!((lo, hi), (0.0, 1.0));
+        assert!((def - n.to_normalized(100.0)).abs() < 1e-7);
+        assert!((n.from_host(HostSpace::CLAP, n.to_host(HostSpace::CLAP, 333.0)) - 333.0).abs() < 1e-2);
+        let both = p.with_normalized_in(HostSpace::CLAP.union(HostSpace::SHELLS));
+        assert!(both.normalized_in.contains(HostSpace::SHELLS) && both.normalized_in.contains(HostSpace::CLAP));
+        assert!(!HostSpace::PLAIN.contains(HostSpace::PLAIN));
+    }
+
+    fn pct_text(v: f32) -> String { format!("{} %", (v * 100.0).round()) }
+    fn pct_parse(t: &str) -> Option<f32> { t.trim_end_matches('%').trim().parse::<f32>().ok().map(|v| v / 100.0) }
+
+    #[test]
+    fn own_text_prints_and_reads_clamped_values() {
+        let p = ParamInfo::new("h", "H", 0.0, 1.0, 0.0, Unit::None).with_text(pct_text, pct_parse);
+        assert_eq!(p.format(0.4), "40 %");
+        assert_eq!(p.format(7.0), "100 %", "printed after clamping");
+        assert_eq!(p.parse("40 %"), Some(0.4));
+        assert_eq!(p.parse("250 %"), Some(1.0), "read values are clamped");
+        assert_eq!(p.parse("loud"), None);
+        assert_eq!(p.clone(), p, "comparable");
+    }
+
     use super::*;
 
     #[test]
