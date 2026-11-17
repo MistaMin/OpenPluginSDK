@@ -246,6 +246,7 @@ fn run_by_hand(
                     ch[..d].fill(0.0);
                 }
                 LfeMode::Process => {}
+                _ => unimplemented!(),
             }
         }
     }
@@ -624,7 +625,7 @@ fn passed_lfe_is_delayed_with_the_mains() {
         fn param(&self, _: &str) -> Option<f32> {
             None
         }
-        fn process(&mut self, io: &mut [Vec<f32>], frames: usize) {
+        fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
             let start = self.1;
             for (ch, ring) in io.iter_mut().zip(&mut self.0) {
                 let mut pos = start;
@@ -678,7 +679,7 @@ impl Plugin for Probe {
     fn supported_layouts(&self) -> &'static [IoConfig] {
         STEREO_ONLY
     }
-    fn process(&mut self, _: &mut [Vec<f32>], _: usize) {}
+    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
     fn reset(&mut self) {}
     fn set_param(&mut self, _: &str, _: f32) -> bool {
         false
