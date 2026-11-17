@@ -536,6 +536,26 @@ constexpr uint32 kChangesPollMs = 30;
 // IInfoListener::setChannelContextInfos. Attributes: "name" (TChar string,
 // absent for none), "rgba" (int, 0xRRGGBBAA), "flags" (int, OP_TRACK_*).
 constexpr const char* kTrackMessage = "openplugin.track";
+// Controller to processor: a state the old plugin saved for the controller (ABI 10,
+// op_shell_load_foreign_state). Attributes: "kind" (int, OP_FOREIGN_*), "data" (binary).
+constexpr const char* kForeignMessage = "openplugin.foreign";
+// The most a foreign state may be. A larger stream is not offered to the plugin.
+constexpr uint32_t kMaxForeignState = 16u << 20;
+
+// The whole stream, from its start. False for an unreadable or oversized one.
+inline bool read_all(IBStream* stream, std::vector<uint8_t>& out) {
+    out.clear();
+    if (!stream || stream->seek(0, IBStream::kIBSeekSet, nullptr) != kResultOk) return false;
+    uint8_t chunk[4096];
+    for (;;) {
+        int32 got = 0;
+        if (stream->read(chunk, static_cast<int32>(sizeof(chunk)), &got) != kResultOk || got < 0) return false;
+        if (got == 0) break;
+        if (out.size() + static_cast<size_t>(got) > kMaxForeignState) return false;
+        out.insert(out.end(), chunk, chunk + got);
+    }
+    return stream->seek(0, IBStream::kIBSeekSet, nullptr) == kResultOk;
+}
 
 // What the host last said about the track, as op_shell_set_track_info takes it.
 struct TrackState {
@@ -735,6 +755,21 @@ public:
     // The controller's message with the host's track. Message thread. Kept for
     // an engine made later, and given to the one that exists now.
     tresult PLUGIN_API notify(IMessage* message) SMTG_OVERRIDE {
+        if (message && message->getMessageID() && std::strcmp(message->getMessageID(), kForeignMessage) == 0) {
+            IAttributeList* attributes = message->getAttributes();
+            int64 kind = 0;
+            const void* data = nullptr;
+            uint32 size = 0;
+            if (!attributes || attributes->getInt("kind", kind) != kResultOk || attributes->getBinary("data", data, size) != kResultOk || !data || size == 0 || size > kMaxForeignState || kind < 1 || kind > 4)
+                return kInvalidArgument;
+            const std::vector<uint8_t> bytes(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + size);
+            std::vector<double> loaded(defaults_);
+            if (!loadForeign(static_cast<uint32_t>(kind), bytes, &loaded)) return kResultFalse;
+            for (uint32_t i = 0; i < count_; ++i) values_[i].store(loaded[i]);
+            generation_.fetch_add(1, std::memory_order_release);
+            if (engine_) pushValues(engine_);
+            return kResultOk;
+        }
         if (message && message->getMessageID() && std::strcmp(message->getMessageID(), kTrackMessage) == 0) {
             IAttributeList* attributes = message->getAttributes();
             if (!attributes) return kInvalidArgument;
@@ -775,6 +810,19 @@ public:
     // only after that.
     tresult PLUGIN_API setState(IBStream* stream) SMTG_OVERRIDE {
         if (!stream || count_ == 0) return kResultFalse;
+        // A state the old plugin wrote goes to the plugin first (ABI 10): only a plugin that
+        // reads that kind is asked, and it refuses what it does not recognise, so a state this
+        // shell wrote falls through to the head below.
+        if (foreignKinds_ & (1u << (OP_FOREIGN_VST3_COMPONENT - 1))) {
+            std::vector<uint8_t> raw;
+            std::vector<double> loaded(defaults_);
+            if (read_all(stream, raw) && loadForeign(OP_FOREIGN_VST3_COMPONENT, raw, &loaded)) {
+                for (uint32_t i = 0; i < count_; ++i) values_[i].store(loaded[i]);
+                generation_.fetch_add(1, std::memory_order_release);
+                if (engine_) pushValues(engine_);
+                return kResultOk;
+            }
+        }
         IBStreamer reader(stream, kLittleEndian);
         std::vector<double> loaded(defaults_);
         if (!read_state_head(reader, ids_, loaded, true)) return kResultFalse;
@@ -1002,6 +1050,33 @@ private:
         }
         return engine;
     }
+    // Offers a state the old plugin saved to the plugin (ABI 10). With an engine the plugin
+    // loads it there; without one a scratch engine takes it, as checkBlob does, and the plugin's
+    // state after it is kept in pendingBlob_ for the engine setActive makes. `normalized`, when
+    // given, receives every parameter's value after a success. All or nothing.
+    bool loadForeign(uint32_t kind, const std::vector<uint8_t>& bytes, std::vector<double>* normalized) {
+        if (bytes.empty() || !(foreignKinds_ & (1u << (kind - 1)))) return false;
+        void* target = engine_;
+        if (!target) {
+            const EngineSetup setup = engineSetup();
+            if (scratch_ && !(scratchSetup_ == setup)) dropScratch();
+            if (!scratch_) {
+                scratch_ = makeEngine(setup);
+                scratchSetup_ = setup;
+                if (scratch_ && !pendingBlob_.empty()) op_shell_load_state(scratch_, pendingBlob_.data(), static_cast<uint32_t>(pendingBlob_.size()));
+            }
+            target = scratch_;
+            if (!target) return false;
+        }
+        if (op_shell_load_foreign_state(target, kind, bytes.data(), static_cast<uint32_t>(bytes.size())) == 0) return false;
+        if (normalized) {
+            normalized->resize(count_);
+            for (uint32_t i = 0; i < count_; ++i) (*normalized)[i] = static_cast<double>(op_shell_get_normalized(target, i));
+        }
+        if (!engine_ && !save_blob(scratch_, pendingBlob_)) pendingBlob_.clear();
+        return true;
+    }
+    const uint32_t foreignKinds_ = op_shell_foreign_kinds();
     // Checks a blob without an engine by loading it into a scratch engine made as
     // setActive would make it. An accepted blob stays there for setActive to
     // adopt, so a session that restores before it activates builds each engine
@@ -1693,6 +1768,7 @@ public:
         id = kMidiParamBase + static_cast<ParamID>(channel) * kMidiControllers + static_cast<ParamID>(number);
         return kResultTrue;
     }
+    const uint32_t foreignKinds_ = op_shell_foreign_kinds();
     OBJ_METHODS(Controller, EditController)
     DEFINE_INTERFACES
         DEF_INTERFACE(IMidiMapping)
@@ -1743,8 +1819,39 @@ public:
         }
         return kResultOk;
     }
+    // The old plugin's controller state goes to the processor, which owns the plugin (ABI 10).
+    tresult PLUGIN_API setState(IBStream* stream) SMTG_OVERRIDE {
+        if (!stream) return kResultFalse;
+        if (!(foreignKinds_ & (1u << (OP_FOREIGN_VST3_CONTROLLER - 1)))) return kResultOk;
+        std::vector<uint8_t> raw;
+        if (!read_all(stream, raw) || raw.empty()) return kResultOk;
+        if (IPtr<IMessage> message = owned(allocateMessage())) {
+            message->setMessageID(kForeignMessage);
+            message->getAttributes()->setInt("kind", OP_FOREIGN_VST3_CONTROLLER);
+            message->getAttributes()->setBinary("data", raw.data(), static_cast<uint32>(raw.size()));
+            sendMessage(message);
+        }
+        return kResultOk;
+    }
     tresult PLUGIN_API setComponentState(IBStream* stream) SMTG_OVERRIDE {
         if (!stream) return kResultFalse;
+        // A component state the old plugin wrote: a scratch plugin reads it for its values.
+        if (foreignKinds_ & (1u << (OP_FOREIGN_VST3_COMPONENT - 1))) {
+            std::vector<uint8_t> raw;
+            if (read_all(stream, raw)) {
+                std::vector<double> loaded(count_);
+                bool ok = false;
+                if (void* scratch = op_shell_create(48000.0, 512, 2)) {
+                    ok = op_shell_load_foreign_state(scratch, OP_FOREIGN_VST3_COMPONENT, raw.data(), static_cast<uint32_t>(raw.size())) != 0;
+                    for (uint32_t i = 0; ok && i < count_; ++i) loaded[i] = static_cast<double>(op_shell_get_normalized(scratch, i));
+                    op_shell_destroy(scratch);
+                }
+                if (ok) {
+                    for (uint32_t i = 0; i < count_; ++i) setParamNormalized(ids_.id(i), loaded[i]);
+                    return kResultOk;
+                }
+            }
+        }
         IBStreamer reader(stream, kLittleEndian);
         // The same head the processor reads; nothing is set unless all of it reads.
         std::vector<double> loaded(count_);

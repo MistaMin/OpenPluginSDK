@@ -7,7 +7,7 @@
 // Also the ABI 9 calls of a stand-in that never renames its parameters and
 // whose latency never moves: the instance's table is the first table, and the
 // largest latency is the latency. A stand-in with its own defines
-// OP_STUB_OWN_ABI9.
+// OP_STUB_OWN_ABI9. The ABI 10 foreign-state calls likewise, with OP_STUB_OWN_ABI10.
 #pragma once
 #include "op_shell.h"
 #include <cstring>
@@ -43,5 +43,13 @@ int op_shell_instance_param_parse(const void*, uint32_t index, const char* text,
 }
 uint32_t op_shell_max_latency(const void* instance) { return instance ? op_shell_latency(const_cast<void*>(instance)) : 0; }
 uint32_t op_shell_latency_now(const void* instance) { return instance ? op_shell_latency(const_cast<void*>(instance)) : 0; }
+}
+#endif
+
+// ABI 10: a stand-in that reads no other plugin's state refuses every one and lists none.
+#ifndef OP_STUB_OWN_ABI10
+extern "C" {
+uint32_t op_shell_load_foreign_state(void*, uint32_t, const uint8_t*, uint32_t) { return 0; }
+uint32_t op_shell_foreign_kinds(void) { return 0; }
 }
 #endif

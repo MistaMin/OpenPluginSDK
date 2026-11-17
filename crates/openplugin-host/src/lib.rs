@@ -665,6 +665,31 @@ impl HostSession {
         .unwrap_or(false)
     }
 
+    /// Restore a state the plugin this one replaces saved ([`Plugin::load_foreign_state`]).
+    /// All or nothing: false changes no parameter. The plugin's own values after a success are
+    /// the ones the host reads. Main thread; blocks at most [`STATE_WAIT`]; safe beside the audio thread.
+    pub fn load_foreign(&self, kind: openplugin_core::foreign_state::ForeignStateKind, bytes: &[u8]) -> bool {
+        if bytes.is_empty() {
+            return false;
+        }
+        self.with_exclusive(|audio| {
+            let applied = catch_unwind(AssertUnwindSafe(|| audio.inner.load_foreign_state(kind, bytes)));
+            if !matches!(applied, Ok(true)) {
+                return false;
+            }
+            for (index, info) in self.info.params.iter().enumerate() {
+                if let Some(value) = audio.inner.param(info.id) {
+                    self.plane.store(index, value);
+                }
+            }
+            audio.cursor.invalidate();
+            self.note_latency(audio.inner.latency());
+            self.note_info(audio.inner.info());
+            true
+        })
+        .unwrap_or(false)
+    }
+
     /// In-place stereo: [`HostSession::process_planar`] for two slices.
     /// Copies through scratch, so `left` and `right` are both the input and the output.
     pub fn process_stereo(&self, left: &mut [f32], right: &mut [f32]) -> bool {
