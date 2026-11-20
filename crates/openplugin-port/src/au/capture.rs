@@ -118,6 +118,32 @@ pub fn capture(job: &Job, sink: &mut Sink) -> Result<(), String> {
         }
     }
 
+    // A saved session restored the way a host does: the ClassInfo dictionary set on a new unit.
+    if let Some(path) = &job.load_component {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let u = new_unit(component)?;
+        let data = unsafe { CFDataCreate(std::ptr::null(), bytes.as_ptr(), bytes.len() as isize) };
+        if data.is_null() {
+            return Err("the session file would not load into memory".into());
+        }
+        let mut error: CFTypeRef = std::ptr::null();
+        let dict = unsafe { CFPropertyListCreateWithData(std::ptr::null(), data, 0, std::ptr::null_mut(), &mut error) };
+        unsafe { CFRelease(data) };
+        if dict.is_null() {
+            if !error.is_null() {
+                unsafe { CFRelease(error) };
+            }
+            return Err(format!("{} is not a property list", path.display()));
+        }
+        let st = unsafe { AudioUnitSetProperty(u, AU_PROP_CLASS_INFO, AU_SCOPE_GLOBAL, 0, (&dict as *const CFTypeRef).cast(), std::mem::size_of::<CFTypeRef>() as u32) };
+        unsafe { CFRelease(dict) };
+        let notes = vec![format!("setting ClassInfo returned {st}")];
+        match class_info(u) {
+            Ok(b) => sink.add("loaded", "loaded", None, vec![("au-classinfo", b)], values(u, &table), notes)?,
+            Err(e) => sink.notes.push(format!("state after loading: {e}")),
+        }
+    }
+
     // Factory presets: an array of pointers to AUPreset structures.
     let mut array: *const c_void = std::ptr::null();
     let mut size = std::mem::size_of::<*const c_void>() as u32;

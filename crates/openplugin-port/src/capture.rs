@@ -100,6 +100,13 @@ pub struct Job {
     pub blob_dir: String,
     pub max_presets: usize,
     pub sets: Vec<SetSpec>,
+    /// VST3 only: files holding a component state and a controller state, loaded the way a host
+    /// restores a session (`IComponent::setState`, then `IEditController::setComponentState`
+    /// and `setState`), so what a port does with an old plugin's states can be checked.
+    #[serde(default)]
+    pub load_component: Option<PathBuf>,
+    #[serde(default)]
+    pub load_controller: Option<PathBuf>,
 }
 
 /// The child's output.
@@ -191,12 +198,15 @@ pub struct CaptureOptions {
     pub out_dir: PathBuf,
     pub max_presets: usize,
     pub sets: Vec<SetSpec>,
+    /// See [`Job::load_component`] and [`Job::load_controller`].
+    pub load_component: Option<PathBuf>,
+    pub load_controller: Option<PathBuf>,
     pub env: Vec<(String, String)>,
 }
 
 impl CaptureOptions {
     pub fn new(helper: PathBuf, out_dir: PathBuf) -> Self {
-        Self { helper, timeout: Duration::from_secs(120), format: None, out_dir, max_presets: 128, sets: Vec::new(), env: Vec::new() }
+        Self { helper, timeout: Duration::from_secs(120), format: None, out_dir, max_presets: 128, sets: Vec::new(), load_component: None, load_controller: None, env: Vec::new() }
     }
 }
 
@@ -229,6 +239,8 @@ pub fn run(path: &Path, opts: &CaptureOptions) -> Result<Vec<(Capture, PathBuf)>
             blob_dir: format!("{base}.blobs"),
             max_presets: opts.max_presets,
             sets: opts.sets.clone(),
+            load_component: opts.load_component.clone(),
+            load_controller: opts.load_controller.clone(),
         };
         let json = serde_json::to_string(&job).map_err(|e| e.to_string())?;
         let result: ChildResult = probe::run_helper(&opts.helper, &["__capture".into(), json.into()], opts.timeout, &opts.env)?;

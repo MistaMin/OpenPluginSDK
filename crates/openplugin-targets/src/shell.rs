@@ -27,6 +27,8 @@ pub use openplugin_host::shell::{
     au_code, identity, param_aax_id, param_host_id,
     // ABI 9: the instance's own parameter table, and its largest latency.
     instance_param, instance_param_format, instance_param_parse, latency_now, max_latency,
+    // ABI 10: states the plugin replaces.
+    foreign_kinds, load_foreign_state,
 };
 
 #[cfg(any(target_os = "macos", windows))]
@@ -497,6 +499,11 @@ macro_rules! export_shell {
         }
 
         #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_foreign_kinds() -> u32 {
+            $crate::shell::foreign_kinds::<$plugin>()
+        }
+
+        #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_shell_kind() -> u32 {
             $crate::shell::kind::<$plugin>()
         }
@@ -825,6 +832,18 @@ macro_rules! export_shell {
         ) -> u32 {
             unsafe {
                 $crate::shell::load_state(instance as *mut $crate::shell::ShellInstance, data, length)
+            }
+        }
+
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_shell_load_foreign_state(
+            instance: *mut ::std::ffi::c_void,
+            kind: u32,
+            data: *const u8,
+            length: u32,
+        ) -> u32 {
+            unsafe {
+                $crate::shell::load_foreign_state(instance as *mut $crate::shell::ShellInstance, kind, data, length)
             }
         }
 

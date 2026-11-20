@@ -23,6 +23,7 @@ Usage:
   --format    clap, vst3, au or aax, when the extension does not say
 
   openplugin-port capture <plugin>... [--out DIR] [--format FORMAT] [--set PARAM=VALUE]...
+                          [--load-component FILE] [--load-controller FILE]
                           [--max-presets N] [--timeout SECONDS]
 
   capture     load the plugin in a child process (nothing is installed) and save
@@ -30,7 +31,9 @@ Usage:
               bytes, VST3 component and controller streams, the Audio Unit
               ClassInfo dictionary as a binary plist. One state for the default
               settings, one per factory preset (CLAP preset discovery, VST3
-              program lists, Audio Unit factory presets), and one after --set
+              program lists, Audio Unit factory presets), one after --load-component and
+              --load-controller (VST3: files restored the way a host restores a session,
+              to check what a port does with an old plugin's states), and one after --set
               (a parameter id or name and a plain value, repeatable). Writes
               <name>.<format>.capture.json and a <name>.<format>.blobs folder in
               --out (default: the current folder), with every parameter's plain
@@ -185,6 +188,8 @@ fn run_capture(args: &[String]) -> ExitCode {
                 "--out" => o.out_dir = PathBuf::from(value("a folder")?),
                 "--format" => o.format = Some(value("a name")?),
                 "--set" => o.sets.push(capture::parse_set(&value("param=value")?)?),
+                "--load-component" => o.load_component = Some(PathBuf::from(value("a file")?)),
+                "--load-controller" => o.load_controller = Some(PathBuf::from(value("a file")?)),
                 "--max-presets" => o.max_presets = value("a number")?.parse().map_err(|_| "--max-presets needs a number")?,
                 "--timeout" => o.timeout = Duration::from_secs(value("seconds")?.parse().map_err(|_| "--timeout needs a number of seconds")?),
                 flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
