@@ -13,11 +13,11 @@ None of these came from the 1.0 Beta run. #21 and #37 were tested before the fre
 | PR | Branch | Behind main | Checks | Conflicts | Notes |
 |---|---|---|---|---|---|
 | #21 Linux VST3 shell | `linux-vst3` | 63 | green (old) | none reported | needs a rebase and a re-run after the rename |
-| #36 GoodLookin DRI v0.2.1 pin | `pin-goodlookindri-0.2.1` | 0 (rebased) | CI re-running | none | base of the stack below |
+| #36 GoodLookin DRI v0.2.1 pin | `pin-goodlookindri-0.2.1` | 0 (rebased) | 19 pass | none | base of the stack below |
 | #37 ports keep host behaviour | `MistaMin/hybrideq-host-values` | 53 | 7 failing | **yes** | rebase onto the freeze |
-| #38 foreign state (ABI 10) | `foreign-state-shells` | 0 (rebased) | CI re-running | none | on top of #36 |
-| #39 `--au-version` | `au-component-version` | 0 (rebased) | CI re-running | none | on top of #38 |
-| #40 VST3 controller state | `vst3-controller-state` | 0 (rebased) | CI re-running | none | on top of #39 |
+| #38 foreign state (ABI 10) | `foreign-state-shells` | 0 (rebased) | 19 pass | none | on top of #36 |
+| #39 `--au-version` | `au-component-version` | 0 (rebased) | 19 pass | none | on top of #38 |
+| #40 VST3 controller state | `vst3-controller-state` | 0 (rebased) | 19 pass | none | on top of #39 |
 
 No PR has a review requested or a blocking review.
 
@@ -45,7 +45,7 @@ In the main checkout: 47 subagent worktrees under `.claude/worktrees/agent-*` an
 
 ## Remaining, in priority order
 
-1. The #36 → #38 → #39 → #40 stack: rebased and pushed; wait for CI to go green, then merge in order (#36 first). Merging is the owner's step.
+1. The #36 → #38 → #39 → #40 stack: rebased, all 19 checks pass on each; merge in order (#36 first). Merging is the owner's step.
 2. #21: rebase after the rename and re-run CI before merging.
 3. #37: resolve its conflicts with the freeze and fix its 7 failing jobs.
 4. 1.0 Beta run t10: the five API-docs tasks (`missing_docs` for core, dri, host, dsp, targets). They are ready and wait for the owner's go.
