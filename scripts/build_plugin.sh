@@ -29,6 +29,9 @@ Plugin
                          Both may be left out when the plugin pins its codes
                          (Plugin::au_ids); codes that differ from the pinned ones stop the build.
   --au-type TYPE         Audio Unit component type: auto, aufx, aumu, aumf [OP_AU_TYPE=auto]
+  --au-version N|release Audio Unit component version: a number, or `release` to derive
+                         it from --version as major*65536 + minor*256 + patch. A host takes a
+                         higher number for an update; default 1, as before [OP_AU_VERSION]
   --ttl-bin NAME         the plugin's cargo bin that writes the LV2 files;
                          called as `NAME <folder> <library stem>`      [OP_TTL_BIN]
   --standalone-bin NAME  the plugin's cargo bin that runs standalone   [OP_STANDALONE_BIN]
@@ -78,7 +81,7 @@ USAGE
 MANIFEST="${OP_MANIFEST:-}"; PACKAGE="${OP_PACKAGE:-}"; LIB_NAME="${OP_LIB_NAME:-}"
 NAME="${OP_NAME:-}"; BUNDLE_ID="${OP_BUNDLE_ID:-}"; VERSION="${OP_VERSION:-}"
 MANUFACTURER="${OP_MANUFACTURER:-OpenPlugin}"
-AU_SUBTYPE="${OP_AU_SUBTYPE:-}"; AU_MANUFACTURER="${OP_AU_MANUFACTURER:-}"; AU_TYPE="${OP_AU_TYPE:-auto}"
+AU_SUBTYPE="${OP_AU_SUBTYPE:-}"; AU_MANUFACTURER="${OP_AU_MANUFACTURER:-}"; AU_TYPE="${OP_AU_TYPE:-auto}"; AU_VERSION="${OP_AU_VERSION:-1}"
 TTL_BIN="${OP_TTL_BIN:-}"; STANDALONE_BIN="${OP_STANDALONE_BIN:-}"; FEATURES="${OP_FEATURES:-}"
 FORMATS="${OP_FORMATS:-clap,lv2,vst3,au,aax}"
 EDITOR="${OP_EDITOR:-0}"; TAIL="${OP_TAIL:-0}"; AAX_PAGES="${OP_AAX_PAGES:-0}"
@@ -103,6 +106,7 @@ while [ $# -gt 0 ]; do
     --au-subtype) need "$@"; AU_SUBTYPE="$2"; shift 2 ;;
     --au-manufacturer) need "$@"; AU_MANUFACTURER="$2"; shift 2 ;;
     --au-type) need "$@"; AU_TYPE="$2"; shift 2 ;;
+    --au-version) need "$@"; AU_VERSION="$2"; shift 2 ;;
     --ttl-bin) need "$@"; TTL_BIN="$2"; shift 2 ;;
     --standalone-bin) need "$@"; STANDALONE_BIN="$2"; shift 2 ;;
     --features) need "$@"; FEATURES="$2"; shift 2 ;;
@@ -162,6 +166,11 @@ if [ -z "$VERSION" ]; then
   [ -n "$VERSION" ] || die "version not found in the manifest (workspace-inherited?); give --version"
 fi
 VERSION="${VERSION%%-*}"   # bundle versions are numbers only
+if [ "$AU_VERSION" = release ]; then
+  IFS=. read -r v_major v_minor v_patch <<<"$VERSION"
+  AU_VERSION=$(( ${v_major:-0} * 65536 + ${v_minor:-0} * 256 + ${v_patch:-0} ))
+fi
+case "$AU_VERSION" in (*[!0-9]*|"") die "--au-version is a number or release, not $AU_VERSION" ;; esac
 if [ -z "$BUNDLE_ID" ]; then
   BUNDLE_ID="com.example.$(echo "$NAME" | tr -cd 'A-Za-z0-9' | tr 'A-Z' 'a-z')"
   echo "build_plugin: no --bundle-id; using $BUNDLE_ID" >&2
@@ -343,7 +352,7 @@ if [ -n "$SHELLS" ]; then
     "-DOP_VST3_SDK=$VST3_SDK" "-DOP_AU_SDK=$AU_SDK" "-DOP_AAX_SDK=$AAX_SDK" \
     "-DOP_BUILD_VST3=$(onoff vst3)" "-DOP_BUILD_AU=$(onoff au)" "-DOP_BUILD_AAX=$(onoff aax)" \
     "-DOP_PRODUCT=$NAME" "-DOP_BUNDLE_ID=$BUNDLE_ID" "-DOP_VERSION=$VERSION" \
-    "-DOP_MANUFACTURER=$MANUFACTURER" "-DOP_AU_SUBTYPE=$AU_SUBTYPE" "-DOP_AU_MANUFACTURER=$AU_MANUFACTURER" \
+    "-DOP_AU_VERSION=$AU_VERSION" "-DOP_MANUFACTURER=$MANUFACTURER" "-DOP_AU_SUBTYPE=$AU_SUBTYPE" "-DOP_AU_MANUFACTURER=$AU_MANUFACTURER" \
     "-DOP_AU_TYPE=$AU_TYPE" \
     "-DOP_EDITOR=$(tf "$EDITOR")" "-DOP_TAIL=$(tf "$TAIL")" "-DOP_AAX_PAGES=$(tf "$AAX_PAGES")"
   # Only the bundles: the SDK's own proof programs test its example, not this plugin.
