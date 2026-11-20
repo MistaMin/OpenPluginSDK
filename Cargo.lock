@@ -314,11 +314,13 @@ dependencies = [
 
 [[package]]
 name = "goodlookindri"
-version = "0.2.0"
+version = "0.2.1"
+source = "git+https://github.com/MistaMin/GoodLookinDri?tag=v0.2.1#9a1d6212324fc6c6eeca56d099af690d8142023f"
 
 [[package]]
 name = "goodlookindri-shell"
-version = "0.2.0"
+version = "0.2.1"
+source = "git+https://github.com/MistaMin/GoodLookinDri?tag=v0.2.1#9a1d6212324fc6c6eeca56d099af690d8142023f"
 dependencies = [
  "fontdue",
  "goodlookindri",

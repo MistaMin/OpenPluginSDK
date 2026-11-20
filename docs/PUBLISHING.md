@@ -8,10 +8,10 @@ Nothing here has been run for real. Every crate in `crates/` is ready to publish
 
 | Crate                | Version | Source                                    |
 |----------------------|---------|-------------------------------------------|
-| `goodlookindri`      | 0.2.0   | `../GoodLookinDri`                        |
-| `goodlookindri-shell`| 0.2.0   | `../GoodLookinDri/shell`                  |
+| `goodlookindri`      | 0.2.1   | git tag `v0.2.1` of GoodLookinDri         |
+| `goodlookindri-shell`| 0.2.1   | git tag `v0.2.1` of GoodLookinDri         |
 
-The workspace `Cargo.toml` names both with `path` and `version`. Cargo uses the path here and the version on crates.io, so nothing changes in this repository once they are published. GoodLookin DRI's owner publishes them first, `goodlookindri` before `goodlookindri-shell` (the shell depends on it). If either is released with a different version, update the two `version = "0.2.0"` entries in the workspace `Cargo.toml`.
+The workspace `Cargo.toml` names both by git tag, and `Cargo.lock` pins the exact commit, so every build uses the same GoodLookin DRI. To update it, release a new GoodLookin DRI tag, change the two `tag = "..."` entries in the workspace `Cargo.toml`, run `cargo update -p goodlookindri -p goodlookindri-shell`, and run the tests. Before publishing to crates.io, GoodLookin DRI's owner publishes `goodlookindri`, then `goodlookindri-shell`, and the two entries change to `version = "..."` (crates.io rejects git-only dependencies).
 
 `openplugin-targets` and `openplugin` reach GoodLookin DRI only through `openplugin-dri`, so the whole chain waits on this step.
 
