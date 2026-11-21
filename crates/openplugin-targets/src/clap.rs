@@ -1339,6 +1339,9 @@ unsafe extern "C" fn state_save(plugin: *const clap_plugin, stream: *const clap_
             // The plugin owns state beyond its parameters: take it between blocks.
             let gate = unsafe { &*std::ptr::addr_of!((*raw).gate) };
             let Some(_held) = gate.enter_state(STATE_WAIT) else { return false };
+            // A value the host set outside a processed block (flush, skipped block) is in the
+            // plane only: hand it to the plugin first, or the chunk misses it.
+            pull_params(unsafe { &mut *raw });
             unsafe { &mut *std::ptr::addr_of_mut!((*raw).inner) }.save_state().unwrap_or_default()
         } else {
             Vec::new()
