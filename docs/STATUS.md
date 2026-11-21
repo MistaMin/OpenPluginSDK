@@ -12,9 +12,9 @@ None of these came from the 1.0 Beta run. All are now rebased onto `ded6d8d` (af
 
 | PR | Branch | Behind main | Checks | Conflicts | Notes |
 |---|---|---|---|---|---|
-| #21 Linux VST3 shell | `linux-vst3` | 0 (rebased 2026-11-22) | CI re-running | none | rebased cleanly; Linux checked by CI only |
+| #21 Linux VST3 shell | `linux-vst3` | 0 (rebased 2026-11-22) | 20 pass | none | rebased cleanly; Linux checked by CI only |
 | #36 GoodLookin DRI v0.2.1 pin | `pin-goodlookindri-0.2.1` | 0 (rebased) | 19 pass | none | base of the stack below |
-| #37 ports keep host behaviour | `MistaMin/hybrideq-host-values` | 0 (rebased 2026-11-22) | CI re-running | none with main; two lines with #39 | ported to the frozen API |
+| #37 ports keep host behaviour | `MistaMin/hybrideq-host-values` | 0 (rebased 2026-11-22) | 19 pass | none with main; two lines with #39 | ported to the frozen API |
 | #38 foreign state (ABI 10) | `foreign-state-shells` | 0 (rebased) | 19 pass | none | on top of #36 |
 | #39 `--au-version` | `au-component-version` | 0 (rebased) | 19 pass | none | on top of #38 |
 | #40 VST3 controller state | `vst3-controller-state` | 0 (rebased) | 19 pass | none | on top of #39 |
@@ -46,7 +46,7 @@ In the main checkout: 47 subagent worktrees under `.claude/worktrees/agent-*` an
 ## Remaining, in priority order
 
 1. The #36 → #38 → #39 → #40 stack: rebased, all 19 checks pass on each; merge in order (#36 first). Merging is the owner's step.
-2. #21 and #37: rebased; merge once CI is green. #37 and #39 both set the Audio Unit component version (#39 opt-in with `--au-version release`, #37 always from `OP_VERSION`): the owner picks one, and the second to merge resolves two lines.
+2. #21 and #37: rebased, CI green. #37 and #39 both set the Audio Unit component version (#39 opt-in with `--au-version release`, #37 always from `OP_VERSION`): the owner picks one, and the second to merge resolves two lines.
 3. 1.0 Beta run t10: the five API-docs tasks (`missing_docs`). Missing on `ded6d8d`: core 401, dsp 431, dri 133, targets 16, host 9 (also testing 69, port 318, which the run does not cover). The owner said go on 2026-11-22. The go is queued for the run's coordinator (the main checkout's agent), which Orca could not wake.
 4. 1.0 Beta run t11: the release check, last.
 5. Owner only: tagging 1.0, the crates.io publish, publishing GoodLookin DRI, the Windows items that wait for the PC (ROADMAP_WINDOWS_LINUX.md W3), real DAW sessions (Logic, Cubase, Bitwig), PACE signing.
