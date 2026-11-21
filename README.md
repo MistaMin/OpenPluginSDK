@@ -4,7 +4,8 @@
 > Targets **CLAP**, **LV2**, **VST3**, **Audio Unit (AU)** and **Avid AAX**, with a standalone editor window for development.
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
+[![CI](https://github.com/MistaMin/OpenPluginSDK/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MistaMin/OpenPluginSDK/actions/workflows/ci.yml)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)](docs/PLATFORMS.md)
 [![Version](https://img.shields.io/badge/version-1.0%20Beta-orange.svg)](#)
 
 ---
@@ -17,8 +18,8 @@ It combines:
 1. **Realtime-safe DSP core:** Zero-allocation processing loop (`process()`), hostile parameter sanitization, and no panics.
 2. **Textbook DSP library:** Bundled high-order RBJ biquad filters, overlap-save convolution for impulses up to 1024 taps (`BlockConvolver`), log-domain soft-knee dynamics (compressor/limiter/gate), tape/tube non-linear saturation curves, IEC 60268-17 VU and PPM meters, BS.1770-4 loudness (`Loudness`), loudness-matched auto gain (`LoudnessMatch`), and Delta listening (`Delta`).
 3. **GoodLookin Design Rust Interface (DRI) 0.2:** procedural hardware drawing with no bitmaps: 47 knob styles, 40 faceplate finishes, meters, switches and the spectrum. Knobs are lit by default, shaded per pixel from a light rig, and the classic and flat tiers remain. `SceneCanvas` rasterises a scene, with the static plate cached, into the pixels an editor shows. No JUCE dependency or license. See [docs/DRI_GUIDE.md](docs/DRI_GUIDE.md).
-4. **Format bridges:** CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX are macOS native shells over `export_shell!`. A standalone build opens the editor in a window of its own, without audio. The shell contract is [docs/SHELL.md](docs/SHELL.md).
-5. **One editor in every format:** a plugin writes one `Editor` and passes `editor = make_editor` to the export macros. CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), VST3, Audio Unit and AAX all host it in a Rust `NSView`. See [docs/EDITOR.md](docs/EDITOR.md) and [`examples/editor`](examples/editor).
+4. **Format bridges:** CLAP and LV2 are Rust entries. VST3, Audio Unit, and AAX are native C++ shells over `export_shell!`: VST3 and AAX on macOS and Windows, the Audio Unit on macOS. A standalone build opens the editor in a window of its own, without audio. The shell contract is [docs/SHELL.md](docs/SHELL.md).
+5. **One editor in every format:** a plugin writes one `Editor` and passes `editor = make_editor` to the export macros. CLAP (`clap.gui`), LV2 (`ui:CocoaUI`), VST3, Audio Unit and AAX all host it in a Rust view: an `NSView` on macOS, an HWND on Windows, an X11 window on Linux. See [docs/EDITOR.md](docs/EDITOR.md) and [`examples/editor`](examples/editor).
 
 ---
 
@@ -82,7 +83,7 @@ It combines:
 | [`openplugin`](crates/openplugin) | Top-level facade, and a small prelude (the plugin and editor contracts, the descriptors, the export macros) |
 | [`openplugin-core`](crates/openplugin-core) | Core `Plugin` trait, `ParamInfo` (format and parse), tapers, transport, MIDI, the `Editor` contract, and text presets (`PresetBank`, `build::embed_files`) |
 | [`openplugin-dsp`](crates/openplugin-dsp) | Realtime-safe DSP: RBJ biquads, `BlockConvolver`, dynamics, saturation, VU metering. See [docs/CONVOLVE.md](docs/CONVOLVE.md) |
-| [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knob tiers, faceplates, meters), `SceneCanvas` (scene to pixels, cached plate layer), and the macOS `EditorView`. Drawing lives in GoodLookin DRI |
+| [`openplugin-dri`](crates/openplugin-dri) | GoodLookin DRI adapter (knob tiers, faceplates, meters), `SceneCanvas` (scene to pixels, cached plate layer), and the editor views for macOS, Windows and X11. Drawing lives in GoodLookin DRI |
 | [`openplugin-targets`](crates/openplugin-targets) | CLAP and LV2 entries with their editors, the LV2 `.ttl` writer, and `export_shell!` with `op_editor_*`. See [docs/SHELL.md](docs/SHELL.md) |
 | [`openplugin-host`](crates/openplugin-host) | Rust host session (`HostSession`): parameter plane, scratch render, presets, session state. Also holds the Rust side of the `op_shell_*` ABI |
 
@@ -213,10 +214,10 @@ impl SaturatorPlugin {
 ## Target Format Support
 
 ### CLAP
-Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. `export_clap!(P)` exports the entry. With `export_clap!(P, editor = make_editor)` it also offers `clap.gui` on macOS. `text_to_value` reads choice names, On/Off and units (`ParamInfo::parse`).
+Modern, open audio plugin standard with high-efficiency event dispatching and direct parameter modulation. `export_clap!(P)` exports the entry. With `export_clap!(P, editor = make_editor)` it also offers `clap.gui` (Cocoa, Win32 or X11). `text_to_value` reads choice names, On/Off and units (`ParamInfo::parse`).
 
 ### LV2
-`export_lv2!` gives two stereo audio ports each way (an instrument has outputs only) and one control port per parameter, then a `freeWheeling` port (`set_offline`), a MIDI/`time:Position` atom input when the plugin takes notes, a MIDI atom output when it sends them, and an `lv2:isSideChain` input per sidechain channel. Port order is in [docs/FORMATS.md](docs/FORMATS.md#lv2-ports). `editor = make_editor` adds a `ui:CocoaUI`. `lv2::write_bundle` writes `manifest.ttl` and the plugin `.ttl` from the parameter table. `Plugin::lv2_uri` sets a fixed URI.
+`export_lv2!` gives two stereo audio ports each way (an instrument has outputs only) and one control port per parameter, then a `freeWheeling` port (`set_offline`), a MIDI/`time:Position` atom input when the plugin takes notes, a MIDI atom output when it sends them, and an `lv2:isSideChain` input per sidechain channel. Port order is in [docs/FORMATS.md](docs/FORMATS.md#lv2-ports). `editor = make_editor` adds a `ui:CocoaUI`, `ui:WindowsUI` or `ui:X11UI`. `lv2::write_bundle` writes `manifest.ttl` and the plugin `.ttl` from the parameter table. `Plugin::lv2_uri` sets a fixed URI.
 
 ### VST3
 A thin native factory in `native/vst3` calls the `op_shell_*` ABI from `export_shell!`. It implements the processor and the edit controller. With `-DOP_EDITOR=ON` and `export_shell!(P, editor = make_editor)` it hosts the plugin's editor. See [docs/SHELL.md](docs/SHELL.md).

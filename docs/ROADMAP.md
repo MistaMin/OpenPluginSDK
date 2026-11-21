@@ -12,7 +12,7 @@ The editor work follows the plan of [GoodLookin DRI](https://github.com/MistaMin
 
 | Area | State |
 |---|---|
-| Formats | CLAP and LV2 are Rust entries on macOS, Windows and Linux. VST3, Audio Unit and AAX are C++ shells over the Rust `op_shell_*` ABI (version 8): VST3 and AAX on macOS and Windows, the Audio Unit on macOS. Every format carries notes, MIDI out, transport, sidechain, layouts in one channel order, offline, parameter groups, state, latency and tail, and tells the host about changes (0.6). |
+| Formats | CLAP and LV2 are Rust entries on macOS, Windows and Linux. VST3, Audio Unit and AAX are C++ shells over the Rust `op_shell_*` ABI (version 9): VST3 and AAX on macOS and Windows, the Audio Unit on macOS. Every format carries notes, MIDI out, transport, sidechain, layouts in one channel order, offline, parameter groups, state, latency and tail, and tells the host about changes (0.6). |
 | Editor | One Rust `Editor` in every format, resizable, with hit-testing, keyboard focus, damage-only repaint, design-file editors, the host parameter menu, typing a value, tooltips, file drops and accessibility (0.5, 0.7). Views: `NSView` on macOS, HWND with UI Automation on Windows, X11 on Linux (X11 under XWayland on Wayland). |
 | Drawing | GoodLookin DRI 0.2: lit knobs by default, `SceneCanvas` with a cached plate layer and damaged-rectangle repaint. |
 | Proofs | Unit, hostile-input and no-allocation suites in every format; the native VST3, AU and AAX shell proofs; format parity sample for sample across all five formats; `clap-validator`, `lv2_validate`, lilv, `auval -strict`, pluginval at strictness 10 and Avid's AAX Validator (locally). CI runs the workspace and the headless proofs on macOS, Linux and Windows. Host runs: REAPER and OpenGrid9 on macOS, Pro Tools with AAX on macOS, REAPER on Windows ([HOST_TESTS.md](HOST_TESTS.md)). |
@@ -149,10 +149,8 @@ Done since: **the API freeze** is applied from the decisions in [API_REVIEW.md](
 Remaining 1.0 work, open:
 
 - **API documentation** (task 3): `missing_docs` on every public item, compiled doc examples, docs.rs metadata.
-- **Porting scaffolding** (porting toolkit task 8). The guides (task 5) are done.
-- **No C++ runtime dependency on Windows**: the shells link the C and C++ runtime statically, so no VC++ redistributable is needed.
 
-Done from this list: the shell follow-ups of 0.6 task 7 (shell ABI 9, see its status).
+Done from this list: the shell follow-ups of 0.6 task 7 (shell ABI 9, see its status), porting scaffolding (porting toolkit task 8, `openplugin-port new`) and no C++ runtime dependency on Windows (the shells link the C and C++ runtime statically, so no VC++ redistributable is needed).
 
 Tagging 1.0 and the crates.io publish are the owner's decisions.
 

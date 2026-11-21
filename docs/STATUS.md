@@ -1,4 +1,4 @@
-# OpenPluginSDK status, 2026-11-20
+# OpenPluginSDK status, 2026-11-22
 
 Read from `gh` and `git` (origin/main at `ded6d8d`, CI green), not from agent memory.
 
@@ -8,13 +8,13 @@ Read from `gh` and `git` (origin/main at `ded6d8d`, CI green), not from agent me
 
 ## Open PRs
 
-None of these came from the 1.0 Beta run. #21 and #37 were tested before the freeze renamed `openplugin-ffi` to `openplugin-host`.
+None of these came from the 1.0 Beta run. All are now rebased onto `ded6d8d` (after the freeze).
 
 | PR | Branch | Behind main | Checks | Conflicts | Notes |
 |---|---|---|---|---|---|
-| #21 Linux VST3 shell | `linux-vst3` | 63 | green (old) | none reported | needs a rebase and a re-run after the rename |
+| #21 Linux VST3 shell | `linux-vst3` | 0 (rebased 2026-11-22) | CI re-running | none | rebased cleanly; Linux checked by CI only |
 | #36 GoodLookin DRI v0.2.1 pin | `pin-goodlookindri-0.2.1` | 0 (rebased) | 19 pass | none | base of the stack below |
-| #37 ports keep host behaviour | `MistaMin/hybrideq-host-values` | 53 | 7 failing | **yes** | rebase onto the freeze |
+| #37 ports keep host behaviour | `MistaMin/hybrideq-host-values` | 0 (rebased 2026-11-22) | CI re-running | none with main; two lines with #39 | ported to the frozen API |
 | #38 foreign state (ABI 10) | `foreign-state-shells` | 0 (rebased) | 19 pass | none | on top of #36 |
 | #39 `--au-version` | `au-component-version` | 0 (rebased) | 19 pass | none | on top of #38 |
 | #40 VST3 controller state | `vst3-controller-state` | 0 (rebased) | 19 pass | none | on top of #39 |
@@ -39,16 +39,14 @@ In the main checkout: 47 subagent worktrees under `.claude/worktrees/agent-*` an
 ## Workspaces with unmerged work (keep)
 
 - Main checkout `/Volumes/Developer 2/Dependencies/OpenPluginSDK`: branch `vst3-controller-state` (#36–#40 stack), untracked `graphify-out/` (37 MB, not for git).
-- `hybrideq-host-values`: #37.
-- `.claude/worktrees/linux-vst3`: #21.
+- `hybrideq-host-values`: #37. Its local branch is the old `13e649e`; the remote is `e278893` (rebased), so reset to the remote.
+- `.claude/worktrees/linux-vst3`: #21. Its local branch is the old `156d65e`; the remote is `86c291d` (rebased), so reset to the remote.
 - `sdk-reorg`: this map (branch `MistaMin/sdk-reorg`).
 
 ## Remaining, in priority order
 
 1. The #36 → #38 → #39 → #40 stack: rebased, all 19 checks pass on each; merge in order (#36 first). Merging is the owner's step.
-2. #21: rebase after the rename and re-run CI before merging.
-3. #37: resolve its conflicts with the freeze and fix its 7 failing jobs.
-4. 1.0 Beta run t10: the five API-docs tasks (`missing_docs` for core, dri, host, dsp, targets). They are ready and wait for the owner's go.
-5. 1.0 Beta run t11: the release check, last.
-6. `docs/ROADMAP.md` is out of date: "Remaining 1.0 work" still lists porting scaffolding (#18) and the static CRT (#15), both merged, and the 1.0 Beta table says ABI 8.
-7. Owner only: tagging 1.0, the crates.io publish, publishing GoodLookin DRI, the Windows items that wait for the PC (ROADMAP_WINDOWS_LINUX.md W3), real DAW sessions (Logic, Cubase, Bitwig), PACE signing.
+2. #21 and #37: rebased; merge once CI is green. #37 and #39 both set the Audio Unit component version (#39 opt-in with `--au-version release`, #37 always from `OP_VERSION`): the owner picks one, and the second to merge resolves two lines.
+3. 1.0 Beta run t10: the five API-docs tasks (`missing_docs`). Missing on `ded6d8d`: core 401, dsp 431, dri 133, targets 16, host 9 (also testing 69, port 318, which the run does not cover). The owner said go on 2026-11-22. The go is queued for the run's coordinator (the main checkout's agent), which Orca could not wake.
+4. 1.0 Beta run t11: the release check, last.
+5. Owner only: tagging 1.0, the crates.io publish, publishing GoodLookin DRI, the Windows items that wait for the PC (ROADMAP_WINDOWS_LINUX.md W3), real DAW sessions (Logic, Cubase, Bitwig), PACE signing.
