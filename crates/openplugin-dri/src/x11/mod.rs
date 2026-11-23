@@ -370,6 +370,24 @@ fn scale_from_resources(resources: &[u8]) -> Option<f32> {
     (dpi.is_finite() && dpi > 0.0).then(|| (dpi / 96.0).clamp(1.0, 3.0))
 }
 
+/// The scale the root window's resources ask for (`Xft.dpi`), 1 without one.
+fn root_scale(conn: &RustConnection, root: Window) -> f32 {
+    conn.get_property(false, root, AtomEnum::RESOURCE_MANAGER, AtomEnum::STRING, 0, 1 << 20)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .and_then(|reply| scale_from_resources(&reply.value))
+        .unwrap_or(1.0)
+}
+
+/// Device pixels per point that a new [`EditorView`] will use: the display's
+/// `Xft.dpi` over 96, or 1 when there is no X server or no such setting. For a
+/// host that asks for sizes in pixels before a view exists (a VST3 shell).
+pub fn display_scale() -> f32 {
+    let Ok((conn, screen)) = RustConnection::connect(None) else { return 1.0 };
+    let Some(root) = conn.setup().roots.get(screen).map(|s| s.root) else { return 1.0 };
+    root_scale(&conn, root)
+}
+
 /// An editor length in device pixels.
 fn device(points: u32, scale: f32) -> u32 {
     ((points as f32 * scale).round() as u32).clamp(1, 32767)
@@ -510,12 +528,7 @@ impl EditorView {
             direct: (visual.red_mask, visual.green_mask, visual.blue_mask) == (0xff_0000, 0xff00, 0xff),
         };
 
-        let scale = conn
-            .get_property(false, root, AtomEnum::RESOURCE_MANAGER, AtomEnum::STRING, 0, 1 << 20)
-            .ok()
-            .and_then(|cookie| cookie.reply().ok())
-            .and_then(|reply| scale_from_resources(&reply.value))
-            .unwrap_or(1.0);
+        let scale = root_scale(&conn, root);
 
         let size = editor.size();
         let win = (device(size.0, scale), device(size.1, scale));

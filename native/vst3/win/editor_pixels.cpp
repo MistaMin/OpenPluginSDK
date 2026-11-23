@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 // See editor_pixels.h. Main thread only, like every op_editor_* call.
+// The Linux VST3 shell (vst3/linux) uses this file too: there the system's
+// scale is the display's (op_editor_display_scale, op_editor_x11.h).
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -7,6 +10,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include "op_editor_x11.h"
+#endif
 #include "editor_pixels.h"
 #include <cmath>
 #include <cstddef>
@@ -44,8 +50,14 @@ double gHostScale = 0.0;
 // The scale to expect before an editor has a window: the host's, else the system's.
 double systemScale() {
     if (gHostScale > 0.0) return gHostScale;
+#ifdef _WIN32
     const UINT dpi = GetDpiForSystem();
     return dpi ? static_cast<double>(dpi) / 96.0 : 1.0;
+#else
+    // Asked once: it opens a connection to the X server.
+    static const double display = op_editor_display_scale();
+    return display > 0.0 ? display : 1.0;
+#endif
 }
 double scaleOf(void* editor) {
     const double scale = editor ? op_editor_scale(editor) : 0.0;

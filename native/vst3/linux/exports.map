@@ -1,0 +1,11 @@
+/* SPDX-License-Identifier: MIT */
+/* What a Linux VST3 module exports: the VST3 entry points, and nothing of the
+   Rust library inside it (vst3/linux/vst3.cmake). */
+{
+  global:
+    GetPluginFactory;
+    ModuleEntry;
+    ModuleExit;
+  local:
+    *;
+};
