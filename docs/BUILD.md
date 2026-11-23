@@ -152,7 +152,7 @@ Not covered: installing the package, a signed or notarised package (shown with `
 
 ## Linux
 
-`scripts/build_plugin_linux.sh` builds a plugin crate into the formats that work on Linux today: CLAP, LV2 and a standalone executable. It is plain bash over `cargo` and binutils, takes the same option names and environment variables as `build_plugin.sh` where they mean the same thing (`--manifest-path`, `--package`, `--lib-name`, `--name`, `--version`, `--ttl-bin`, `--standalone-bin`, `--features`, `--formats`, `--out`, `--work-dir`, `--jobs`, `--dry-run`, `--no-verify`), and refuses `vst3`, `au` and `aax`, which are not built on Linux yet. `--formats all` is `clap,lv2,standalone`, as on macOS, and so needs `--standalone-bin`. The macOS-only options (`--bundle-id`, `--editor`, `--archs` and so on) are refused by name. It runs only on Linux and never installs anything.
+`scripts/build_plugin_linux.sh` builds a plugin crate into the formats that work on Linux: CLAP, LV2, VST3 and a standalone executable. It is plain bash over `cargo` and binutils, takes the same option names and environment variables as `build_plugin.sh` where they mean the same thing (`--manifest-path`, `--package`, `--lib-name`, `--name`, `--version`, `--ttl-bin`, `--standalone-bin`, `--features`, `--formats`, `--out`, `--work-dir`, `--jobs`, `--dry-run`, `--no-verify`), and refuses `au` and `aax`, which do not exist on Linux. `vst3` needs `--vst3-sdk` and CMake, and takes `--editor`, `--tail` and `--manufacturer` as on macOS. `--formats all` is `clap,lv2,standalone`, as on macOS, and so needs `--standalone-bin`. The macOS-only options (`--bundle-id`, `--archs` and so on) are refused by name. It runs only on Linux and never installs anything.
 
 ```bash
 scripts/build_plugin_linux.sh \
@@ -165,6 +165,7 @@ scripts/build_plugin_linux.sh \
 |---|---|
 | CLAP | `<out>/<Name>.clap`: the shared library itself, one ELF file, not a folder |
 | LV2 | `<out>/<Stem>.lv2/` with `<Stem>.so`, and `manifest.ttl` and `<Stem>.ttl` written by `<ttl-bin> <folder> <Stem>`. `<Stem>` is reduced as on macOS |
+| VST3 | `<out>/<Name>.vst3/Contents/<arch>-linux/<Name>.so` (`x86_64-linux`, `aarch64-linux`): the shell of `native/vst3/linux` over the plugin's `staticlib`, with the VST3 SDK licence in `Contents/Resources`. It exports only `GetPluginFactory`, `ModuleEntry` and `ModuleExit` (the check fails on anything else), and links libstdc++ statically. With `--editor` the editor is an X11 view run by the host's `Linux::IRunLoop` |
 | Standalone | `<out>/<Name>`: the plugin's `--standalone-bin`, one ELF executable; and `<out>/<id>.desktop`, a freedesktop Desktop Entry (`Type=Application`, `Exec="<Name>"`, `StartupWMClass=OpenPlugin`, the X11 view's class). `<id>` is `<Name>` in lower case with every character but letters, digits, `_`, `.` and `-` as `-`. `Exec` names the executable on `PATH`: the script installs nothing, so the folder is the installer's choice |
 
 The library is a release build of the host architecture, with the same `--remap-path-prefix` list as on macOS. `--strip` runs `strip --strip-all` on each copy; the dynamic symbols stay. Unless `--no-verify` is given, the script then checks each library and fails the run on any of these:
@@ -172,7 +173,7 @@ The library is a release build of the host architecture, with the same `--remap-
 - `strings -a` finds the build, workspace, its parent, plugin crate, SDK or home path.
 - `readelf -d` lists a `NEEDED` library other than glibc's (`libc`, `libm`, and `libdl`, `libpthread`, `librt` for older toolchains), `libgcc_s` and the loader. `--allow-lib SONAME` (or `OP_ALLOW_LIBS`) accepts another. `ldd` reports a library as not found.
 - An `RPATH` or `RUNPATH` points into the build tree, the workspace or the home folder.
-- `nm -D --defined-only` does not show `clap_entry` (CLAP) or `lv2_descriptor` (LV2).
+- `nm -D --defined-only` does not show `clap_entry` (CLAP), `lv2_descriptor` (LV2) or the three VST3 entry points, or the VST3 module exports anything else.
 - The LV2 bundle lacks `manifest.ttl` or `<Stem>.ttl`, or `manifest.ttl` does not name `<Stem>.so` as `lv2:binary`.
 - The standalone file is not an ELF executable (it gets the same path, library and run path checks, and no export check), its desktop entry is missing, or `desktop-file-validate` (when installed) rejects the entry.
 
@@ -266,7 +267,7 @@ Not covered: ARM64, a signed or installed bundle, Pro Tools (PACE signing), and 
 
 ## Windows: packaging
 
-`scripts\windows\build_plugin.ps1` turns a plugin crate into Windows plug-ins in one command: a CLAP file, a VST3 bundle and an AAX bundle. It is the Windows counterpart of `scripts/build_plugin.sh` and `scripts/build_plugin_linux.sh`, with the same options where they mean the same thing, spelled the PowerShell way (`--manifest-path` is `-ManifestPath`), and the same environment variables. It needs Rust for the MSVC target, CMake, and Visual Studio or its Build Tools with the C++ workload; it finds the compiler, `rc` and `dumpbin` itself (`vswhere`, `vcvars64.bat`). Nothing is installed, signed or copied into a plug-in folder.
+`scripts\windows\build_plugin.ps1` turns a plugin crate into Windows plug-ins in one command: a CLAP file, an LV2 bundle, a VST3 bundle and an AAX bundle, for the machine's processor (x64, or ARM64 on Windows on Arm, where AAX is not built). It is the Windows counterpart of `scripts/build_plugin.sh` and `scripts/build_plugin_linux.sh`, with the same options where they mean the same thing, spelled the PowerShell way (`--manifest-path` is `-ManifestPath`), and the same environment variables. It needs Rust for the MSVC target, CMake, and Visual Studio or its Build Tools with the C++ workload; it finds the compiler, `rc` and `dumpbin` itself (`vswhere`, `vcvars64.bat`). Nothing is installed, signed or copied into a plug-in folder.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build_plugin.ps1 `
@@ -284,7 +285,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\windows\build_plugin
 | `-Version` | Numbers only (a `-beta` suffix is cut off). Default: the manifest's, also when it is inherited from the workspace |
 | `-Manufacturer` | The vendor: the company in the version resource. Give the name the plugin reports. Default `OpenPlugin` |
 | `-BundleId` | Passed on for parity with macOS; no Windows format reads it |
-| `-Formats` | `clap,vst3,aax` or `all`. Default: `clap`, plus `vst3` when a VST3 SDK is given and `aax` when an AAX SDK is given |
+| `-Formats` | `clap,lv2,vst3,aax` or `all`. Default: `clap`, plus `lv2` when `-TtlBin` is given, `vst3` when a VST3 SDK is given and `aax` when an AAX SDK is given. Quote the list in PowerShell (`-Formats 'clap,lv2,vst3'`) |
+| `-TtlBin` | The plugin's bin that writes the LV2 description files, called as `<bin> <folder> <stem>`; the bundle is `<Stem>.lv2` with the DLL as `<Stem>.dll` |
 | `-Editor`, `-Tail`, `-AaxPages` | `OP_EDITOR`, `OP_TAIL` and `OP_AAX_PAGES` in the shells. Off by default |
 | `-Features` | cargo features for the plugin crate |
 | `-AllowLib` | A DLL the plug-in may import besides the system ones and the Visual C++ runtime. Repeatable |

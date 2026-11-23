@@ -23,8 +23,8 @@ pub use openplugin_testing as testing;
 /// the channel adapters its tests call `process` through, and the export macros. DSP blocks and drawing come from [`crate::dsp`] and [`crate::dri`].
 pub mod prelude {
     pub use openplugin_core::{
-        Category, Channels, ChannelsMut, Editor, EditorFactory, EditorHost, EditorState, Frame, IoConfig,
-        MeterFrame, NotePorts, ParamFlags, ParamInfo, Plugin, PluginInfo, SpeakerLayout, Tail, Taper,
+        Category, Channels, ChannelsMut, Editor, EditorFactory, EditorHost, EditorState, Frame, HostSpace, IoConfig,
+        MeterFrame, NotePorts, ParamFlags, ParamInfo, Plugin, PluginInfo, SpeakerLayout, Skew, Tail, Taper,
         Transport, Unit,
     };
     pub use openplugin_targets::{export_clap, export_lv2, export_shell};

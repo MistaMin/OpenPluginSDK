@@ -27,22 +27,26 @@ pub use openplugin_host::shell::{
     au_code, identity, param_aax_id, param_host_id,
     // ABI 9: the instance's own parameter table, and its largest latency.
     instance_param, instance_param_format, instance_param_parse, latency_now, max_latency,
+    // The parameter table, for the editor bridge's host values.
+    params,
 };
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 pub use editor::OpEditorHost;
 
 /// The editor ABI (`op_editor.h`). The functions take the plugin's
 /// [`EditorFactory`](openplugin_core::EditorFactory); `export_shell!` wraps
 /// them in the `#[unsafe(no_mangle)]` symbols the shells link.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 pub mod editor {
     use super::ShellInstance;
-    use openplugin_core::{EditorFactory, EditorHost, Gesture};
+    use openplugin_core::{EditorFactory, EditorHost, Gesture, HostSpace, ParamInfo};
     #[cfg(target_os = "macos")]
     use openplugin_dri::cocoa::EditorView;
     #[cfg(windows)]
     use openplugin_dri::win32::EditorView;
+    #[cfg(target_os = "linux")]
+    use openplugin_dri::x11::EditorView;
     use std::cell::Cell;
     use std::ffi::c_void;
     use std::rc::Rc;
@@ -76,6 +80,22 @@ pub mod editor {
         pub end_edit: Option<unsafe extern "C" fn(context: *mut c_void, index: u32)>,
     }
 
+    /// The binary's parameter table: the shells speak host values ([`HostSpace::SHELLS`]), the editor
+    /// plain ones. Set by `export_shell!` before the first editor exists (one plugin per binary).
+    static PARAMS: std::sync::OnceLock<&'static [ParamInfo]> = std::sync::OnceLock::new();
+
+    pub fn use_params(params: &'static [ParamInfo]) {
+        let _ = PARAMS.set(params);
+    }
+
+    fn to_host(index: u32, plain: f32) -> f32 {
+        PARAMS.get().and_then(|p| p.get(index as usize)).map_or(plain, |p| p.to_host(HostSpace::SHELLS, plain))
+    }
+
+    fn from_host(index: u32, value: f32) -> f32 {
+        PARAMS.get().and_then(|p| p.get(index as usize)).map_or(value, |p| p.from_host(HostSpace::SHELLS, value))
+    }
+
     /// The gestures of an editor, sent to an `OpEditorHost`.
     pub fn host_for(callbacks: OpEditorHost) -> EditorHost {
         EditorHost::new(move |gesture| unsafe {
@@ -88,7 +108,7 @@ pub mod editor {
                 }
                 Gesture::Perform(i, v) => {
                     if let Some(f) = c.perform_edit {
-                        f(c.context, i, f64::from(v));
+                        f(c.context, i, f64::from(to_host(i, v)));
                     }
                 }
                 Gesture::End(i) => {
@@ -268,15 +288,24 @@ pub mod editor {
     /// # Safety
     /// `editor` is null or from [`create`].
     pub unsafe fn raw_view(editor: *mut c_void) -> *mut c_void {
+        // On Linux the view is an X window id, handed over as a pointer-sized integer.
+        #[cfg(target_os = "linux")]
+        return unsafe { view(editor) }.map(|v| v.raw() as usize as *mut c_void).unwrap_or(std::ptr::null_mut());
+        #[cfg(not(target_os = "linux"))]
         unsafe { view(editor) }.map(|v| v.raw()).unwrap_or(std::ptr::null_mut())
     }
 
     /// `op_editor_attach`.
     ///
     /// # Safety
-    /// `editor` is null or from [`create`]; `parent` is null or an `NSView`.
+    /// `editor` is null or from [`create`]; `parent` is null or an `NSView`
+    /// (an `HWND` on Windows; an X window id on Linux, VST3's
+    /// `kPlatformTypeX11EmbedWindowID`).
     pub unsafe fn attach(editor: *mut c_void, parent: *mut c_void) -> u32 {
         match unsafe { view(editor) } {
+            #[cfg(target_os = "linux")]
+            Some(v) => u32::from(u32::try_from(parent as usize).is_ok_and(|window| v.attach(window))),
+            #[cfg(not(target_os = "linux"))]
             Some(v) => u32::from(unsafe { v.attach(parent) }),
             None => 0,
         }
@@ -303,7 +332,7 @@ pub mod editor {
         }
         super::trace::write("host");
         if let Some(e) = unsafe { view(editor) }.and_then(|v| v.editor()) {
-            e.param_changed(index as usize, plain);
+            e.param_changed(index as usize, from_host(index, plain));
         }
     }
 
@@ -348,6 +377,75 @@ pub mod editor {
         }
     }
 
+    /// `op_editor_set_scale` on Linux (`op_editor_x11.h`): the X11 view takes
+    /// its scale from the display (`Xft.dpi`), not from the host. Always 0.
+    #[cfg(target_os = "linux")]
+    pub fn set_scale(_editor: *mut c_void, _scale: f64) -> u32 {
+        0
+    }
+
+    /// `op_editor_scale` on Linux: device pixels per point of the view. 0 for no editor.
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`].
+    #[cfg(target_os = "linux")]
+    pub unsafe fn scale(editor: *mut c_void) -> f64 {
+        unsafe { view(editor) }.map(|v| f64::from(v.scale())).unwrap_or(0.0)
+    }
+
+    /// `op_editor_set_pixel_size` on Linux: the host made the view's place
+    /// `width` x `height` pixels; the editor takes the nearest size in points
+    /// its range allows. 0 for no editor.
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`].
+    #[cfg(target_os = "linux")]
+    pub unsafe fn set_pixel_size(editor: *mut c_void, width: u32, height: u32) -> u32 {
+        match unsafe { view(editor) } {
+            Some(v) => {
+                let scale = v.scale();
+                let points = |pixels: u32| ((pixels as f32 / scale).round() as u32).max(1);
+                v.resize(points(width), points(height));
+                1
+            }
+            None => 0,
+        }
+    }
+
+    /// `op_editor_display_scale` (Linux): the scale a view opened now would
+    /// use, for the sizes a host asks before an editor exists.
+    #[cfg(target_os = "linux")]
+    pub fn display_scale() -> f64 {
+        f64::from(openplugin_dri::x11::display_scale())
+    }
+
+    /// `op_editor_fd` (Linux): the X connection's descriptor, for the host's
+    /// run loop to watch (VST3 `Linux::IRunLoop::registerEventHandler`); -1 for
+    /// no editor or a lost connection.
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`].
+    #[cfg(target_os = "linux")]
+    pub unsafe fn fd(editor: *mut c_void) -> i32 {
+        match unsafe { view(editor) } {
+            Some(v) if !v.dead() => v.fd(),
+            _ => -1,
+        }
+    }
+
+    /// `op_editor_pump` (Linux): handle the X events that arrived and draw a
+    /// frame when one is due. The shell calls it from the host's run loop: on
+    /// its timer and when the descriptor is readable. Never blocks.
+    ///
+    /// # Safety
+    /// `editor` is null or from [`create`].
+    #[cfg(target_os = "linux")]
+    pub unsafe fn pump(editor: *mut c_void) {
+        if let Some(v) = unsafe { view(editor) } {
+            v.pump();
+        }
+    }
+
     /// `op_editor_destroy`.
     ///
     /// # Safety
@@ -368,43 +466,44 @@ macro_rules! export_shell {
     ($plugin:ty, editor = $editor:path) => {
         $crate::export_shell!($plugin);
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_size(width: *mut u32, height: *mut u32) -> u32 {
             $crate::shell::editor::size($editor, width, height)
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_create(host: *const $crate::shell::OpEditorHost) -> *mut ::std::ffi::c_void {
+            $crate::shell::editor::use_params($crate::shell::params::<$plugin>());
             $crate::shell::editor::create($editor, host)
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_view(editor: *mut ::std::ffi::c_void) -> *mut ::std::ffi::c_void {
             $crate::shell::editor::raw_view(editor)
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_attach(editor: *mut ::std::ffi::c_void, parent: *mut ::std::ffi::c_void) -> u32 {
             $crate::shell::editor::attach(editor, parent)
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_bind(editor: *mut ::std::ffi::c_void, instance: *mut ::std::ffi::c_void) {
             $crate::shell::editor::bind(editor, instance)
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_set_plain(editor: *mut ::std::ffi::c_void, index: u32, plain: f32) {
             $crate::shell::editor::set_plain(editor, index, plain)
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_size_range(
             min_w: *mut u32,
@@ -417,25 +516,25 @@ macro_rules! export_shell {
             unsafe { $crate::shell::editor::size_range($editor, min_w, min_h, max_w, max_h, aspect_w, aspect_h) }
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_get_size(editor: *mut ::std::ffi::c_void, width: *mut u32, height: *mut u32) -> u32 {
             unsafe { $crate::shell::editor::get_size(editor, width, height) }
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_adjust_size(editor: *mut ::std::ffi::c_void, width: *mut u32, height: *mut u32) -> u32 {
             unsafe { $crate::shell::editor::adjust_size(editor, width, height) }
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_resize(editor: *mut ::std::ffi::c_void, width: u32, height: u32) -> u32 {
             unsafe { $crate::shell::editor::resize(editor, width, height) }
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_set_request_resize(
             editor: *mut ::std::ffi::c_void,
@@ -445,7 +544,7 @@ macro_rules! export_shell {
             unsafe { $crate::shell::editor::set_request_resize(editor, context, request) }
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_set_context_menu(
             editor: *mut ::std::ffi::c_void,
@@ -455,7 +554,7 @@ macro_rules! export_shell {
             unsafe { $crate::shell::editor::set_context_menu(editor, context, show) }
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_set_track_info(
             editor: *mut ::std::ffi::c_void,
@@ -466,25 +565,44 @@ macro_rules! export_shell {
             unsafe { $crate::shell::editor::set_track_info(editor, name, rgba, flags) }
         }
 
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_set_scale(editor: *mut ::std::ffi::c_void, scale: f64) -> u32 {
+            #[allow(unused_unsafe)]
             unsafe { $crate::shell::editor::set_scale(editor, scale) }
         }
 
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_scale(editor: *mut ::std::ffi::c_void) -> f64 {
             unsafe { $crate::shell::editor::scale(editor) }
         }
 
-        #[cfg(windows)]
+        #[cfg(target_os = "linux")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_display_scale() -> f64 {
+            $crate::shell::editor::display_scale()
+        }
+
+        #[cfg(target_os = "linux")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_fd(editor: *mut ::std::ffi::c_void) -> i32 {
+            unsafe { $crate::shell::editor::fd(editor) }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn op_editor_pump(editor: *mut ::std::ffi::c_void) {
+            unsafe { $crate::shell::editor::pump(editor) }
+        }
+
+        #[cfg(any(windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_set_pixel_size(editor: *mut ::std::ffi::c_void, width: u32, height: u32) -> u32 {
             unsafe { $crate::shell::editor::set_pixel_size(editor, width, height) }
         }
 
-        #[cfg(any(target_os = "macos", windows))]
+        #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn op_editor_destroy(editor: *mut ::std::ffi::c_void) {
             $crate::shell::editor::destroy(editor)

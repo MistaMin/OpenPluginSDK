@@ -14,10 +14,15 @@
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
+#include "pluginterfaces/vst/ivstmessage.h"
 #include "pluginterfaces/vst/ivstunits.h"
+#include "base/source/fstreamer.h"
 #include "public.sdk/source/common/memorystream.h"
+#include "public.sdk/source/vst/hosting/hostclasses.h"
 #include "public.sdk/source/vst/hosting/parameterchanges.h"
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -645,6 +650,94 @@ static void check_sample_accurate(IComponent* component, IAudioProcessor* proces
         CHECK(bypassed == 1);
     }
 }
+// ---- Edits while no audio runs ---------------------------------------------
+// The value of parameter `id` (or the bypass flag) in the component's saved state.
+static double saved_value(IComponent* component, ParamID id, ParamID bypass) {
+    MemoryStream state;
+    CHECK(component->getState(&state) == kResultOk);
+    state.seek(0, IBStream::kIBSeekSet, nullptr);
+    IBStreamer reader(&state, kLittleEndian);
+    int32 version = 0, count = 0;
+    CHECK(reader.readInt32(version) && reader.readInt32(count) && count > 0);
+    double found = -1.0;
+    for (int32 i = 0; i < count; ++i) {
+        int32 key = i;
+        double value = 0.0;
+        if (version == 2) CHECK(reader.readInt32(key));
+        CHECK(reader.readDouble(value));
+        if (static_cast<ParamID>(key) == id) found = value;
+    }
+    int32 flag = 0;
+    CHECK(reader.readInt32(flag));
+    return id == bypass ? (flag ? 1.0 : 0.0) : found;
+}
+
+// A host that bypasses an effect stops calling process but still edits its
+// parameters, through the controller; the edits must be in the project it saves.
+// While blocks run they are the host's parameter changes' job, and the
+// controller's copy is left alone.
+static void check_idle_edits(IPluginFactory* factory, const TUID effectId, ParamID gain) {
+    IPtr<HostApplication> host = owned(new HostApplication);
+    IComponent* component = nullptr;
+    CHECK(factory->createInstance(effectId, IComponent::iid, reinterpret_cast<void**>(&component)) == kResultOk && component);
+    CHECK(component->initialize(host) == kResultOk);
+    IAudioProcessor* processor = nullptr;
+    CHECK(component->queryInterface(IAudioProcessor::iid, reinterpret_cast<void**>(&processor)) == kResultOk && processor);
+    TUID controllerId{};
+    CHECK(component->getControllerClassId(controllerId) == kResultOk);
+    IEditController* controller = nullptr;
+    CHECK(factory->createInstance(controllerId, IEditController::iid, reinterpret_cast<void**>(&controller)) == kResultOk && controller);
+    CHECK(controller->initialize(host) == kResultOk);
+    IConnectionPoint* fromComponent = nullptr;
+    IConnectionPoint* fromController = nullptr;
+    CHECK(component->queryInterface(IConnectionPoint::iid, reinterpret_cast<void**>(&fromComponent)) == kResultOk);
+    CHECK(controller->queryInterface(IConnectionPoint::iid, reinterpret_cast<void**>(&fromController)) == kResultOk);
+    CHECK(fromComponent->connect(fromController) == kResultOk && fromController->connect(fromComponent) == kResultOk);
+    const ParamID bypass = check_bypass_parameter(controller);
+    SpeakerArrangement arrangement = SpeakerArr::kStereo;
+    CHECK(processor->setBusArrangements(&arrangement, 1, &arrangement, 1) == kResultOk);
+    CHECK(component->activateBus(kAudio, kInput, 0, true) == kResultOk);
+    CHECK(component->activateBus(kAudio, kOutput, 0, true) == kResultOk);
+    ProcessSetup setup{kRealtime, kSample32, 512, 48000.0};
+    CHECK(processor->setupProcessing(setup) == kResultOk);
+    CHECK(component->setActive(true) == kResultOk);
+    CHECK(processor->setProcessing(true) == kResultOk);
+    render_host(processor, 2, 1, {}, false);
+
+    const double before = saved_value(component, gain, bypass);
+    const double other = before > 0.5 ? 0.125 : 0.875;
+    // Audio runs: left to the host's parameter changes.
+    CHECK(controller->setParamNormalized(gain, other) == kResultOk);
+    CHECK(saved_value(component, gain, bypass) == before);
+    // Processing off: the processor takes the edit.
+    CHECK(processor->setProcessing(false) == kResultOk);
+    CHECK(controller->setParamNormalized(gain, other) == kResultOk);
+    CHECK(std::fabs(saved_value(component, gain, bypass) - other) < 1e-12);
+    // Processing on but no block for longer than the idle time: the same, bypass too.
+    CHECK(processor->setProcessing(true) == kResultOk);
+    render_host(processor, 2, 1, {}, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(700));
+    CHECK(controller->setParamNormalized(gain, before) == kResultOk);
+    CHECK(controller->setParamNormalized(bypass, 1.0) == kResultOk);
+    CHECK(std::fabs(saved_value(component, gain, bypass) - before) < 1e-12);
+    CHECK(saved_value(component, bypass, bypass) == 1.0);
+    CHECK(controller->setParamNormalized(bypass, 0.0) == kResultOk);
+    CHECK(saved_value(component, bypass, bypass) == 0.0);
+    std::puts("VST3 edits while no audio runs: left to the host while blocks run, saved while processing is off or no block came for the idle time (bypass too)");
+
+    CHECK(processor->setProcessing(false) == kResultOk);
+    CHECK(component->setActive(false) == kResultOk);
+    fromComponent->disconnect(fromController);
+    fromController->disconnect(fromComponent);
+    fromComponent->release();
+    fromController->release();
+    processor->release();
+    CHECK(controller->terminate() == kResultOk);
+    controller->release();
+    CHECK(component->terminate() == kResultOk);
+    component->release();
+}
+
 int main(int argc, char** argv) {
     CHECK(argc == 2);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(argv[1]), static_cast<CFIndex>(std::strlen(argv[1])), true);
@@ -970,13 +1063,14 @@ int main(int argc, char** argv) {
         CHECK(component->terminate() == kResultOk);
         component->release();
     }
+    check_idle_edits(factory, effect.cid, find_shell_param("Gain"));
     factory->release();
     CHECK(exitFn());
     CFRelease(bundle);
 #if OP_HAS_TAIL
-    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, tail, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass (flag, delayed dry output, restore, state, legacy state), sample-accurate parameter changes and bypass: PASS");
+    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, tail, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass (flag, delayed dry output, restore, state, legacy state), sample-accurate parameter changes and bypass, edits while no audio runs: PASS");
 #else
-    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass, sample-accurate parameter changes and bypass, tail not built (OP_TAIL=OFF): PASS");
+    std::puts("VST3 proof: factory and ABI class IDs, parameter metadata, latency, shell-equal audio, in-place buffers, state round-trip, malformed and wrong-count state, bypass, sample-accurate parameter changes and bypass, edits while no audio runs, tail not built (OP_TAIL=OFF): PASS");
 #endif
     return 0;
 }

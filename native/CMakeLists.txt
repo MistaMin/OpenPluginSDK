@@ -33,6 +33,11 @@ if(CMAKE_HOST_WIN32)
   include("${CMAKE_CURRENT_LIST_DIR}/cmake/windows.cmake")
   return()
 endif()
+# Linux too (VST3 only; CLAP and LV2 are the Rust library itself).
+if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+  include("${CMAKE_CURRENT_LIST_DIR}/cmake/linux.cmake")
+  return()
+endif()
 project(OpenPluginShell LANGUAGES C CXX OBJCXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,6 +52,14 @@ set(OP_AAX_SDK "" CACHE PATH "Existing AAX SDK checkout")
 set(OP_PRODUCT "Plugin" CACHE STRING "Bundle executable and display name")
 set(OP_BUNDLE_ID "com.example.openplugin" CACHE STRING "Bundle identifier prefix")
 set(OP_VERSION "0.1.0" CACHE STRING "Bundle version")
+# The Audio Unit's component version, the number hosts such as Logic compare: X.Y.Z as 0xXXYYZZ
+# (anything after the numbers, such as "-beta", is not part of it).
+string(REGEX MATCHALL "[0-9]+" OP_VERSION_PARTS "${OP_VERSION}")
+list(APPEND OP_VERSION_PARTS 0 0 0)
+list(GET OP_VERSION_PARTS 0 OP_VERSION_MAJOR)
+list(GET OP_VERSION_PARTS 1 OP_VERSION_MINOR)
+list(GET OP_VERSION_PARTS 2 OP_VERSION_PATCH)
+math(EXPR OP_AU_VERSION "(${OP_VERSION_MAJOR} << 16) | (${OP_VERSION_MINOR} << 8) | ${OP_VERSION_PATCH}")
 set(OP_MANUFACTURER "OpenPlugin" CACHE STRING "Audio Unit manufacturer display name")
 set(OP_AU_SUBTYPE "OPSh" CACHE STRING "Audio Unit subtype, four characters")
 set(OP_AU_MANUFACTURER "OPSh" CACHE STRING "Audio Unit manufacturer code, four characters")
@@ -197,6 +210,8 @@ if(OP_BUILD_VST3)
     COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:OpenPluginVST3>")
   add_executable(VST3Proof vst3/host.cpp
     "${OP_VST3_SDK}/public.sdk/source/common/memorystream.cpp"
+    "${OP_VST3_SDK}/public.sdk/source/vst/hosting/hostclasses.cpp"
+    "${OP_VST3_SDK}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp"
     "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp")
   target_include_directories(VST3Proof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(VST3Proof PRIVATE sdk "-framework CoreFoundation")

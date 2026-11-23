@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # Builds a plugin written with OpenPluginSDK into Linux plug-ins: a CLAP file,
-# an LV2 bundle and a standalone executable with its desktop entry. The macOS packager is scripts/build_plugin.sh; this script
+# an LV2 bundle, a VST3 bundle and a standalone executable with its desktop entry. The macOS packager is scripts/build_plugin.sh; this script
 # takes the same option names where they mean the same thing. See
 # docs/BUILD.md. Run with --help.
 set -euo pipefail
@@ -17,6 +17,9 @@ Every option can also be set by the environment variable in brackets.
 
   CLAP  OUT/NAME.clap        the shared library itself (one ELF file)
   LV2   OUT/STEM.lv2/        STEM.so, manifest.ttl and STEM.ttl
+  VST3  OUT/NAME.vst3/       Contents/ARCH-linux/NAME.so (the shell of
+                             native/vst3/linux with the Rust library inside),
+                             Contents/Resources/VST3-SDK-LICENSE.txt
   standalone OUT/NAME        the executable (one ELF file)
              OUT/ID.desktop  its freedesktop desktop entry
 
@@ -38,9 +41,14 @@ Plugin
   --features LIST        cargo features for the plugin crate           [OP_FEATURES]
 
 Formats and options
-  --formats LIST         comma list of clap,lv2,standalone, or "all"
-                         (default: clap,lv2). vst3, au and aax are not
-                         built on Linux yet                            [OP_FORMATS]
+  --formats LIST         comma list of clap,lv2,vst3,standalone, or
+                         "all" (clap,lv2,standalone; default: clap,lv2).
+                         au and aax are not built on Linux             [OP_FORMATS]
+  --vst3-sdk DIR         VST3 SDK checkout, for vst3                   [VST3_SDK]
+  --manufacturer NAME    the vendor, for the VST3 shell                [OP_MANUFACTURER]
+  --editor               the VST3 shell hosts the plugin's editor (an
+                         X11 view run by the host's loop)              [OP_EDITOR=1]
+  --tail                 the VST3 shell reports the plugin's tail      [OP_TAIL=1]
   --strip                strip the symbol table from the libraries
                          (the dynamic exports stay)                    [OP_STRIP=1]
   --allow-lib SONAME     a shared library the plug-in may need besides
@@ -67,6 +75,8 @@ NAME="${OP_NAME:-}"; VERSION="${OP_VERSION:-}"
 TTL_BIN="${OP_TTL_BIN:-}"; STANDALONE_BIN="${OP_STANDALONE_BIN:-}"; FEATURES="${OP_FEATURES:-}"
 FORMATS="${OP_FORMATS:-clap,lv2}"
 STRIP="${OP_STRIP:-0}"; ALLOW_LIBS="${OP_ALLOW_LIBS:-}"
+VST3_SDK="${VST3_SDK:-}"; MANUFACTURER="${OP_MANUFACTURER:-OpenPlugin}"
+EDITOR="${OP_EDITOR:-0}"; TAIL="${OP_TAIL:-0}"
 OUT="${OP_OUT:-$PWD/dist}"; WORK="${OP_WORK_DIR:-$PWD/build/openplugin-linux}"
 JOBS="${OP_JOBS:-$(nproc 2>/dev/null || echo 2)}"
 DRY=0; VERIFY=1
@@ -85,6 +95,10 @@ while [ $# -gt 0 ]; do
     --features) need "$@"; FEATURES="$2"; shift 2 ;;
     --formats) need "$@"; FORMATS="$2"; shift 2 ;;
     --strip) STRIP=1; shift ;;
+    --vst3-sdk) need "$@"; VST3_SDK="$2"; shift 2 ;;
+    --manufacturer) need "$@"; MANUFACTURER="$2"; shift 2 ;;
+    --editor) EDITOR=1; shift ;;
+    --tail) TAIL=1; shift ;;
     --allow-lib) need "$@"; ALLOW_LIBS="${ALLOW_LIBS:+$ALLOW_LIBS,}$2"; shift 2 ;;
     --out) need "$@"; OUT="$2"; shift 2 ;;
     --work-dir) need "$@"; WORK="$2"; shift 2 ;;
@@ -92,9 +106,9 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY=1; shift ;;
     --no-verify) VERIFY=0; shift ;;
     -h|--help) usage; exit 0 ;;
-    --bundle-id|--manufacturer|--au-subtype|--au-manufacturer|--archs|--deployment-target|--vst3-sdk|--au-sdk|--aax-sdk)
+    --bundle-id|--au-subtype|--au-manufacturer|--archs|--deployment-target|--au-sdk|--aax-sdk)
       die "$1 is a macOS option of scripts/build_plugin.sh; it has no meaning for the Linux formats" ;;
-    --editor|--no-editor|--tail|--no-tail|--aax-pages|--pkg)
+    --no-editor|--no-tail|--aax-pages|--pkg)
       die "$1 is a macOS option of scripts/build_plugin.sh; it has no meaning for the Linux formats" ;;
     *) die "unknown option $1 (see --help)" ;;
   esac
@@ -119,8 +133,8 @@ MANIFEST="$(abspath "$MANIFEST")"
 if [ "$FORMATS" = all ]; then FORMATS="clap,lv2,standalone"; fi
 for f in $(echo "$FORMATS" | tr ',' ' '); do
   case "$f" in
-    clap|lv2|standalone) ;;
-    vst3|au|aax) die "format $f is not built on Linux yet (Linux builds clap, lv2 and standalone); use scripts/build_plugin.sh on macOS for it" ;;
+    clap|lv2|vst3|standalone) ;;
+    au|aax) die "format $f is not built on Linux (Linux builds clap, lv2, vst3 and standalone); use scripts/build_plugin.sh on macOS for it" ;;
     *) die "unknown format $f" ;;
   esac
 done
@@ -138,8 +152,14 @@ VERSION="${VERSION%%-*}"   # numbers only, as on macOS
 if has_format lv2 && [ -z "$TTL_BIN" ]; then die "lv2 needs --ttl-bin, the plugin's bin that writes the description files"; fi
 if has_format standalone && [ -z "$STANDALONE_BIN" ]; then die "standalone needs --standalone-bin, the plugin's bin that runs standalone"; fi
 case "$STANDALONE_BIN" in */*) die "--standalone-bin must not contain '/'" ;; esac
+if has_format vst3; then
+  [ -n "$VST3_SDK" ] || die "vst3 needs --vst3-sdk (or VST3_SDK), a VST3 SDK checkout"
+  [ -f "$VST3_SDK/public.sdk/source/main/linuxmain.cpp" ] || die "--vst3-sdk $VST3_SDK is not a VST3 SDK checkout"
+  VST3_SDK="$(abspath "$VST3_SDK")"
+  if [ "$DRY" = 0 ]; then command -v cmake >/dev/null || die "vst3 needs cmake and a C++ compiler"; fi
+fi
 NEED_LIB=0
-if has_format clap || has_format lv2; then NEED_LIB=1; fi
+if has_format clap || has_format lv2 || has_format vst3; then NEED_LIB=1; fi
 for t in strings nm readelf ldd file; do
   if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then command -v "$t" >/dev/null || die "$t is needed for the checks (binutils, glibc); or give --no-verify"; fi
 done
@@ -196,6 +216,8 @@ if has_format standalone; then
   cargo_build --bin "$STANDALONE_BIN"
 fi
 if [ "$NEED_LIB" = 1 ] && [ "$DRY" = 0 ] && [ ! -f "$SO" ]; then die "$SO was not built: is the crate a cdylib, and is --lib-name right?"; fi
+STATIC="$REL/lib$LIB_NAME.a"
+if has_format vst3 && [ "$DRY" = 0 ] && [ ! -f "$STATIC" ]; then die "$STATIC was not built: vst3 needs \"staticlib\" in the crate's crate-type"; fi
 
 # ---------- plug-ins ----------
 LIBS=()     # every shared library shipped, for the checks
@@ -221,6 +243,24 @@ if has_format lv2; then
   place "$B/$STEM.so"
   run "$REL/$TTL_BIN" "$B" "$STEM"
   LIBS+=("$B/$STEM.so"); KINDS+=(lv2)
+fi
+
+if has_format vst3; then
+  note "VST3"
+  NATIVE="$WORK/native"
+  onoff() { if [ "$1" = 1 ]; then echo ON; else echo OFF; fi; }
+  run cmake -S "$SDK_ROOT/native" -B "$NATIVE" -DCMAKE_BUILD_TYPE=Release \
+    "-DOP_RUST_LIB=$STATIC" "-DOP_VST3_SDK=$VST3_SDK" "-DOP_PRODUCT=$NAME" "-DOP_VERSION=$VERSION" \
+    "-DOP_MANUFACTURER=$MANUFACTURER" "-DOP_EDITOR=$(onoff "$EDITOR")" "-DOP_TAIL=$(onoff "$TAIL")" \
+    "-DOP_TRIM_PATHS=$WORK;$WS_PARENT;$SDK_ROOT;$VST3_SDK;$HOME"
+  run cmake --build "$NATIVE" --target OpenPluginVST3 -j "$JOBS"
+  B="$OUT/$NAME.vst3"
+  run rm -rf "$B"
+  run cp -R "$NATIVE/$NAME.vst3" "$B"
+  case "$(uname -m)" in aarch64|arm64) VST3_ARCH=aarch64-linux ;; *) VST3_ARCH=x86_64-linux ;; esac
+  M="$B/Contents/$VST3_ARCH/$NAME.so"
+  if [ "$STRIP" = 1 ]; then run strip --strip-all "$M"; fi
+  LIBS+=("$M"); KINDS+=(vst3)
 fi
 
 # A Desktop Entry string: backslash, newline, tab and carriage return escaped.
@@ -268,7 +308,7 @@ if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
       if [ ! -x "$f" ]; then echo "not executable: $f"; bad=1; fi
     elif ! file -b "$f" | grep -q 'ELF .* shared object'; then echo "not an ELF shared object: $f"; bad=1; fi
     # No build path in a shipped binary.
-    for p in "$WORK" "$WS_PARENT" "$MANIFEST_DIR" "$SDK_ROOT" "$HOME"; do
+    for p in "$WORK" "$WS_PARENT" "$MANIFEST_DIR" "$SDK_ROOT" "$HOME" ${VST3_SDK:+"$VST3_SDK"}; do
       if strings -a "$f" | grep -qF "$p"; then echo "path leak: $f contains $p"; bad=1; fi
     done
     # Linked libraries: only the expected system ones, and all of them found.
@@ -287,11 +327,19 @@ if [ "$VERIFY" = 1 ] && [ "$DRY" = 0 ]; then
       done
     done < <(readelf -d "$f" | sed -n 's/.*(\(RPATH\|RUNPATH\)).*\[\(.*\)\].*/\2/p')
     # The format's entry point is exported (an executable has none).
-    case "$kind" in clap) sym=clap_entry ;; lv2) sym=lv2_descriptor ;; standalone) continue ;; esac
-    if nm -D --defined-only "$f" | awk '{print $NF}' | grep -qx "$sym"; then
-      echo "exports $sym"
-    else
-      echo "missing export: $f does not define $sym"; bad=1
+    case "$kind" in clap) syms=clap_entry ;; lv2) syms=lv2_descriptor ;; vst3) syms="GetPluginFactory ModuleEntry ModuleExit" ;; standalone) continue ;; esac
+    for sym in $syms; do
+      if nm -D --defined-only "$f" | awk '{print $NF}' | grep -qx "$sym"; then
+        echo "exports $sym"
+      else
+        echo "missing export: $f does not define $sym"; bad=1
+      fi
+    done
+    # The VST3 module keeps the Rust library to itself (native/vst3/linux/exports.map):
+    # two plug-ins of this SDK in one host must not bind to each other's op_shell_*.
+    if [ "$kind" = vst3 ]; then
+      extra="$(nm -D --defined-only "$f" | awk '{print $NF}' | grep -vxE 'GetPluginFactory|ModuleEntry|ModuleExit' | grep -vE '^(_init|_fini)$' || true)"
+      if [ -n "$extra" ]; then echo "unexpected exports in $f: $(echo "$extra" | head -5 | tr '\n' ' ')"; bad=1; else echo "exports nothing else"; fi
     fi
   done
   if has_format lv2; then

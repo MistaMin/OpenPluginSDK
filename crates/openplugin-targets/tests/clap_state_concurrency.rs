@@ -560,7 +560,8 @@ fn a_plugin_with_its_own_chunk_round_trips() {
     let first = activated(Stateful { a: 7, b: 7, level: 0.0 });
     first.plane().unwrap().store(0, 0.75);
     let saved = save(first.as_plugin()).expect("save");
-    assert_eq!(saved, encode_session(&STATEFUL_INFO, &[0.75], &chunk(7, 0.0)), "the parameters, then the plugin's own chunk");
+    // The value is in the plane only (no block ran): the save pulls it into the plugin first.
+    assert_eq!(saved, encode_session(&STATEFUL_INFO, &[0.75], &chunk(7, 0.75)), "the parameters, then the plugin's own chunk");
 
     let second = activated(Stateful { a: 0, b: 0, level: 0.0 });
     assert!(load(second.as_plugin(), &saved));
