@@ -25,8 +25,9 @@
 
 #if OP_HAS_EDITOR
 // op_editor.h is included by editor_pixels.h, so these rename only the shell's calls.
-#include "op_editor_x11.h"
+// editor_pixels.h first: it turns on the size range and menu calls of op_editor.h.
 #include "../win/editor_pixels.h"
+#include "op_editor_x11.h"
 #define op_editor_size ::openplugin_vst_win::editor_size
 #define op_editor_size_range ::openplugin_vst_win::editor_size_range
 #define op_editor_get_size ::openplugin_vst_win::editor_get_size

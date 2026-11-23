@@ -10,10 +10,11 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#else
-#include "op_editor_x11.h"
 #endif
 #include "editor_pixels.h"
+#ifndef _WIN32
+#include "op_editor_x11.h"
+#endif
 #include <cmath>
 #include <cstddef>
 #include <initializer_list>
