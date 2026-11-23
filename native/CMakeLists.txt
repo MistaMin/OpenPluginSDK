@@ -210,6 +210,8 @@ if(OP_BUILD_VST3)
     COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:OpenPluginVST3>")
   add_executable(VST3Proof vst3/host.cpp
     "${OP_VST3_SDK}/public.sdk/source/common/memorystream.cpp"
+    "${OP_VST3_SDK}/public.sdk/source/vst/hosting/hostclasses.cpp"
+    "${OP_VST3_SDK}/public.sdk/source/vst/hosting/pluginterfacesupport.cpp"
     "${OP_VST3_SDK}/public.sdk/source/vst/hosting/parameterchanges.cpp")
   target_include_directories(VST3Proof PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
   target_link_libraries(VST3Proof PRIVATE sdk "-framework CoreFoundation")

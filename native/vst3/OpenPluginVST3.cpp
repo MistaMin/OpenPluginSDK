@@ -34,6 +34,7 @@
 #include "pluginterfaces/base/ibstream.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cctype>
@@ -536,6 +537,18 @@ constexpr uint32 kChangesPollMs = 30;
 // IInfoListener::setChannelContextInfos. Attributes: "name" (TChar string,
 // absent for none), "rgba" (int, 0xRRGGBBAA), "flags" (int, OP_TRACK_*).
 constexpr const char* kTrackMessage = "openplugin.track";
+// A value the controller was given (by the host or the editor), sent to the processor.
+// The processor takes it only while no audio runs: then nothing else would bring it
+// there, and a project saved now must hold it (a host that bypasses an effect stops
+// calling process, but still edits its parameters). While audio runs, the host's
+// parameter changes bring every value, sample-accurate.
+constexpr const char* kEditMessage = "openplugin.edit";
+// How long without a block before the processor counts as idle. Longer than any
+// host block (a 32768-sample block at 96 kHz is 341 ms).
+constexpr int64_t kIdleMs = 500;
+inline int64_t steady_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 // What the host last said about the track, as op_shell_set_track_info takes it.
 struct TrackState {
@@ -749,9 +762,34 @@ public:
             applyTrack();
             return kResultOk;
         }
+        if (message && message->getMessageID() && std::strcmp(message->getMessageID(), kEditMessage) == 0) {
+            IAttributeList* attributes = message->getAttributes();
+            int64 id = 0;
+            double value = 0.0;
+            if (!attributes || attributes->getInt("id", id) != kResultOk || attributes->getFloat("value", value) != kResultOk || !std::isfinite(value))
+                return kInvalidArgument;
+            if (!idle()) return kResultOk;
+            value = std::clamp(value, 0.0, 1.0);
+            if (static_cast<ParamID>(id) == kBypassId) {
+                bypass_.store(value >= 0.5);
+            } else if (const int32 index = ids_.index(static_cast<ParamID>(id)); index >= 0) {
+                values_[index].store(value);
+            } else {
+                return kResultOk;
+            }
+            // The next block gives the engine every value again.
+            generation_.fetch_add(1, std::memory_order_release);
+            return kResultOk;
+        }
         return AudioEffect::notify(message);
     }
+    // No audio runs: processing is off, or no block came for kIdleMs.
+    bool idle() const {
+        return !processing_.load(std::memory_order_acquire) || steady_ms() - lastBlockMs_.load(std::memory_order_relaxed) > kIdleMs;
+    }
     tresult PLUGIN_API setProcessing(TBool active) SMTG_OVERRIDE {
+        if (active) lastBlockMs_.store(steady_ms(), std::memory_order_relaxed);
+        processing_.store(active != 0, std::memory_order_release);
         if (active && engine_) {
             op_shell_reset(engine_);
             clearBypassLine();
@@ -837,6 +875,7 @@ public:
     // A block longer than the prepared size, or with more than OP_MAX_EVENTS
     // events, is passed to the engine in consecutive chunks.
     tresult PLUGIN_API process(ProcessData& data) SMTG_OVERRIDE {
+        lastBlockMs_.store(steady_ms(), std::memory_order_relaxed);
         const int32 numSamples = std::max<int32>(data.numSamples, 0);
         collect(data, numSamples);
         if (data.numSamples == 0) {
@@ -1510,6 +1549,9 @@ private:
     std::atomic<bool> bypass_{false};
     // Moves when the main thread writes values_ or the engine's values.
     std::atomic<uint32_t> generation_{1};
+    // For idle(): set by setProcessing and by every block (audio thread).
+    std::atomic<bool> processing_{false};
+    std::atomic<int64_t> lastBlockMs_{0};
 
     // Layouts as VST3 arrangements, the buses they imply, and the selection.
     
@@ -1753,11 +1795,14 @@ public:
             loaded[i] = op_shell_param(i, &desc) ? desc.default_normalized : 0.0;
         }
         if (!read_state_head(reader, ids_, loaded, false)) return kResultFalse;
+        // The processor's own state: nothing to send it back (sendEdit).
+        loading_ = true;
         for (uint32_t i = 0; i < count_; ++i) setParamNormalized(ids_.id(i), loaded[i]);
         // The plugin-state trailer after the flag belongs to the processor.
         int32 bypass = 0;
         if (!reader.readInt32(bypass)) bypass = 0;
         setParamNormalized(kBypassId, bypass != 0 ? 1.0 : 0.0);
+        loading_ = false;
         return kResultOk;
     }
     // The processor's messages: what changed (ABI 6) and, with an editor, the engine.
@@ -1800,16 +1845,20 @@ public:
         }
         if (restart && componentHandler) componentHandler->restartComponent(restart);
     }
-#if OP_HAS_EDITOR
-    IPlugView* PLUGIN_API createView(FIDString name) SMTG_OVERRIDE;
+    // A value from the host: the editor shows it, and the processor hears it (kEditMessage).
     tresult PLUGIN_API setParamNormalized(ParamID tag, ParamValue value) SMTG_OVERRIDE {
         const tresult result = EditController::setParamNormalized(tag, value);
+#if OP_HAS_EDITOR
         if (const int32 index = ids_.index(tag); editor_ && result == kResultOk && index >= 0) {
             const auto at = static_cast<uint32_t>(index);
             op_editor_set_plain(editor_, at, static_cast<float>(op_shell_to_plain(at, value)));
         }
+#endif
+        if (result == kResultOk) sendEdit(tag, value);
         return result;
     }
+#if OP_HAS_EDITOR
+    IPlugView* PLUGIN_API createView(FIDString name) SMTG_OVERRIDE;
     // Called by the view.
     void* openEditor(void* parent, void* frameContext, OpEditorRequestResize request, OpEditorContextMenu menu) {
         closeEditor();
@@ -1873,6 +1922,7 @@ private:
         const ParamValue normalized = op_shell_to_normalized(index, plain);
         self->EditController::setParamNormalized(self->ids_.id(index), normalized);
         self->EditController::performEdit(self->ids_.id(index), normalized);
+        self->sendEdit(self->ids_.id(index), normalized);
     }
     static void hostEnd(void* context, uint32_t index) {
         auto* self = static_cast<Controller*>(context);
@@ -1885,6 +1935,17 @@ private:
 #endif
 
 private:
+    // kEditMessage to the processor. Not while a state is loaded: the processor has it.
+    void sendEdit(ParamID id, ParamValue value) {
+        if (loading_ || !peerConnection) return;
+        if (IPtr<IMessage> message = owned(allocateMessage())) {
+            message->setMessageID(kEditMessage);
+            IAttributeList* attributes = message->getAttributes();
+            attributes->setInt("id", static_cast<int64>(id));
+            attributes->setFloat("value", value);
+            sendMessage(message);
+        }
+    }
     // Tell the processor (by message) and the open editor what the host said.
     void sendTrack() {
         if (IPtr<IMessage> message = owned(allocateMessage())) {
@@ -1910,6 +1971,8 @@ private:
     uint32_t count_ = 0;
     ParamIds ids_;
     bool midiIn_ = false;
+    // setComponentState is setting the values it read (sendEdit stays quiet).
+    bool loading_ = false;
     ShellUnits units_;
     UnitID selectedUnit_ = kRootUnitId;
     ShellExpressions expressions_;
