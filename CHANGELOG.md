@@ -18,6 +18,7 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
 
 - VST3: edits made while no audio runs reach the processor's state. A host that bypasses an effect stops calling `process` but still edits its parameters through the controller, and a project saved then lost those edits. The controller now sends each value to the processor as a message, which the processor takes while processing is off or no block came for 500 ms; while blocks run, the host's parameter changes stay the only route. The VST3 proof covers it.
 - The DRI canvas draws a window smaller than its design at the window's size. It clamped the scale to 1.0, so on a 1x screen such a window got a full-size frame that the view shrank without filtering, dropping rows and columns of pixels.
+- X11 view: after a frame it stays idle as long as the frame took, and draws the damage left pending at the next pump. A JUCE host re-posts its timer message every 300 ms while one is still running, so frames slower than that (a full repaint at every tick while the host automates every parameter) filled the main thread for good: pluginval's Editor Automation never got its editor-close message through and timed out after 30 s. Frames of a few milliseconds are paced as before.
 
 
 ### The 1.0 API freeze
