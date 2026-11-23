@@ -400,6 +400,10 @@ pub struct EditorView {
     /// The editor's size, which mouse positions are mapped to.
     size: (u32, u32),
     last: Instant,
+    /// No frame before this: after each frame the view stays idle as long as the frame took, so a
+    /// slow frame never fills the host's main thread (JUCE re-posts a timer message every 300 ms
+    /// while one is still running, and the queue would never drain).
+    next_frame: Instant,
     conn: RustConnection,
     root: Window,
     visual: u32,
@@ -555,6 +559,7 @@ impl EditorView {
             poll,
             size,
             last: Instant::now(),
+            next_frame: Instant::now(),
             conn,
             root,
             visual,
@@ -1113,6 +1118,11 @@ impl EditorView {
         if !self.full && self.rects.is_empty() {
             return;
         }
+        let started = Instant::now();
+        // The damage stays pending: the next pump after the pause draws it.
+        if started < self.next_frame {
+            return;
+        }
         let mut rects = std::mem::take(&mut self.rects);
         if self.full {
             rects.clear();
@@ -1159,6 +1169,8 @@ impl EditorView {
             }
             true
         });
+        let now = Instant::now();
+        self.next_frame = now + (now - started);
         if !sent {
             self.dead = true;
         }
