@@ -360,7 +360,7 @@ if (-not $NoVerify -and -not $DryRun) {
     # C++ runtime (vcruntime*, msvcp*, concrt*) is linked statically and never allowed,
     # not even with -AllowLib: check_imports.ps1 fails on it.
     $system = @('kernel32.dll', 'ntdll.dll', 'user32.dll', 'gdi32.dll', 'shell32.dll', 'comdlg32.dll', 'comctl32.dll', 'advapi32.dll',
-        'ole32.dll', 'oleaut32.dll', 'ws2_32.dll', 'userenv.dll', 'bcrypt.dll', 'bcryptprimitives.dll', 'dbghelp.dll', 'imm32.dll', 'version.dll',
+        'ole32.dll', 'oleaut32.dll', 'uiautomationcore.dll', 'ws2_32.dll', 'userenv.dll', 'bcrypt.dll', 'bcryptprimitives.dll', 'dbghelp.dll', 'imm32.dll', 'version.dll',
         'ucrtbase.dll') + @($AllowLib | ForEach-Object { $_.ToLowerInvariant() })
     $exports = @{
         clap = @('clap_entry')
