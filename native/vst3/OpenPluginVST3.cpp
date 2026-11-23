@@ -1000,11 +1000,11 @@ public:
             }
             const uint32_t frames = static_cast<uint32_t>(end - start);
             if (hostIn)
-                for (uint32_t i = 0; i < inCh_; ++i) inPtr_[i] = hostIn->channelBuffers32[inMap_[i]] + start;
+                for (uint32_t i = 0; i < inCh_; ++i) inPtr_[i] = offsetChannel(hostIn->channelBuffers32[inMap_[i]], start);
             if (hostOut)
-                for (uint32_t i = 0; i < outCh_; ++i) outPtr_[i] = hostOut->channelBuffers32[outMap_[i]] + start;
+                for (uint32_t i = 0; i < outCh_; ++i) outPtr_[i] = offsetChannel(hostOut->channelBuffers32[outMap_[i]], start);
             if (hostSide)
-                for (uint32_t i = 0; i < sideCh_; ++i) sidePtr_[i] = hostSide->channelBuffers32[sideMap_[i]] + start;
+                for (uint32_t i = 0; i < sideCh_; ++i) sidePtr_[i] = offsetChannel(hostSide->channelBuffers32[sideMap_[i]], start);
             OpProcess args{};
             args.struct_size = sizeof(OpProcess);
             args.frames = frames;
@@ -1516,6 +1516,10 @@ private:
     // line always runs, so switching never starts from stale audio. Host
     // channel h of the output is bypassed to host channel h of the input;
     // outputs without an input are silent when bypassed.
+    // A channel pointer moved to `offset` within the block; null stays null, so a channel
+    // the host leaves out (an unconnected sidechain, for example) is never read or written.
+    template <typename T>
+    static T* offsetChannel(T* channel, int32 offset) { return channel ? channel + offset : nullptr; }
     void captureDry(const AudioBusBuffers* input, int32 offset, uint32_t frames) {
         for (uint32_t h = 0; h < outCh_; ++h) {
             float* dry = dry_[h].data();
@@ -1523,16 +1527,18 @@ private:
                 std::memset(dry, 0, frames * sizeof(float));
                 continue;
             }
-            const float* in = input->channelBuffers32[h] + offset;
+            // A host may pass null for a channel it does not use: it reads as silence.
+            const float* in = offsetChannel(input->channelBuffers32[h], offset);
             if (delay_ == 0) {
-                std::memcpy(dry, in, frames * sizeof(float));
+                if (in) std::memcpy(dry, in, frames * sizeof(float));
+                else std::memset(dry, 0, frames * sizeof(float));
                 continue;
             }
             float* line = line_[h].data();
             size_t pos = linePos_;
             for (uint32_t i = 0; i < frames; ++i) {
                 dry[i] = line[pos];
-                line[pos] = in[i];
+                line[pos] = in ? in[i] : 0.0f;
                 if (++pos == delay_) pos = 0;
             }
         }
@@ -1543,7 +1549,8 @@ private:
     void applyBypass(AudioBusBuffers& output, int32 offset, uint32_t frames, float target) {
         if (mix_ == target) {
             if (target == 0.0f) return;
-            for (uint32_t h = 0; h < outCh_; ++h) std::memcpy(output.channelBuffers32[h] + offset, dry_[h].data(), frames * sizeof(float));
+            for (uint32_t h = 0; h < outCh_; ++h)
+                if (float* out = offsetChannel(output.channelBuffers32[h], offset)) std::memcpy(out, dry_[h].data(), frames * sizeof(float));
             return;
         }
         float mix = mix_;
@@ -1551,6 +1558,7 @@ private:
             if (mix < target) mix = std::min(target, mix + mixStep_);
             else if (mix > target) mix = std::max(target, mix - mixStep_);
             for (uint32_t h = 0; h < outCh_; ++h) {
+                if (!output.channelBuffers32[h]) continue;
                 float& sample = output.channelBuffers32[h][offset + i];
                 sample = mix >= 1.0f ? dry_[h][i] : sample + (dry_[h][i] - sample) * mix;
             }

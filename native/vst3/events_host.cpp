@@ -170,6 +170,10 @@ struct Result {
     std::vector<Event> events;
 };
 
+// Set: the aux bus is sent active with its channel pointers null, as a host may for a
+// sidechain it has not connected.
+static bool g_nullSide = false;
+
 // One block. `in`, `out` and `side` are host-order channel buffers; an empty
 // `side` with `auxBus` set sends the aux bus inactive (0 channels).
 static Result process(Plug& p, int frames, const Audio* in, const Audio* side, int outChannels, bool auxBus, ParameterChanges* params = nullptr,
@@ -182,7 +186,7 @@ static Result process(Plug& p, int frames, const Audio* in, const Audio* side, i
     Audio sideCopy = side ? *side : Audio();
     std::vector<float*> inPtrs, sidePtrs;
     for (auto& channel : inCopy) inPtrs.push_back(channel.data());
-    for (auto& channel : sideCopy) sidePtrs.push_back(channel.data());
+    for (auto& channel : sideCopy) sidePtrs.push_back(g_nullSide ? nullptr : channel.data());
     AudioBusBuffers inputs[2]{};
     int32 numInputs = 0;
     if (in) {
@@ -416,6 +420,25 @@ int main(int argc, char** argv) {
             for (int s = 0; s < kBlock; ++s) CHECK(near(r.out[0][s], 0.1f));
             CHECK(p.probe().sidechain_channels == 0);
             std::printf("VST3 events: the aux bus reaches the plugin as the sidechain (0.1 + 0.25 = 0.35); inactive, it arrives as none\n");
+
+            // Null channel pointers on an active aux bus, in a block the shell splits: more
+            // events at offset 0 than one call takes ends the first piece at sample 1, so the
+            // rest starts one sample in. A null channel must stay null there (read as silence),
+            // not become a pointer one sample past null.
+            p.start({true, true}, true);
+            EventList many(OP_MAX_EVENTS + 64);
+            for (int32 k = 0; k < static_cast<int32>(OP_MAX_EVENTS); ++k) {
+                Event on = noteOn(0, static_cast<int16>(k % 128), 0.5f);
+                on.noteOn.channel = static_cast<int16>((k / 128) % 16);
+                CHECK(many.addEvent(on) == kResultOk);
+            }
+            ParameterChanges cc;
+            for (int16 controller = 1; controller <= 16; ++controller) point(cc, mapped(mapping, 0, controller), 0, 0.5);
+            g_nullSide = true;
+            r = process(p, kBlock, &in, &side, 2, true, &cc, &many);
+            g_nullSide = false;
+            for (int s = 1; s < kBlock; ++s) CHECK(std::isfinite(r.out[0][s]) && std::isfinite(r.out[1][s]));
+            std::printf("VST3 events: an active aux bus with null channel pointers, in a block split one sample in, reads as silence\n");
         }
 
         // Channel order. The stub passes channel i only if it holds the tag of the

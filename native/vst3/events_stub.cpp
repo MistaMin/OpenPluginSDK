@@ -167,6 +167,9 @@ void op_shell_destroy(void* instance) { delete static_cast<Stub*>(instance); }
 void op_shell_reset(void* instance) {
     if (instance) static_cast<Stub*>(instance)->note = -1;
 }
+// ABI 9: this stub reads no other plug-in's state.
+uint32_t op_shell_foreign_kinds(void) { return 0; }
+uint32_t op_shell_load_foreign_state(void*, uint32_t, const uint8_t*, uint32_t) { return 0; }
 uint32_t op_shell_latency(void*) { return 0; }
 uint32_t op_shell_set_plain(void* instance, uint32_t index, float plain) {
     if (!instance || index != 0) return 0;
