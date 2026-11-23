@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: MIT
-# Builds a plugin written with OpenPluginSDK into Windows plug-ins: a CLAP file, a
-# VST3 bundle and an AAX bundle, in one go. The macOS packager is
+# Builds a plugin written with OpenPluginSDK into Windows plug-ins: a CLAP file, an
+# LV2 bundle, a VST3 bundle and an AAX bundle, in one go, for the processor of the
+# machine it runs on (x64, or ARM64 on Windows on Arm). The macOS packager is
 # scripts/build_plugin.sh and the Linux one scripts/build_plugin_linux.sh; this
 # script takes the same options where they mean the same thing, spelled the
 # PowerShell way (--manifest-path is -ManifestPath). See docs/BUILD.md.
@@ -12,8 +13,12 @@
 # What it makes, in -Out (every option can also be set by the variable in brackets):
 #
 #   CLAP  <Name>.clap                                        the DLL itself
-#   VST3  <Name>.vst3\Contents\x86_64-win\<Name>.vst3        needs -Vst3Sdk
-#   AAX   <Name>.aaxplugin\Contents\x64\<Name>.aaxplugin     needs -AaxSdk; unsigned
+#   LV2   <Stem>.lv2\<Stem>.dll, manifest.ttl, <Stem>.ttl    needs -TtlBin; Stem is
+#         Name reduced to letters, digits and '_', as on Linux
+#   VST3  <Name>.vst3\Contents\<arch>-win\<Name>.vst3        needs -Vst3Sdk; arch is
+#         x86_64, or arm64 on an ARM64 machine
+#   AAX   <Name>.aaxplugin\Contents\x64\<Name>.aaxplugin     needs -AaxSdk; unsigned;
+#         x64 only
 #
 # Plugin
 #   -ManifestPath FILE  Cargo.toml of the plugin crate                   [OP_MANIFEST]
@@ -28,11 +33,13 @@
 #   -BundleId ID        bundle identifier prefix; no Windows format reads
 #                       it, it is passed on for parity with macOS        [OP_BUNDLE_ID]
 #   -Features LIST      cargo features for the plugin crate              [OP_FEATURES]
+#   -TtlBin NAME        the plugin's cargo bin that writes the LV2 files;
+#                       called as `NAME <folder> <stem>`                 [OP_TTL_BIN]
 #
 # Formats and options
-#   -Formats LIST       comma list of clap,vst3,aax, or "all". Default:
-#                       clap, vst3 when a VST3 SDK is given, aax when an
-#                       AAX SDK is given                                 [OP_FORMATS]
+#   -Formats LIST       comma list of clap,lv2,vst3,aax, or "all". Default:
+#                       clap, lv2 when -TtlBin is given, vst3 when a VST3
+#                       SDK is given, aax when an AAX SDK is given       [OP_FORMATS]
 #   -Editor             the shells host the plugin's editor (OP_EDITOR)  [OP_EDITOR=1]
 #   -Tail               the shells report the plugin's tail (OP_TAIL)    [OP_TAIL=1]
 #   -AaxPages           write the AAX page table into the bundle         [OP_AAX_PAGES=1]
@@ -76,6 +83,7 @@ param(
     [string]$Manufacturer = $env:OP_MANUFACTURER,
     [string]$BundleId = $env:OP_BUNDLE_ID,
     [string]$Features = $env:OP_FEATURES,
+    [string]$TtlBin = $env:OP_TTL_BIN,
     [string]$Formats = $env:OP_FORMATS,
     [switch]$Editor,
     [switch]$Tail,
@@ -128,19 +136,26 @@ if (-not $Jobs) { $Jobs = "$([Environment]::ProcessorCount)" }
 if (-not $Manufacturer) { $Manufacturer = 'OpenPlugin' }
 if (-not $BundleId) { $BundleId = 'com.example.openplugin' }
 
+# The machine's processor decides the build: each is built on its own machine.
+$arm = $env:PROCESSOR_ARCHITECTURE -eq 'ARM64'
+$archName = if ($arm) { 'ARM64' } else { 'x64' }
+
 if (-not $Formats) {
     $list = @('clap')
+    if ($TtlBin) { $list += 'lv2' }
     if ($Vst3Sdk) { $list += 'vst3' }
     if ($AaxSdk) { $list += 'aax' }
     $Formats = $list -join ','
 }
-if ($Formats -eq 'all') { $Formats = 'clap,vst3,aax' }
+if ($Formats -eq 'all') { $Formats = 'clap,lv2,vst3,aax' }
 $formatList = @($Formats -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($f in $formatList) {
-    if ($f -in 'lv2', 'au', 'standalone') { Die "format $f is not built on Windows (Windows builds clap, vst3 and aax)" }
-    if ($f -notin 'clap', 'vst3', 'aax') { Die "unknown format $f" }
+    if ($f -in 'au', 'standalone') { Die "format $f is not built on Windows (Windows builds clap, lv2, vst3 and aax)" }
+    if ($f -notin 'clap', 'lv2', 'vst3', 'aax') { Die "unknown format $f" }
 }
 function Has([string]$format) { return $formatList -contains $format }
+if ((Has 'lv2') -and -not $TtlBin) { Die 'lv2 needs -TtlBin (or OP_TTL_BIN), the plugin''s bin that writes the description files' }
+if ((Has 'aax') -and $arm) { Die 'aax is built for x64 only' }
 if ((Has 'vst3') -and -not $Vst3Sdk) { Die 'vst3 needs -Vst3Sdk (or VST3_SDK), a VST3 SDK checkout' }
 if ((Has 'aax') -and -not $AaxSdk) { Die 'aax needs -AaxSdk (or AAX_SDK), an AAX SDK checkout' }
 if ((Has 'vst3') -and -not (Test-Path -LiteralPath (Join-Path $Vst3Sdk 'public.sdk\source\main\dllmain.cpp'))) { Die "-Vst3Sdk $Vst3Sdk is not a VST3 SDK checkout" }
@@ -164,7 +179,7 @@ $Package = $crate.name
 $libTarget = $crate.targets | Where-Object { ($_.kind -contains 'cdylib') -or ($_.kind -contains 'staticlib') } | Select-Object -First 1
 if (-not $libTarget) { Die "$Package has no cdylib or staticlib library" }
 if (-not $LibName) { $LibName = $libTarget.name -replace '-', '_' }
-if ((Has 'clap') -and -not ($libTarget.crate_types -contains 'cdylib')) { Die "clap needs a cdylib: add `"cdylib`" to crate-type in $ManifestPath" }
+if (((Has 'clap') -or (Has 'lv2')) -and -not ($libTarget.crate_types -contains 'cdylib')) { Die "clap and lv2 need a cdylib: add `"cdylib`" to crate-type in $ManifestPath" }
 if ($needShell -and -not ($libTarget.crate_types -contains 'staticlib')) { Die "vst3 and aax need a staticlib: add `"staticlib`" to crate-type in $ManifestPath" }
 if (-not $Name) { $Name = $Package }
 if ($Name -match '[\\/:*?"<>|]') { Die '-Name must be a file name' }
@@ -179,9 +194,10 @@ $manifestDir = Split-Path -Parent $ManifestPath
 function Import-VsEnvironment {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (-not (Test-Path -LiteralPath $vswhere)) { Die 'vswhere.exe not found: install Visual Studio or its Build Tools with the C++ workload' }
-    $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath | Select-Object -First 1
-    if (-not $vs) { Die 'no Visual Studio installation with the C++ tools was found' }
-    $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+    $component = if ($arm) { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
+    $vs = & $vswhere -latest -products * -requires $component -property installationPath | Select-Object -First 1
+    if (-not $vs) { Die "no Visual Studio installation with the C++ tools for $archName was found" }
+    $vcvars = Join-Path $vs ('VC\Auxiliary\Build\' + $(if ($arm) { 'vcvarsarm64.bat' } else { 'vcvars64.bat' }))
     if (-not (Test-Path -LiteralPath $vcvars)) { Die "$vcvars not found" }
     foreach ($line in (cmd /d /c "`"$vcvars`" >nul 2>&1 && set")) {
         $at = $line.IndexOf('=')
@@ -219,7 +235,7 @@ if ($Vst3Sdk) { $private += $Vst3Sdk }
 if ($AaxSdk) { $private += $AaxSdk }
 $private = @($private | Sort-Object -Unique)
 
-Note "plugin $Name ($Package) $Version by $Manufacturer, formats: $($formatList -join ','), x64 Windows"
+Note "plugin $Name ($Package) $Version by $Manufacturer, formats: $($formatList -join ','), $archName Windows"
 if ($DryRun) { Note 'dry run: nothing below is executed' }
 if (-not $DryRun) { New-Item -ItemType Directory -Force -Path $WorkDir, $Out | Out-Null }
 
@@ -247,20 +263,29 @@ function New-VersionResource([string]$description, [string]$fileName, [string]$s
 
 # ---------- Rust ----------
 Note 'Rust library'
+# The LV2 description writer first: building a bin builds the library again, which
+# would replace the DLL below with one that has no version resource.
+if (Has 'lv2') {
+    $ttlArgs = @('build', '--release', '--manifest-path', $ManifestPath, '-p', $Package, '--bin', $TtlBin)
+    if ($Features) { $ttlArgs += @('--features', $Features) }
+    Run 'cargo' $ttlArgs
+}
 $cargoArgs = @('rustc', '--release', '--manifest-path', $ManifestPath, '-p', $Package, '--lib')
 if ($Features) { $cargoArgs += @('--features', $Features) }
 # The linker arguments reach the DLL only (a static library is not linked): its
 # version resource, and the PDB named without its folder.
 $cargoArgs += @('--', '-C', 'link-arg=/PDBALTPATH:%_PDB%')
-if (Has 'clap') {
-    $clapRes = New-VersionResource "$Name (CLAP)" "$Name.clap" 'clap'
+if ((Has 'clap') -or (Has 'lv2')) {
+    # One DLL is both the CLAP file and the LV2 binary.
+    $kinds = @(@('clap', 'lv2') | Where-Object { Has $_ } | ForEach-Object { $_.ToUpperInvariant() }) -join ', '
+    $clapRes = New-VersionResource "$Name ($kinds)" "$Name.clap" 'clap'
     $cargoArgs += @('-C', "link-arg=$clapRes")
 }
 Run 'cargo' $cargoArgs
 $dll = Join-Path $release "$LibName.dll"
 $lib = Join-Path $release "$LibName.lib"
 if (-not $DryRun) {
-    if ((Has 'clap') -and -not (Test-Path -LiteralPath $dll)) { Die "$dll was not built: is -LibName right?" }
+    if (((Has 'clap') -or (Has 'lv2')) -and -not (Test-Path -LiteralPath $dll)) { Die "$dll was not built: is -LibName right?" }
     if ($needShell -and -not (Test-Path -LiteralPath $lib)) { Die "$lib was not built: is -LibName right?" }
 }
 
@@ -281,10 +306,25 @@ if (Has 'clap') {
     Place $dll $bundle
     $shipped += [pscustomobject]@{ Kind = 'clap'; Path = $bundle }
 }
+if (Has 'lv2') {
+    Note 'LV2'
+    $stem = $Name -replace '[^A-Za-z0-9_]', ''
+    if (-not $stem) { $stem = 'plugin' }
+    $bundle = Join-Path $Out "$stem.lv2"
+    if ((Split-Path -Parent $bundle) -ne $Out) { Die "refusing to replace ${bundle}: it is not directly inside $Out" }
+    Write-Output "+ make $bundle with $dll as $stem.dll"
+    if (-not $DryRun) {
+        if (Test-Path -LiteralPath $bundle) { Remove-Item -LiteralPath $bundle -Recurse -Force }
+        New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+        Copy-Item -LiteralPath $dll -Destination (Join-Path $bundle "$stem.dll")
+    }
+    Run (Join-Path $release "$TtlBin.exe") @($bundle, $stem)
+    $shipped += [pscustomobject]@{ Kind = 'lv2'; Path = (Join-Path $bundle "$stem.dll") }
+}
 if ($needShell) {
     Note 'VST3 and AAX shells'
     $onOff = { param($flag) if ($flag) { 'ON' } else { 'OFF' } }
-    $configure = @('-S', (Join-Path $sdkRoot 'native'), '-B', $cmakeDir, '-A', 'x64', '-UOP_RUST_NATIVE_LIBS',
+    $configure = @('-S', (Join-Path $sdkRoot 'native'), '-B', $cmakeDir, '-A', $archName, '-UOP_RUST_NATIVE_LIBS',
         "-DOP_RUST_LIB=$lib", "-DOP_PRODUCT=$Name", "-DOP_BUNDLE_ID=$BundleId", "-DOP_VERSION=$Version", "-DOP_MANUFACTURER=$Manufacturer",
         "-DOP_BUILD_VST3=$(& $onOff (Has 'vst3'))", "-DOP_BUILD_AAX=$(& $onOff (Has 'aax'))",
         "-DOP_EDITOR=$(& $onOff $Editor)", "-DOP_TAIL=$(& $onOff $Tail)", "-DOP_AAX_PAGES=$(& $onOff ($AaxPages -and (Has 'aax')))",
@@ -301,7 +341,7 @@ if ($needShell) {
         Note 'VST3'
         $bundle = Join-Path $Out "$Name.vst3"
         Place (Join-Path $cmakeDir "$Name.vst3") $bundle
-        $shipped += [pscustomobject]@{ Kind = 'vst3'; Path = (Join-Path $bundle "Contents\x86_64-win\$Name.vst3") }
+        $shipped += [pscustomobject]@{ Kind = 'vst3'; Path = (Join-Path $bundle "Contents\$(if ($arm) { 'arm64' } else { 'x86_64' })-win\$Name.vst3") }
     }
     if (Has 'aax') {
         Note 'AAX'
@@ -324,6 +364,7 @@ if (-not $NoVerify -and -not $DryRun) {
         'ucrtbase.dll') + @($AllowLib | ForEach-Object { $_.ToLowerInvariant() })
     $exports = @{
         clap = @('clap_entry')
+        lv2  = @('lv2_descriptor') + @(if ($Editor) { 'lv2ui_descriptor' })
         vst3 = @('GetPluginFactory', 'InitDll', 'ExitDll')
         aax  = @('ACFRegisterPlugin', 'ACFRegisterComponent', 'ACFGetClassFactory', 'ACFCanUnloadNow', 'ACFStartup', 'ACFShutdown', 'ACFGetSDKVersion')
     }
@@ -334,7 +375,8 @@ if (-not $NoVerify -and -not $DryRun) {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { Fail "$file is missing"; continue }
         $bytes = [IO.File]::ReadAllBytes($file)
         $headers = (& dumpbin.exe /nologo /headers $file) -join "`n"
-        if ($headers -notmatch '8664 machine \(x64\)' -or $headers -notmatch '(?m)^\s+DLL\s*$') { Fail "$file is not a 64-bit DLL" } else { Write-Output "x64 DLL, $($bytes.Length) bytes" }
+        $machine = if ($arm -and $item.Kind -ne 'aax') { 'AA64 machine \(ARM64\)' } else { '8664 machine \(x64\)' }
+        if ($headers -notmatch $machine -or $headers -notmatch '(?m)^\s+DLL\s*$') { Fail "$file is not a 64-bit $archName DLL" } else { Write-Output "$archName DLL, $($bytes.Length) bytes" }
         # No folder of the build machine, as bytes or as UTF-16, with either slash.
         $narrow = $latin.GetString($bytes)
         $wide = [Text.Encoding]::Unicode.GetString($bytes, 0, $bytes.Length - ($bytes.Length % 2))
@@ -377,6 +419,15 @@ if (-not $NoVerify -and -not $DryRun) {
     if (Has 'vst3') {
         $licence = Join-Path $Out "$Name.vst3\Contents\Resources\VST3-SDK-LICENSE.txt"
         if (-not (Test-Path -LiteralPath $licence)) { Fail "$licence is missing" }
+    }
+    if (Has 'lv2') {
+        $bundle = Join-Path $Out "$stem.lv2"
+        foreach ($t in 'manifest.ttl', "$stem.ttl") {
+            $f = Join-Path $bundle $t
+            if (-not (Test-Path -LiteralPath $f) -or (Get-Item -LiteralPath $f).Length -eq 0) { Fail "$f is missing or empty" } else { Write-Output "lv2 file: $t" }
+        }
+        $manifest = Join-Path $bundle 'manifest.ttl'
+        if ((Test-Path -LiteralPath $manifest) -and -not ([IO.File]::ReadAllText($manifest)).Contains("lv2:binary <$stem.dll>")) { Fail "manifest.ttl does not name $stem.dll as lv2:binary" }
     }
     if ((Has 'aax') -and $AaxPages) {
         $pages = Join-Path $Out "$Name.aaxplugin\Contents\Resources\${Name}Pages.xml"
