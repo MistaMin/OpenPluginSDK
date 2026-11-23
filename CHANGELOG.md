@@ -8,6 +8,18 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
 
 ## [Unreleased]
 
+### Added
+
+- **VST3 on Linux** (`native/vst3/linux`, `native/cmake/linux.cmake`): the shell of `OpenPluginVST3.cpp`, built as `<Name>.vst3/Contents/<arch>-linux/<Name>.so` (x86_64, aarch64) with `linuxmain.cpp`'s entry points. The editor is the X11 view in the host's window (`kPlatformTypeX11EmbedWindowID`); the view registers a timer and the X connection's descriptor with the host's `Linux::IRunLoop` and is pumped on both, and attaching fails on a host without a run loop. Sizes cross in pixels through `vst3/win/editor_pixels` (now shared). A version script exports only `GetPluginFactory`, `ModuleEntry` and `ModuleExit`, so two plug-ins of this SDK in one process never bind to each other's `op_shell_*`; libstdc++ is linked in. `export_shell!` exports the editor ABI on Linux too, with `op_editor_fd`, `op_editor_pump` and `op_editor_display_scale` (`include/op_editor_x11.h`). `scripts/build_plugin_linux.sh` builds it (`--formats vst3`, `--vst3-sdk`, `--editor`, `--tail`, `--manufacturer`) and checks the exports.
+- **Windows: LV2 and ARM64** in `scripts/windows/build_plugin.ps1`. `-Formats` takes `lv2` with `-TtlBin` (the DLL as `<Stem>.lv2/<Stem>.dll` plus the description files); the machine's processor picks the build, so on Windows on Arm it uses the ARM64 tools, `cmake -A ARM64` and `Contents\arm64-win`. AAX stays x64. `UIAutomationCore.dll` counts as a system DLL.
+- `openplugin_dri::x11::display_scale()`: the scale a new X11 view will use.
+
+### Fixed
+
+- VST3: edits made while no audio runs reach the processor's state. A host that bypasses an effect stops calling `process` but still edits its parameters through the controller, and a project saved then lost those edits. The controller now sends each value to the processor as a message, which the processor takes while processing is off or no block came for 500 ms; while blocks run, the host's parameter changes stay the only route. The VST3 proof covers it.
+- The DRI canvas draws a window smaller than its design at the window's size. It clamped the scale to 1.0, so on a 1x screen such a window got a full-size frame that the view shrank without filtering, dropping rows and columns of pixels.
+
+
 ### The 1.0 API freeze
 
 The public API was reviewed item by item ([docs/API_REVIEW.md](docs/API_REVIEW.md)) and every recommendation applied. What is frozen from 1.0 is stated in [docs/VERSIONING.md](docs/VERSIONING.md#the-frozen-surface). Each entry below is **Breaking** unless it says otherwise, and gives the change a plugin makes.
