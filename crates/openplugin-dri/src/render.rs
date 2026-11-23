@@ -285,7 +285,9 @@ const MAX_PIXELS: f32 = 64.0 * 1024.0 * 1024.0;
 
 /// The scale a frame is drawn at: 1 to 4, lowered for a design too large for [`MAX_PIXELS`].
 fn capped_scale(scale: f32, width: f32, height: f32) -> f32 {
-    let scale = if scale.is_finite() { scale.clamp(1.0, 4.0) } else { 2.0 };
+    // Below 1.0 too: a window smaller than the design on a 1x screen is drawn at its own size, not
+    // drawn larger and shrunk by the view without filtering, which drops rows and columns of pixels.
+    let scale = if scale.is_finite() { scale.clamp(0.25, 4.0) } else { 2.0 };
     scale.min((MAX_PIXELS / (width * height).max(1.0)).sqrt())
 }
 
@@ -336,6 +338,13 @@ mod tests {
         assert_eq!(capped_scale(2.0, 1200.0, 800.0), 2.0);
         assert_eq!(capped_scale(9.0, 1200.0, 800.0), 4.0);
         assert_eq!(capped_scale(f32::NAN, 1200.0, 800.0), 2.0);
+    }
+
+    #[test]
+    fn a_window_smaller_than_the_design_is_drawn_at_its_own_size() {
+        let mut canvas = SceneCanvas::new(1180.0, 880.0);
+        let frame = canvas.frame(0.9, |dl| draw_faceplate(dl, 1180.0, 880.0, "Navy"));
+        assert_eq!((frame.width, frame.height), (1062, 792));
     }
 
     #[test]
