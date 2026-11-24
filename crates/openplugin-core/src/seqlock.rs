@@ -11,6 +11,26 @@ use std::sync::atomic::{fence, AtomicU64, Ordering};
 
 /// A `Copy` snapshot one thread publishes and any number read, without a lock:
 /// how a plugin hands meters and telemetry from `process` to its editor.
+///
+/// [`Self::publish`] never blocks and does not allocate. [`Self::read`]
+/// spins while a publish is under way, so call it from the editor, not from
+/// the audio thread. Only one thread may publish: two publishers at once can
+/// leave a torn value.
+///
+/// ```
+/// use openplugin_core::{MeterFrame, Seqlock};
+/// use std::sync::Arc;
+/// let meters = Arc::new(Seqlock::new(MeterFrame::SILENT));
+/// let audio = meters.clone();
+/// std::thread::spawn(move || {
+///     let mut frame = MeterFrame::SILENT;
+///     frame.output_db = [-6.0, -6.0];
+///     audio.publish(frame);
+/// })
+/// .join()
+/// .unwrap();
+/// assert_eq!(meters.read().output_db, [-6.0, -6.0]);
+/// ```
 pub struct Seqlock<T> {
     seq: AtomicU64,
     slot: UnsafeCell<T>,
@@ -20,6 +40,7 @@ unsafe impl<T: Copy + Send> Send for Seqlock<T> {}
 unsafe impl<T: Copy + Send> Sync for Seqlock<T> {}
 
 impl<T: Copy> Seqlock<T> {
+    /// A seqlock holding `value`.
     pub fn new(value: T) -> Self {
         Self {
             seq: AtomicU64::new(0),

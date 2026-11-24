@@ -11,11 +11,11 @@
 //! and a parameter table can be reordered or extended without breaking saved
 //! projects.
 //!
-//! - Plugin ids: [`Plugin::clap_id`](crate::Plugin::clap_id),
-//!   [`Plugin::vst3_ids`](crate::Plugin::vst3_ids),
-//!   [`Plugin::au_ids`](crate::Plugin::au_ids),
-//!   [`Plugin::aax_ids`](crate::Plugin::aax_ids),
-//!   [`Plugin::lv2_uri`](crate::Plugin::lv2_uri).
+//! - Plugin ids: [`Plugin::clap_id`],
+//!   [`Plugin::vst3_ids`],
+//!   [`Plugin::au_ids`],
+//!   [`Plugin::aax_ids`],
+//!   [`Plugin::lv2_uri`].
 //! - Parameter ids: [`ParamInfo::with_host_id`](crate::ParamInfo::with_host_id)
 //!   and the per-format forms, kept in [`ParamPins`].
 //!
@@ -67,12 +67,16 @@ impl ParamPins {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PinFormat {
+    /// CLAP `param_id`.
     Clap,
+    /// VST3 `ParamID`.
     Vst3,
+    /// `AudioUnitParameterID`.
     Au,
 }
 
 impl PinFormat {
+    /// Every numeric format, in the order [`check_pins`] checks them.
     pub const ALL: [Self; 3] = [Self::Clap, Self::Vst3, Self::Au];
 
     /// `CLAP`, `VST3` or `Audio Unit`.
@@ -109,14 +113,38 @@ pub const AAX_BYPASS_PARAM_ID: &str = "MasterBypassID";
 #[non_exhaustive]
 pub enum PinError {
     /// Two parameters have one numeric id in `format`.
-    Duplicate { format: PinFormat, first: usize, second: usize, id: u32 },
+    Duplicate {
+        /// The format.
+        format: PinFormat,
+        /// The earlier parameter.
+        first: usize,
+        /// The later parameter.
+        second: usize,
+        /// The id both have.
+        id: u32,
+    },
     /// The id is one the format or the SDK's shell keeps for itself.
-    Reserved { format: PinFormat, index: usize, id: u32 },
+    Reserved {
+        /// The format.
+        format: PinFormat,
+        /// The parameter.
+        index: usize,
+        /// The reserved id.
+        id: u32,
+    },
     /// Two parameters have one AAX id.
-    AaxDuplicate { first: usize, second: usize },
+    AaxDuplicate {
+        /// The earlier parameter.
+        first: usize,
+        /// The later parameter.
+        second: usize,
+    },
     /// The AAX pin is empty, longer than [`AAX_PARAM_ID_MAX`], not printable
     /// ASCII, or the bypass parameter's id.
-    AaxInvalid { index: usize },
+    AaxInvalid {
+        /// The parameter.
+        index: usize,
+    },
     /// [`Plugin::vst3_ids`] is all zero, or names one id for both classes.
     Vst3Class,
     /// [`Plugin::au_ids`] has a code that is not four printable characters.
@@ -127,7 +155,10 @@ pub enum PinError {
     ClapId,
     /// A table with pins is saved by [`ParamInfo::id`], which must then be
     /// unique and not empty; this parameter's is neither.
-    StateKey { index: usize },
+    StateKey {
+        /// The parameter.
+        index: usize,
+    },
 }
 
 impl std::fmt::Display for PinError {
@@ -249,6 +280,18 @@ fn state_key_error(params: &[ParamInfo]) -> Option<PinError> {
 ///
 /// A pin set the format cannot carry ([`param_host_ids`] fails) gives the
 /// identity map, as does a table without pins.
+///
+/// ```
+/// use openplugin_core::{ParamIdMap, ParamInfo, PinFormat, Unit};
+/// let params = [
+///     ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db).with_host_id(7),
+///     ParamInfo::new("mix", "Mix", 0.0, 100.0, 100.0, Unit::Percent).with_host_id(3),
+/// ];
+/// let map = ParamIdMap::new(&params, PinFormat::Clap);
+/// assert_eq!(map.id(0), Some(7));
+/// assert_eq!(map.index(3), Some(1));
+/// assert_eq!(map.index(0), None);
+/// ```
 #[derive(Debug, Clone)]
 pub struct ParamIdMap {
     /// `ids[index]`; empty for the identity map.
@@ -259,6 +302,8 @@ pub struct ParamIdMap {
 }
 
 impl ParamIdMap {
+    /// The map for `params` in `format`. Allocates: build it on the main
+    /// thread, when the instance is made.
     pub fn new(params: &[ParamInfo], format: PinFormat) -> Self {
         match param_host_ids(params, format) {
             Ok(ids) if format_pinned(params, format) => {
@@ -280,15 +325,17 @@ impl ParamIdMap {
         self.ids.is_empty()
     }
 
+    /// Number of parameters.
     pub fn len(&self) -> usize {
         self.count
     }
 
+    /// No parameters.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
 
-    /// The id of the parameter at `index`.
+    /// The id of the parameter at `index`; `None` past the end.
     pub fn id(&self, index: usize) -> Option<u32> {
         if index >= self.count {
             None
@@ -299,7 +346,8 @@ impl ParamIdMap {
         }
     }
 
-    /// The position of the parameter the host calls `id`.
+    /// The position of the parameter the host calls `id`; `None` for an
+    /// unknown id. A binary search; no allocation.
     pub fn index(&self, id: u32) -> Option<usize> {
         if self.is_identity() {
             return ((id as usize) < self.count).then_some(id as usize);
@@ -313,8 +361,17 @@ impl ParamIdMap {
 /// bytes of the class id in the order its 32 hex digits are written
 /// (`FUID::toString`, the `CID` of `moduleinfo.json`, `openplugin-port scan`'s
 /// `class_id`), the same on every system.
+///
+/// ```
+/// use openplugin_core::Vst3Ids;
+/// const IDS: Option<Vst3Ids> =
+///     Vst3Ids::from_hex("0123456789ABCDEF0123456789ABCDEF", "FEDCBA9876543210FEDCBA9876543210");
+/// assert!(IDS.unwrap().is_valid());
+/// assert!(Vst3Ids::processor_from_hex("not hex").is_none());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vst3Ids {
+    /// The audio processor's class id: what a project names the plugin by.
     pub processor: [u8; 16],
     /// `None` keeps the controller id derived from the plugin id, for a port
     /// of a single-component plugin, which had no controller class.
@@ -375,14 +432,24 @@ const fn hex16(text: &str) -> Option<[u8; 16]> {
 /// The Audio Unit subtype and manufacturer codes, four printable ASCII
 /// characters each, such as `*b"ExGn"`. The component type follows the
 /// plugin's kind (or the build's `OP_AU_TYPE`).
+///
+/// ```
+/// use openplugin_core::AuIds;
+/// let ids = AuIds { subtype: *b"ExGn", manufacturer: *b"ExCo" };
+/// assert!(ids.is_valid());
+/// assert!(!AuIds { subtype: *b"Ex G", ..ids }.is_valid()); // no spaces
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuIds {
+    /// Component subtype code, unique among the manufacturer's plugins.
     pub subtype: [u8; 4],
+    /// Component manufacturer code; Apple reserves all-lower-case codes.
     pub manufacturer: [u8; 4],
 }
 
 impl AuIds {
-    /// True when both codes are four printable characters.
+    /// True when both codes are four printable characters, space excluded
+    /// (unlike [`AaxIds`](crate::AaxIds), which allows a space).
     pub fn is_valid(&self) -> bool {
         [self.subtype, self.manufacturer].iter().all(|code| code.iter().all(|b| (0x21..0x7f).contains(b)))
     }
@@ -397,8 +464,25 @@ pub fn clap_id_valid(id: &str) -> bool {
 /// in favour of the derived id. Empty when all pins are usable (and for a
 /// plugin without pins). Call it from the plugin's own tests:
 ///
-/// ```ignore
-/// assert_eq!(openplugin::core::identity::check_pins(&MyPlugin::default()), []);
+/// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct Gain { db: f32 }
+/// # impl Plugin for Gain {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id == "gain" { self.db = v; true } else { false } }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
+/// #     fn save_state(&mut self) -> Option<Vec<u8>> { Some(self.db.to_le_bytes().to_vec()) }
+/// #     fn load_state(&mut self, d: &[u8]) -> bool {
+/// #         d.try_into().map(|b| self.db = f32::from_le_bytes(b)).is_ok()
+/// #     }
+/// # }
+/// assert_eq!(openplugin_core::identity::check_pins(&Gain::default()), []);
 /// ```
 pub fn check_pins(plugin: &dyn Plugin) -> Vec<PinError> {
     let params = plugin.info().params;

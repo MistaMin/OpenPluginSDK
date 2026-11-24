@@ -42,6 +42,15 @@ use std::sync::Arc;
 
 /// The plugin's handle for telling its host about changes. Cheap to clone;
 /// every method is safe on any thread, the audio thread included.
+///
+/// ```
+/// use openplugin_core::HostNotifier;
+/// let entry_side = HostNotifier::new(); // the format entry makes it
+/// let plugin_side = entry_side.clone(); // and hands a clone to the plugin
+/// plugin_side.latency_changed(); // after a state load changed the latency
+/// assert_eq!(entry_side.take(), HostNotifier::LATENCY);
+/// assert_eq!(entry_side.take(), 0); // told once
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct HostNotifier {
     flags: Arc<AtomicU32>,

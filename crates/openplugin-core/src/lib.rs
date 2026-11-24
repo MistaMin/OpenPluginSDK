@@ -7,8 +7,32 @@
 //! - Zero allocation in the audio processing thread (`process()`).
 //! - No panics: hostile parameter values and malformed transport packets are sanitized.
 //! - Parameter normalization and formatting with linear and logarithmic tapers.
+//!
+//! # Where to start
+//!
+//! A plugin is a static [`PluginInfo`] with its [`ParamInfo`] table, and a
+//! type that implements [`Plugin`] (the trait's documentation has a complete
+//! example). An editor implements [`Editor`]. Everything else is optional:
+//! layouts ([`layout`]), MIDI ([`midi`], [`mpe`], [`expression`]), state
+//! ([`state`], [`preset`], [`foreign_state`]), identity pins ([`identity`]),
+//! and the realtime building blocks the format entries use themselves
+//! ([`plane`], [`seqlock`], [`spsc`], [`worker`], [`smooth`], [`ramp`]).
+//!
+//! # Threads
+//!
+//! Each item says which thread may call it. In short: [`Plugin::process`]
+//! and the per-block calls run on the audio thread and must not allocate,
+//! lock or panic; descriptors, state, presets and the editor live on the
+//! host's main thread. Values are plain units (the parameter's own range)
+//! unless a name says normalized (0..1).
+//!
+//! # Features
+//!
+//! - `automation`: host-side automation lanes (the `automation` module). Off by
+//!   default and outside the 1.0 API promise.
 
 #![deny(unsafe_code)]
+#![deny(missing_docs)]
 
 /// Host-side automation lanes. Behind the `automation` feature: no bridge or
 /// plugin needs it, so it is outside the frozen API.
@@ -78,18 +102,37 @@ pub use state::{
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub struct MeterFrame {
+    /// Input level per channel (left, right), dBFS.
     pub input_db: [f32; 2],
+    /// Output level per channel (left, right), dBFS.
     pub output_db: [f32; 2],
+    /// Gain reduction in dB, positive for attenuation; 0 when nothing is reduced.
     pub reduction_db: f32,
+    /// True-peak level per channel (left, right), dBTP.
     pub true_peak_db: [f32; 2],
+    /// Short-term loudness, LUFS.
     pub short_loudness_db: f32,
+    /// Integrated loudness, LUFS.
     pub integrated_loudness_db: f32,
+    /// Stereo correlation, -1 (out of phase) to 1 (mono).
     pub correlation: f32,
+    /// Sidechain input level per channel (left, right), dBFS.
     pub sidechain_db: [f32; 2],
+    /// Clip indicators: bit 0 left, bit 1 right.
     pub clip: u8,
 }
 
 impl MeterFrame {
+    /// Every level at -100 dB, no reduction, correlation 0, no clip: what an
+    /// editor shows before the audio thread has published anything.
+    ///
+    /// ```
+    /// use openplugin_core::MeterFrame;
+    /// let mut frame = MeterFrame::SILENT;
+    /// frame.input_db = [-12.0, -12.5];
+    /// frame.reduction_db = 3.0;
+    /// assert_eq!(MeterFrame::default().clip, 0);
+    /// ```
     pub const SILENT: Self = Self {
         input_db: [-100.0, -100.0],
         output_db: [-100.0, -100.0],
@@ -113,16 +156,27 @@ impl Default for MeterFrame {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Category {
+    /// Equalisers and filters.
     Eq,
+    /// Compressors, limiters, gates, expanders.
     Dynamics,
+    /// Pitch shifters and pitch correction.
     PitchShift,
+    /// Reverbs.
     Reverb,
+    /// Delays and echoes.
     Delay,
+    /// Chorus, flanger, phaser, tremolo and similar.
     Modulation,
+    /// Saturation, distortion, exciters.
     Harmonic,
+    /// Dither and noise shaping.
     Dither,
+    /// Synthesisers and samplers.
     Instrument,
+    /// Gain, metering, routing and other tools.
     Utility,
+    /// Anything else.
     Other,
 }
 
@@ -132,16 +186,27 @@ pub enum Category {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Unit {
+    /// No unit; prints two decimals.
     None,
+    /// Decibels; prints `-inf dB` at or below -95.9.
     Db,
+    /// Hertz; prints in kHz from 1000 up.
     Hz,
+    /// Milliseconds.
     Ms,
+    /// Percent (the value is 0..100, not 0..1).
     Percent,
+    /// A ratio printed as `n:1`.
     Ratio,
+    /// Semitones.
     Semitones,
+    /// Cents.
     Cents,
+    /// Seconds.
     Seconds,
+    /// A switch: values round to whole numbers, 0.5 and up prints `On`.
     Toggle,
+    /// An index into [`ParamInfo::choices`]: values round to whole numbers.
     Choice,
 }
 
@@ -149,7 +214,10 @@ pub enum Unit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub enum Taper {
+    /// Travel is proportional to the value.
     Linear,
+    /// Travel is proportional to the logarithm of the value (equal travel per
+    /// octave or decade). Needs `min > 0`; with `min <= 0` it acts as [`Taper::Linear`].
     Log,
     /// Travel is the linear proportion raised to the skew: `t = ((v - min) / (max - min)) ^ skew`,
     /// so a skew below 1 gives the low end more travel. The skewed ranges many plugin SDKs offer;
@@ -159,13 +227,23 @@ pub enum Taper {
 
 /// The exponent of [`Taper::Skew`], kept as `f32` bits so a taper stays `Eq` and `Hash`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+///
+/// ```
+/// use openplugin_core::{ParamInfo, Skew, Taper, Unit};
+/// let p = ParamInfo::new("time", "Time", 0.0, 1000.0, 100.0, Unit::Ms)
+///     .with_taper(Taper::Skew(Skew::new(0.5)));
+/// assert!((p.to_normalized(250.0) - 0.5).abs() < 1e-6);
+/// ```
 pub struct Skew(u32);
 
 impl Skew {
+    /// The exponent `skew`. One that is not finite and positive makes the
+    /// taper act as [`Taper::Linear`].
     pub const fn new(skew: f32) -> Self {
         Self(skew.to_bits())
     }
 
+    /// The exponent given to [`Skew::new`].
     pub fn get(self) -> f32 {
         f32::from_bits(self.0)
     }
@@ -176,6 +254,14 @@ impl Skew {
 /// only the host-facing value, range and default change. It is the value space of a plugin from an
 /// SDK that published normalized values, so automation saved with that plugin replays on a port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize)]
+///
+/// ```
+/// use openplugin_core::{HostSpace, ParamInfo, Unit};
+/// let p = ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)
+///     .with_normalized_in(HostSpace::CLAP.union(HostSpace::SHELLS));
+/// assert_eq!(p.to_host(HostSpace::CLAP, 0.0), 0.5);
+/// assert_eq!(p.to_host(HostSpace::PLAIN, 0.0), 0.0);
+/// ```
 pub struct HostSpace(u8);
 
 impl HostSpace {
@@ -187,14 +273,18 @@ impl HostSpace {
     /// automation is normalized anyway; the Audio Unit's values and ranges become 0..1.
     pub const SHELLS: Self = Self(4);
 
+    /// Both sets of formats.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    /// Whether every format in `other` is in `self`. Always `false` for
+    /// [`HostSpace::PLAIN`], which names no format.
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0 && other.0 != 0
     }
 
+    /// Whether no format is named: plain units everywhere.
     pub const fn is_plain(&self) -> bool {
         self.0 == 0
     }
@@ -202,9 +292,23 @@ impl HostSpace {
 
 /// A parameter's own value text: how a plain value prints and how typed text reads back
 /// ([`ParamInfo::with_text`]). `parse` returns a plain value; the result is clamped afterwards.
+/// Two `ParamText`s are equal when both function pointers are.
+///
+/// ```
+/// use openplugin_core::{ParamInfo, Unit};
+/// fn format(v: f32) -> String { format!("{v:.0} voices") }
+/// fn parse(t: &str) -> Option<f32> { t.trim_end_matches(" voices").parse().ok() }
+/// let p = ParamInfo::new("voices", "Voices", 1.0, 16.0, 8.0, Unit::None).with_text(format, parse);
+/// assert_eq!(p.format(4.0), "4 voices");
+/// assert_eq!(p.parse("99 voices"), Some(16.0));
+/// ```
 #[derive(Clone, Copy)]
 pub struct ParamText {
+    /// Prints a plain value; it is given the value already clamped. Main
+    /// thread; it may allocate.
     pub format: fn(f32) -> String,
+    /// Reads typed text as a plain value, or `None` when it is not one. A
+    /// value that is not finite is refused; others are clamped.
     pub parse: fn(&str) -> Option<f32>,
 }
 
@@ -329,12 +433,20 @@ pub fn group_name(path: &str) -> &str {
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[non_exhaustive]
 pub struct ParamInfo {
+    /// Stable identifier, unique in the table. Saved state is keyed by it,
+    /// and AAX uses it as the parameter id unless pinned.
     pub id: &'static str,
+    /// Name shown to the user.
     pub name: &'static str,
+    /// Lowest plain value.
     pub min: f32,
+    /// Highest plain value.
     pub max: f32,
+    /// Plain value on load and reset; also what NaN clamps to.
     pub default: f32,
+    /// Display unit; `Toggle` and `Choice` also make values whole.
     pub unit: Unit,
+    /// How normalized 0..1 travel maps to the plain range.
     pub taper: Taper,
     /// Choice labels for `Unit::Choice` (value is integer index).
     pub choices: &'static [&'static str],
@@ -365,6 +477,21 @@ pub struct ParamInfo {
 }
 
 impl ParamInfo {
+    /// An automatable parameter from `min` to `max` (plain units) starting at
+    /// `default`, linear taper, continuous, top-level group, no pins. `const`,
+    /// so a parameter table can be a `static`. Nothing is checked here, and
+    /// [`ParamInfo::clamp`] uses [`f32::clamp`], which panics when `min > max`
+    /// or either is NaN: keep `min <= max`.
+    ///
+    /// ```
+    /// use openplugin_core::{ParamInfo, Taper, Unit};
+    /// static PARAMS: [ParamInfo; 2] = [
+    ///     ParamInfo::new("cutoff", "Cutoff", 20.0, 20_000.0, 1_000.0, Unit::Hz).with_taper(Taper::Log),
+    ///     ParamInfo::new("mode", "Mode", 0.0, 2.0, 0.0, Unit::Choice).with_choices(&["A", "B", "C"]),
+    /// ];
+    /// assert_eq!(PARAMS[0].format(1500.0), "1.50 kHz");
+    /// assert_eq!(PARAMS[1].parse("b"), Some(1.0));
+    /// ```
     pub const fn new(
         id: &'static str,
         name: &'static str,
@@ -391,6 +518,7 @@ impl ParamInfo {
         }
     }
 
+    /// Set the taper ([`Taper::Linear`] by default).
     pub const fn with_taper(mut self, taper: Taper) -> Self {
         self.taper = taper;
         self
@@ -433,6 +561,8 @@ impl ParamInfo {
         self
     }
 
+    /// Set the choice labels and make the unit [`Unit::Choice`]. `min` and
+    /// `max` are not changed: set them to `0` and `choices.len() - 1`.
     pub const fn with_choices(mut self, choices: &'static [&'static str]) -> Self {
         self.choices = choices;
         self.unit = Unit::Choice;
@@ -689,16 +819,37 @@ impl ParamInfo {
 /// may come.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[non_exhaustive]
+///
+/// ```
+/// use openplugin_core::{Category, ParamInfo, PluginInfo, Unit};
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS)
+///     .with_url("https://example.com")
+///     .with_editor(true);
+/// assert_eq!(INFO.param("gain").map(|p| p.max), Some(24.0));
+/// assert!(INFO.param("missing").is_none());
+/// ```
 pub struct PluginInfo {
+    /// Reverse-domain identifier (`com.vendor.plugin`): the CLAP id, and the
+    /// seed of identities other formats derive. Never change it after release.
     pub id: &'static str,
+    /// Product name shown in host menus.
     pub name: &'static str,
+    /// Vendor (manufacturer) name.
     pub vendor: &'static str,
+    /// Vendor or product web page; empty for none.
     pub url: &'static str,
+    /// Support e-mail address; empty for none.
     pub email: &'static str,
+    /// Version text, `major.minor.patch`.
     pub version: &'static str,
+    /// Category for host menus.
     pub category: Category,
+    /// The parameter table, in host order.
     pub params: &'static [ParamInfo],
+    /// Whether the plugin makes sound from notes rather than from its input.
     pub is_instrument: bool,
+    /// Whether the plugin has an editor of its own.
     pub has_editor: bool,
 }
 
@@ -715,11 +866,13 @@ impl PluginInfo {
         Self { id, name, vendor, url: "", email: "", version, category, params, is_instrument: false, has_editor: false }
     }
 
+    /// Set the web page.
     pub const fn with_url(mut self, url: &'static str) -> Self {
         self.url = url;
         self
     }
 
+    /// Set the support e-mail address.
     pub const fn with_email(mut self, email: &'static str) -> Self {
         self.email = email;
         self
@@ -737,6 +890,8 @@ impl PluginInfo {
         self
     }
 
+    /// The parameter whose [`ParamInfo::id`] is `id`, or `None`. A linear
+    /// search; no allocation.
     pub fn param(&self, id: &str) -> Option<&'static ParamInfo> {
         self.params.iter().find(|p| p.id == id)
     }
@@ -747,15 +902,25 @@ impl PluginInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub struct Transport {
+    /// The host transport is running.
     pub playing: bool,
+    /// The host is recording.
     pub recording: bool,
+    /// Tempo in quarter notes per minute; 0 when the host gave none.
     pub tempo: f64,
+    /// Time-signature numerator (beats per bar); 0 when unknown.
     pub numerator: u32,
+    /// Time-signature denominator (note value of a beat); 0 when unknown.
     pub denominator: u32,
+    /// Timeline position of the block's first sample, in samples.
     pub sample_pos: i64,
+    /// Timeline position of the block's first sample, in seconds.
     pub seconds: f64,
+    /// Timeline position of the block's first sample, in quarter notes.
     pub quarter_notes: f64,
+    /// Start of the current bar, in quarter notes.
     pub bar_start: f64,
+    /// The current bar, as the host counts it (from 0 in CLAP and LV2).
     pub bar_number: i64,
 }
 
@@ -849,9 +1014,53 @@ pub fn sample_rate_supported(sample_rate: f64) -> bool {
 /// - Unaltered channels: if `io` provides more channels than configured in `prepare`,
 ///   extra channels are untouched.
 ///
+/// Threads: `process`, `process_buses`, `set_param_index`, the note, MIDI
+/// and expression calls, `set_transport`, `meters` and `pull_*` run on the
+/// audio thread and must not allocate, lock or panic. `prepare`, `reset`,
+/// the layout calls, state, presets, identities and the other queries run on
+/// the host's main (message) thread, between blocks, and may allocate.
+/// `reset` is also called on the audio thread by CLAP: keep it allocation-free.
+///
 /// A new method must also be forwarded by `openplugin_dsp::SurroundAdapter`,
 /// or every wrapped plugin silently answers with the default.
+///
+/// ```
+/// use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+///
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+///
+/// struct Gain { db: f32, linear: f32 }
+///
+/// impl Plugin for Gain {
+///     fn info(&self) -> &'static PluginInfo { &INFO }
+///     fn prepare(&mut self, _sample_rate: f32, _max_block: usize, _channels: usize) {}
+///     fn reset(&mut self) {}
+///     fn set_param(&mut self, id: &str, value: f32) -> bool {
+///         if id != "gain" { return false; }
+///         self.db = PARAMS[0].clamp(value);
+///         self.linear = 10f32.powf(self.db / 20.0);
+///         true
+///     }
+///     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+///     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+///         for channel in io.iter_mut() {
+///             for sample in &mut channel[..frames] { *sample *= self.linear; }
+///         }
+///     }
+/// }
+///
+/// let mut plugin = Gain { db: 0.0, linear: 1.0 };
+/// plugin.prepare(48_000.0, 64, 2);
+/// assert!(plugin.set_param("gain", -6.0));
+/// let (mut left, mut right) = ([1.0f32; 64], [1.0f32; 64]);
+/// plugin.process(&mut [&mut left[..], &mut right[..]], 64);
+/// assert!((left[0] - 0.501).abs() < 1e-3);
+/// ```
 pub trait Plugin: Send + 'static {
+    /// The plugin's static descriptor. Any thread; must return the same
+    /// `static` every time, and must not allocate.
     fn info(&self) -> &'static PluginInfo;
 
     /// Configures audio stream parameters before processing begins.
@@ -1111,10 +1320,15 @@ pub trait Plugin: Send + 'static {
         0
     }
 
+    /// Name of factory program `index` (`0..preset_count()`). Main thread.
+    /// Out of range should return `""`, as the default does.
     fn preset_name(&self, _index: usize) -> &'static str {
         ""
     }
 
+    /// Plain values of factory program `index`, one per parameter in
+    /// [`PluginInfo::params`] order; `None` when `index` is out of range
+    /// (the default). Main thread, possibly during playback.
     fn preset_values(&self, _index: usize) -> Option<&'static [f32]> {
         None
     }
@@ -1248,10 +1462,20 @@ pub trait Plugin: Send + 'static {
 /// The four AAX codes: manufacturer, product, and the mono and stereo plug-in
 /// types. Each is four printable ASCII characters, such as `*b"OpGd"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// ```
+/// use openplugin_core::AaxIds;
+/// const IDS: AaxIds = AaxIds { manufacturer: *b"ExCo", product: *b"Gain", mono: *b"GaiM", stereo: *b"GaiS" };
+/// const _: () = assert!(IDS.is_valid());
+/// ```
 pub struct AaxIds {
+    /// Manufacturer code, shared by all of a vendor's plugins.
     pub manufacturer: [u8; 4],
+    /// Product code.
     pub product: [u8; 4],
+    /// Plug-in type code of the mono variant.
     pub mono: [u8; 4],
+    /// Plug-in type code of the stereo variant; must differ from `mono`.
     pub stereo: [u8; 4],
 }
 

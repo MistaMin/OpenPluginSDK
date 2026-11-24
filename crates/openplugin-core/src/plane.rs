@@ -14,6 +14,16 @@ use crate::{ParamInfo, Plugin, PluginInfo};
 
 /// Shared parameter bits. `Sync` so the editor thread and the audio thread can
 /// both reach it. The plugin object itself stays on the audio thread.
+///
+/// ```
+/// use openplugin_core::{Category, ParamInfo, ParamPlane, PluginInfo, Unit};
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// let plane = ParamPlane::new(&INFO);
+/// assert!(plane.store_id("gain", 99.0));
+/// assert_eq!(plane.load(0), Some(24.0)); // clamped
+/// assert!(!plane.store(5, 0.0)); // no such slot
+/// ```
 pub struct ParamPlane {
     values: Box<[AtomicU32]>,
     infos: &'static [ParamInfo],
@@ -36,14 +46,17 @@ impl ParamPlane {
         }
     }
 
+    /// Number of parameters.
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    /// No parameters.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
 
+    /// The parameter table the plane was made from.
     pub fn infos(&self) -> &'static [ParamInfo] {
         self.infos
     }
@@ -68,6 +81,8 @@ impl ParamPlane {
         true
     }
 
+    /// [`Self::store`] by [`ParamInfo::id`]; false for an unknown id. A
+    /// linear search, no allocation.
     pub fn store_id(&self, id: &str, value: f32) -> bool {
         match self.infos.iter().position(|param| param.id == id) {
             Some(index) => self.store(index, value),
@@ -82,6 +97,7 @@ impl ParamPlane {
         Some(info.clamp(raw))
     }
 
+    /// [`Self::load`] by [`ParamInfo::id`]; `None` for an unknown id.
     pub fn load_id(&self, id: &str) -> Option<f32> {
         let index = self.infos.iter().position(|param| param.id == id)?;
         self.load(index)
@@ -105,6 +121,35 @@ impl ParamPlane {
 
 /// Remembers the bits last applied to the plugin. The first [`Self::pull`]
 /// applies every slot, because the seen bits start at `u32::MAX`.
+///
+/// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct Gain { db: f32 }
+/// # impl Plugin for Gain {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id == "gain" { self.db = v; true } else { false } }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
+/// #     fn save_state(&mut self) -> Option<Vec<u8>> { Some(self.db.to_le_bytes().to_vec()) }
+/// #     fn load_state(&mut self, d: &[u8]) -> bool {
+/// #         d.try_into().map(|b| self.db = f32::from_le_bytes(b)).is_ok()
+/// #     }
+/// # }
+/// use openplugin_core::{ParamCursor, ParamPlane};
+/// let plane = ParamPlane::new(&INFO);
+/// let mut cursor = ParamCursor::new(plane.len());
+/// let mut plugin = Gain::default();
+/// assert_eq!(cursor.pull(&plane, &mut plugin), 1); // the first pull applies every slot
+/// plane.store(0, -12.0); // editor or host thread
+/// assert_eq!(cursor.pull(&plane, &mut plugin), 1); // audio thread
+/// assert_eq!(cursor.pull(&plane, &mut plugin), 0); // nothing changed since
+/// assert_eq!(plugin.param("gain"), Some(-12.0));
+/// ```
 pub struct ParamCursor {
     seen: Box<[u32]>,
     /// Plane revision of the last full pull ([`Self::mark_pulled`]); 0, which no plane has, after `invalidate`.
@@ -112,6 +157,8 @@ pub struct ParamCursor {
 }
 
 impl ParamCursor {
+    /// A cursor for `count` slots, every one unseen. Allocates: make it
+    /// before the audio callback starts.
     pub fn new(count: usize) -> Self {
         Self {
             seen: vec![u32::MAX; count].into_boxed_slice(),

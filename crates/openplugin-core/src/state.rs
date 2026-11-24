@@ -11,6 +11,7 @@
 use crate::identity::{state_is_keyed, ParamIdMap, PinFormat};
 use crate::{Plugin, PluginInfo};
 
+/// The first four bytes of a parameter snapshot ([`encode_params`]).
 pub const SNAPSHOT_MAGIC: &[u8; 4] = b"OPST";
 /// The positional snapshot: one value per parameter in descriptor order.
 pub const SNAPSHOT_VERSION: u16 = 1;
@@ -145,7 +146,9 @@ fn decode_keyed(info: &PluginInfo, count: usize, body: &[u8]) -> Option<Vec<f32>
     (found > 0 || (info.params.is_empty() && entries.is_empty())).then_some(values)
 }
 
+/// The first four bytes of a session ([`encode_session`]).
 pub const SESSION_MAGIC: &[u8; 4] = b"OPCH";
+/// The session layout version [`encode_session`] writes and [`decode_session`] reads.
 pub const SESSION_VERSION: u16 = 1;
 
 /// Parameter plane plus the plugin's own chunk.
@@ -153,9 +156,24 @@ pub const SESSION_VERSION: u16 = 1;
 /// An old OPST blob decodes as a session with an empty chunk. A plugin that
 /// already returns its own document from [`Plugin::save_state`] keeps that
 /// document as `chunk`. The plane is stored beside it.
+///
+/// Encoding and decoding allocate: main thread only.
+///
+/// ```
+/// use openplugin_core::{decode_session, encode_session, Category, ParamInfo, PluginInfo, Unit};
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// let bytes = encode_session(&INFO, &[-6.0], b"my chunk");
+/// let session = decode_session(&INFO, &bytes).unwrap();
+/// assert_eq!(session.values, [-6.0]);
+/// assert_eq!(session.chunk, b"my chunk");
+/// assert!(decode_session(&INFO, &bytes[..bytes.len() - 1]).is_none());
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
+    /// One plain, clamped value per parameter, in descriptor order.
     pub values: Vec<f32>,
+    /// The plugin's own chunk ([`Plugin::save_state`]); empty for none.
     pub chunk: Vec<u8>,
 }
 
@@ -204,7 +222,11 @@ pub fn decode_session(info: &PluginInfo, bytes: &[u8]) -> Option<Session> {
     })
 }
 
-/// Apply a decoded vector only after every entry has been checked.
+/// Apply a decoded vector only after every entry has been checked: false,
+/// with nothing applied, when the length differs from the table or a value
+/// is not finite. Values are clamped. A `set_param_index` that returns false
+/// stops the loop there, leaving the earlier values applied. Main thread;
+/// allocates.
 pub fn restore_params(plugin: &mut dyn Plugin, values: &[f32]) -> bool {
     let info = plugin.info();
     if values.len() != info.params.len() {
@@ -227,6 +249,39 @@ pub fn restore_params(plugin: &mut dyn Plugin, values: &[f32]) -> bool {
 
 /// Two full state blobs. The first toggle copies the live state onto the empty
 /// side so it is a snapshot, and later toggles restore the side being entered.
+///
+/// It works through [`Plugin::save_state`] and [`Plugin::load_state`], so a
+/// plugin whose state lives only in its parameters (`save_state` returns
+/// `None`) cannot be toggled. Main thread; allocates.
+///
+/// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct Gain { db: f32 }
+/// # impl Plugin for Gain {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id == "gain" { self.db = v; true } else { false } }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
+/// #     fn save_state(&mut self) -> Option<Vec<u8>> { Some(self.db.to_le_bytes().to_vec()) }
+/// #     fn load_state(&mut self, d: &[u8]) -> bool {
+/// #         d.try_into().map(|b| self.db = f32::from_le_bytes(b)).is_ok()
+/// #     }
+/// # }
+/// use openplugin_core::AbCompare;
+/// let mut plugin = Gain { db: -3.0 };
+/// let mut ab = AbCompare::new();
+/// assert!(ab.toggle(&mut plugin)); // to B, a copy of A
+/// plugin.set_param("gain", 6.0); // edit B
+/// assert!(ab.toggle(&mut plugin)); // back to A
+/// assert_eq!(plugin.param("gain"), Some(-3.0));
+/// assert!(ab.toggle(&mut plugin) && ab.on_b());
+/// assert_eq!(plugin.param("gain"), Some(6.0));
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct AbCompare {
     a: Vec<u8>,
@@ -235,14 +290,19 @@ pub struct AbCompare {
 }
 
 impl AbCompare {
+    /// On side A, both sides empty.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Whether side B is the live one.
     pub fn on_b(&self) -> bool {
         self.on_b
     }
 
+    /// Save the live state to the current side and load the other one. True
+    /// when the switch happened; false, staying on the same side, when
+    /// `save_state` returns `None` or `load_state` refuses.
     pub fn toggle(&mut self, plugin: &mut dyn Plugin) -> bool {
         let Some(live) = plugin.save_state() else {
             return false;

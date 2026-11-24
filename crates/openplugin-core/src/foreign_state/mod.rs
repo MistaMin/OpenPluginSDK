@@ -49,6 +49,9 @@
 //!
 //! The `Plugin` trait is unchanged; the old plugin's chunk is just another
 //! input to `load_state`.
+//!
+//! The readers allocate what they build (strings, trees, vectors): call them
+//! from `load_state` on the main thread, never from the audio thread.
 
 pub mod bytes;
 pub mod chunk;
@@ -60,6 +63,14 @@ pub mod xml;
 use std::fmt;
 
 /// Bounds on what a reader will build from untrusted input.
+///
+/// ```
+/// use openplugin_core::foreign_state::{xml, ErrorKind, Limits};
+/// let tight = Limits { max_depth: 2, ..Limits::default() };
+/// assert!(xml::parse_with(b"<a><b/></a>", &tight).is_ok());
+/// let err = xml::parse_with(b"<a><b><c><d/></c></b></a>", &tight).unwrap_err();
+/// assert_eq!(err.kind, ErrorKind::TooDeep);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     /// Deepest nesting of elements, arrays or dictionaries. At most 512 is honoured.
@@ -106,9 +117,11 @@ pub enum ErrorKind {
 /// A reader's refusal: what, roughly where, and a fixed description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForeignError {
+    /// What went wrong.
     pub kind: ErrorKind,
     /// Byte offset in the input where the problem was found.
     pub offset: usize,
+    /// A fixed English description of the check that failed.
     pub what: &'static str,
 }
 
@@ -126,6 +139,7 @@ impl fmt::Display for ForeignError {
 
 impl std::error::Error for ForeignError {}
 
+/// The result of every reader in this module.
 pub type Result<T> = std::result::Result<T, ForeignError>;
 
 /// Which container a foreign state came from, as the format shells name them (`op_shell.h`,

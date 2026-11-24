@@ -25,3 +25,9 @@ openplugin-core = { path = ".", features = ["automation"] }
 # Host-side automation lanes (the `automation` module). Not used by any bridge
 # or plugin, and outside the API promise of 1.0.
 automation = []
+
+[package.metadata.docs.rs]
+# Document the optional automation lanes too. The crate has no platform code,
+# so one target covers it.
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]

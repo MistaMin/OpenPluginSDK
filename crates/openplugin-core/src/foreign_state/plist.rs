@@ -21,25 +21,49 @@ use super::bytes::{Endian, Reader};
 use super::xml::{self, Element};
 use super::{ErrorKind, ForeignError, Limits, Result};
 
+/// One property-list value.
+///
+/// ```
+/// use openplugin_core::foreign_state::plist;
+/// let doc = br#"<?xml version="1.0" encoding="UTF-8"?>
+/// <plist version="1.0"><dict>
+///   <key>name</key><string>Warm</string>
+///   <key>gain</key><real>-3.5</real>
+/// </dict></plist>"#;
+/// let root = plist::parse(doc).unwrap();
+/// assert_eq!(root.get("name").and_then(|v| v.as_str()), Some("Warm"));
+/// assert_eq!(root.get("gain").and_then(|v| v.as_f64()), Some(-3.5));
+/// assert!(root.get("missing").is_none());
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Value {
+    /// The binary `null` object (`0x00`).
     Null,
+    /// `<true/>`, `<false/>`, or `0x08`/`0x09`.
     Bool(bool),
+    /// An integer. Binary integers of 1, 2 and 4 bytes are unsigned, 8 and
+    /// 16 bytes signed, as Apple writes them.
     Integer(i128),
+    /// A real number, as stored (it may be NaN or infinite).
     Real(f64),
     /// Seconds since 2001-01-01 00:00:00 UTC.
     Date(f64),
+    /// A string (ASCII or UTF-16 in binary lists).
     String(String),
+    /// Raw bytes (`<data>` base64, or a binary `0x4n` object).
     Data(Vec<u8>),
     /// Binary property lists only: a keyed-archiver object reference.
     Uid(u64),
+    /// An array; a binary set (`0xCn`) also reads as one.
     Array(Vec<Value>),
     /// Entries in file order.
     Dict(Vec<(String, Value)>),
 }
 
 impl Value {
+    /// The first entry under `key` of a dictionary; `None` for a missing key
+    /// or a value that is not a dictionary. A linear search.
     pub fn get(&self, key: &str) -> Option<&Value> {
         match self {
             Value::Dict(d) => d.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -47,6 +71,8 @@ impl Value {
         }
     }
 
+    /// The text of a [`Value::String`]; `None` for any other value. The
+    /// other `as_*` methods are the same for their variant.
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s),
@@ -54,6 +80,7 @@ impl Value {
         }
     }
 
+    /// The bytes of a [`Value::Data`].
     pub fn as_data(&self) -> Option<&[u8]> {
         match self {
             Value::Data(d) => Some(d),
@@ -61,6 +88,7 @@ impl Value {
         }
     }
 
+    /// The number of a [`Value::Integer`] (not of a real).
     pub fn as_integer(&self) -> Option<i128> {
         match self {
             Value::Integer(i) => Some(*i),
@@ -77,6 +105,7 @@ impl Value {
         }
     }
 
+    /// The value of a [`Value::Bool`].
     pub fn as_bool(&self) -> Option<bool> {
         match self {
             Value::Bool(b) => Some(*b),
@@ -84,6 +113,7 @@ impl Value {
         }
     }
 
+    /// The members of a [`Value::Array`].
     pub fn as_array(&self) -> Option<&[Value]> {
         match self {
             Value::Array(a) => Some(a),
@@ -91,6 +121,7 @@ impl Value {
         }
     }
 
+    /// The entries of a [`Value::Dict`], in file order.
     pub fn as_dict(&self) -> Option<&[(String, Value)]> {
         match self {
             Value::Dict(d) => Some(d),
@@ -109,6 +140,7 @@ pub fn parse(data: &[u8]) -> Result<Value> {
     parse_with(data, &Limits::default())
 }
 
+/// Parse either form, chosen by the magic, within `limits`.
 pub fn parse_with(data: &[u8], limits: &Limits) -> Result<Value> {
     if is_binary(data) { parse_binary(data, limits) } else { parse_xml(data, limits) }
 }
@@ -126,6 +158,8 @@ struct Bin<'a> {
     limits: Limits,
 }
 
+/// Parse a `bplist00` document within `limits`. [`ErrorKind::Invalid`] for
+/// data without the magic or with a bad trailer, table or marker.
 pub fn parse_binary(data: &[u8], limits: &Limits) -> Result<Value> {
     let bad = |what: &'static str| ForeignError::new(ErrorKind::Invalid, 0, what);
     if data.len() > limits.max_len {
@@ -314,6 +348,7 @@ impl<'a> Bin<'a> {
 
 // ---------- XML ----------
 
+/// Parse the XML form (a `<plist>` root holding one value) within `limits`.
 pub fn parse_xml(data: &[u8], limits: &Limits) -> Result<Value> {
     let root = xml::parse_with(data, limits)?;
     if root.name != "plist" {

@@ -9,20 +9,42 @@ use super::{ErrorKind, ForeignError, Result};
 
 /// `magic`, then an optional `version_bytes`-wide version, then a `size`
 /// field, then the payload.
+///
+/// ```
+/// use openplugin_core::foreign_state::bytes::{Endian, LenWidth};
+/// use openplugin_core::foreign_state::chunk::{read_chunk, ChunkLayout};
+/// const OLD: ChunkLayout = ChunkLayout {
+///     magic: b"GAIN",
+///     endian: Endian::Little,
+///     version_bytes: 2,
+///     size: LenWidth::U32,
+///     size_includes_header: false,
+/// };
+/// let data = [b'G', b'A', b'I', b'N', 3, 0, 2, 0, 0, 0, 0xAA, 0xBB, 0xFF];
+/// let (chunk, rest) = read_chunk(&data, &OLD).unwrap();
+/// assert_eq!((chunk.version, chunk.payload), (Some(3), &[0xAA, 0xBB][..]));
+/// assert_eq!(rest, [0xFF]);
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkLayout {
+    /// The bytes the chunk starts with.
     pub magic: &'static [u8],
+    /// Byte order of the version and size fields.
     pub endian: Endian,
     /// Width in bytes of the version field after the magic; 0 for none (at most 8).
     pub version_bytes: usize,
+    /// Width of the size field.
     pub size: LenWidth,
     /// Whether the size counts the header (magic, version and size field) too.
     pub size_includes_header: bool,
 }
 
+/// One chunk [`read_chunk`] found: borrowed from the input, nothing copied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chunk<'a> {
+    /// The version field; `None` when the layout has none.
     pub version: Option<u64>,
+    /// The bytes after the header, as long as the size field says.
     pub payload: &'a [u8],
 }
 
@@ -65,6 +87,14 @@ pub fn read_exact<'a>(data: &'a [u8], layout: &ChunkLayout) -> Result<Chunk<'a>>
 
 /// A sequence of `tag(4) size(4) payload` chunks (RIFF-like). Iterating yields
 /// `Err` once and then stops if a size runs past the data.
+///
+/// ```
+/// use openplugin_core::foreign_state::bytes::Endian;
+/// use openplugin_core::foreign_state::chunk::TaggedChunks;
+/// let data = [b'n', b'a', b'm', b'e', 0, 0, 0, 3, b'a', b'b', b'c', 0, b'v', b'o', b'l', b' ', 0, 0, 0, 1, 9];
+/// let chunks: Vec<_> = TaggedChunks::new(&data, Endian::Big, true).collect::<Result<_, _>>().unwrap();
+/// assert_eq!(chunks, [(*b"name", &b"abc"[..]), (*b"vol ", &[9u8][..])]);
+/// ```
 #[derive(Debug, Clone)]
 pub struct TaggedChunks<'a> {
     r: Reader<'a>,

@@ -22,9 +22,27 @@ struct Ring<T> {
 unsafe impl<T: Send> Sync for Ring<T> {}
 unsafe impl<T: Send> Send for Ring<T> {}
 
+/// The sending end of a [`channel`]. `Send` but not `Sync`: one thread pushes.
 pub struct Producer<T>(Arc<Ring<T>>, PhantomData<Cell<()>>);
+/// The receiving end of a [`channel`]. `Send` but not `Sync`: one thread pops.
 pub struct Consumer<T>(Arc<Ring<T>>, PhantomData<Cell<()>>);
 
+/// A queue holding up to `capacity` items, and its two ends. Allocates the
+/// ring here, once; push and pop then never allocate. Items left in the ring
+/// are dropped when both ends are gone.
+///
+/// # Panics
+///
+/// When `capacity` is 0. Make the channel on the main thread.
+///
+/// ```
+/// use openplugin_core::spsc;
+/// let (mut tx, mut rx) = spsc::channel::<u32>(2);
+/// assert!(tx.push(1).is_ok());
+/// assert!(tx.push(2).is_ok());
+/// assert_eq!(tx.push(3), Err(3)); // full
+/// assert_eq!(rx.pop(), Some(1));
+/// ```
 pub fn channel<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     assert!(capacity > 0, "spsc capacity must be non-zero");
     let ring = Arc::new(Ring {
@@ -41,7 +59,7 @@ pub fn channel<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
 }
 
 impl<T> Producer<T> {
-    /// Returns the item when the ring is full.
+    /// Append `item`; hands it back when the ring is full. Wait-free.
     pub fn push(&mut self, item: T) -> Result<(), T> {
         let write = self.0.write.load(Ordering::Relaxed);
         let next = (write + 1) % self.0.slots.len();
@@ -57,6 +75,7 @@ impl<T> Producer<T> {
 }
 
 impl<T> Consumer<T> {
+    /// The oldest item, or `None` when the ring is empty. Wait-free.
     pub fn pop(&mut self) -> Option<T> {
         let read = self.0.read.load(Ordering::Relaxed);
         if read == self.0.write.load(Ordering::Acquire) {
