@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::wav::{self, Audio};
 
+/// The names [`generate`] accepts.
 pub const SIGNALS: [&str; 5] = ["sweep", "noise", "impulses", "burst", "silence"];
 
 struct Rng(u64);

@@ -529,6 +529,10 @@ struct Class {
     sdk_version: String,
 }
 
+/// Probe child: load a VST3 module and describe every audio-module class it exports. Runs inside
+/// the `__probe` child only, since the module's code runs here. `Err` with a message when the
+/// module will not load, its entry point returns false, or it has no `GetPluginFactory` or that
+/// returns null.
 pub fn probe(bundle: &Path) -> Result<ProbeResult, String> {
     let handle = sys::load_bundle(bundle)?;
     // bundleEntry (macOS) or ModuleEntry (Linux) is required; a missing one is tolerated.

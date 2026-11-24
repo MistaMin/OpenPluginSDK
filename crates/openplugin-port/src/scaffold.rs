@@ -23,8 +23,28 @@ pub enum SdkSource {
     Version(String),
 }
 
+/// What [`generate`] writes.
+///
+/// ```
+/// use openplugin_port::manifest::{Manifest, Plugin, SCHEMA_VERSION};
+/// use openplugin_port::scaffold::{generate, NewOptions, SdkSource};
+///
+/// let manifest = Manifest {
+///     schema_version: SCHEMA_VERSION,
+///     plugin: Plugin { name: "Space Verb".into(), vendor: "Acme".into(), ..Default::default() },
+///     ..Default::default()
+/// };
+/// let options = NewOptions {
+///     sdk: SdkSource::Version("1.0.0-beta".into()),
+///     crate_name: None,
+///     tool: "openplugin-port".into(),
+/// };
+/// let files = generate(&manifest, &options).unwrap();
+/// assert!(files.iter().any(|f| f.path == "src/params.rs"));
+/// ```
 #[derive(Debug, Clone)]
 pub struct NewOptions {
+    /// Where the generated crate's `openplugin` dependency comes from.
     pub sdk: SdkSource,
     /// The Cargo package name; by default made from the plugin's name.
     pub crate_name: Option<String>,
@@ -36,7 +56,9 @@ pub struct NewOptions {
 /// One file of the generated crate, by its path inside the crate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct File {
+    /// Path inside the crate, `/`-separated, such as `src/lib.rs`.
     pub path: &'static str,
+    /// The file's whole text.
     pub text: String,
 }
 
@@ -116,7 +138,8 @@ fn package_version(version: &str) -> String {
     }
 }
 
-/// Every file of the crate for one manifest. Nothing is written.
+/// Every file of the crate for one manifest. Nothing is written. `Err` when the crate name
+/// (given or made from the plugin's name) is not a usable Cargo package name.
 pub fn generate(m: &Manifest, opts: &NewOptions) -> Result<Vec<File>, String> {
     let name = opts.crate_name.clone().unwrap_or_else(|| crate_name(m));
     if !valid_crate_name(&name) {

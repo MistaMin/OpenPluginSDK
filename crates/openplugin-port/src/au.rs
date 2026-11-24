@@ -22,16 +22,24 @@ pub use render::render;
 /// What `Info.plist` says about one component.
 #[derive(Debug, Clone)]
 pub struct PlistComponent {
+    /// `name`, such as `Acme: Verb` (manufacturer, colon, plugin).
     pub name: String,
+    /// `description`; empty when missing.
     pub description: String,
+    /// `type`, four characters (`aufx`, `aumu`...).
     pub component_type: String,
+    /// `subtype`, four characters.
     pub subtype: String,
+    /// `manufacturer`, four characters.
     pub manufacturer: String,
+    /// `factoryFunction`: the symbol that creates the unit, when given.
     pub factory: Option<String>,
+    /// `version`, as a number.
     pub version: Option<u32>,
 }
 
-/// `AudioComponents` from the bundle's `Info.plist`.
+/// `AudioComponents` from the bundle's `Info.plist`. Entries without a type, subtype or
+/// manufacturer are left out; a bundle without the list gives an empty `Vec`. Reads files only.
 pub fn plist_components(bundle_path: &Path) -> Vec<PlistComponent> {
     let Some(plist) = bundle::info_plist(bundle_path) else { return Vec::new() };
     let Some(list) = plist.get("AudioComponents").and_then(|v| v.as_array()) else { return Vec::new() };
@@ -51,6 +59,9 @@ pub fn plist_components(bundle_path: &Path) -> Vec<PlistComponent> {
         .collect()
 }
 
+/// Probe child: register the bundle's Audio Units from its `Info.plist`, instantiate each and
+/// describe it. Runs inside the `__probe` child only. `Err` when `Info.plist` lists no
+/// `AudioComponents` or the bundle will not load.
 pub fn probe(bundle_path: &Path) -> Result<ProbeResult, String> {
     let comps = plist_components(bundle_path);
     if comps.is_empty() {

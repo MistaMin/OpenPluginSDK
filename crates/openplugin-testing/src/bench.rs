@@ -15,9 +15,19 @@ use openplugin_core::{Channels, ChannelsMut, IoConfig, Plugin};
 use crate::json::{self, Value};
 use crate::rng::Rng;
 
+/// The case matrix [`bench()`] runs: every rate × block size × channel count.
+///
+/// ```
+/// use openplugin_testing::bench::BenchOptions;
+///
+/// let options = BenchOptions { block_sizes: vec![128], iterations: 50, ..BenchOptions::quick() };
+/// assert_eq!(options.sample_rates, [48_000.0]);
+/// ```
 #[derive(Clone, Debug)]
 pub struct BenchOptions {
+    /// Sample rates to run, in Hz. Default 44.1, 48 and 96 kHz.
     pub sample_rates: Vec<f32>,
+    /// Block sizes to run, in frames. Default 32, 64, 256, 512 and 1024.
     pub block_sizes: Vec<usize>,
     /// Channel counts to run with `prepare`. `None` runs each layout the
     /// plugin lists in `supported_layouts`.
@@ -28,6 +38,7 @@ pub struct BenchOptions {
     pub iterations: usize,
     /// Only cases whose key contains this text.
     pub filter: Option<String>,
+    /// Seed of the noise fed to the plugin. Default `0x0BE05EED`.
     pub seed: u64,
 }
 
@@ -58,37 +69,94 @@ impl BenchOptions {
     }
 }
 
+/// One measured case of a [`BenchReport`]. The loads are fractions of real time (`0.01` is
+/// one percent: the block took 1 % of the time it lasts), with the timer's own overhead
+/// subtracted.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BenchCase {
+    /// Sample rate, in Hz.
     pub sample_rate: f32,
+    /// Block size, in frames.
     pub block: usize,
+    /// Main-bus channel count given to `prepare`.
     pub channels: usize,
     /// Layout name, or `channels` when the channel count was set by hand.
     pub layout: String,
+    /// Median load over the timed blocks.
     pub median: f64,
+    /// 99th-percentile load.
     pub p99: f64,
+    /// Mean load.
     pub mean: f64,
+    /// Fastest block's load.
     pub min: f64,
+    /// Slowest block's load.
     pub max: f64,
 }
 
 impl BenchCase {
-    /// The identity used to match cases between two reports.
+    /// The identity used to match cases between two reports, such as `"48000Hz/64fr/2ch"`.
+    /// The layout name is not part of it.
     pub fn key(&self) -> String {
         format!("{}Hz/{}fr/{}ch", self.sample_rate, self.block, self.channels)
     }
 }
 
+/// What [`bench()`] measured. Prints as text ([`BenchReport::to_text`]) or JSON
+/// ([`BenchReport::to_json`]); a saved JSON report reads back with [`BenchReport::from_json`]
+/// as the baseline of [`compare`].
+///
+/// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct MyPlugin { db: f32 }
+/// # impl Plugin for MyPlugin {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id != "gain" { return false; } self.db = PARAMS[0].clamp(v); true }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+/// #         let g = 10f32.powf(self.db / 20.0);
+/// #         for c in io { for s in &mut c[..frames] { *s *= g; } }
+/// #     }
+/// # }
+/// use openplugin_testing::bench::{bench, compare, BenchOptions, BenchReport};
+///
+/// let options = BenchOptions {
+///     block_sizes: vec![64],
+///     channel_counts: Some(vec![2]),
+///     warmup_blocks: 4,
+///     iterations: 16,
+///     ..BenchOptions::quick()
+/// };
+/// let report = bench(MyPlugin::default, &options);
+/// assert_eq!(report.cases.len(), 1);
+/// assert_eq!(report.cases[0].key(), "48000Hz/64fr/2ch");
+///
+/// let baseline = BenchReport::from_json(&report.to_json()).unwrap();
+/// assert_eq!(baseline.cases[0].key(), report.cases[0].key());
+/// assert!(!compare(&baseline, &report, 0.25).has_regression());
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct BenchReport {
+    /// The plugin's name ([`PluginInfo::name`](openplugin_core::PluginInfo::name)).
     pub plugin: String,
     /// Whether the harness itself was built with debug assertions. Compare only like with like.
     pub debug_build: bool,
+    /// Blocks timed per case ([`BenchOptions::iterations`]).
     pub iterations: usize,
+    /// One entry per case, layouts outermost, then rates, then block sizes.
     pub cases: Vec<BenchCase>,
 }
 
 /// Measure `P` over the matrix in `options`. Build with `--release` for numbers that mean anything.
+///
+/// `make` is called once to read the layouts and once per case. Runs on the calling thread and
+/// takes roughly `(warmup_blocks + iterations) × cases` blocks of the plugin's time; allocates
+/// the buffers and the report. See [`BenchReport`] for an example.
 pub fn bench<P: Plugin>(make: impl Fn() -> P, options: &BenchOptions) -> BenchReport {
     let probe = make();
     let name = probe.info().name.to_string();
@@ -259,6 +327,9 @@ impl BenchReport {
         out
     }
 
+    /// Read a report written by [`BenchReport::to_json`]. `Err` carries an English message for
+    /// text that is not JSON or lacks `plugin`, `cases` or a case's numbers; a missing
+    /// `debug_build` reads as false and a missing `iterations` as 0.
     pub fn from_json(text: &str) -> Result<Self, String> {
         let v = json::parse(text)?;
         let plugin = v.get("plugin").and_then(Value::as_str).ok_or("missing plugin")?.to_string();
@@ -284,42 +355,60 @@ impl BenchReport {
     }
 }
 
+/// How one case moved between two reports ([`compare`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Verdict {
+    /// Within the tolerance, or the change is below the noise floor.
     Same,
+    /// The median shrank by more than the tolerance.
     Faster,
+    /// The median grew by more than the tolerance: a regression.
     Slower,
 }
 
+/// One case present in both reports of a [`Comparison`].
 #[derive(Clone, Debug)]
 pub struct Row {
+    /// The case's [`BenchCase::key`].
     pub key: String,
+    /// Median load in the baseline.
     pub base_median: f64,
+    /// Median load in the new report.
     pub new_median: f64,
+    /// `new_median / base_median`; infinity when the baseline median is zero.
     pub ratio: f64,
+    /// Same, faster or slower.
     pub verdict: Verdict,
 }
 
+/// The result of [`compare`]: matched cases, unmatched keys, and the tolerance used.
 #[derive(Clone, Debug)]
 pub struct Comparison {
+    /// One row per case in both reports, in the new report's order.
     pub rows: Vec<Row>,
+    /// Keys of cases only the baseline has.
     pub only_in_base: Vec<String>,
+    /// Keys of cases only the new report has.
     pub only_in_new: Vec<String>,
+    /// The tolerance passed to [`compare`] (0.25 is 25 %).
     pub tolerance: f64,
     /// Set when one report is a debug build and the other is not.
     pub build_mismatch: bool,
 }
 
 impl Comparison {
+    /// The rows whose verdict is [`Verdict::Slower`]. Allocates.
     pub fn regressions(&self) -> Vec<&Row> {
         self.rows.iter().filter(|r| r.verdict == Verdict::Slower).collect()
     }
 
+    /// True when any row is [`Verdict::Slower`].
     pub fn has_regression(&self) -> bool {
         self.rows.iter().any(|r| r.verdict == Verdict::Slower)
     }
 
+    /// Fixed-width text: one line per row, then the unmatched keys and a summary line.
     pub fn to_text(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "compare (tolerance {:.0}%{}):", self.tolerance * 100.0, if self.build_mismatch { ", WARNING: debug vs release" } else { "" });
@@ -383,6 +472,35 @@ pub fn compare(base: &BenchReport, new: &BenchReport, tolerance: f64) -> Compari
 /// Flags: `--json`, `--out FILE`, `--baseline FILE`, `--tolerance 0.25`,
 /// `--quick`, `--filter TEXT`, `--iterations N`. Returns a failing exit code
 /// when `--baseline` is given and a case is slower.
+///
+/// Exit codes: 0 success, 1 a regression against the baseline, 2 an unknown argument or a file
+/// that cannot be written or read. A `--tolerance` or `--iterations` value that does not parse
+/// keeps the default. `--out` writes JSON to the file and prints text. A bench target's `main`
+/// passes `std::env::args().skip(1)`; here the arguments are given by hand:
+///
+/// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct MyPlugin { db: f32 }
+/// # impl Plugin for MyPlugin {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id != "gain" { return false; } self.db = PARAMS[0].clamp(v); true }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+/// #         let g = 10f32.powf(self.db / 20.0);
+/// #         for c in io { for s in &mut c[..frames] { *s *= g; } }
+/// #     }
+/// # }
+/// use std::process::ExitCode;
+///
+/// let args = ["--quick", "--iterations", "8", "--filter", "48000Hz/64fr"].map(String::from);
+/// let code = openplugin_testing::bench::cli(MyPlugin::default, args);
+/// assert_eq!(code, ExitCode::SUCCESS);
+/// ```
 pub fn cli<P: Plugin>(make: impl Fn() -> P, args: impl IntoIterator<Item = String>) -> std::process::ExitCode {
     let mut opts = BenchOptions::default();
     let (mut as_json, mut out, mut baseline, mut tolerance) = (false, None, None, 0.25f64);

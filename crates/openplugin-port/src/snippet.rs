@@ -21,7 +21,12 @@ pub enum Pin {
     Position,
     /// Keep the source's id with this `ParamInfo` method (`with_clap_id`,
     /// `with_vst3_id` or `with_au_id`).
-    Id { method: &'static str, id: u32 },
+    Id {
+        /// `with_clap_id`, `with_vst3_id` or `with_au_id`.
+        method: &'static str,
+        /// The id to keep.
+        id: u32,
+    },
     /// The id cannot be kept, and why.
     Unpinnable(String),
 }
@@ -79,9 +84,13 @@ pub fn pins(format: &str, params: &[Param]) -> Vec<Pin> {
 pub struct Inferred {
     /// The string id the SDK addresses the parameter by.
     pub id: String,
+    /// Display name.
     pub name: String,
+    /// Plain minimum.
     pub min: f32,
+    /// Plain maximum.
     pub max: f32,
+    /// Plain default.
     pub default: f32,
     /// A `Unit` variant name: `Db`, `Hz`, `Toggle`, `Choice`, `None`...
     pub unit: &'static str,
@@ -89,6 +98,7 @@ pub struct Inferred {
     pub taper: &'static str,
     /// `with_steps` argument; 0 when the SDK's unit already implies the steps.
     pub steps: u32,
+    /// Choice labels for a `Choice` unit, in order; empty otherwise.
     pub choices: Vec<String>,
     /// `ParamFlags` constants the parameter carries, `AUTOMATABLE` included when it is.
     pub flags: Vec<&'static str>,
@@ -154,10 +164,24 @@ fn is_toggle_text(t: &str) -> bool {
 /// travel of the curve: 0 is exact.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Fit {
+    /// Largest distance of a middle point from the straight line, relative to the travel.
     pub linear_error: f64,
+    /// The same for the exponential curve; `None` when a value is zero or negative.
     pub log_error: Option<f64>,
 }
 
+/// Fit `(normalised, plain)` points, in order of travel. `None` for no points, a non-finite
+/// value, or end points that are equal (no travel).
+///
+/// ```
+/// use openplugin_port::snippet::{fit, is_log};
+///
+/// // 20 Hz .. 20 kHz on a log taper, read at 0, 0.5 and 1.
+/// let f = fit(&[(0.0, 20.0), (0.5, 632.46), (1.0, 20_000.0)]).unwrap();
+/// assert!(f.log_error.unwrap() < 1e-3);
+/// assert!(is_log(&f));
+/// assert!(fit(&[(0.0, 1.0), (1.0, 1.0)]).is_none());
+/// ```
 pub fn fit(points: &[(f64, f64)]) -> Option<Fit> {
     let (first, last) = (points.first()?, points.last()?);
     let (y0, y1) = (first.1, last.1);
@@ -484,6 +508,8 @@ pub enum Layouts {
     NoBuses,
 }
 
+/// Decide [`Layouts`] from the scanned buses: mono or stereo main buses (and an optional mono or
+/// stereo sidechain) give an `IoConfig` expression; anything else asks for a hand-written list.
 pub fn layouts(p: &Plugin) -> Layouts {
     let main_in = p.buses.iter().find(|b| b.direction == "input" && b.kind == "main");
     let main_out = p.buses.iter().find(|b| b.direction == "output" && b.kind == "main");
@@ -506,7 +532,9 @@ pub fn layouts(p: &Plugin) -> Layouts {
     }
 }
 
-/// The Rust text for a manifest. `file_note` names the source in the header.
+/// The Rust text for a manifest: the `src/params.rs` of a port, with the parameter table,
+/// identity and layouts, and a `TODO(porting)` line for every guess. Never fails; what cannot be
+/// expressed becomes a comment.
 pub fn render(m: &Manifest) -> String {
     let p = &m.plugin;
     let inferred = infer(p);

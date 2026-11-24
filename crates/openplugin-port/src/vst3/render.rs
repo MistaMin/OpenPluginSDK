@@ -145,6 +145,9 @@ static QUEUE_VTBL: QueueVtbl = QueueVtbl {
     add_point: q_add,
 };
 
+/// Render child: load the plugin, activate it at `job.rate` and `job.block`, feed it `feed` with
+/// `job.events` at their offsets, and return `frames + latency` frames of output. Runs inside the
+/// `__render` child only. `Err` with a message when the plugin cannot be loaded or activated.
 pub fn render(job: &crate::render::Job, feed: &crate::render::Feed) -> Result<crate::render::Rendered, String> {
     let handle = sys::load_bundle(&job.path)?;
     let entry = sys::bundle_function(handle, sys::MODULE_ENTRY);

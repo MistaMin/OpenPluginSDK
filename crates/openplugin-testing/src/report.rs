@@ -38,6 +38,7 @@ pub enum Check {
 pub(crate) const CHECK_COUNT: usize = 13;
 
 impl Check {
+    /// Every check, in the order a [`Report`] lists them.
     pub const ALL: [Check; CHECK_COUNT] = [
         Check::NoAlloc,
         Check::NoPanic,
@@ -54,6 +55,15 @@ impl Check {
         Check::Locks,
     ];
 
+    /// The check's stable machine name, such as `"no_alloc"`: what the report prints and what
+    /// scripts can match on.
+    ///
+    /// ```
+    /// use openplugin_testing::Check;
+    ///
+    /// assert_eq!(Check::NoAlloc.id(), "no_alloc");
+    /// assert_eq!(Check::ALL.len(), 13);
+    /// ```
     pub fn id(self) -> &'static str {
         match self {
             Check::NoAlloc => "no_alloc",
@@ -72,6 +82,7 @@ impl Check {
         }
     }
 
+    /// A one-line English description of what the check asserts, for the report.
     pub fn title(self) -> &'static str {
         match self {
             Check::NoAlloc => "no allocation or free on the audio path",
@@ -95,15 +106,22 @@ impl Check {
     }
 }
 
+/// The outcome of one [`Check`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Status {
+    /// Every assertion of the check held, and at least one ran.
     Pass,
+    /// At least one assertion failed; [`CheckResult::first_failure`] says which.
     Fail,
+    /// The check did not run: left out through [`Options::skip`](crate::Options::skip), not
+    /// applicable to the plugin, not detectable ([`Check::Locks`]), or no case ran. The
+    /// note says why.
     Skip,
 }
 
 impl Status {
+    /// `"pass"`, `"FAIL"` or `"skip"`, as the report prints it.
     pub fn label(self) -> &'static str {
         match self {
             Status::Pass => "pass",
@@ -118,32 +136,70 @@ impl Status {
 /// the case text) to reproduce it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Failure {
+    /// The case's label: rate, block size, stimulus and step, as the suite names it.
     pub case: String,
     /// The master seed of the run.
     pub seed: u64,
     /// The seed of the case's own generator, derived from the master seed and the case text.
     pub case_seed: u64,
+    /// What went wrong, in English.
     pub message: String,
 }
 
+/// One line of a [`Report`]: a check, its outcome, and its counts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckResult {
+    /// The check this line reports.
     pub check: Check,
+    /// Pass, fail or skip.
     pub status: Status,
     /// Assertions evaluated for this check.
     pub cases: u64,
     /// Assertions that failed.
     pub failures: u64,
+    /// The first failing case, with its seeds; `None` when nothing failed.
     pub first_failure: Option<Failure>,
     /// Why the check was skipped, or something worth knowing.
     pub note: Option<String>,
 }
 
+/// What [`conformance`](crate::conformance) found: one [`CheckResult`] per [`Check`], in the
+/// order of [`Check::ALL`]. Its `Display` is the multi-line text report.
+///
+/// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct MyPlugin { db: f32 }
+/// # impl Plugin for MyPlugin {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id != "gain" { return false; } self.db = PARAMS[0].clamp(v); true }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+/// #         let g = 10f32.powf(self.db / 20.0);
+/// #         for c in io { for s in &mut c[..frames] { *s *= g; } }
+/// #     }
+/// # }
+/// use openplugin_testing::{conformance, Check, Options, Status};
+///
+/// let options = Options { sample_rates: vec![48_000.0], block_sizes: vec![64], ..Options::quick() };
+/// let report = conformance(MyPlugin::default, options);
+/// assert!(report.passed(), "{report}");
+/// assert_eq!(report.status(Check::Locks), Status::Skip); // never detectable
+/// println!("{report}");
+/// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
+    /// The plugin's name ([`PluginInfo::name`](openplugin_core::PluginInfo::name)).
     pub plugin: String,
+    /// The master seed of the run ([`Options::seed`](crate::Options::seed)).
     pub seed: u64,
+    /// One result per check, in the order of [`Check::ALL`].
     pub checks: Vec<CheckResult>,
+    /// Sample rates, in Hz, the plugin accepted and was run at.
     pub rates_run: Vec<f32>,
     /// Rates the plugin refused through `accepts_sample_rate`.
     pub rates_skipped: Vec<f32>,
@@ -152,18 +208,22 @@ pub struct Report {
 }
 
 impl Report {
+    /// The result of `check`.
     pub fn result(&self, check: Check) -> &CheckResult {
         &self.checks[check.index()]
     }
 
+    /// The status of `check`: `report.result(check).status`.
     pub fn status(&self, check: Check) -> Status {
         self.result(check).status
     }
 
+    /// True when no check failed. Skipped checks do not fail a run.
     pub fn passed(&self) -> bool {
         self.checks.iter().all(|c| c.status != Status::Fail)
     }
 
+    /// The checks that failed, in report order (empty when [`Report::passed`]). Allocates.
     pub fn failed_checks(&self) -> Vec<Check> {
         self.checks.iter().filter(|c| c.status == Status::Fail).map(|c| c.check).collect()
     }

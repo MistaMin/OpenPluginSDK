@@ -12,12 +12,28 @@ use crate::render::{Event, Job, RenderInfo, read_raw_channels, write_raw};
 use crate::wav::{self, Audio};
 use crate::{ScanOptions, probe, scan, signal};
 
+/// What [`run_null`] does. Start from [`NullOptions::new`] and set fields.
+///
+/// ```
+/// use std::path::PathBuf;
+/// use openplugin_port::null::NullOptions;
+///
+/// let mut options = NullOptions::new("openplugin-port".into(), "Old.vst3".into(), "New.clap".into());
+/// options.input = "noise:3".into();
+/// options.automation = Some("0:Mix=0.5, 1s:Mix=1".into());
+/// options.tolerance = 1e-5;
+/// assert_eq!(options.block, 512);
+/// ```
 pub struct NullOptions {
     /// The executable to re-run as `__render`. The CLI passes itself.
     pub helper: PathBuf,
+    /// The original plugin's bundle or file.
     pub original: PathBuf,
+    /// The port's bundle or file.
     pub port: PathBuf,
+    /// `clap`, `vst3` or `au` for the original; by default the extension decides.
     pub original_format: Option<String>,
+    /// `clap`, `vst3` or `au` for the port; by default the extension decides.
     pub port_format: Option<String>,
     /// A built-in signal (`sweep`, `noise:3`, ...) or a WAV path.
     pub input: String,
@@ -25,10 +41,13 @@ pub struct NullOptions {
     pub automation: Option<String>,
     /// `None`: a WAV input's own rate, else 48000.
     pub rate: Option<u32>,
+    /// Block size in frames; at least 1. Default 512.
     pub block: u32,
+    /// Largest absolute sample difference that still nulls. Default `1e-6` (about -120 dBFS).
     pub tolerance: f64,
     /// JSON object mapping original parameter ids or names to port ids or names.
     pub param_map: Option<PathBuf>,
+    /// How long each child may run before it is killed. Default 120 s.
     pub timeout: Duration,
     /// Where the raw render files go (default: a folder in the system temp dir, removed afterwards).
     pub work_dir: Option<PathBuf>,
@@ -36,10 +55,13 @@ pub struct NullOptions {
     pub save_dir: Option<PathBuf>,
     /// Extra environment for each plugin's child (used by the tests to inject faults).
     pub env_original: Vec<(String, String)>,
+    /// Extra environment for the port's child.
     pub env_port: Vec<(String, String)>,
 }
 
 impl NullOptions {
+    /// Options with the defaults: a `sweep` input, no automation, 512-frame blocks, tolerance
+    /// `1e-6`, 120 s timeout, formats from the extensions.
     pub fn new(helper: PathBuf, original: PathBuf, port: PathBuf) -> Self {
         Self {
             helper,
@@ -62,27 +84,42 @@ impl NullOptions {
     }
 }
 
+/// One plugin of a null test, as rendered.
 #[derive(Debug, Clone, Serialize)]
 pub struct Side {
+    /// The path given.
     pub path: String,
+    /// `clap`, `vst3` or `au`.
     pub format: String,
+    /// The plugin's name.
     pub name: String,
+    /// Latency the plugin reported, in samples; its output is shifted back by this much.
     pub latency_samples: u32,
+    /// Input channels it rendered with.
     pub input_channels: u32,
+    /// Output channels it rendered.
     pub output_channels: u32,
 }
 
+/// One sample of both renders.
 #[derive(Debug, Clone, Serialize)]
 pub struct SamplePair {
+    /// Frame index, after latency alignment.
     pub index: usize,
+    /// The original's sample.
     pub original: f32,
+    /// The port's sample.
     pub port: f32,
 }
 
+/// How one output channel compared.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelReport {
+    /// Channel index, from 0.
     pub channel: usize,
+    /// Largest absolute difference; infinity when one side alone is NaN or infinite.
     pub max_abs_diff: f64,
+    /// Frame of [`ChannelReport::max_abs_diff`].
     pub max_at: usize,
     /// 20 log10 of the RMS of the difference; `None` for exactly zero (minus infinity).
     pub rms_diff_db: Option<f64>,
@@ -90,26 +127,39 @@ pub struct ChannelReport {
     pub first_differing: Option<SamplePair>,
     /// First sample whose difference exceeds the tolerance.
     pub first_over_tolerance: Option<SamplePair>,
+    /// How many samples differ by more than the tolerance.
     pub samples_over_tolerance: usize,
 }
 
+/// What [`run_null`] found. [`NullReport::to_text`] is the human report; it serialises to JSON.
 #[derive(Debug, Clone, Serialize)]
 pub struct NullReport {
+    /// The original plugin.
     pub original: Side,
+    /// The port.
     pub port: Side,
+    /// Sample rate of the render, in Hz.
     pub rate: u32,
+    /// Block size, in frames.
     pub block: u32,
+    /// Frames compared (the input's length).
     pub frames: usize,
+    /// The tolerance used.
     pub tolerance: f64,
+    /// True when the two reported latencies differ (each output is still aligned by its own).
     pub latency_differs: bool,
+    /// One report per output channel.
     pub channels: Vec<ChannelReport>,
     /// Parameter pairs used: original id and name, port id and name.
     pub parameter_map: Vec<String>,
+    /// Things worth knowing that do not fail the test.
     pub notes: Vec<String>,
+    /// True when no sample of any channel is over the tolerance.
     pub pass: bool,
 }
 
 impl NullReport {
+    /// Multi-line English report, ending in `PASS` or `FAIL: ...`.
     pub fn to_text(&self) -> String {
         let mut s = String::new();
         let side = |label: &str, x: &Side| {
@@ -158,8 +208,11 @@ impl NullReport {
 /// One automation entry: when, which parameter (id or name, as the original calls it), plain value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Automation {
+    /// When, in frames from the start.
     pub frame: u64,
+    /// The original's parameter id (decimal) or name.
     pub param: String,
+    /// Plain value, in the parameter's own units.
     pub value: f64,
 }
 
@@ -181,7 +234,17 @@ fn parse_time(text: &str, rate: u32) -> Result<u64, String> {
 }
 
 /// `frame:param=value`, separated by `,` `;` or newlines. A time is a frame number or has an `s` or
-/// `ms` suffix; `param` is an id or a name; `@file` reads the entries from a file.
+/// `ms` suffix; `param` is an id or a name; `@file` reads the entries from a file. `rate` (Hz)
+/// turns times into frames. `Err` with a message for an entry that does not parse, a negative
+/// time, or a file that cannot be read.
+///
+/// ```
+/// use openplugin_port::null::parse_automation;
+///
+/// let entries = parse_automation("0:Mix=0.5; 500ms:Mix=1", 48_000).unwrap();
+/// assert_eq!(entries[1].frame, 24_000);
+/// assert_eq!((entries[1].param.as_str(), entries[1].value), ("Mix", 1.0));
+/// ```
 pub fn parse_automation(spec: &str, rate: u32) -> Result<Vec<Automation>, String> {
     let text = match spec.strip_prefix('@') {
         Some(path) => std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?,
@@ -222,7 +285,9 @@ fn json_key(v: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// Read a map file: an object of original id or name to port id or name.
+/// Read a map file: an object of original id or name to port id or name. Values may be strings
+/// or numbers. `Err` with a message for a file that cannot be read, is not a JSON object, or
+/// has another kind of value.
 pub fn read_param_map(path: &Path) -> Result<Vec<(String, String)>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -233,7 +298,8 @@ pub fn read_param_map(path: &Path) -> Result<Vec<(String, String)>, String> {
 }
 
 /// The port parameter for an original one: the map file first (by id, then by name), then the same
-/// name, then the same id.
+/// name (any case), then the same id. `None` when nothing matches, or a map entry names a port
+/// parameter that does not exist.
 pub fn match_param<'a>(orig: &Param, port: &'a [Param], map: &[(String, String)]) -> Option<&'a Param> {
     let id = orig.id.to_string();
     let by_map = map.iter().find(|(k, _)| *k == id).or_else(|| map.iter().find(|(k, _)| k.to_lowercase() == orig.name.to_lowercase()));
@@ -245,6 +311,7 @@ pub fn match_param<'a>(orig: &Param, port: &'a [Param], map: &[(String, String)]
 }
 
 /// The map from original to port parameter ids, written by `openplugin-port param-map`.
+/// Returns the JSON object and one English line per original parameter that found no match.
 pub fn generate_param_map(original: &Manifest, port: &Manifest, map: &[(String, String)]) -> (serde_json::Value, Vec<String>) {
     let mut obj = serde_json::Map::new();
     let mut unmatched = Vec::new();
@@ -299,7 +366,20 @@ fn render_side(opts: &NullOptions, work: &Path, tag: &str, manifest: &Manifest, 
     Ok((info, audio?))
 }
 
-/// Compare two aligned renders.
+/// Compare two aligned renders, channel by channel, sample by sample. Channels and samples past
+/// the shorter side are not compared. Two NaNs count as equal; a NaN or infinity on one side
+/// only is an infinite difference.
+///
+/// ```
+/// use openplugin_port::null::compare;
+///
+/// let original = vec![vec![0.0f32, 0.5, 1.0]];
+/// let port = vec![vec![0.0f32, 0.5, 0.9]];
+/// let report = &compare(&original, &port, 1e-3)[0];
+/// assert_eq!(report.samples_over_tolerance, 1);
+/// assert_eq!(report.max_at, 2);
+/// assert_eq!(report.first_differing.as_ref().unwrap().index, 2);
+/// ```
 pub fn compare(a: &[Vec<f32>], b: &[Vec<f32>], tolerance: f64) -> Vec<ChannelReport> {
     a.iter()
         .zip(b)
@@ -349,7 +429,11 @@ fn latency_aligned(out: &[Vec<f32>], latency: usize, frames: usize) -> Vec<Vec<f
     out.iter().map(|c| c.iter().skip(latency).take(frames).copied().collect()).collect()
 }
 
-/// Run the whole null test.
+/// Run the whole null test: scan both plugins, render each in its own child process through the
+/// same input and automation, align by reported latency and [`compare`]. Blocks for up to
+/// `opts.timeout` per child. `Err` with a message for a block of 0, a scan or render that
+/// failed, an empty input, an automation entry naming a parameter either side lacks, or
+/// different output channel counts. A port that does not null is `Ok` with `pass == false`.
 pub fn run_null(opts: &NullOptions) -> Result<NullReport, String> {
     if opts.block == 0 {
         return Err("--block must be at least 1".into());

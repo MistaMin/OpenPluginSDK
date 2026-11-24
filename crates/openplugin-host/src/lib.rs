@@ -33,7 +33,54 @@
 //! The audio side allocates nothing. A plugin without a chunk
 //! ([`openplugin_core::has_state_chunk`]) saves and loads through the
 //! parameter plane and never takes the gate, so none of its blocks is skipped.
+//!
+//! # Example
+//!
+//! ```
+//! use openplugin_core::{Category, ParamInfo, PluginInfo, Unit};
+//! use openplugin_host::{HostSession, Plugin};
+//!
+//! static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+//! static INFO: PluginInfo =
+//!     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+//!
+//! #[derive(Default)]
+//! struct Gain { db: f32 }
+//!
+//! impl Plugin for Gain {
+//!     fn info(&self) -> &'static PluginInfo { &INFO }
+//!     fn prepare(&mut self, _rate: f32, _max_block: usize, _channels: usize) {}
+//!     fn reset(&mut self) {}
+//!     fn set_param(&mut self, id: &str, value: f32) -> bool {
+//!         if id != "gain" { return false; }
+//!         self.db = PARAMS[0].clamp(value);
+//!         true
+//!     }
+//!     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+//!     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+//!         let linear = 10f32.powf(self.db / 20.0);
+//!         for channel in io {
+//!             channel[..frames].iter_mut().for_each(|sample| *sample *= linear);
+//!         }
+//!     }
+//! }
+//!
+//! // 48 kHz, blocks of up to 64 frames, stereo.
+//! let session = HostSession::new(Box::new(Gain::default()), 48_000.0, 64, 2).unwrap();
+//! assert!(session.store_param(0, -6.0)); // plain units: dB
+//!
+//! let mut left = [1.0f32; 64];
+//! let mut right = [1.0f32; 64];
+//! assert!(session.process_stereo(&mut left, &mut right)); // the plane is applied here
+//! assert!((left[0] - 0.501).abs() < 1e-3);
+//!
+//! let saved = session.save_bytes().unwrap();
+//! assert!(session.store_param(0, 0.0));
+//! assert!(session.load_bytes(&saved));
+//! assert_eq!(session.load_param(0), -6.0);
+//! ```
 #![allow(unsafe_code)]
+#![deny(missing_docs)]
 
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -64,7 +111,14 @@ struct PresetEntry {
 
 /// [`HostSession::new`] was given a sample rate outside
 /// [`openplugin_core::MIN_SAMPLE_RATE`]..=[`openplugin_core::MAX_SAMPLE_RATE`],
-/// or one the plugin refuses.
+/// or one the plugin refuses. The field is the rate that was refused, in Hz.
+///
+/// ```
+/// use openplugin_host::UnsupportedRate;
+///
+/// let error = UnsupportedRate(1.0);
+/// assert_eq!(error.to_string(), "sample rate 1 Hz is not supported");
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UnsupportedRate(pub f64);
 
@@ -139,8 +193,41 @@ struct AudioGuard<'a> {
     _flush: DenormalGuard,
 }
 
-/// One host instance. Message-thread calls use the plane and the atomics.
-/// The audio thread is the only caller that enters `audio`.
+/// One host instance of one plugin: the parameter plane, the meters, and the plugin object
+/// behind the gate described in the [crate docs](crate).
+///
+/// It is `Send + Sync`: share it (`Arc<HostSession>`) between the message thread and the
+/// audio thread. Message-thread calls use the plane and the atomics; only one thread at a
+/// time may call the `process_*` methods and [`HostSession::reset`] (the audio thread), and
+/// [`HostSession::prepare`] must not run beside them. The [crate docs](crate) have a full
+/// example.
+///
+/// ```
+/// # use openplugin_core::{Category, ParamInfo, PluginInfo, Unit};
+/// # use openplugin_host::{HostSession, Plugin};
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.thru", "Thru", "Example", "1", Category::Utility, &[]);
+/// # struct Thru;
+/// # impl Plugin for Thru {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, _: &str, _: f32) -> bool { false }
+/// #     fn param(&self, _: &str) -> Option<f32> { None }
+/// #     fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
+/// # }
+/// use std::sync::Arc;
+///
+/// let session = Arc::new(HostSession::new(Box::new(Thru), 44_100.0, 256, 2).unwrap());
+/// let audio = Arc::clone(&session);
+/// std::thread::spawn(move || {
+///     let mut planar = [[0.25f32; 256]; 2];
+///     let [left, right] = &mut planar;
+///     assert!(audio.process_planar(&mut [&mut left[..], &mut right[..]]));
+/// })
+/// .join()
+/// .unwrap();
+/// assert_eq!(session.latency(), 0);
+/// ```
 pub struct HostSession {
     audio: UnsafeCell<Audio>,
     plane: ParamPlane,
@@ -196,9 +283,12 @@ unsafe impl Send for HostSession {}
 unsafe impl Sync for HostSession {}
 
 impl HostSession {
-    /// Builds a host session. The rate is checked as [`HostSession::prepare`]
-    /// checks it; `max_block` and `channels` are clamped to 1..=65536 and
-    /// 1..=[`MAX_AUDIO_CHANNELS`].
+    /// Builds a host session and prepares the plugin once. `sample_rate` is in Hz, `max_block`
+    /// is the largest block in frames, `channels` the main-bus channel count. The rate is
+    /// checked as [`HostSession::prepare`] checks it ([`UnsupportedRate`] otherwise);
+    /// `max_block` and `channels` are clamped to 1..=65536 and 1..=[`MAX_AUDIO_CHANNELS`].
+    ///
+    /// Message thread. Allocates the scratch buffers and event queues the audio side then uses.
     pub fn new(
         mut plugin: Box<dyn Plugin>,
         sample_rate: f64,
@@ -315,23 +405,32 @@ impl HostSession {
         f64::from_bits(self.tail.load(Ordering::Acquire))
     }
 
+    /// The plugin's display name ([`PluginInfo::name`]). Any thread; never blocks, never allocates.
     pub fn name(&self) -> &'static str {
         self.info.name
     }
 
+    /// How many parameters the plugin has; valid indices are `0..param_count()`. Fixed for the
+    /// session's life. Any thread; never blocks, never allocates.
     pub fn param_count(&self) -> usize {
         self.info.params.len()
     }
 
-    /// The descriptor of parameter `index`.
+    /// The descriptor of parameter `index`, from the table of creation (ids, ranges and order
+    /// never change; see [`HostSession::current_info`] for names that may). `None` for an
+    /// index at or past [`HostSession::param_count`]. Any thread; never allocates.
     pub fn param_info(&self, index: usize) -> Option<&'static ParamInfo> {
         self.info.params.get(index)
     }
 
+    /// How many factory presets [`HostSession::apply_preset`] accepts: those for which
+    /// [`Plugin::preset_values`] returned values at creation. Any thread; never allocates.
     pub fn preset_count(&self) -> usize {
         self.presets.len()
     }
 
+    /// The name of factory preset `index`, or `""` for an index at or past
+    /// [`HostSession::preset_count`]. Any thread; never allocates.
     pub fn preset_name(&self, index: usize) -> &'static str {
         self.presets
             .get(index)
@@ -339,19 +438,27 @@ impl HostSession {
             .unwrap_or("")
     }
 
-    /// Write a plain value onto the parameter plane ([`ParamPlane::store`]);
-    /// the audio thread applies it on the next `process_*`. `store`/`load`
-    /// name the plane, where [`Plugin::set_param`]/`param` name the plugin.
+    /// Write a plain value (the parameter's own units, such as dB or Hz) onto the parameter
+    /// plane ([`ParamPlane::store`]); the audio thread applies it on the next `process_*`.
+    /// `store`/`load` name the plane, where [`Plugin::set_param`]/`param` name the plugin.
+    ///
+    /// The value is clamped to the parameter's range; NaN becomes the default. Returns false,
+    /// and stores nothing, for an index at or past [`HostSession::param_count`]. Any thread;
+    /// never blocks, never allocates.
     pub fn store_param(&self, index: usize, value: f32) -> bool {
         self.plane.store(index, value)
     }
 
+    /// The plain value last stored on the plane for parameter `index` (by the host, a preset,
+    /// a state load, or the plugin's own values at creation). `0.0` for an index at or past
+    /// [`HostSession::param_count`]. Any thread; never blocks, never allocates.
     pub fn load_param(&self, index: usize) -> f32 {
         self.plane.load(index).unwrap_or(0.0)
     }
 
     /// Stores the value a VST3, Audio Unit or AAX host sees ([`HostSpace::SHELLS`]): plain units,
-    /// or normalized travel for a parameter shown normalized there. Does not allocate.
+    /// or normalized travel for a parameter shown normalized there. Returns false for an index
+    /// at or past [`HostSession::param_count`]. Any thread; never blocks, does not allocate.
     pub fn store_host(&self, index: usize, value: f32) -> bool {
         let Some(param) = self.info.params.get(index) else {
             return false;
@@ -359,14 +466,17 @@ impl HostSession {
         self.plane.store(index, param.from_host(HostSpace::SHELLS, value))
     }
 
-    /// The value a VST3, Audio Unit or AAX host sees ([`FfiInstance::store_host`]).
+    /// The value a VST3, Audio Unit or AAX host sees ([`HostSession::store_host`]). For an index
+    /// at or past [`HostSession::param_count`], `0.0`. Any thread; never blocks, never allocates.
     pub fn load_host(&self, index: usize) -> f32 {
         let value = self.load_param(index);
         self.info.params.get(index).map_or(value, |param| param.to_host(HostSpace::SHELLS, value))
     }
 
     /// Plain value from normalized 0..1 travel, using the parameter taper.
-    /// The audio thread applies it on the next `process_*`. Does not allocate.
+    /// The audio thread applies it on the next `process_*`. A non-finite `normalized` stores
+    /// the default; values outside 0..1 are clamped to the range. Returns false for an index
+    /// at or past [`HostSession::param_count`]. Any thread; never blocks, does not allocate.
     pub fn store_normalized(&self, index: usize, normalized: f32) -> bool {
         let Some(param) = self.info.params.get(index) else {
             return false;
@@ -379,6 +489,8 @@ impl HostSession {
         self.plane.store(index, param.from_normalized(travel))
     }
 
+    /// Parameter `index` as normalized 0..1 travel through its taper ([`ParamInfo::to_normalized`]).
+    /// `0.0` for an index at or past [`HostSession::param_count`]. Any thread; never allocates.
     pub fn load_normalized(&self, index: usize) -> f32 {
         let Some(param) = self.info.params.get(index) else {
             return 0.0;
@@ -495,19 +607,30 @@ impl HostSession {
         }
     }
 
+    /// The meter frame the plugin published at the end of the last block ([`Plugin::meters`]);
+    /// [`MeterFrame::SILENT`] before the first. A seqlock read: any thread, never blocks the
+    /// audio thread, never allocates.
     pub fn meters(&self) -> MeterFrame {
         self.meters.read()
     }
 
+    /// The per-bus meters the plugin published at the end of the last block
+    /// ([`Plugin::bus_meters`]); [`BusMeters::SILENT`] before the first. Any thread; never
+    /// blocks the audio thread, never allocates.
     pub fn bus_meters(&self) -> BusMeters {
         self.bus_meters.read()
     }
 
+    /// The factory preset last applied with [`HostSession::apply_preset`], or `-1` when none has
+    /// been. Storing a parameter afterwards does not clear it. Any thread; never allocates.
     pub fn preset_index(&self) -> i32 {
         self.preset.load(Ordering::Acquire)
     }
 
-    /// Publish a factory preset onto the plane. The audio thread applies it.
+    /// Publish a factory preset onto the plane. The audio thread applies it on the next block.
+    /// Returns false, and changes nothing, for an index at or past [`HostSession::preset_count`]
+    /// or a preset whose value count differs from the parameter count. Any thread; never
+    /// blocks, never allocates.
     pub fn apply_preset(&self, index: usize) -> bool {
         let Some(entry) = self.presets.get(index) else {
             return false;
@@ -546,7 +669,11 @@ impl HostSession {
             .store(if offline { 2 } else { 1 }, Ordering::Release);
     }
 
-    /// Exclusive with `process`. Allocates the scratch buffers.
+    /// Prepares the plugin again for a new sample rate (Hz), largest block (frames) and
+    /// main-bus channel count, and reallocates the scratch buffers to match.
+    ///
+    /// Exclusive with `process`: the caller must make sure no `process_*` or `reset` call runs
+    /// meanwhile (this call does not take the gate). Message thread; allocates.
     ///
     /// Returns false for a sample rate outside
     /// [`openplugin_core::MIN_SAMPLE_RATE`]..=[`openplugin_core::MAX_SAMPLE_RATE`],
@@ -707,6 +834,12 @@ impl HostSession {
 
     /// In-place stereo: [`HostSession::process_planar`] for two slices.
     /// Copies through scratch, so `left` and `right` are both the input and the output.
+    /// A session prepared for one channel processes `left` and copies it to `right`.
+    ///
+    /// Returns false, and leaves the audio as it was, when the slices differ in length or
+    /// are longer than the prepared `max_block`. Returns true for a block skipped while a
+    /// state call holds the plugin (the audio passes through dry). Audio thread; never
+    /// blocks, never allocates. Non-finite input samples are read as zero.
     pub fn process_stereo(&self, left: &mut [f32], right: &mut [f32]) -> bool {
         if left.len() != right.len() {
             return false;
@@ -734,7 +867,13 @@ impl HostSession {
         true
     }
 
-    /// In-place planar audio, the main form. Each channel slice is the same length.
+    /// In-place planar audio, the main form. Each channel slice is the same length (the
+    /// block's frame count); the plugin is given as many channels as `channels` holds.
+    ///
+    /// Returns false, and leaves the audio as it was, for no channels, slices of different
+    /// lengths, more channels than prepared, or more frames than the prepared `max_block`.
+    /// Returns true for a block skipped while a state call holds the plugin (dry). Audio
+    /// thread; never blocks, never allocates. Non-finite input samples are read as zero.
     pub fn process_planar(&self, channels: &mut [&mut [f32]]) -> bool {
         if channels.is_empty()
             || channels
@@ -767,6 +906,10 @@ impl HostSession {
 
     /// [`HostSession::process_planar`] for interleaved audio, frame-major.
     /// `samples.len()` is `channels * frames`.
+    ///
+    /// Returns false, and leaves the audio as it was, for `channels == 0`, a length that is
+    /// not a multiple of `channels`, more channels than prepared, or more frames than the
+    /// prepared `max_block`. Audio thread; never blocks, never allocates.
     pub fn process_interleaved(&self, samples: &mut [f32], channels: usize) -> bool {
         if channels == 0 || samples.len() % channels != 0 {
             return false;
@@ -797,7 +940,13 @@ impl HostSession {
         true
     }
 
-    /// Main bus plus a sidechain. The sidechain is copied into scratch and is not written back.
+    /// Main bus plus a sidechain. The sidechain is copied into scratch and is not written back;
+    /// sidechain channels the caller does not pass are silent.
+    ///
+    /// Returns false, and leaves the audio as it was, for an empty or ragged `main`, a
+    /// sidechain channel of a different length, more channels than prepared on either bus
+    /// (the sidechain width is the widest of [`Plugin::supported_layouts`]), or more frames
+    /// than the prepared `max_block`. Audio thread; never blocks, never allocates.
     pub fn process_with_sidechain(&self, main: &mut [&mut [f32]], sidechain: &[&[f32]]) -> bool {
         if main.is_empty() || main.iter().any(|channel| channel.len() != main[0].len()) {
             return false;

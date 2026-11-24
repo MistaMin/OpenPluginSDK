@@ -5,12 +5,23 @@ use std::path::Path;
 
 /// Planar audio: one `Vec<f32>` per channel.
 #[derive(Debug, Clone, PartialEq)]
+///
+/// ```
+/// use openplugin_port::wav::{decode, encode, Audio};
+///
+/// let audio = Audio { rate: 44_100, channels: vec![vec![0.0, 0.25], vec![-0.25, 0.5]] };
+/// assert_eq!(audio.frames(), 2);
+/// assert_eq!(decode(&encode(&audio)).unwrap(), audio);
+/// ```
 pub struct Audio {
+    /// Sample rate, in Hz.
     pub rate: u32,
+    /// The samples, one `Vec` per channel; every channel is the same length.
     pub channels: Vec<Vec<f32>>,
 }
 
 impl Audio {
+    /// Frames: the first channel's length, 0 with no channels.
     pub fn frames(&self) -> usize {
         self.channels.first().map_or(0, Vec::len)
     }
@@ -23,7 +34,9 @@ fn u32le(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
-/// Decode WAV bytes.
+/// Decode WAV bytes: 8/16/24/32-bit integer or 32/64-bit float PCM, any channel count, to
+/// float samples in -1..1 (integers) or as stored (floats). `Err` with a message for bytes that
+/// are not RIFF/WAVE, lack a `fmt ` or `data` chunk, or hold another encoding.
 pub fn decode(bytes: &[u8]) -> Result<Audio, String> {
     if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err("not a RIFF/WAVE file".into());
@@ -81,12 +94,14 @@ pub fn decode(bytes: &[u8]) -> Result<Audio, String> {
     Ok(Audio { rate, channels: out })
 }
 
+/// Read and [`decode`] a WAV file. `Err` names the path and the reason.
 pub fn read(path: &Path) -> Result<Audio, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Encode as 32-bit float WAV.
+/// Encode as 32-bit float WAV. No channels writes one silent channel's header with no frames.
+/// Every channel must be at least [`Audio::frames`] long; a shorter one panics.
 pub fn encode(audio: &Audio) -> Vec<u8> {
     let nch = audio.channels.len().max(1);
     let frames = audio.frames();
@@ -112,6 +127,7 @@ pub fn encode(audio: &Audio) -> Vec<u8> {
     b
 }
 
+/// [`encode`] and write a WAV file. `Err` names the path and the reason.
 pub fn write(path: &Path, audio: &Audio) -> Result<(), String> {
     std::fs::write(path, encode(audio)).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }

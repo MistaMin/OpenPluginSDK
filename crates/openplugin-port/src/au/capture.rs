@@ -95,6 +95,9 @@ fn class_info(unit: AudioComponentInstance) -> Result<Vec<u8>, String> {
     out
 }
 
+/// Capture child: load the plugin, save its default state, `--set` state and factory presets
+/// into `sink`. Runs inside the `__capture` child only, since the plugin's code runs here.
+/// `Err` with a message when the plugin cannot be loaded or its state cannot be read.
 pub fn capture(job: &Job, sink: &mut Sink) -> Result<(), String> {
     let component = register(job)?;
     let unit = new_unit(component)?;

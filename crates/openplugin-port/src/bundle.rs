@@ -37,6 +37,7 @@ pub fn info_plist(bundle: &Path) -> Option<Value> {
     read_plist(&bundle.join("Contents").join("Info.plist"))
 }
 
+/// The string value of `key` in a parsed plist; `None` when missing or not a string.
 pub fn plist_str<'a>(plist: &'a Value, key: &str) -> Option<&'a str> {
     plist.get(key).and_then(Value::as_str)
 }

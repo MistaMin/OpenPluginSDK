@@ -312,6 +312,9 @@ impl Session {
     }
 }
 
+/// Capture child: load the plugin, save its default state, `--set` state and factory presets
+/// into `sink`. Runs inside the `__capture` child only, since the plugin's code runs here.
+/// `Err` with a message when the plugin cannot be loaded or its state cannot be read.
 pub fn capture(job: &Job, sink: &mut Sink) -> Result<(), String> {
     let first = open(job)?;
     match first.blobs() {
