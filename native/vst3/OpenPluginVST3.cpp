@@ -977,7 +977,10 @@ public:
         const bool haveTransport = data.processContext != nullptr;
         if (haveTransport) buildTransport(*data.processContext);
 
-        const int32 limit = processSetup.maxSamplesPerBlock > 0 ? processSetup.maxSamplesPerBlock : data.numSamples;
+        // Chunks of at most the block size of the activation: the engine and the dry
+        // buffers were made for it. A host may enlarge maxSamplesPerBlock while active
+        // (setupProcessing); that size applies from the next activation.
+        const int32 limit = activeBlock_ > 0 ? activeBlock_ : data.numSamples;
         int32 start = 0;
         uint32_t next = 0;
         uint32_t nextBypass = 0;
@@ -1569,6 +1572,7 @@ private:
     void prepareBypass() {
         delay_ = engine_ ? op_shell_latency(engine_) : 0;
         const size_t block = static_cast<size_t>(std::max(processSetup.maxSamplesPerBlock, 1));
+        activeBlock_ = static_cast<int32>(block);
         paramCapacity_ = static_cast<uint32_t>(std::max<size_t>(kMinChangeCapacity, static_cast<size_t>(count_) + 1));
         tagged_.assign(paramCapacity_ + kNoteCapacity, Tagged{});
         repush_.assign(count_, 0);
@@ -1673,6 +1677,8 @@ private:
     float* outPtr_[OP_MAX_CHANNELS] = {};
     const float* sidePtr_[OP_MAX_CHANNELS] = {};
     bool offline_ = false;
+    // The block size the engine and the dry buffers were made for (prepareBypass).
+    int32 activeBlock_ = 0;
     std::vector<std::vector<float>> dry_;
     std::vector<std::vector<float>> line_;
     size_t delay_ = 0;
