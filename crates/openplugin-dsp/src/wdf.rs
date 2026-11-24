@@ -82,6 +82,36 @@ pub fn wright_omega(x: f64) -> f64 {
 }
 
 /// A one-port or a subtree of a wave digital filter, adapted towards its parent.
+/// Called once per sample on the audio thread: implementations must not
+/// allocate or lock.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Capacitor, DiodeParams, Series, SingleDiode, WdfPort};
+///
+/// /// A potentiometer leg: a resistor whose value the user turns.
+/// struct Pot {
+///     ohms: f64,
+/// }
+///
+/// impl WdfPort for Pot {
+///     fn resistance(&self) -> f64 {
+///         self.ohms
+///     }
+///     fn reflect(&mut self) -> f64 {
+///         0.0 // a resistor reflects nothing
+///     }
+///     fn incident(&mut self, _a: f64) {}
+/// }
+///
+/// let mut tree = Series::new(Pot { ohms: 10_000.0 }, Capacitor::new(47e-9, 48_000.0));
+/// let diode = SingleDiode::new(DiodeParams::D1N4148);
+/// let v = diode.process(&mut tree);
+/// assert!(v.is_finite());
+/// tree.a.ohms = 4_700.0;
+/// tree.refresh(); // after changing a component value
+/// ```
 pub trait WdfPort {
     /// Port resistance seen by the parent.
     fn resistance(&self) -> f64;
@@ -98,6 +128,16 @@ pub trait WdfPort {
 }
 
 /// Resistor; reflects nothing.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Resistor, WdfPort};
+///
+/// let mut r = Resistor::new(1_000.0);
+/// assert_eq!(r.resistance(), 1_000.0);
+/// r.set_resistance(2_200.0);
+/// assert_eq!(r.reflect(), 0.0);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Resistor {
     r: f64,
@@ -125,6 +165,14 @@ impl WdfPort for Resistor {
 }
 
 /// Capacitor, bilinear transform: `R = 1 / (2 C fs)`, `b[n] = a[n-1]`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Capacitor, WdfPort};
+///
+/// let c = Capacitor::new(1e-6, 48_000.0);
+/// assert!((c.resistance() - 1.0 / (2.0 * 1e-6 * 48_000.0)).abs() < 1e-9);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Capacitor {
     c: f64,
@@ -170,6 +218,14 @@ impl WdfPort for Capacitor {
 }
 
 /// Inductor, bilinear transform: `R = 2 L fs`, `b[n] = -a[n-1]`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Inductor, WdfPort};
+///
+/// let l = Inductor::new(0.1, 48_000.0);
+/// assert!((l.resistance() - 2.0 * 0.1 * 48_000.0).abs() < 1e-6);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Inductor {
     l: f64,
@@ -215,6 +271,15 @@ impl WdfPort for Inductor {
 }
 
 /// Voltage source `e` with series resistance `Rs`; adapted, `b = e`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{ResistiveVoltageSource, WdfPort};
+///
+/// let mut source = ResistiveVoltageSource::new(50.0);
+/// source.set_voltage(1.0);
+/// assert_eq!(source.reflect(), 1.0); // b = e
+/// ```
 #[derive(Debug, Clone)]
 pub struct ResistiveVoltageSource {
     r: f64,
@@ -247,6 +312,14 @@ impl WdfPort for ResistiveVoltageSource {
 }
 
 /// Series three-port adaptor, adapted at the parent port.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Resistor, Series, WdfPort};
+///
+/// let s = Series::new(Resistor::new(1_000.0), Resistor::new(2_000.0));
+/// assert_eq!(s.resistance(), 3_000.0);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Series<A: WdfPort, B: WdfPort> {
     /// First child.
@@ -304,6 +377,14 @@ impl<A: WdfPort, B: WdfPort> WdfPort for Series<A, B> {
 }
 
 /// Parallel three-port adaptor, adapted at the parent port.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Parallel, Resistor, WdfPort};
+///
+/// let p = Parallel::new(Resistor::new(1_000.0), Resistor::new(1_000.0));
+/// assert!((p.resistance() - 500.0).abs() < 1e-9);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Parallel<A: WdfPort, B: WdfPort> {
     /// First child.
@@ -364,6 +445,16 @@ impl<A: WdfPort, B: WdfPort> WdfPort for Parallel<A, B> {
 }
 
 /// Ideal polarity inverter in front of one child.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Inverter, ResistiveVoltageSource, WdfPort};
+///
+/// let mut source = ResistiveVoltageSource::new(100.0);
+/// source.set_voltage(0.5);
+/// let mut inv = Inverter::new(source);
+/// assert_eq!(inv.reflect(), -0.5);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Inverter<A: WdfPort> {
     /// The inverted child.
@@ -397,6 +488,17 @@ impl<A: WdfPort> WdfPort for Inverter<A> {
 }
 
 /// Diode model parameters: saturation current (A) and `n Vt` (V).
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{DiodePair, DiodeParams};
+///
+/// // A germanium-like diode: more leakage, softer knee.
+/// let ge = DiodeParams { is: 1e-6, nvt: 1.3 * 0.02585 };
+/// let pair = DiodePair::new(ge);
+/// let b = pair.reflect(1.0, 1_000.0);
+/// assert!(b.is_finite());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DiodeParams {
     /// Saturation current `Is`.
@@ -419,6 +521,21 @@ fn sanitize(a: f64) -> f64 {
 }
 
 /// Antiparallel diode pair, the nonlinear root of a tree.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Capacitor, DiodePair, DiodeParams, Parallel, ResistiveVoltageSource};
+///
+/// // The diode clipper built by hand: source and capacitor in parallel, diodes at the root.
+/// let mut tree = Parallel::new(ResistiveVoltageSource::new(2_200.0), Capacitor::new(10e-9, 48_000.0));
+/// let diodes = DiodePair::new(DiodeParams::D1N4148);
+/// let mut v = 0.0;
+/// for _ in 0..480 {
+///     tree.a.set_voltage(5.0); // 5 V in
+///     v = diodes.process(&mut tree);
+/// }
+/// assert!(v > 0.4 && v < 1.0); // clamped near one diode drop
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct DiodePair {
     p: DiodeParams,
@@ -458,6 +575,7 @@ impl DiodePair {
 }
 
 /// Single diode, exact closed form for `i = Is (exp(v/Vt) - 1)`.
+/// See the [`WdfPort`] example.
 #[derive(Debug, Clone, Copy)]
 pub struct SingleDiode {
     p: DiodeParams,
@@ -488,6 +606,20 @@ impl SingleDiode {
 /// capacitor in parallel with an antiparallel diode pair (Werner et al. 2015,
 /// Fig. 1). The tree is `Parallel(ResistiveVoltageSource, Capacitor)` with the
 /// diode pair as root. Defaults: 2.2 kohm, 10 nF, 1N4148 (corner 7.2 kHz).
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::DiodeClipper;
+///
+/// let mut clipper = DiodeClipper::new(96_000.0);
+/// let mut buf: Vec<f32> = (0..9_600)
+///     .map(|n| 4.0 * (2.0 * std::f32::consts::PI * 200.0 * n as f32 / 96_000.0).sin())
+///     .collect();
+/// clipper.process(&mut buf);
+/// assert!(buf.iter().all(|v| v.abs() < 1.0)); // a 4 V sine clipped below 1 V
+/// ```
 #[derive(Debug, Clone)]
 pub struct DiodeClipper {
     tree: Parallel<ResistiveVoltageSource, Capacitor>,

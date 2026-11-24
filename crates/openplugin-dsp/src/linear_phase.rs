@@ -10,15 +10,45 @@
 
 use std::f64::consts::PI;
 
+/// Why [`LinearPhaseOversampler::prepare`] or `process` refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OversampleError {
+    /// The factor is not 1, 2 or 4.
     Factor,
+    /// The channel count is not 1 to 8.
     Channels,
+    /// The block size is 0 or above 1 048 576 at prepare time, or a block is
+    /// longer than the prepared one.
     BlockSize,
+    /// The buffers do not match the prepared channel count, or their lengths
+    /// differ.
     BufferShape,
 }
 
+/// Linear-phase 1x, 2x or 4x oversampling around a per-sample closure; see the
+/// module documentation. `prepare` allocates; `process` does not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::LinearPhaseOversampler;
+///
+/// let mut os = LinearPhaseOversampler::prepare(2, 2, 512).unwrap();
+/// assert_eq!(os.latency_samples(), 64);
+///
+/// let input = [vec![0.5f32; 512], vec![0.5f32; 512]];
+/// let mut left = vec![0.0f32; 512];
+/// let mut right = vec![0.0f32; 512];
+/// let inputs: [&[f32]; 2] = [&input[0], &input[1]];
+/// os.process(&inputs, &mut [&mut left, &mut right], |frame| {
+///     for s in frame.iter_mut() {
+///         *s = s.tanh(); // the non-linearity runs at 96 kHz
+///     }
+/// })
+/// .unwrap();
+/// assert!((left[511] - 0.5f32.tanh()).abs() < 1e-3);
+/// ```
 pub struct LinearPhaseOversampler {
     factor: usize,
     channels: usize,
@@ -80,10 +110,13 @@ impl LinearPhaseOversampler {
         })
     }
 
+    /// The oversampling factor, 1, 2 or 4.
     pub fn factor(&self) -> usize {
         self.factor
     }
 
+    /// Latency at the host rate in samples: 64 at 2x and 4x, 0 at 1x. Report it
+    /// and delay any dry path by it.
     pub fn latency_samples(&self) -> usize {
         if self.factor == 1 {
             0
@@ -92,6 +125,7 @@ impl LinearPhaseOversampler {
         }
     }
 
+    /// Clears the filter history. Does not allocate.
     pub fn reset(&mut self) {
         for ring in self.up.iter_mut().chain(self.down.iter_mut()) {
             ring.fill(0.0);

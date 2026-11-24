@@ -60,6 +60,28 @@ impl Pitch {
 }
 
 /// Common interface of the detectors.
+/// Implemented by [`YinDetector`] and [`MpmDetector`]. Implementations
+/// allocate in their constructor and not in `detect`, so `detect` may run
+/// on the audio thread.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{MpmDetector, PitchDetector, YinDetector};
+///
+/// fn estimate(detector: &mut dyn PitchDetector, signal: &[f32]) -> f32 {
+///     detector.detect(signal).frequency
+/// }
+///
+/// let rate = 48_000.0;
+/// let tone: Vec<f32> = (0..4_096)
+///     .map(|n| (2.0 * std::f32::consts::PI * 220.0 * n as f32 / rate).sin())
+///     .collect();
+/// let mut yin = YinDetector::new(rate, 50.0, 1_000.0);
+/// let mut mpm = MpmDetector::new(rate, 50.0, 1_000.0);
+/// assert!((estimate(&mut yin, &tone) - 220.0).abs() < 1.0);
+/// assert!((estimate(&mut mpm, &tone) - 220.0).abs() < 1.0);
+/// ```
 pub trait PitchDetector {
     /// Number of samples `detect` uses (the most recent ones of its argument).
     fn window(&self) -> usize;
@@ -92,6 +114,15 @@ fn range_lags(rate: f32, min_hz: f32, max_hz: f32) -> (f32, usize, usize) {
 }
 
 /// YIN detector. See the module docs.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{PitchDetector, YinDetector};
+///
+/// let mut yin = YinDetector::new(48_000.0, 80.0, 800.0);
+/// let silence = vec![0.0f32; yin.window()];
+/// assert!(!yin.detect(&silence).is_voiced(0.5));
+/// ```
 pub struct YinDetector {
     fs: f64,
     threshold: f32,
@@ -239,6 +270,14 @@ impl PitchDetector for YinDetector {
 }
 
 /// McLeod pitch method detector. See the module docs.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{MpmDetector, Pitch, PitchDetector};
+///
+/// let mut mpm = MpmDetector::new(48_000.0, 80.0, 800.0);
+/// assert_eq!(mpm.detect(&[0.0; 8]), Pitch::NONE); // shorter than the window
+/// ```
 pub struct MpmDetector {
     fs: f64,
     cutoff: f32,

@@ -104,6 +104,21 @@ pub(crate) fn warp(sample_rate: f64, hz: f32) -> f64 {
 // ---------------------------------------------------------------------------
 
 /// Four-pole transistor ladder (Moog style). See the [module documentation](self).
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::TransistorLadder;
+///
+/// let mut ladder = TransistorLadder::new(48_000.0);
+/// ladder.set_cutoff(1_200.0);
+/// ladder.set_resonance(0.3);
+/// ladder.set_drive(2.0);
+/// let mut buf: Vec<f32> = (0..4_800).map(|n| if n % 100 < 50 { 0.5 } else { -0.5 }).collect();
+/// ladder.process(&mut buf);
+/// assert!(buf.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Debug, Clone)]
 pub struct TransistorLadder {
     sample_rate: f64,
@@ -259,6 +274,20 @@ impl TransistorLadder {
 // ---------------------------------------------------------------------------
 
 /// Four-pole diode ladder (EMS / TB-303 class). See the [module documentation](self).
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::DiodeLadder;
+///
+/// let mut ladder = DiodeLadder::new(48_000.0);
+/// ladder.set_cutoff(2_000.0);
+/// ladder.set_poles(4);
+/// let mut buf = vec![0.25f32; 2_400];
+/// ladder.process(&mut buf);
+/// assert!(buf.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Debug, Clone)]
 pub struct DiodeLadder {
     sample_rate: f64,

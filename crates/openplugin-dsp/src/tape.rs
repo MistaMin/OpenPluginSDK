@@ -95,6 +95,22 @@ fn langevin_d(x: f64) -> f64 {
 }
 
 /// Jiles-Atherton tape hysteresis. See the [module documentation](self).
+/// Plain state, no allocation; realtime-safe. Oversample it: hysteresis is a
+/// strong non-linearity.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::TapeHysteresis;
+///
+/// let mut tape = TapeHysteresis::new(96_000.0);
+/// tape.set_drive(0.7);
+/// let mut buf: Vec<f32> = (0..9_600)
+///     .map(|n| 0.5 * (2.0 * std::f32::consts::PI * 100.0 * n as f32 / 96_000.0).sin())
+///     .collect();
+/// tape.process(&mut buf);
+/// assert!(buf.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Debug, Clone)]
 pub struct TapeHysteresis {
     sample_rate: f64,

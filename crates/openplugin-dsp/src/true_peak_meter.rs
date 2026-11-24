@@ -80,6 +80,22 @@ impl Channel {
 }
 
 /// Multichannel true-peak meter with hold. See the module documentation.
+/// `new` allocates the channels; `process` does not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::TruePeakMeter;
+///
+/// let mut meter = TruePeakMeter::new(48_000.0, 2);
+/// assert_eq!(meter.factor(), 4);
+/// let sine: Vec<f32> = (0..4_800)
+///     .map(|n| 0.5 * (2.0 * std::f32::consts::PI * 997.0 * n as f32 / 48_000.0).sin())
+///     .collect();
+/// meter.process(0, &sine);
+/// assert!((meter.max_dbtp(0) - -6.02).abs() < 0.1);
+/// assert!(meter.max_dbtp(1) < -100.0); // nothing on the right yet
+/// ```
 #[derive(Clone, Debug)]
 pub struct TruePeakMeter {
     interp: Interpolator,
@@ -90,6 +106,9 @@ pub struct TruePeakMeter {
 }
 
 impl TruePeakMeter {
+    /// A meter for `channels` (at least 1) at `sample_rate` (Hz, clamped to the
+    /// SDK range): 4x oversampling below 96 kHz, 2x below 192 kHz, else 1x, and a
+    /// 2 s hold. Allocates the channels.
     pub fn new(sample_rate: f32, channels: usize) -> Self {
         let rate = crate::rate::effective_rate(sample_rate);
         let factor = if rate < 96_000.0 {
@@ -127,6 +146,7 @@ impl TruePeakMeter {
         self.interp.factor
     }
 
+    /// The channel count.
     pub fn channel_count(&self) -> usize {
         self.channels.len()
     }

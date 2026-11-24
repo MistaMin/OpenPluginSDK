@@ -156,6 +156,17 @@ const RING: usize = 16;
 
 /// A band-limited oscillator. See the module documentation.
 #[derive(Clone, Copy, Debug)]
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{BandlimitedOsc, BlWave};
+///
+/// let mut osc = BandlimitedOsc::new(BlWave::Saw);
+/// let mut out = [0.0f32; 256];
+/// osc.fill(440.0, 48_000.0, &mut out);
+/// assert!(out.iter().all(|s| s.abs() < 1.5));
+/// ```
 pub struct BandlimitedOsc {
     wave: BlWave,
     order: BlepOrder,
@@ -193,10 +204,13 @@ impl BandlimitedOsc {
         self
     }
 
+    /// Changes the waveform. Residuals already scheduled for the old waveform
+    /// still play out, so a change mid-note may click once.
     pub fn set_wave(&mut self, wave: BlWave) {
         self.wave = wave;
     }
 
+    /// The current waveform.
     pub fn wave(&self) -> BlWave {
         self.wave
     }

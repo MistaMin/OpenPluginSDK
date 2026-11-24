@@ -71,6 +71,26 @@ impl std::fmt::Display for WavetableError {
 impl std::error::Error for WavetableError {}
 
 /// One cycle at several band limits, ready to read.
+/// Building a set allocates (do it off the audio thread); reading it does
+/// not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{WavetableOsc, WavetableSet};
+///
+/// // A single cycle drawn by hand, band-limited into mip levels.
+/// let cycle: Vec<f32> = (0..256).map(|n| if n < 128 { 1.0 } else { -1.0 }).collect();
+/// let set = WavetableSet::from_cycle(&cycle, 2048).unwrap();
+/// assert!(set.level_count() > 1);
+///
+/// let mut osc = WavetableOsc::new();
+/// let mut block = [0.0f32; 128];
+/// for s in &mut block {
+///     *s = osc.next(&set, 440.0, 48_000.0);
+/// }
+/// assert!(block.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Clone, Debug)]
 pub struct WavetableSet {
     size: usize,
@@ -236,16 +256,31 @@ impl WavetableSet {
 }
 
 /// Phase accumulator reading a [`WavetableSet`].
+/// Plain state, no allocation; one per voice, sharing a [`WavetableSet`].
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{WavetableOsc, WavetableSet};
+///
+/// let saw = WavetableSet::saw(2048).unwrap();
+/// let mut osc = WavetableOsc::new();
+/// osc.set_phase(0.25);
+/// let y = osc.next(&saw, 110.0, 48_000.0);
+/// assert!(y.is_finite());
+/// ```
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WavetableOsc {
     phase: f64,
 }
 
 impl WavetableOsc {
+    /// An oscillator at phase 0.
     pub const fn new() -> Self {
         Self { phase: 0.0 }
     }
 
+    /// Phase in cycles, 0..1.
     pub fn phase(&self) -> f64 {
         self.phase
     }

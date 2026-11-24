@@ -4,7 +4,7 @@
 //! butterflies use Neon on Apple Silicon. The inverse transform is divided by
 //! 2048 here. `rustfft` leaves that scale to the caller.
 //!
-//! A call shorter than [`DIRECT_BELOW`] samples convolves directly against a
+//! A call shorter than 48 samples (`DIRECT_BELOW`) convolves directly against a
 //! time-domain copy of the impulse instead, because the two transforms cost the
 //! same whatever the call length: per-sample or split-block calls stay cheap.
 //!
@@ -38,6 +38,19 @@ struct Channel {
 
 /// One shared impulse, one history per channel.
 #[derive(Clone)]
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::BlockConvolver;
+///
+/// let mut convolver = BlockConvolver::new(1);
+/// convolver.set_kernel(&[0.5]); // off the audio thread: it allocates
+///
+/// let mut block = [1.0f32; 64];
+/// convolver.process(0, &mut block);
+/// assert!(block.iter().all(|s| (s - 0.5).abs() < 1e-4));
+/// ```
 pub struct BlockConvolver {
     forward: Arc<dyn Fft<f32>>,
     inverse: Arc<dyn Fft<f32>>,
@@ -52,6 +65,9 @@ pub struct BlockConvolver {
 }
 
 impl BlockConvolver {
+    /// A convolver for `channels` channels (at least 1) with an all-zero impulse,
+    /// so it outputs silence until [`set_kernel`](Self::set_kernel). Allocates and
+    /// plans the transforms: call it off the audio thread.
     pub fn new(channels: usize) -> Self {
         let mut planner = FftPlanner::<f32>::new();
         let forward = planner.plan_fft_forward(FFT);
@@ -77,10 +93,12 @@ impl BlockConvolver {
         }
     }
 
+    /// Number of channels.
     pub fn channels(&self) -> usize {
         self.channels.len()
     }
 
+    /// Clears every channel's history. The impulse is kept.
     pub fn reset(&mut self) {
         for channel in &mut self.channels {
             channel.overlap = [0.0; IMPULSE];

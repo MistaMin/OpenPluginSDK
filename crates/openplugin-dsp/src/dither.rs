@@ -157,6 +157,22 @@ struct Channel {
 
 /// Dither, noise shaping and auto-blank for any number of channels.
 #[derive(Debug, Clone)]
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Dither, DitherKind, NoiseShaping};
+///
+/// let mut dither = Dither::new(1, 48_000.0, 16, 0x5eed);
+/// dither.set_kind(DitherKind::Tpdf);
+/// dither.set_shaping(NoiseShaping::FirstOrder);
+///
+/// let input = [0.25f32; 64];
+/// let mut pcm = [0i16; 64];
+/// dither.process_i16(0, &input, &mut pcm);
+/// // 0.25 of full scale, give or take the dither.
+/// assert!(pcm.iter().all(|&s| (i32::from(s) - 8192).abs() <= 8));
+/// ```
 pub struct Dither {
     channels: Vec<Channel>,
     bits: u32,
@@ -200,19 +216,26 @@ impl Dither {
         self.bits = bits.clamp(8, 24);
     }
 
+    /// The target word length in bits.
     pub fn bits(&self) -> u32 {
         self.bits
     }
 
+    /// Chooses the dither density.
     pub fn set_kind(&mut self, kind: DitherKind) {
         self.kind = kind;
     }
 
+    /// Chooses the noise shaping. [`NoiseShaping::Perceptual`] designs its filter
+    /// here (a fixed amount of arithmetic, no allocation); set it when a
+    /// parameter changes, not per sample.
     pub fn set_shaping(&mut self, shaping: NoiseShaping) {
         self.shaping = shaping;
         self.redesign();
     }
 
+    /// Sample rate in Hz. Redesigns the perceptual filter for the new rate; an
+    /// invalid rate falls back as in [`crate::effective_rate`].
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = effective_rate(sample_rate);
         self.redesign();

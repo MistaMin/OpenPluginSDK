@@ -10,7 +10,7 @@
 //!
 //! The reflection filters are the Jaffe-Smith loss filter and loop gain, a
 //! tuning allpass and optional dispersion allpasses, all from
-//! [`crate::phys_common`] (see [`crate::pluck`] for the design). They are
+//! the crate's private `phys_common` module (see [`crate::pluck`] for the design). They are
 //! lumped at the bridge (string) or at the right end (bore), which is allowed
 //! because the model is linear and time invariant. The integer delay is shared
 //! between the two lines, so the loop phase delay at the fundamental is exact.
@@ -46,6 +46,23 @@ fn flush(x: f64) -> f64 {
 }
 
 /// Bidirectional string with a rigid nut and a lossy bridge.
+/// `new` and `prepare` allocate the delay lines; everything else is
+/// allocation-free and realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::WaveguideString;
+///
+/// let mut string = WaveguideString::new(48_000.0, 40.0);
+/// string.set_frequency(110.0);
+/// string.set_decay(3.0);
+/// string.pluck(1.0);
+/// let mut out = vec![0.0f32; 4_800];
+/// string.process(&mut out);
+/// assert!(out.iter().any(|s| s.abs() > 0.01));
+/// assert!(out.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Clone, Debug)]
 pub struct WaveguideString {
     fs: f64,
@@ -120,6 +137,7 @@ impl WaveguideString {
         self.redesign();
     }
 
+    /// Silences the string. Does not allocate.
     pub fn reset(&mut self) {
         self.r.iter_mut().for_each(|v| *v = 0.0);
         self.l.iter_mut().for_each(|v| *v = 0.0);
@@ -167,6 +185,8 @@ impl WaveguideString {
         }
     }
 
+    /// Number of dispersion allpass sections used for the stiffness, clamped to
+    /// 1..=[`crate::MAX_DISPERSION_SECTIONS`].
     pub fn set_dispersion_sections(&mut self, n: usize) {
         self.sections = n.clamp(1, MAX_DISPERSION_SECTIONS);
         self.redesign();
@@ -317,12 +337,14 @@ impl WaveguideString {
         (right + left) as f32
     }
 
+    /// One output sample with no excitation input.
     #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> f32 {
         self.next_with(0.0)
     }
 
+    /// Fills `out` with output samples, no excitation input.
     pub fn process(&mut self, out: &mut [f32]) {
         for o in out {
             *o = self.next();
@@ -350,6 +372,22 @@ impl BoreEnd {
 }
 
 /// A cylindrical bore with an excitation input.
+/// `new` and `prepare` allocate the delay lines; everything else is
+/// allocation-free and realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{BoreEnd, WaveguideBore};
+///
+/// // Closed at the mouthpiece, open at the bell: a clarinet-like bore.
+/// let mut bore = WaveguideBore::new(48_000.0, 50.0, BoreEnd::Closed, BoreEnd::Open);
+/// bore.set_frequency(147.0);
+/// let mut io = vec![0.0f32; 2_400];
+/// io[0] = 1.0; // an impulse of breath
+/// bore.process(&mut io);
+/// assert!(io.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Clone, Debug)]
 pub struct WaveguideBore {
     fs: f64,
@@ -406,6 +444,7 @@ impl WaveguideBore {
         self.redesign();
     }
 
+    /// Silences the bore. Does not allocate.
     pub fn reset(&mut self) {
         self.r.iter_mut().for_each(|v| *v = 0.0);
         self.l.iter_mut().for_each(|v| *v = 0.0);
@@ -416,6 +455,7 @@ impl WaveguideBore {
         self.dc_y1 = 0.0;
     }
 
+    /// Changes how the two ends reflect.
     pub fn set_ends(&mut self, left: BoreEnd, right: BoreEnd) {
         self.left = left;
         self.right = right;
@@ -529,6 +569,7 @@ impl WaveguideBore {
         y as f32
     }
 
+    /// One output sample with no excitation input.
     #[inline]
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> f32 {

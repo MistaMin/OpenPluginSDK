@@ -40,6 +40,21 @@ use crate::envelope::{db_to_amp, Ballistics, Detection, Domain, EnvelopeFollower
 use crate::rate::effective_rate;
 
 /// Transient shaper. See the [module docs](self).
+/// Plain state, no allocation; one linked gain for any channel count.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::TransientShaper;
+///
+/// let mut shaper = TransientShaper::new(48_000.0);
+/// shaper.set_attack(0.8); // emphasise onsets
+/// shaper.set_sustain(-0.5); // shorten tails
+/// let mut left: Vec<f32> = (0..4_800).map(|n| if n < 100 { 0.0 } else { 0.5 }).collect();
+/// let mut right = left.clone();
+/// shaper.process(&mut [&mut left, &mut right]);
+/// assert!(left.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Debug, Clone)]
 pub struct TransientShaper {
     fast: EnvelopeFollower,
@@ -81,12 +96,14 @@ impl TransientShaper {
         }
     }
 
+    /// Changes the sample rate in Hz, keeping the times.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.fast.set_sample_rate(sample_rate);
         self.slow.set_sample_rate(sample_rate);
         self.smoother.set_sample_rate(sample_rate);
     }
 
+    /// Clears both envelopes and the gain.
     pub fn reset(&mut self) {
         self.fast.reset();
         self.slow.reset();
@@ -122,6 +139,8 @@ impl TransientShaper {
         }
     }
 
+    /// Attack and release of the fast envelope, milliseconds. Non-finite values
+    /// are ignored.
     pub fn set_fast_ms(&mut self, attack_ms: f32, release_ms: f32) {
         if attack_ms.is_finite() && release_ms.is_finite() {
             self.fast.set_attack_ms(attack_ms.max(0.0));
@@ -129,6 +148,8 @@ impl TransientShaper {
         }
     }
 
+    /// Attack and release of the slow envelope, milliseconds. Non-finite values
+    /// are ignored.
     pub fn set_slow_ms(&mut self, attack_ms: f32, release_ms: f32) {
         if attack_ms.is_finite() && release_ms.is_finite() {
             self.slow.set_attack_ms(attack_ms.max(0.0));

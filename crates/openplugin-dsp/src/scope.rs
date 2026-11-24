@@ -35,10 +35,15 @@ pub const SCOPE_POINTS: usize = 256;
 /// One published snapshot.
 #[derive(Clone, Copy, Debug)]
 pub struct ScopeFrame {
+    /// Side, `(R - L) / sqrt 2`, per point (horizontal).
     pub x: [f32; SCOPE_POINTS],
+    /// Mid, `(L + R) / sqrt 2`, per point (vertical).
     pub y: [f32; SCOPE_POINTS],
+    /// Phase correlation, -1 to 1; silence reads 1.
     pub correlation: f32,
+    /// `(rms_R - rms_L) / (rms_R + rms_L)`, -1 (left) to 1 (right).
     pub balance: f32,
+    /// Frame counter; 0 before the first frame.
     pub sequence: u32,
 }
 
@@ -67,6 +72,20 @@ pub fn scope_feed(sample_rate: f32) -> (ScopeWriter, ScopeReader) {
 }
 
 /// The audio-thread half.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::scope_feed;
+///
+/// let (mut writer, reader) = scope_feed(48_000.0);
+/// let signal: Vec<f32> = (0..4_800).map(|n| (n as f32 * 0.05).sin()).collect();
+/// writer.push(&signal, &signal); // audio thread: mono content
+///
+/// let frame = reader.read(); // editor thread
+/// assert!(frame.sequence > 0);
+/// assert!(frame.correlation > 0.99);
+/// assert!(frame.x.iter().all(|x| x.abs() < 1e-6)); // mono: no side
+/// ```
 pub struct ScopeWriter {
     shared: Arc<Seqlock<ScopeFrame>>,
     frame: ScopeFrame,
@@ -134,6 +153,7 @@ impl ScopeWriter {
 }
 
 /// The editor-thread half. Cheap to clone.
+/// See the [`ScopeWriter`] example.
 #[derive(Clone)]
 pub struct ScopeReader {
     shared: Arc<Seqlock<ScopeFrame>>,

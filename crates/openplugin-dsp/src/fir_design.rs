@@ -97,13 +97,50 @@ impl std::error::Error for FirError {}
 
 /// The response shape of a windowed-sinc design. Frequencies are in Hz and are
 /// the -6 dB points (the middle of the transition).
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{design_kaiser, design_windowed, fir_magnitude_db, FirKind};
+/// use openplugin_dsp::windows::WindowKind;
+///
+/// let fs = 48_000.0;
+/// // 80 dB stopband, 1 kHz transition around 8 kHz.
+/// let taps = design_kaiser(FirKind::LowPass { cutoff_hz: 8_000.0 }, fs, 80.0, 1_000.0).unwrap();
+/// assert_eq!(taps.len() % 2, 1);
+/// assert!(fir_magnitude_db(&taps, 1_000.0 / fs).abs() < 0.01);
+/// assert!(fir_magnitude_db(&taps, 10_000.0 / fs) < -75.0);
+///
+/// // A high-pass needs an odd length.
+/// let hp = FirKind::HighPass { cutoff_hz: 100.0 };
+/// assert!(design_windowed(hp, fs, 64, WindowKind::Hann).is_err());
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum FirKind {
-    LowPass { cutoff_hz: f64 },
-    HighPass { cutoff_hz: f64 },
-    BandPass { low_hz: f64, high_hz: f64 },
-    BandStop { low_hz: f64, high_hz: f64 },
+    /// Passes below `cutoff_hz`.
+    LowPass {
+        /// The -6 dB point, Hz.
+        cutoff_hz: f64,
+    },
+    /// Passes above `cutoff_hz`; needs an odd length.
+    HighPass {
+        /// The -6 dB point, Hz.
+        cutoff_hz: f64,
+    },
+    /// Passes between `low_hz` and `high_hz`.
+    BandPass {
+        /// Lower -6 dB point, Hz.
+        low_hz: f64,
+        /// Upper -6 dB point, Hz.
+        high_hz: f64,
+    },
+    /// Rejects between `low_hz` and `high_hz`; needs an odd length.
+    BandStop {
+        /// Lower -6 dB point, Hz.
+        low_hz: f64,
+        /// Upper -6 dB point, Hz.
+        high_hz: f64,
+    },
 }
 
 fn lowpass_ideal(fc: f64, m: f64) -> f64 {
@@ -320,23 +357,48 @@ pub fn fir_group_delay(taps: &[f32], freq: f64) -> f64 {
 /// One point of the weighted frequency grid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LsPoint {
+    /// Frequency, Hz, from 0 to Nyquist.
     pub freq_hz: f64,
     /// Desired linear gain (zero-phase amplitude; may be negative).
     pub gain: f64,
+    /// Weight of the error at this point, 0 or more; 0 is "don't care".
     pub weight: f64,
 }
 
 /// A band with a gain that varies linearly from `gain_lo` to `gain_hi`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{design_least_squares, fir_magnitude_db, ls_grid, LsBand};
+///
+/// let fs = 48_000.0;
+/// let taps = 63;
+/// // Pass to 4 kHz, stop from 6 kHz, nothing asked in between.
+/// let bands = [
+///     LsBand::flat(0.0, 4_000.0, 1.0, 1.0),
+///     LsBand::flat(6_000.0, 24_000.0, 0.0, 10.0),
+/// ];
+/// let fit = design_least_squares(taps, fs, &ls_grid(&bands, fs, taps)).unwrap();
+/// assert_eq!(fit.taps.len(), taps);
+/// assert!(fir_magnitude_db(&fit.taps, 1_000.0 / fs).abs() < 0.5);
+/// assert!(fir_magnitude_db(&fit.taps, 10_000.0 / fs) < -40.0);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LsBand {
+    /// Lower edge, Hz.
     pub lo_hz: f64,
+    /// Upper edge, Hz.
     pub hi_hz: f64,
+    /// Desired linear gain at `lo_hz`.
     pub gain_lo: f64,
+    /// Desired linear gain at `hi_hz`.
     pub gain_hi: f64,
+    /// Weight of the error over the band, 0 or more.
     pub weight: f64,
 }
 
 impl LsBand {
+    /// A band of constant `gain` from `lo_hz` to `hi_hz` (Hz) with `weight`.
     pub fn flat(lo_hz: f64, hi_hz: f64, gain: f64, weight: f64) -> Self {
         Self {
             lo_hz,
@@ -371,6 +433,7 @@ pub fn ls_grid(bands: &[LsBand], sample_rate: f64, taps: usize) -> Vec<LsPoint> 
 /// A least-squares design and how it was solved.
 #[derive(Clone, Debug)]
 pub struct LsFit {
+    /// The coefficients, `taps` long, symmetric (linear phase).
     pub taps: Vec<f32>,
     /// Weighted RMS error of the fit over the grid.
     pub rms_error: f64,

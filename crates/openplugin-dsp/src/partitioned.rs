@@ -132,12 +132,16 @@ use std::sync::Arc;
 type C = Complex<f32>;
 
 /// Most stage sizes a configuration may list (head and partition sizes).
+/// Most stages a [`ConvolverConfig`] may have.
 pub const MAX_STAGES: usize = 4;
 /// Smallest stage size.
+/// Smallest stage (partition) size, samples.
 pub const MIN_STAGE: usize = 16;
 /// Largest stage size.
+/// Largest stage (partition) size, samples.
 pub const MAX_STAGE: usize = 1 << 16;
 /// Stage sizes used by [`ConvolverConfig::new`].
+/// The stage sizes of [`ConvolverConfig::new`].
 pub const DEFAULT_STAGES: [usize; 3] = [64, 512, 4096];
 
 const TINY: f32 = 1.0e-30;
@@ -193,9 +197,19 @@ pub enum ConvolveError {
     /// The longest impulse (`max_len`) must be at least 1.
     ZeroLength,
     /// The number of impulses does not match the layout.
-    WrongFilterCount { expected: usize, got: usize },
+    WrongFilterCount {
+        /// Impulses the layout takes.
+        expected: usize,
+        /// Impulses given.
+        got: usize,
+    },
     /// An impulse is longer than the `max_len` the configuration was built for.
-    TooLong { len: usize, max: usize },
+    TooLong {
+        /// Length of the impulse, taps.
+        len: usize,
+        /// The configuration's `max_len`, taps.
+        max: usize,
+    },
     /// An impulse contains NaN or infinity.
     NotFinite,
 }
@@ -222,6 +236,24 @@ impl std::error::Error for ConvolveError {}
 ///
 /// A [`LongConvolver`] and the [`ConvolutionIr`]s it plays must come from equal
 /// configurations.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{ConvolverConfig, Layout};
+///
+/// // Prepare time: a convolver and an impulse for it.
+/// let config = ConvolverConfig::new(Layout::Mono, 48_000);
+/// let mut conv = config.build().unwrap();
+/// let mut impulse = vec![0.0f32; 48_000];
+/// impulse[0] = 0.5;
+/// let ir = config.build_ir(&[&impulse]).unwrap(); // FFT work: a worker thread
+///
+/// // Audio thread: zero latency, allocation-free.
+/// let mut block = [1.0f32, 0.0, 0.0, 0.0];
+/// conv.process_mono(&ir, &mut block);
+/// assert!((block[0] - 0.5).abs() < 1e-6);
+/// assert_eq!(conv.latency(), 0);
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConvolverConfig {
     layout: Layout,
@@ -265,14 +297,17 @@ impl ConvolverConfig {
         Ok(self)
     }
 
+    /// The channel layout.
     pub fn layout(&self) -> Layout {
         self.layout
     }
 
+    /// The stage sizes, ascending.
     pub fn stages(&self) -> &[usize] {
         &self.stages
     }
 
+    /// The longest impulse this configuration accepts, taps.
     pub fn max_len(&self) -> usize {
         self.max_len
     }
@@ -390,6 +425,7 @@ struct IrStage {
 /// Immutable and `Send + Sync`; build it on a worker thread and hand it to
 /// the audio thread with `openplugin_core::worker`. Memory is about 16 bytes
 /// per tap per impulse.
+/// See the [`ConvolverConfig`] example.
 pub struct ConvolutionIr {
     config: ConvolverConfig,
     /// Per impulse, the first `N1` taps reversed (oldest sample first).
@@ -398,6 +434,7 @@ pub struct ConvolutionIr {
 }
 
 impl ConvolutionIr {
+    /// The configuration these impulses were built for.
     pub fn config(&self) -> &ConvolverConfig {
         &self.config
     }
@@ -435,6 +472,8 @@ struct Stage {
 /// Create with [`ConvolverConfig::build`]; play impulses from
 /// [`ConvolverConfig::build_ir`]. Switching to another impulse of the same
 /// configuration is just passing a different `&ConvolutionIr`.
+/// Processing is allocation-free and lock-free. See the [`ConvolverConfig`]
+/// example.
 pub struct LongConvolver {
     config: ConvolverConfig,
     channels: usize,
@@ -657,6 +696,7 @@ impl LongConvolver {
         }
     }
 
+    /// The configuration this convolver was built for.
     pub fn config(&self) -> &ConvolverConfig {
         &self.config
     }

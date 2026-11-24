@@ -57,6 +57,19 @@ struct Channel {
 }
 
 /// Delay-line pitch shifter.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::DelayPitchShifter;
+///
+/// let mut shifter = DelayPitchShifter::new(1, 48_000.0, 40.0, 2);
+/// shifter.set_semitones(7.0);
+///
+/// let mut block = [0.0f32; 256];
+/// shifter.process(0, &mut block);
+/// assert!(block.iter().all(|s| s.is_finite()));
+/// ```
 pub struct DelayPitchShifter {
     sample_rate: f32,
     window: f32,
@@ -134,6 +147,7 @@ impl DelayPitchShifter {
         self.window as usize
     }
 
+    /// The sample rate in Hz the shifter was built for.
     pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }

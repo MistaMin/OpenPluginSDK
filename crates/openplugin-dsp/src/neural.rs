@@ -350,6 +350,16 @@ fn mul(a: usize, b: usize) -> Result<usize, ModelError> {
 }
 
 /// Fully connected layer, `y = f(W x + b)`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::neural::{Activation, Dense, Layer};
+///
+/// // 2 inputs, 1 output: y = tanh(0.5 a - 0.25 b + 0.1).
+/// let dense = Dense::new(2, 1, Activation::Tanh, vec![0.5, -0.25], vec![0.1]).unwrap();
+/// let _layer = Layer::Dense(dense);
+/// assert!(Dense::new(2, 1, Activation::Tanh, vec![0.5], vec![0.1]).is_err()); // wrong length
+/// ```
 #[derive(Debug, Clone)]
 pub struct Dense {
     inputs: usize,
@@ -385,6 +395,22 @@ impl Dense {
 }
 
 /// Gated recurrent unit (Cho et al. 2014). See the module docs.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::neural::{Gru, Layer};
+///
+/// let (inputs, hidden) = (1, 2);
+/// let gru = Gru::new(
+///     inputs,
+///     hidden,
+///     vec![0.1; 3 * hidden * inputs],
+///     vec![0.0; 3 * hidden * hidden],
+///     vec![0.0; 3 * hidden],
+/// )
+/// .unwrap();
+/// let _layer = Layer::Gru(gru);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Gru {
     inputs: usize,
@@ -454,6 +480,22 @@ impl Gru {
 }
 
 /// Long short-term memory with forget gate, no peepholes. See the module docs.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::neural::{Layer, Lstm};
+///
+/// let (inputs, hidden) = (1, 4);
+/// let lstm = Lstm::new(
+///     inputs,
+///     hidden,
+///     vec![0.1; 4 * hidden * inputs],
+///     vec![0.0; 4 * hidden * hidden],
+///     vec![0.0; 4 * hidden],
+/// )
+/// .unwrap();
+/// let _layer = Layer::Lstm(lstm);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Lstm {
     inputs: usize,
@@ -517,6 +559,15 @@ impl Lstm {
 }
 
 /// Causal dilated 1-D convolution over time, `y[t] = f(b + Σ W_j x[t-j·d])`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::neural::{Activation, Conv1d};
+///
+/// // 1 in, 1 out, kernel 3, dilation 2: sees the current sample and 2 and 4 back.
+/// let conv = Conv1d::new(1, 1, 3, 2, Activation::Identity, vec![0.5, 0.25, 0.25], vec![0.0]).unwrap();
+/// assert_eq!(conv.receptive_past(), 4);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Conv1d {
     inputs: usize,
@@ -647,6 +698,31 @@ impl Layer {
 
 /// A chain of layers run one sample at a time: input size 1 (audio) or 2
 /// (audio and a conditioning value), output size 1.
+/// `new` and `from_json` allocate (run them off the audio thread);
+/// `process_sample` and `process_block` do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::neural::{Activation, Dense, Layer, Model};
+///
+/// // A one-layer "model": y = tanh(2 x).
+/// let json = r#"{
+///     "version": 1, "sample_rate": 48000, "input_size": 1, "residual": false,
+///     "layers": [
+///         { "type": "dense", "in": 1, "out": 1, "activation": "tanh", "weights": [2.0], "bias": [0.0] }
+///     ]
+/// }"#;
+/// let mut model = Model::from_json(json).unwrap();
+/// let y = model.process_sample(0.25, 0.0);
+/// assert!((y - 0.5f32.tanh()).abs() < 1e-6);
+///
+/// // The same model built in code.
+/// let dense = Dense::new(1, 1, Activation::Tanh, vec![2.0], vec![0.0]).unwrap();
+/// let mut same = Model::new(1, 48_000.0, false, vec![Layer::Dense(dense)]).unwrap();
+/// assert_eq!(same.process_sample(0.25, 0.0), y);
+/// assert!(Model::from_json("{}").is_err());
+/// ```
 #[derive(Debug, Clone)]
 pub struct Model {
     layers: Vec<Layer>,

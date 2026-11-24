@@ -5,14 +5,36 @@
 //! layouts the developer chooses, and on a surround layout it runs several
 //! copies ("engines") of the inner plugin, one per channel pair.
 //!
-//! ```ignore
+//! ```
+//! # use openplugin_core::{Category, Plugin, PluginInfo};
+//! # use openplugin_dsp::LinkedDetector;
+//! # static INFO: PluginInfo = PluginInfo::new("example.gain", "Gain", "example", "1.0.0", Category::Utility, &[]);
+//! # #[derive(Default)]
+//! # struct MyPlugin;
+//! # impl Plugin for MyPlugin {
+//! #     fn info(&self) -> &'static PluginInfo { &INFO }
+//! #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+//! #     fn reset(&mut self) {}
+//! #     fn set_param(&mut self, _: &str, _: f32) -> bool { false }
+//! #     fn param(&self, _: &str) -> Option<f32> { None }
+//! #     fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
+//! # }
+//! # type MyCompressor = MyPlugin;
+//! # impl LinkedDetector for MyPlugin {
+//! #     fn detector_level(&self) -> f32 { 0.0 }
+//! #     fn set_linked_level(&mut self, _: f32) {}
+//! # }
+//! use openplugin_core::SpeakerLayout;
+//! use openplugin_dsp::{LfeMode, SurroundAdapter};
+//!
 //! // In the plugin's export, one line:
-//! SurroundAdapter::new(MyPlugin::default)
+//! let plain = SurroundAdapter::new(MyPlugin::default);
 //! // or with options:
-//! SurroundAdapter::new(MyCompressor::default)
+//! let linked = SurroundAdapter::new(MyCompressor::default)
 //!     .surround_layouts(&[SpeakerLayout::Surround51, SpeakerLayout::Surround714])
 //!     .lfe(LfeMode::Pass)
-//!     .linked()
+//!     .linked();
+//! # let _ = (plain, linked);
 //! ```
 //!
 //! # Where it lives
@@ -119,6 +141,29 @@ use crate::downmix::{roles_of, Downmix, DownmixTarget, MixSettings};
 /// number where bigger means the detector asks for more gain change; its unit
 /// is the plugin's choice (envelope amplitude, reduction in dB), as long as
 /// `set_linked_level` takes the same unit. Zero means "no demand".
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::LinkedDetector;
+///
+/// struct Detector {
+///     envelope: f32,
+///     linked: f32,
+/// }
+///
+/// impl LinkedDetector for Detector {
+///     fn detector_level(&self) -> f32 {
+///         self.envelope
+///     }
+///     fn set_linked_level(&mut self, level: f32) {
+///         self.linked = level; // the gain computer uses max(envelope, linked)
+///     }
+/// }
+///
+/// let mut d = Detector { envelope: 0.2, linked: 0.0 };
+/// d.set_linked_level(0.5);
+/// assert_eq!(d.envelope.max(d.linked), 0.5);
+/// ```
 pub trait LinkedDetector {
     /// The detector level after the frames processed so far.
     fn detector_level(&self) -> f32;
@@ -214,6 +259,52 @@ fn usable(layout: SpeakerLayout) -> bool {
 }
 
 /// A stereo plugin on surround buses. See the module docs.
+/// Engines and scratch buffers are allocated in `prepare_layout`, never in
+/// `process`.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_core::{Category, IoConfig, Plugin, PluginInfo, SpeakerLayout};
+/// use openplugin_dsp::SurroundAdapter;
+///
+/// static INFO: PluginInfo = PluginInfo::new("example.half", "Half", "example", "1.0.0", Category::Utility, &[]);
+///
+/// /// A stereo plugin that halves its input.
+/// #[derive(Default)]
+/// struct Half;
+///
+/// impl Plugin for Half {
+///     fn info(&self) -> &'static PluginInfo {
+///         &INFO
+///     }
+///     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+///     fn reset(&mut self) {}
+///     fn set_param(&mut self, _: &str, _: f32) -> bool {
+///         false
+///     }
+///     fn param(&self, _: &str) -> Option<f32> {
+///         None
+///     }
+///     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+///         for channel in io.iter_mut() {
+///             for s in &mut channel[..frames] {
+///                 *s *= 0.5;
+///             }
+///         }
+///     }
+/// }
+///
+/// let mut adapter = SurroundAdapter::new(Half::default);
+/// let five_one = IoConfig { input: SpeakerLayout::Surround51, output: SpeakerLayout::Surround51, sidechain: None };
+/// assert!(adapter.set_layout(five_one));
+/// adapter.prepare_layout(48_000.0, 64, five_one);
+///
+/// let mut buffers = vec![vec![1.0f32; 64]; 6];
+/// let mut io: Vec<&mut [f32]> = buffers.iter_mut().map(|b| b.as_mut_slice()).collect();
+/// adapter.process(&mut io, 64);
+/// assert!(buffers.iter().all(|ch| ch[63] == 0.5)); // every channel, LFE included
+/// ```
 pub struct SurroundAdapter<P: Plugin, F: Fn() -> P + Send + 'static> {
     make: F,
     engines: Vec<Engine<P>>,
@@ -805,8 +896,30 @@ impl<P: Plugin, F: Fn() -> P + Send + 'static> SurroundAdapter<P, F> {
 /// pointer as the factory so the type can be named. Export macros need a
 /// `Default` type:
 ///
-/// ```ignore
-/// export_clap!(openplugin_dsp::StereoOnSurround<MyPlugin>);
+/// ```
+/// # use openplugin_core::{Category, Plugin, PluginInfo};
+/// # use openplugin_dsp::LinkedDetector;
+/// # static INFO: PluginInfo = PluginInfo::new("example.gain", "Gain", "example", "1.0.0", Category::Utility, &[]);
+/// # #[derive(Default)]
+/// # struct MyPlugin;
+/// # impl Plugin for MyPlugin {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, _: &str, _: f32) -> bool { false }
+/// #     fn param(&self, _: &str) -> Option<f32> { None }
+/// #     fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
+/// # }
+/// # type MyCompressor = MyPlugin;
+/// # impl LinkedDetector for MyPlugin {
+/// #     fn detector_level(&self) -> f32 { 0.0 }
+/// #     fn set_linked_level(&mut self, _: f32) {}
+/// # }
+/// use openplugin_dsp::StereoOnSurround;
+///
+/// // export_clap!(openplugin_dsp::StereoOnSurround<MyPlugin>);
+/// let adapter = StereoOnSurround::<MyPlugin>::default();
+/// assert!(adapter.supported_layouts().len() > 1); // stereo plus the surround layouts
 /// ```
 ///
 /// `Default` gives the default options (see [`SurroundAdapter::new`]). To use

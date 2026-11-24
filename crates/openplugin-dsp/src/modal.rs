@@ -92,7 +92,10 @@ pub enum ModalPreset {
     /// Simply supported bar: ratios `n^2`.
     BarSimplySupported,
     /// Rectangular simply supported plate with side ratio `a / b`.
-    Plate { aspect: f32 },
+    Plate {
+        /// Side ratio `a / b` of the plate.
+        aspect: f32,
+    },
     /// Ideal circular membrane with a fixed rim (up to 28 modes).
     Membrane,
 }
@@ -175,6 +178,14 @@ pub fn mode_ratios(preset: ModalPreset, out: &mut [f64]) -> usize {
 }
 
 /// Settings for [`ModalBank::load_preset`].
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::PresetSettings;
+///
+/// let marimba_bar = PresetSettings { f1: 220.0, t60: 1.5, modes: 4, ..PresetSettings::default() };
+/// assert_eq!(marimba_bar.decay_tilt, 1.0);
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct PresetSettings {
     /// Frequency of the first mode.
@@ -196,6 +207,26 @@ impl Default for PresetSettings {
 }
 
 /// A bank of two-pole resonators.
+/// `new` allocates; `next`, `process` and the setters do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Exciter, ModalBank, ModalPreset, PresetSettings, Strike};
+///
+/// let rate = 48_000.0;
+/// let mut bank = ModalBank::new(rate, 16);
+/// let loaded = bank.load_preset(ModalPreset::BarFreeFree, &PresetSettings::default());
+/// assert!(loaded > 0 && loaded <= 8);
+///
+/// let mut mallet = Exciter::new(rate, Strike::Mallet { contact_ms: 2.0 });
+/// mallet.trigger(0.8);
+/// let mut peak = 0.0f32;
+/// for _ in 0..4_800 {
+///     peak = peak.max(bank.next(mallet.next()).abs());
+/// }
+/// assert!(peak > 0.0 && peak.is_finite());
+/// ```
 #[derive(Clone, Debug)]
 pub struct ModalBank {
     fs: f64,
@@ -247,6 +278,7 @@ impl ModalBank {
         }
     }
 
+    /// The most modes the bank holds (the `capacity` given to `new`, at least 1).
     pub fn capacity(&self) -> usize {
         self.a1.len()
     }
@@ -256,6 +288,7 @@ impl ModalBank {
         self.count
     }
 
+    /// Whether no modes are active.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -394,12 +427,19 @@ pub enum Strike {
     /// One sample of amplitude `velocity`.
     Impulse,
     /// White noise of RMS `velocity / sqrt 3`, fading linearly to zero over `ms`.
-    NoiseBurst { ms: f32 },
+    NoiseBurst {
+        /// Length of the burst, milliseconds (clamped to 0.01..=2000).
+        ms: f32,
+    },
     /// Half-sine force pulse of unit area (times `velocity`) lasting `contact_ms`.
-    Mallet { contact_ms: f32 },
+    Mallet {
+        /// Contact time, milliseconds (clamped to 0.01..=2000).
+        contact_ms: f32,
+    },
 }
 
 /// Excitation generator for a [`ModalBank`] (or any resonator).
+/// Plain state, no allocation; see the [`ModalBank`] example.
 #[derive(Clone, Debug)]
 pub struct Exciter {
     fs: f64,
@@ -411,6 +451,8 @@ pub struct Exciter {
 }
 
 impl Exciter {
+    /// An idle exciter for `sample_rate` (Hz, clamped to the SDK range) producing
+    /// `kind`. Does not allocate.
     pub fn new(sample_rate: f32, kind: Strike) -> Self {
         Self {
             fs: f64::from(effective_rate(sample_rate)),
@@ -422,10 +464,12 @@ impl Exciter {
         }
     }
 
+    /// Changes the sample rate in Hz; takes effect at the next trigger.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.fs = f64::from(effective_rate(sample_rate));
     }
 
+    /// Changes what the next trigger produces.
     pub fn set_kind(&mut self, kind: Strike) {
         self.kind = kind;
     }
@@ -443,6 +487,7 @@ impl Exciter {
         };
     }
 
+    /// Whether a strike is still being produced.
     pub fn is_active(&self) -> bool {
         self.n < self.len
     }

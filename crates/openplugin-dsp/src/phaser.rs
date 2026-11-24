@@ -48,6 +48,19 @@ struct ChannelState {
 }
 
 /// Phaser.
+/// `new` and `prepare` allocate; processing and the setters do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{LfoShape, Phaser};
+///
+/// let mut phaser = Phaser::new(1, 48_000.0);
+/// phaser.set_shape(LfoShape::Triangle);
+/// let mut block = vec![0.25f32; 512];
+/// phaser.process(0, &mut block);
+/// assert!(block.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Clone, Debug)]
 pub struct Phaser {
     sample_rate: f32,
@@ -118,6 +131,7 @@ impl Phaser {
         }
     }
 
+    /// The channel count given to `new`.
     pub fn channels(&self) -> usize {
         self.channels.len()
     }
@@ -159,11 +173,13 @@ impl Phaser {
         }
     }
 
+    /// The sweep rate, free in Hz or synced to the host tempo.
     pub fn set_rate(&mut self, rate: LfoRate) {
         self.rate = rate;
         self.apply_lfo_setup();
     }
 
+    /// The sweep waveform.
     pub fn set_shape(&mut self, shape: LfoShape) {
         self.shape = shape;
         self.apply_lfo_setup();

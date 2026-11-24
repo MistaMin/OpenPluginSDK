@@ -34,6 +34,34 @@ use rustfft::{Fft, FftPlanner};
 use std::sync::Arc;
 
 /// Receives each spectrum, in place.
+/// Called on the audio thread from [`Stft::process`] and friends, so an
+/// implementation must not allocate or lock. A closure
+/// `FnMut(usize, &mut [Complex<f32>])` implements it.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Complex, SpectralProcessor, Stft, StftConfig};
+///
+/// /// Zeroes every bin above a cutoff: a brick-wall low-pass.
+/// struct BrickWall {
+///     cutoff_bin: usize,
+/// }
+///
+/// impl SpectralProcessor for BrickWall {
+///     fn process_frame(&mut self, _channel: usize, bins: &mut [Complex<f32>]) {
+///         for bin in bins.iter_mut().skip(self.cutoff_bin) {
+///             *bin = Complex::new(0.0, 0.0);
+///         }
+///     }
+/// }
+///
+/// let mut stft = Stft::new(1, StftConfig::hann(256)).unwrap();
+/// let mut buffer = vec![0.5f32; 2_048];
+/// stft.process_in_place(0, &mut buffer, &mut BrickWall { cutoff_bin: 8 });
+/// // DC passes, delayed by the frame.
+/// assert!((buffer[2_047] - 0.5).abs() < 1e-3);
+/// ```
 pub trait SpectralProcessor {
     /// `bins` holds frequency bins `0..=frame/2` of `channel`'s windowed frame.
     /// Bins 0 and `frame/2` are real by definition; their imaginary parts are ignored.
@@ -47,6 +75,18 @@ impl<F: FnMut(usize, &mut [Complex<f32>])> SpectralProcessor for F {
 }
 
 /// A processor that leaves the spectrum alone.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Identity, Stft, StftConfig};
+///
+/// let mut stft = Stft::new(1, StftConfig::hann(64)).unwrap();
+/// let input: Vec<f32> = (0..512).map(|n| (n as f32 * 0.1).sin()).collect();
+/// let mut output = vec![0.0f32; 512];
+/// stft.process(0, &input, &mut output, &mut Identity);
+/// // The input comes back delayed by exactly one frame.
+/// assert!((output[300] - input[300 - 64]).abs() < 1e-4);
+/// ```
 pub struct Identity;
 
 impl SpectralProcessor for Identity {
@@ -127,13 +167,24 @@ pub fn check_ola(frame: usize, hop: usize, analysis: WindowKind, synthesis: Wind
 }
 
 /// STFT settings.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{check_ola, StftConfig};
+/// use openplugin_dsp::windows::WindowKind;
+///
+/// let config = StftConfig { synthesis: WindowKind::Hann, hop: 256, ..StftConfig::hann(1024) };
+/// assert!(check_ola(config.frame, config.hop, config.analysis, config.synthesis).is_cola(1e-4));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StftConfig {
     /// Frame size, a power of two of at least 4.
     pub frame: usize,
     /// Samples between frames, `1..=frame`.
     pub hop: usize,
+    /// Window applied before the forward transform.
     pub analysis: WindowKind,
+    /// Window applied after the inverse transform.
     pub synthesis: WindowKind,
 }
 
@@ -157,6 +208,8 @@ struct Channel {
 }
 
 /// Multichannel STFT analysis/resynthesis.
+/// `new` allocates; `process`, `process_in_place` and `tick` do not. See
+/// [`SpectralProcessor`] and [`Identity`] for examples.
 pub struct Stft {
     n: usize,
     hop: usize,
@@ -218,14 +271,17 @@ impl Stft {
         })
     }
 
+    /// The channel count.
     pub fn channels(&self) -> usize {
         self.channels.len()
     }
 
+    /// The frame size, samples.
     pub fn frame(&self) -> usize {
         self.n
     }
 
+    /// The hop, samples.
     pub fn hop(&self) -> usize {
         self.hop
     }

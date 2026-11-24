@@ -14,6 +14,23 @@ use crate::bypass::DelayFade;
 
 /// Latency-aligned `processed - dry`, gliding in and out. No allocation after
 /// [`Delta::prepare`].
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Delta;
+///
+/// let mut delta = Delta::prepare(1, 64, 48_000.0, 20.0);
+/// delta.set_latency(0);
+/// delta.set_enabled(true);
+/// delta.snap();
+///
+/// // Processing that changed nothing: the difference is silence.
+/// let dry = [0.5f32; 8];
+/// let mut processed = dry;
+/// delta.process(&[&dry[..]], &mut [&mut processed[..]]);
+/// assert_eq!(processed, [0.0; 8]);
+/// ```
 pub struct Delta {
     line: DelayFade,
 }
@@ -26,10 +43,13 @@ impl Delta {
         Self { line: DelayFade::new(channels, max_latency, sample_rate, glide * 0.001, 0.0) }
     }
 
+    /// Delay of the dry signal in samples: the latency the plugin reports.
+    /// Clamped to the `max_latency` given to [`prepare`](Self::prepare).
     pub fn set_latency(&mut self, latency: usize) {
         self.line.set_latency(latency);
     }
 
+    /// The dry delay in samples.
     pub fn latency(&self) -> usize {
         self.line.latency()
     }
@@ -39,6 +59,7 @@ impl Delta {
         self.line.target = if enabled { 1.0 } else { 0.0 };
     }
 
+    /// Whether the glide target is the difference signal.
     pub fn is_enabled(&self) -> bool {
         self.line.target > 0.5
     }
@@ -53,6 +74,7 @@ impl Delta {
         self.line.value
     }
 
+    /// Clears the dry delay. The glide position is kept.
     pub fn reset(&mut self) {
         self.line.reset();
     }

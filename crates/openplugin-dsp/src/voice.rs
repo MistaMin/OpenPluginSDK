@@ -72,6 +72,21 @@ impl Ramp {
 /// the same sample as the note-on applies to all generated samples). Later
 /// values ramp linearly over the ramp length. No allocation; NaN and
 /// infinite values are refused.
+/// # Example
+///
+/// ```
+/// use openplugin_core::Expression;
+/// use openplugin_dsp::NoteExpressions;
+///
+/// let mut ex = NoteExpressions::new();
+/// ex.set_ramp(48);
+/// assert!(ex.set(Expression::Brightness, 0.8)); // before the first sample: taken at once
+/// assert_eq!(ex.get(Expression::Brightness), 0.8);
+/// ex.advance(1);
+/// ex.set(Expression::Brightness, 0.2); // later values ramp over 48 samples
+/// assert!(ex.is_ramping());
+/// assert!(!ex.set(Expression::Pan, f32::NAN));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NoteExpressions {
     ramps: [Ramp; RAMPS],
@@ -110,6 +125,7 @@ impl NoteExpressions {
         self.ramp_samples = samples;
     }
 
+    /// Ramp length for later changes, in samples.
     pub fn ramp(&self) -> u32 {
         self.ramp_samples
     }
@@ -174,6 +190,7 @@ impl NoteExpressions {
 }
 
 /// One voice over a mono slice the caller already owns.
+/// Plain state, no allocation.
 #[derive(Clone, Copy, Debug)]
 #[deprecated(since = "1.0.0", note = "use `SincPlayer`, which resamples without aliasing")]
 pub struct SampleVoice {
@@ -198,6 +215,7 @@ impl Default for SampleVoice {
 }
 
 impl SampleVoice {
+    /// An idle voice.
     pub const fn new() -> Self {
         Self {
             cursor: 0.0,
@@ -208,6 +226,7 @@ impl SampleVoice {
         }
     }
 
+    /// Whether the voice is playing.
     pub const fn is_active(self) -> bool {
         self.active
     }
@@ -283,6 +302,7 @@ impl Slot {
 
 /// Fixed polyphony. `note_on` reuses a free slot or the oldest one.
 /// `N` is chosen when the bank is built, so the audio thread does not grow it.
+/// Plain state, no allocation.
 #[derive(Clone, Debug)]
 #[deprecated(since = "1.0.0", note = "use `VoiceAllocator`")]
 pub struct Polyphony<const N: usize> {
@@ -293,6 +313,8 @@ pub struct Polyphony<const N: usize> {
 }
 
 impl<const N: usize> Polyphony<N> {
+    /// `N` idle slots with linear attack and release lengths in samples (0 is
+    /// instant).
     pub const fn new(attack: u32, release: u32) -> Self {
         Self {
             slots: [Slot::idle(); N],
@@ -302,6 +324,8 @@ impl<const N: usize> Polyphony<N> {
         }
     }
 
+    /// Starts `note` in a free slot, or the oldest one when all are busy, and
+    /// returns the slot index; `None` for a key above 127 or when `N` is 0.
     pub fn note_on(&mut self, note: u8) -> Option<usize> {
         self.note_on_ref(NoteRef::key(note))
     }
@@ -341,6 +365,7 @@ impl<const N: usize> Polyphony<N> {
         Some(index)
     }
 
+    /// Starts the release of every slot holding `note`.
     pub fn note_off(&mut self, note: u8) {
         for slot in &mut self.slots {
             if slot.active && !slot.released && slot.note == note {
@@ -375,6 +400,7 @@ impl<const N: usize> Polyphony<N> {
             .map(|(i, _)| i)
     }
 
+    /// Starts the release of every held slot.
     pub fn note_off_all(&mut self) {
         for slot in &mut self.slots {
             if slot.active && !slot.released {

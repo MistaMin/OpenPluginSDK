@@ -101,6 +101,23 @@ pub enum SvfMode {
 }
 
 /// TPT state-variable filter. See the [module documentation](self).
+/// Plain state, no allocation; safe to reconfigure every sample.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Svf, SvfMode};
+///
+/// let mut svf = Svf::new();
+/// svf.configure(SvfMode::LowPass, 48_000.0, 1_000.0, 0.707, 0.0);
+/// let mut y = 0.0;
+/// for _ in 0..4_800 {
+///     y = svf.process_sample(1.0);
+/// }
+/// assert!((y - 1.0).abs() < 1e-3);
+/// let (low, band, high) = svf.process_split(1.0); // all three outputs at once
+/// assert!((low - 1.0).abs() < 1e-3 && band.abs() < 1e-3 && high.abs() < 1e-3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Svf {
     a1: f64,

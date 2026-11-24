@@ -42,6 +42,19 @@ pub enum OnePoleMode {
 ///
 /// Named `OnePoleFilter` to avoid confusion with the parameter smoother
 /// `openplugin_core::OnePole`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{OnePoleFilter, OnePoleMode};
+///
+/// let mut lp = OnePoleFilter::new();
+/// lp.set(OnePoleMode::LowPass, 48_000.0, 1_000.0);
+/// let mut y = 0.0;
+/// for _ in 0..4_800 {
+///     y = lp.process_sample(1.0);
+/// }
+/// assert!((y - 1.0).abs() < 1e-3); // a low-pass passes DC
+/// ```
 #[derive(Debug, Clone)]
 pub struct OnePoleFilter {
     big_g: f64,
@@ -66,10 +79,13 @@ impl OnePoleFilter {
         }
     }
 
+    /// Clears the state, as after silence.
     pub fn reset(&mut self) {
         self.s = 0.0;
     }
 
+    /// Sets the response, the sample rate (Hz) and the corner (Hz, clamped to
+    /// 1 Hz..0.499 fs). A non-finite corner is ignored. Keeps the state.
     pub fn set(&mut self, mode: OnePoleMode, sample_rate: f32, freq: f32) {
         if let Some(g) = tan_g(sample_rate, freq) {
             self.big_g = g / (1.0 + g);
@@ -86,6 +102,7 @@ impl OnePoleFilter {
         (lp, x - lp)
     }
 
+    /// Filters one sample. Realtime-safe.
     #[inline]
     pub fn process_sample(&mut self, x: f32) -> f32 {
         let (lp, hp) = self.split(sanitize_in(x));
@@ -102,24 +119,42 @@ impl OnePoleFilter {
 
 /// First-order all-pass: unit gain, phase -90 degrees at the corner (+1 at DC,
 /// -1 at Nyquist). `H(s) = (1 - s) / (1 + s)`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Allpass1;
+///
+/// let mut ap = Allpass1::new();
+/// ap.set(48_000.0, 1_000.0);
+/// let mut y = 0.0;
+/// for _ in 0..4_800 {
+///     y = ap.process_sample(1.0);
+/// }
+/// assert!((y - 1.0).abs() < 1e-3); // unit gain, +1 at DC
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct Allpass1 {
     pole: OnePoleFilter,
 }
 
 impl Allpass1 {
+    /// A section with the corner at 1 rad/sample until [`Self::set`] is called.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Clears the state.
     pub fn reset(&mut self) {
         self.pole.reset();
     }
 
+    /// Sets the sample rate (Hz) and the -90 degree frequency (Hz). A
+    /// non-finite frequency is ignored.
     pub fn set(&mut self, sample_rate: f32, freq: f32) {
         self.pole.set(OnePoleMode::LowPass, sample_rate, freq);
     }
 
+    /// Filters one sample. Realtime-safe.
     #[inline]
     pub fn process_sample(&mut self, x: f32) -> f32 {
         let x = sanitize_in(x);
@@ -133,24 +168,39 @@ impl Allpass1 {
 
 /// Second-order all-pass: unit gain, phase -180 degrees at the centre
 /// frequency, sharper for higher `q`. `H(s) = (s^2 - s/Q + 1) / (s^2 + s/Q + 1)`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Allpass2;
+///
+/// let mut ap = Allpass2::new();
+/// ap.set(48_000.0, 1_000.0, 0.707);
+/// let out: Vec<f32> = (0..64).map(|n| ap.process_sample(if n == 0 { 1.0 } else { 0.0 })).collect();
+/// assert!(out.iter().all(|y| y.is_finite()));
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct Allpass2 {
     svf: Svf,
 }
 
 impl Allpass2 {
+    /// A section that passes signal unchanged until [`Self::set`] is called.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Clears the state.
     pub fn reset(&mut self) {
         self.svf.reset();
     }
 
+    /// Sets the sample rate (Hz), the -180 degree frequency (Hz) and Q. Non-finite
+    /// values are ignored.
     pub fn set(&mut self, sample_rate: f32, freq: f32, q: f32) {
         self.svf.configure(SvfMode::AllPass, sample_rate, freq, q, 0.0);
     }
 
+    /// Filters one sample. Realtime-safe.
     #[inline]
     pub fn process_sample(&mut self, x: f32) -> f32 {
         self.svf.process_sample(x)
@@ -162,6 +212,18 @@ impl Allpass2 {
 ///
 /// `y[n] = (x[n] - x[n-1]) / (1 + g) + R y[n-1]`, `g = tan(pi f / fs)`,
 /// `R = (1 - g) / (1 + g)`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::DcBlocker;
+///
+/// let mut dc = DcBlocker::new(48_000.0, 20.0);
+/// let mut y = 1.0;
+/// for _ in 0..48_000 {
+///     y = dc.process_sample(0.5); // a constant offset
+/// }
+/// assert!(y.abs() < 1e-3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct DcBlocker {
     gain: f64,
@@ -177,6 +239,8 @@ impl Default for DcBlocker {
 }
 
 impl DcBlocker {
+    /// A blocker for `sample_rate` (Hz) with its corner at `freq` (Hz). Does not
+    /// allocate.
     pub fn new(sample_rate: f32, freq: f32) -> Self {
         let mut s = Self {
             gain: 1.0,
@@ -188,6 +252,8 @@ impl DcBlocker {
         s
     }
 
+    /// Changes the sample rate and corner, keeping the state. A non-finite
+    /// corner is ignored.
     pub fn set(&mut self, sample_rate: f32, freq: f32) {
         if let Some(g) = tan_g(sample_rate, freq) {
             self.gain = 1.0 / (1.0 + g);
@@ -195,11 +261,13 @@ impl DcBlocker {
         }
     }
 
+    /// Clears the state.
     pub fn reset(&mut self) {
         self.x1 = 0.0;
         self.y1 = 0.0;
     }
 
+    /// Filters one sample. Realtime-safe.
     #[inline]
     pub fn process_sample(&mut self, x: f32) -> f32 {
         let x = sanitize_in(x);
@@ -222,7 +290,9 @@ impl DcBlocker {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ButterworthKind {
+    /// Passes below the cutoff.
     LowPass,
+    /// Passes above the cutoff.
     HighPass,
 }
 
@@ -232,6 +302,20 @@ pub const MAX_BUTTERWORTH_ORDER: usize = 8;
 /// Butterworth low/high-pass of order 1 to 8 (6 to 48 dB/octave), -3 dB at the
 /// cutoff, maximally flat. Odd orders use one [`OnePoleFilter`]; each pair of
 /// poles is one [`Svf`] section with its Butterworth Q.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Butterworth, ButterworthKind};
+///
+/// let mut hp = Butterworth::new();
+/// hp.set(ButterworthKind::HighPass, 4, 48_000.0, 80.0); // 24 dB/octave at 80 Hz
+/// assert_eq!(hp.order(), 4);
+/// let mut y = 1.0;
+/// for _ in 0..48_000 {
+///     y = hp.process_sample(1.0);
+/// }
+/// assert!(y.abs() < 1e-3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Butterworth {
     order: usize,
@@ -255,6 +339,7 @@ impl Butterworth {
         }
     }
 
+    /// Clears the state of every section.
     pub fn reset(&mut self) {
         self.pole.reset();
         for s in &mut self.sections {
@@ -262,6 +347,7 @@ impl Butterworth {
         }
     }
 
+    /// The order in use, 1 to 8.
     pub fn order(&self) -> usize {
         self.order
     }
@@ -297,6 +383,7 @@ impl Butterworth {
         }
     }
 
+    /// Filters one sample. Realtime-safe.
     #[inline]
     pub fn process_sample(&mut self, x: f32) -> f32 {
         let mut y = x;

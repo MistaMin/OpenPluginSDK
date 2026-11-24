@@ -40,7 +40,9 @@ use crate::svf::{Svf, SvfMode};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeEssDetect {
+    /// A band-pass at the de-esser's frequency and Q.
     BandPass,
+    /// A high-pass at the de-esser's frequency: everything above the corner.
     HighPass,
 }
 
@@ -48,12 +50,32 @@ pub enum DeEssDetect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeEssMode {
+    /// The whole signal is turned down while sibilance is detected.
     WideBand,
+    /// Only the detected band is turned down.
     SplitBand,
 }
 
 /// De-esser for any number of channels (constructed for a fixed count).
 #[derive(Debug, Clone)]
+///
+/// [`new`](Self::new) allocates; nothing after it does.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{DeEssMode, DeEsser};
+///
+/// let mut deesser = DeEsser::new(48_000.0, 2);
+/// deesser.set_frequency(7_000.0);
+/// deesser.set_threshold_db(-24.0);
+/// deesser.set_mode(DeEssMode::SplitBand);
+///
+/// let mut left = [0.0f32; 256];
+/// let mut right = [0.0f32; 256];
+/// deesser.process(&mut [&mut left[..], &mut right[..]]);
+/// assert_eq!(deesser.gain_reduction_db(), 0.0); // silence is not reduced
+/// ```
 pub struct DeEsser {
     fs: f32,
     channels: usize,
@@ -129,10 +151,12 @@ impl DeEsser {
         self.dynamics.set_params(self.params);
     }
 
+    /// Number of channels, fixed at construction.
     pub fn channels(&self) -> usize {
         self.channels
     }
 
+    /// Clears the filters and the detector. Settings are kept.
     pub fn reset(&mut self) {
         for f in self.det.iter_mut().chain(self.split.iter_mut()) {
             f.reset();
@@ -143,6 +167,8 @@ impl DeEsser {
         self.dynamics.reset();
     }
 
+    /// Centre (band-pass) or corner (high-pass) of the detector in Hz. NaN and
+    /// infinity are ignored.
     pub fn set_frequency(&mut self, hz: f32) {
         if hz.is_finite() {
             self.freq = hz;
@@ -150,6 +176,7 @@ impl DeEsser {
         }
     }
 
+    /// Q of the detector band-pass. NaN and infinity are ignored.
     pub fn set_q(&mut self, q: f32) {
         if q.is_finite() {
             self.q = q;
@@ -157,6 +184,8 @@ impl DeEsser {
         }
     }
 
+    /// Threshold in dBFS of a sine in the detected band. NaN and infinity are
+    /// ignored.
     pub fn set_threshold_db(&mut self, db: f32) {
         if db.is_finite() {
             self.params.threshold_db = db;
@@ -164,6 +193,8 @@ impl DeEsser {
         }
     }
 
+    /// Compression ratio above the threshold, at least 1 (lower values are
+    /// raised to 1; NaN is ignored).
     pub fn set_ratio(&mut self, ratio: f32) {
         if !ratio.is_nan() {
             self.params.ratio = ratio.max(1.0);
@@ -179,6 +210,8 @@ impl DeEsser {
         }
     }
 
+    /// Attack and release of the detector in milliseconds, each at least 0. If
+    /// either is NaN or infinite, both are ignored.
     pub fn set_times_ms(&mut self, attack_ms: f32, release_ms: f32) {
         if attack_ms.is_finite() && release_ms.is_finite() {
             self.params.attack_ms = attack_ms.max(0.0);
@@ -187,15 +220,19 @@ impl DeEsser {
         }
     }
 
+    /// Chooses the detector filter.
     pub fn set_detect(&mut self, d: DeEssDetect) {
         self.detect = d;
         self.configure();
     }
 
+    /// Chooses wide-band or split-band reduction.
     pub fn set_mode(&mut self, m: DeEssMode) {
         self.mode = m;
     }
 
+    /// `true` outputs the detector signal instead of the processed one, to tune
+    /// the frequency by ear.
     pub fn set_listen(&mut self, on: bool) {
         self.listen = on;
     }

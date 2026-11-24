@@ -5,15 +5,21 @@
 //! `next` only adds `hz / sample_rate` and wraps.
 #![allow(deprecated)] // this module defines the deprecated items
 
+/// Waveform of the deprecated [`Oscillator`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 #[deprecated(since = "1.0.0", note = "not band-limited; use `BlWave` with `BandlimitedOsc`")]
 pub enum Wave {
+    /// A sine.
     Sine,
+    /// A rising ramp, -1 to 1, not band-limited.
     Saw,
+    /// +1 for the first half cycle, -1 for the second, not band-limited.
     Square,
 }
 
+/// A naive phase-accumulator oscillator (it aliases). Plain state, no
+/// allocation.
 #[derive(Clone, Copy, Debug)]
 #[deprecated(since = "1.0.0", note = "saw and square alias; use `BandlimitedOsc` or `WavetableOsc`")]
 pub struct Oscillator {
@@ -22,10 +28,12 @@ pub struct Oscillator {
 }
 
 impl Oscillator {
+    /// An oscillator at phase 0.
     pub const fn new(wave: Wave) -> Self {
         Self { phase: 0.0, wave }
     }
 
+    /// Phase in cycles, 0..1.
     pub const fn phase(self) -> f32 {
         self.phase
     }

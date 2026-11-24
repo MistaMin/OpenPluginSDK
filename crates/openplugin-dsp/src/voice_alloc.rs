@@ -86,8 +86,12 @@ use crate::voice::NoteExpressions;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StealPolicy {
+    /// The voice that started first.
     Oldest,
+    /// The voice with the lowest level set by [`VoiceAllocator::set_level`];
+    /// ties go to the oldest.
     Quietest,
+    /// Reuse a voice already playing the same note, else the oldest.
     SameNote,
 }
 
@@ -95,8 +99,12 @@ pub enum StealPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VoiceMode {
+    /// One voice per note.
     Poly,
+    /// Voice 0 only, last-note priority; every note change retriggers the envelope.
     Mono,
+    /// Voice 0 only, last-note priority; a note change while a key is held does
+    /// not retrigger.
     Legato,
 }
 
@@ -104,6 +112,7 @@ pub enum VoiceMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum GlideMode {
+    /// No glide: a new note starts at its own pitch.
     Off,
     /// Every new note glides from the previous pitch.
     Always,
@@ -115,7 +124,9 @@ pub enum GlideMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VoicePhase {
+    /// Not playing; available for a new note.
     Free,
+    /// Key down (or held by the sustain pedal).
     Held,
     /// Key up (or stolen into release); the tail is still sounding.
     Released,
@@ -159,10 +170,12 @@ impl<S> Voice<S> {
         }
     }
 
+    /// Free, held or released.
     pub fn phase(&self) -> VoicePhase {
         self.phase
     }
 
+    /// Whether the voice is free for a new note.
     pub fn is_free(&self) -> bool {
         self.phase == VoicePhase::Free
     }
@@ -292,6 +305,37 @@ pub const ENDED_CAPACITY: usize = 64;
 const DEFAULT_SMOOTHING: f32 = 0.005;
 
 /// `N` voices with state `S`. See the module documentation.
+/// `new` and `with_state` allocate the ended-note list once; every note,
+/// pedal and expression call after that is allocation-free and realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{StealPolicy, VoiceAllocator};
+///
+/// #[derive(Default)]
+/// struct Osc {
+///     phase: f32,
+/// }
+///
+/// let mut alloc: VoiceAllocator<Osc, 2> = VoiceAllocator::new(48_000.0);
+/// alloc.set_policy(StealPolicy::Oldest);
+///
+/// let a = alloc.note_on(60, 100).unwrap();
+/// let b = alloc.note_on(64, 100).unwrap();
+/// assert_ne!(a.voice, b.voice);
+/// alloc.voice_mut(a.voice).unwrap().state.phase = 0.0; // the caller restarts its own state
+///
+/// // A third note steals the oldest voice.
+/// let c = alloc.note_on(67, 100).unwrap();
+/// assert_eq!(c.voice, a.voice);
+/// assert_eq!(c.stolen, Some(60));
+///
+/// // Key up sends the voice into release; free it when its envelope is idle.
+/// let off = alloc.note_off(64);
+/// alloc.free(off.released.unwrap());
+/// assert_eq!(alloc.active(), 1);
+/// ```
 #[derive(Clone, Debug)]
 pub struct VoiceAllocator<S, const N: usize> {
     voices: [Voice<S>; N],
@@ -357,6 +401,8 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         this
     }
 
+    /// Sets the sample rate in Hz, used for glide and expression ramps. A rate
+    /// that is not finite and positive is ignored.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         if sample_rate.is_finite() && sample_rate > 0.0 {
             self.sample_rate = sample_rate;
@@ -420,10 +466,12 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         count
     }
 
+    /// Sets which voice to steal when every voice is busy.
     pub fn set_policy(&mut self, policy: StealPolicy) {
         self.policy = policy;
     }
 
+    /// The steal policy in use.
     pub fn policy(&self) -> StealPolicy {
         self.policy
     }
@@ -436,6 +484,7 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         }
     }
 
+    /// Poly, mono or legato.
     pub fn mode(&self) -> VoiceMode {
         self.mode
     }
@@ -451,18 +500,22 @@ impl<S, const N: usize> VoiceAllocator<S, N> {
         self.limit = n.clamp(1, N.max(1));
     }
 
+    /// Voice `i`, or `None` past the last voice.
     pub fn voice(&self, i: usize) -> Option<&Voice<S>> {
         self.voices.get(i)
     }
 
+    /// Voice `i` for changing its state, or `None` past the last voice.
     pub fn voice_mut(&mut self, i: usize) -> Option<&mut Voice<S>> {
         self.voices.get_mut(i)
     }
 
+    /// Every voice, in index order.
     pub fn voices(&self) -> &[Voice<S>; N] {
         &self.voices
     }
 
+    /// Every voice, in index order, for changing their states.
     pub fn voices_mut(&mut self) -> &mut [Voice<S>; N] {
         &mut self.voices
     }

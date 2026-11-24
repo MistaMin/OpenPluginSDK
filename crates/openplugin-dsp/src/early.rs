@@ -20,6 +20,18 @@ use crate::rate::effective_rate;
 use crate::reverb_common::{Ring, clean, flush};
 
 /// One early reflection.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{EarlyReflections, EarlyTap};
+///
+/// let mut er = EarlyReflections::new(48_000.0);
+/// er.set_taps(&[
+///     EarlyTap { time_ms: 7.0, gain: 0.8, pan: -0.5 },
+///     EarlyTap { time_ms: 11.0, gain: 0.6, pan: 0.5 },
+/// ]);
+/// assert!(er.longest_tap_samples() >= 528);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EarlyTap {
     /// Delay in milliseconds at size 1.
@@ -128,6 +140,23 @@ struct Slot {
 }
 
 /// Tapped-delay early reflections; stereo out from a mono sum of the input.
+/// `new` allocates the delay ring; processing and the setters do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{EarlyPattern, EarlyReflections};
+///
+/// let mut er = EarlyReflections::new(48_000.0);
+/// er.set_pattern(EarlyPattern::SmallRoom);
+/// er.set_size(1.5);
+/// let mut left = vec![0.0f32; 4_800];
+/// let mut right = vec![0.0f32; 4_800];
+/// left[0] = 1.0;
+/// right[0] = 1.0;
+/// er.process(&mut left, &mut right);
+/// assert!(left[1..].iter().any(|s| s.abs() > 0.0)); // the reflections arrive later
+/// ```
 #[derive(Clone, Debug)]
 pub struct EarlyReflections {
     sample_rate: f32,
@@ -189,6 +218,7 @@ impl EarlyReflections {
         }
     }
 
+    /// The output level (linear).
     pub fn level(&self) -> f32 {
         self.level
     }
@@ -215,6 +245,7 @@ impl EarlyReflections {
         }
     }
 
+    /// Clears the delay line. Does not allocate.
     pub fn reset(&mut self) {
         self.ring.clear();
     }

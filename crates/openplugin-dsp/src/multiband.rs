@@ -51,6 +51,21 @@ struct Band {
 }
 
 /// Multiband compressor with 2 to 4 bands. See the [module docs](self).
+/// `new` allocates; `process` and the setters do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{DynamicsParams, LrOrder, MultibandCompressor};
+///
+/// let mut mb = MultibandCompressor::new(48_000.0, 2, 3, LrOrder::Lr4, &[200.0, 3_000.0]);
+/// mb.set_band_params(0, DynamicsParams { threshold_db: -30.0, ratio: 3.0, ..DynamicsParams::default() });
+/// let mut left = vec![0.5f32; 4_800];
+/// let mut right = vec![0.5f32; 4_800];
+/// mb.process(&mut [&mut left, &mut right]);
+/// assert!(mb.gain_reduction_db(0) > 0.0); // DC lands in the low band
+/// assert_eq!(mb.bands(), 3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct MultibandCompressor {
     channels: usize,
@@ -92,10 +107,12 @@ impl MultibandCompressor {
         }
     }
 
+    /// The band count.
     pub fn bands(&self) -> usize {
         self.bands
     }
 
+    /// The channel count.
     pub fn channels(&self) -> usize {
         self.channels
     }
@@ -125,6 +142,7 @@ impl MultibandCompressor {
         self.band[band.min(self.bands - 1)].dynamics.set_params(params);
     }
 
+    /// The settings of `band` (clamped to the last band).
     pub fn band_params(&self, band: usize) -> &DynamicsParams {
         self.band[band.min(self.bands - 1)].dynamics.params()
     }

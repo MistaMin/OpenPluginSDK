@@ -28,6 +28,7 @@ impl Default for Oversampler2x {
 }
 
 impl Oversampler2x {
+    /// Designs the filter for `base_sample_rate` (Hz). Allocates.
     pub fn new(base_sample_rate: f32) -> Self {
         Self { filter: design(base_sample_rate) }
     }
@@ -37,6 +38,7 @@ impl Oversampler2x {
         self.filter = design(base_sr);
     }
 
+    /// Clears the filter history.
     pub fn reset(&mut self) {
         self.filter.reset();
     }

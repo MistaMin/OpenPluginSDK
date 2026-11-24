@@ -7,19 +7,36 @@
 const I16_SCALE: f32 = 32768.0;
 const I32_SCALE: f32 = 2_147_483_648.0;
 
+/// A 16-bit sample as a float in -1..1 (-32768 is -1.0).
 pub fn i16_to_f32(sample: i16) -> f32 {
     f32::from(sample) / I16_SCALE
 }
 
+/// A float in -1..1 as a 16-bit sample, rounded toward zero and clamped;
+/// non-finite input gives 0.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{f32_to_i16, i16_to_f32};
+///
+/// assert_eq!(f32_to_i16(1.0), i16::MAX);
+/// assert_eq!(f32_to_i16(-1.0), i16::MIN);
+/// assert_eq!(f32_to_i16(f32::NAN), 0);
+/// assert_eq!(i16_to_f32(-32_768), -1.0);
+/// ```
 pub fn f32_to_i16(sample: f32) -> i16 {
     let scaled = finite(sample) * I16_SCALE;
     scaled.clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
 }
 
+/// A 32-bit sample as a float in -1..1.
 pub fn i32_to_f32(sample: i32) -> f32 {
     sample as f32 / I32_SCALE
 }
 
+/// A float in -1..1 as a 32-bit sample, rounded toward zero and clamped;
+/// non-finite input gives 0.
 pub fn f32_to_i32(sample: f32) -> i32 {
     let scaled = finite(sample) * I32_SCALE;
     scaled.clamp(i32::MIN as f32, (i32::MAX as f32) - 1.0) as i32

@@ -242,6 +242,19 @@ fn settled(tau: f64, lambda: f64) -> f64 {
 }
 
 /// One channel of PPM detector. No allocation; `Copy`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Ppm, PpmType};
+///
+/// let rate = 48_000.0;
+/// let mut ppm = Ppm::new(rate, PpmType::Ebu);
+/// let tone: Vec<f32> = (0..48_000)
+///     .map(|n| 0.5 * (2.0 * std::f32::consts::PI * 1_000.0 * n as f32 / rate).sin())
+///     .collect();
+/// ppm.process(&tone);
+/// assert!((ppm.level_dbfs() - -6.02).abs() < 0.5); // a steady tone reads its peak
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Ppm {
     kind: PpmType,
@@ -260,6 +273,8 @@ pub struct Ppm {
 }
 
 impl Ppm {
+    /// A meter of `kind` for `sample_rate` (Hz, clamped to the SDK range). Plain
+    /// state, no allocation.
     pub fn new(sample_rate: f32, kind: PpmType) -> Self {
         let rate = crate::rate::effective_rate(sample_rate);
         let mut factor = 1;
@@ -284,6 +299,7 @@ impl Ppm {
         }
     }
 
+    /// The meter type.
     pub fn kind(&self) -> PpmType {
         self.kind
     }
@@ -293,6 +309,7 @@ impl Ppm {
         self.factor
     }
 
+    /// Returns the meter to rest.
     pub fn reset(&mut self) {
         self.history = [0.0; TAPS];
         self.stage = [0.0; 2];

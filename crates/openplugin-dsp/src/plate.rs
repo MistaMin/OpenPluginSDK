@@ -143,8 +143,11 @@ pub enum PlateLine {
 /// from the line's input.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlateTap {
+    /// The tank line the tap reads.
     pub line: PlateLine,
+    /// Samples from the line's input (at the paper's 29 761 Hz rate).
     pub offset: usize,
+    /// +1 or -1.
     pub sign: f32,
 }
 
@@ -273,6 +276,23 @@ impl Tank {
 }
 
 /// Dattorro plate reverberator, stereo in and out, wet signal only.
+/// `new` allocates the tank; `process` and the setters do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::PlateReverb;
+///
+/// let mut plate = PlateReverb::new(48_000.0);
+/// plate.set_rt60(3.0);
+/// plate.set_damping_hz(6_000.0);
+/// plate.set_predelay_ms(10.0);
+/// let mut left = vec![0.0f32; 9_600];
+/// let mut right = vec![0.0f32; 9_600];
+/// left[0] = 1.0;
+/// plate.process(&mut left, &mut right); // wet only
+/// assert!(right.iter().any(|s| s.abs() > 1e-4));
+/// ```
 #[derive(Clone, Debug)]
 pub struct PlateReverb {
     sample_rate: f32,
@@ -543,6 +563,7 @@ impl PlateReverb {
         self.refresh();
     }
 
+    /// Whether freeze is on.
     pub fn is_frozen(&self) -> bool {
         self.frozen
     }

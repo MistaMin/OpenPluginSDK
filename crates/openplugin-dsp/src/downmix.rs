@@ -107,6 +107,14 @@ pub enum SurroundFill {
 
 /// Levels in dB for a downmix. `f32::NEG_INFINITY` (or anything at or below
 /// -120 dB, or NaN) means silent. Levels are clamped to at most +24 dB.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{MixSettings, Normalize};
+///
+/// let with_lfe = MixSettings { lfe_db: -10.0, normalize: Normalize::Peak, ..MixSettings::default() };
+/// assert_eq!(with_lfe.centre_db, -3.0103);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixSettings {
     /// Centre (and front-centre-of-left/right) level. Default -3 dB.
@@ -134,6 +142,14 @@ impl Default for MixSettings {
 }
 
 /// Settings for an [`Upmix`].
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{SurroundFill, UpmixSettings};
+///
+/// let ambient = UpmixSettings { surround_fill: SurroundFill::Side, ..UpmixSettings::default() };
+/// assert_eq!(ambient.centre_db, f32::NEG_INFINITY); // no phantom centre
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UpmixSettings {
     /// Level of the mid signal sent to `FC`. Default silent.
@@ -283,6 +299,22 @@ pub enum DownmixTarget {
 }
 
 /// A layout folded to stereo or mono.
+/// `for_layout` and `from_roles` allocate the matrix; `process` and
+/// `set_settings` do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_core::layout::{SURROUND_FC, SURROUND_FL, SURROUND_FR};
+/// use openplugin_dsp::{Downmix, DownmixTarget, MixSettings};
+///
+/// let lcr = Downmix::from_roles(&[SURROUND_FL, SURROUND_FR, SURROUND_FC], DownmixTarget::Stereo, MixSettings::default());
+/// let (l, r, c) = ([0.0f32; 4], [0.0f32; 4], [1.0f32; 4]);
+/// let (mut out_l, mut out_r) = ([0.0f32; 4], [0.0f32; 4]);
+/// lcr.process(&[&l, &r, &c], &mut [&mut out_l, &mut out_r]);
+/// assert!((out_l[0] - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4); // centre at -3 dB
+/// assert_eq!(out_l, out_r);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Downmix {
     roles: Vec<u8>,
@@ -324,14 +356,17 @@ impl Downmix {
         self.rebuild();
     }
 
+    /// The levels in use.
     pub fn settings(&self) -> MixSettings {
         self.settings
     }
 
+    /// Source channels (the roles given).
     pub fn input_channels(&self) -> usize {
         self.matrix.inputs
     }
 
+    /// Target channels: 2 for stereo, 1 for mono.
     pub fn output_channels(&self) -> usize {
         self.matrix.outputs
     }
@@ -367,6 +402,18 @@ impl Downmix {
 }
 
 /// Stereo spread to a layout. See the module docs.
+/// `for_layout` and `from_roles` allocate the matrix; `process` and
+/// `set_settings` do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_core::SpeakerLayout;
+/// use openplugin_dsp::{Upmix, UpmixSettings};
+///
+/// let up = Upmix::for_layout(SpeakerLayout::Surround51, UpmixSettings::default()).unwrap();
+/// assert_eq!(up.output_channels(), 6);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Upmix {
     roles: Vec<u8>,
@@ -397,10 +444,12 @@ impl Upmix {
         self.rebuild();
     }
 
+    /// The levels in use.
     pub fn settings(&self) -> UpmixSettings {
         self.settings
     }
 
+    /// Target channels (the roles given).
     pub fn output_channels(&self) -> usize {
         self.matrix.outputs
     }

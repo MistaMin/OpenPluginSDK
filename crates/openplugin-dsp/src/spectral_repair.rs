@@ -108,10 +108,24 @@ pub enum GainRule {
 
 /// Parameters. Out-of-range values are clamped and non-finite ones ignored by
 /// [`SpectralRepair::set_params`].
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::spectral_repair::{GainRule, RepairMode, RepairParams};
+///
+/// let p = RepairParams {
+///     mode: RepairMode::Reduce,
+///     rule: GainRule::Wiener,
+///     amount_db: 12.0,
+///     ..RepairParams::default()
+/// };
+/// assert!(p.enabled);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RepairParams {
     /// Master switch; off is the STFT identity path.
     pub enabled: bool,
+    /// Gate or noise reduction.
     pub mode: RepairMode,
     /// Greatest reduction in dB, `0..=96`. Zero is identity.
     pub amount_db: f32,
@@ -119,6 +133,7 @@ pub struct RepairParams {
     pub listen_removed: bool,
     /// Gate: threshold above the learned noise, dB (`-20..=60`).
     pub threshold_db: f32,
+    /// Gain rule used by [`RepairMode::Reduce`].
     pub rule: GainRule,
     /// Over-subtraction factor `alpha` (`0.1..=10`); scales the noise power.
     pub over_subtraction: f32,
@@ -394,9 +409,19 @@ fn i1e(x: f32) -> f32 {
 }
 
 /// Settings for [`SpectralRepair::new`].
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::spectral_repair::RepairConfig;
+///
+/// let config = RepairConfig::new(48_000.0, 2, 2048);
+/// assert_eq!(config.hop, 512);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RepairConfig {
+    /// Sample rate, Hz; one that is not finite and positive counts as 48 kHz.
     pub sample_rate: f32,
+    /// Channel count; 0 counts as 1.
     pub channels: usize,
     /// STFT frame, a power of two of at least 4 (2048 at 48 kHz is typical).
     pub frame: usize,
@@ -405,12 +430,38 @@ pub struct RepairConfig {
 }
 
 impl RepairConfig {
+    /// A configuration with the hop at `frame / 4`.
     pub fn new(sample_rate: f32, channels: usize, frame: usize) -> Self {
         Self { sample_rate, channels, frame, hop: frame / 4 }
     }
 }
 
 /// Spectral gate and learned-profile noise reduction.
+/// `new` allocates everything; processing, learning and `load_profile` do
+/// not. Feed it on the audio thread; `save_profile` allocates.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::spectral_repair::{RepairConfig, SpectralRepair};
+///
+/// let mut repair = SpectralRepair::new(RepairConfig::new(48_000.0, 1, 1024)).unwrap();
+///
+/// // Learn the noise from a passage of noise only.
+/// let noise: Vec<f32> = (0..24_000u32)
+///     .map(|n| (n.wrapping_mul(2_654_435_761) >> 8) as f32 / 16_777_216.0 * 0.02 - 0.01)
+///     .collect();
+/// let mut out = vec![0.0f32; noise.len()];
+/// repair.start_learning();
+/// repair.process(0, &noise, &mut out);
+/// assert!(repair.stop_learning());
+///
+/// // Now the same noise is reduced.
+/// repair.process(0, &noise, &mut out);
+/// let energy = |x: &[f32]| x.iter().map(|s| s * s).sum::<f32>();
+/// assert!(energy(&out[12_000..]) < energy(&noise[12_000..]));
+/// assert_eq!(repair.latency(), 1024);
+/// ```
 pub struct SpectralRepair {
     stft: Stft,
     core: Core,
@@ -469,10 +520,13 @@ impl SpectralRepair {
         }
     }
 
+    /// The parameters in use (after clamping).
     pub fn params(&self) -> RepairParams {
         self.core.params
     }
 
+    /// Applies parameters: out-of-range values are clamped and non-finite ones
+    /// ignored. Realtime-safe.
     pub fn set_params(&mut self, p: RepairParams) {
         self.core.apply_params(p);
     }
@@ -482,6 +536,7 @@ impl SpectralRepair {
         self.stft.latency()
     }
 
+    /// The channel count (at least 1).
     pub fn channels(&self) -> usize {
         self.core.ch.len()
     }
@@ -491,10 +546,12 @@ impl SpectralRepair {
         self.core.bins
     }
 
+    /// The STFT frame size, samples.
     pub fn frame(&self) -> usize {
         self.frame
     }
 
+    /// The STFT hop, samples.
     pub fn hop(&self) -> usize {
         self.hop
     }
@@ -536,6 +593,7 @@ impl SpectralRepair {
         self.core.ch[0].sum_frames > 0
     }
 
+    /// Whether a learn period is running.
     pub fn is_learning(&self) -> bool {
         self.core.learning
     }

@@ -14,6 +14,20 @@ use std::f32::consts::LN_2;
 /// The residual receives first-order ADAA averaging, while the linear path
 /// uses a first-order all-pass (a = 1/3) to match the half-sample phase delay.
 #[derive(Debug, Clone)]
+/// One instance per channel; plain state, no allocation.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::ResidualAdaa1;
+///
+/// let mut adaa = ResidualAdaa1::new();
+/// let mut block = [0.0f32, 0.4, 0.8, 0.4, 0.0];
+/// for sample in &mut block {
+///     *sample = adaa.process_tanh(*sample, 2.0);
+/// }
+/// assert!(block.iter().all(|s| s.is_finite()));
+/// ```
 pub struct ResidualAdaa1 {
     x_prev: f32,
     allpass_state: f32,
@@ -26,6 +40,7 @@ impl Default for ResidualAdaa1 {
 }
 
 impl ResidualAdaa1 {
+    /// A processor with cleared state. Does not allocate.
     pub fn new() -> Self {
         Self {
             x_prev: 0.0,
@@ -33,6 +48,8 @@ impl ResidualAdaa1 {
         }
     }
 
+    /// Clears the previous-sample and all-pass state, as after silence. Call it
+    /// when the transport restarts.
     pub fn reset(&mut self) {
         self.x_prev = 0.0;
         self.allpass_state = 0.0;
@@ -148,6 +165,21 @@ fn soft_clip_antiderivative(x: f32) -> f32 {
 
 /// Second-order Antiderivative Anti-Aliasing (ADAA2) with Taylor series fallback.
 #[derive(Debug, Clone)]
+///
+/// One instance per channel; plain state, no allocation.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Adaa2Taylor;
+///
+/// let mut adaa = Adaa2Taylor::new();
+/// let out: Vec<f32> = [0.0f32, 0.5, 2.0, 2.0, 2.0]
+///     .iter()
+///     .map(|&x| adaa.process_hard_clip(x))
+///     .collect();
+/// assert!(out.iter().all(|y| y.abs() <= 1.0));
+/// ```
 pub struct Adaa2Taylor {
     x1: f32,
     x2: f32,
@@ -160,10 +192,12 @@ impl Default for Adaa2Taylor {
 }
 
 impl Adaa2Taylor {
+    /// A processor with cleared state. Does not allocate.
     pub fn new() -> Self {
         Self { x1: 0.0, x2: 0.0 }
     }
 
+    /// Clears the two stored input samples, as after silence.
     pub fn reset(&mut self) {
         self.x1 = 0.0;
         self.x2 = 0.0;

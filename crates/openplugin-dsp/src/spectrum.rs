@@ -46,6 +46,21 @@ pub fn spectrum_feed(bins: usize) -> (SpectrumWriter, SpectrumReader) {
 }
 
 /// Audio-side end of the feed. One writer only.
+/// A seqlock over atomics: `publish` is wait-free on the audio thread.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::spectrum_feed;
+///
+/// let (mut writer, reader) = spectrum_feed(4);
+/// assert_eq!(reader.read(&mut [0.0; 4], &mut [0.0; 4]), None); // nothing yet
+/// writer.publish(&[-10.0, -20.0, -30.0, -40.0], &[-6.0; 4]);
+///
+/// let (mut mags, mut peaks) = ([0.0f32; 4], [0.0f32; 4]);
+/// assert_eq!(reader.read(&mut mags, &mut peaks), Some(1));
+/// assert_eq!(mags[1], -20.0);
+/// ```
 pub struct SpectrumWriter {
     shared: Arc<Shared>,
 }
@@ -74,12 +89,14 @@ impl SpectrumWriter {
 }
 
 /// UI-side end of the feed. Cheap to clone; any number of readers.
+/// See the [`SpectrumWriter`] and [`SpectrumAnalyzer`] examples.
 #[derive(Clone)]
 pub struct SpectrumReader {
     shared: Arc<Shared>,
 }
 
 impl SpectrumReader {
+    /// Bins per frame.
     pub fn bins(&self) -> usize {
         self.shared.bins
     }
@@ -114,13 +131,23 @@ impl SpectrumReader {
 }
 
 /// Analyser settings.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::SpectrumConfig;
+///
+/// let config = SpectrumConfig { average_ms: 0.0, ..SpectrumConfig::new(4096, 48_000.0) };
+/// assert_eq!(config.hop, 2048);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpectrumConfig {
     /// FFT size, a power of two of at least 4.
     pub fft_size: usize,
     /// Samples between frames, `1..=fft_size`.
     pub hop: usize,
+    /// Analysis window.
     pub window: WindowKind,
+    /// Sample rate, Hz.
     pub sample_rate: f32,
     /// Time constant of the average over frames, in ms. 0 shows each frame raw.
     pub average_ms: f32,
@@ -149,6 +176,27 @@ impl SpectrumConfig {
 }
 
 /// Mono spectrum analyser that feeds an editor. Build with [`SpectrumAnalyzer::new`].
+/// `new` allocates; `process` is allocation-free and wait-free.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{bin_frequency, SpectrumAnalyzer, SpectrumConfig};
+///
+/// let rate = 48_000.0;
+/// let (mut analyzer, reader) = SpectrumAnalyzer::new(SpectrumConfig::new(1024, rate)).unwrap();
+/// let tone: Vec<f32> = (0..4_096)
+///     .map(|n| (2.0 * std::f32::consts::PI * 3_000.0 * n as f32 / rate).sin())
+///     .collect();
+/// analyzer.process(&tone); // audio thread
+///
+/// // Editor thread: read the newest frame.
+/// let mut mags = vec![0.0f32; reader.bins()];
+/// let mut peaks = vec![0.0f32; reader.bins()];
+/// assert!(reader.read(&mut mags, &mut peaks).is_some());
+/// let loudest = (0..mags.len()).max_by(|&a, &b| mags[a].total_cmp(&mags[b])).unwrap();
+/// assert!((bin_frequency(loudest, 1024, rate) - 3_000.0).abs() < 50.0);
+/// ```
 pub struct SpectrumAnalyzer {
     n: usize,
     hop: usize,
@@ -221,6 +269,7 @@ impl SpectrumAnalyzer {
         ))
     }
 
+    /// Bins per spectrum, `fft_size / 2 + 1`.
     pub fn bins(&self) -> usize {
         self.n / 2 + 1
     }
@@ -240,6 +289,7 @@ impl SpectrumAnalyzer {
         &self.peaks_db
     }
 
+    /// Clears the input history, the average and the peaks.
     pub fn reset(&mut self) {
         self.input.fill(0.0);
         self.averaged.fill(0.0);

@@ -38,6 +38,18 @@ const MAX_SECTIONS: usize = 40;
 const RHO: f64 = 2.0;
 
 /// Seeded uniform white noise in `[-1, 1)`.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::WhiteNoise;
+///
+/// let mut a = WhiteNoise::new(7);
+/// let mut b = WhiteNoise::new(7);
+/// let mut block = [0.0f32; 64];
+/// a.fill(&mut block);
+/// assert_eq!(block[0], b.next()); // the same seed repeats
+/// assert!(block.iter().all(|s| (-1.0..=1.0).contains(s)));
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct WhiteNoise {
     state: u64,
@@ -89,6 +101,19 @@ struct Section {
 }
 
 /// Pink noise: white noise through a sample-rate-aware pole/zero ladder.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::PinkNoise;
+///
+/// let mut pink = PinkNoise::new(48_000.0, 1);
+/// let mut block = [0.0f32; 1_024];
+/// pink.fill(&mut block);
+/// assert!(block.iter().all(|s| s.is_finite()));
+/// // -3 dB per octave.
+/// let tilt = pink.response_db(2_000.0) - pink.response_db(1_000.0);
+/// assert!((tilt + 3.0).abs() < 0.5);
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct PinkNoise {
     white: WhiteNoise,
