@@ -1,52 +1,44 @@
-# OpenPluginSDK status, 2026-11-22
+# OpenPluginSDK status, 2026-11-24
 
-Read from `gh` and `git` (origin/main at `ded6d8d`, CI green), not from agent memory.
+Read from `gh` and `git` (origin/main at `926ca9d`, CI green), not from agent memory.
 
-## Merged (35 PRs)
+## Merged (40 PRs)
 
-#1–#20, #22–#35. The 1.0 Beta run (Orca run `run_e3b84494f60a`) is done up to the API freeze: version 1.0.0-beta (#16), static CRT on Windows (#15), identity pinning (#20), voice-info (#17), `openplugin-port new` (#18), porting guides (#19), track info (#22), shell follow-ups on ABI 9 (#34), every audit fix (#23–#33) and the freeze (#35).
+#1–#20, #22–#39, #42. The 1.0 Beta run (Orca run `run_e3b84494f60a`) is done up to the API freeze: version 1.0.0-beta (#16), static CRT on Windows (#15), identity pinning (#20), voice-info (#17), `openplugin-port new` (#18), porting guides (#19), track info (#22), shell follow-ups on ABI 9 (#34), every audit fix (#23–#33) and the freeze (#35). Since then:
+
+- #37 ports keep their host behaviour, plus a Linux VST3 shell, the VST3 idle-edit fix and Windows LV2 and ARM64 builds (merged by the owner on 2026-11-23).
+- #42 X11 frame pacing.
+- #36 GoodLookin DRI pinned by tag v0.2.1, then #38 foreign state (shell ABI 10) and #39 `--au-version`, merged in that order on 2026-11-24.
+
+#39 was rebased onto #37: CMake derives the Audio Unit component version from `OP_VERSION` (as #37 does), and `build_plugin.sh --au-version N` (CMake `OP_AU_VERSION`) overrides it. The default is `release`, the derived number.
 
 ## Open PRs
 
-None of these came from the 1.0 Beta run. All are now rebased onto `ded6d8d` (after the freeze).
+| PR | Branch | Checks | Conflicts | Notes |
+|---|---|---|---|---|
+| #21 Linux VST3 proofs and CI | `linux-vst3` | see the PR | none | rebuilt on main's Linux shell (from #37): adds the twelve proofs, the editor proof under Xvfb, the validator, the `vst3-shell-linux` job, the Ardour width fix and docs |
+| #40 VST3 controller state | `vst3-controller-state` | 19 pass | none | on hold for the owner: main's `3a8c9ca` (from #37) fixes the same bypassed-plug-in case another way |
+| #41 this status | `MistaMin/sdk-reorg` | see the PR | none | docs only |
 
-| PR | Branch | Behind main | Checks | Conflicts | Notes |
-|---|---|---|---|---|---|
-| #21 Linux VST3 shell | `linux-vst3` | 0 (rebased 2026-11-22) | 20 pass | none | rebased cleanly; Linux checked by CI only |
-| #36 GoodLookin DRI v0.2.1 pin | `pin-goodlookindri-0.2.1` | 0 (rebased) | 19 pass | none | base of the stack below |
-| #37 ports keep host behaviour | `MistaMin/hybrideq-host-values` | 0 (rebased 2026-11-22) | 19 pass | none with main; two lines with #39 | ported to the frozen API |
-| #38 foreign state (ABI 10) | `foreign-state-shells` | 0 (rebased) | 19 pass | none | on top of #36 |
-| #39 `--au-version` | `au-component-version` | 0 (rebased) | 19 pass | none | on top of #38 |
-| #40 VST3 controller state | `vst3-controller-state` | 0 (rebased) | 19 pass | none | on top of #39 |
+## Workspaces
 
-No PR has a review requested or a blocking review.
+The owner approved removing the finished workspaces on 2026-11-24. They are removed after this PR merges: the 30 merged, clean Orca workspaces, and the clean, merged `.claude/worktrees/agent-*` and `merge-staging` worktrees in the main checkout. Each one is checked again right before it is removed.
 
-Why #38–#40 failed: #38 adds `op_shell_load_foreign_state` and `op_shell_foreign_kinds` but not to the C++ test stand-ins, so the VST3, AU, universal and validator jobs failed to link; #39 and #40 only inherited it. Main's #34 had meanwhile taken ABI 9. Fixed on 2026-11-20: the stack is rebased onto `ded6d8d`, foreign state is ABI 10, the stand-ins get refuse-all defaults in `native/include/stub_identity.h`, and the new test follows the frozen API. Locally the workspace tests, clippy 1.100.0, the 1.85.0 check and all 44 native proofs (VST3, AU, AAX) pass.
+Kept:
 
-The main checkout still has the old `vst3-controller-state` (`0f50066`) checked out. Its remote branch is now `cb90a2c`, so reset that checkout to the remote, never merge it.
-
-## Workspaces that can be removed (merged and clean), for the owner to approve
-
-Orca workspaces under `~/orca/workspaces/OpenPluginSDK/`:
-`0.3-a-shell-proofs`, `0.3-c-sample-rate`, `0.3-d-clap-fuzz`, `0.3-e-lv2-fuzz`, `0.3-f-shell-fuzz`, `0.3-g-state-fuzz`, `0.3-h-clap-no-alloc`, `0.3-i-lv2-shell-no-alloc`, `0.3-j-macos-ci`, `audit-dsp`, `audit-editor`, `audit-native`, `audit2-core`, `audit2-port`, `fix-aax-au`, `fix-clap-events`, `fix-dsp-precision`, `fix-editor`, `fix-lv2-state`, `fix-native-shells`*, `fix-state-gate`, `fix-x11-flaky`, `v1-api-freeze`, `v1-identity`, `v1-port-guides`, `v1-port-new`, `v1-shell-followups`*, `v1-track-info`, `v1-version`, `v1-win-crt`.
-
-Merged, with only a regenerable change: `fix-dsp-robust`, `fix-dsp-speed`, `fix-native-crash` (modified `Cargo.lock`), `v1-voice-info` (untracked `build-voice/` build folder).
-
-\* still has an idle agent terminal open.
-
-In the main checkout: 47 subagent worktrees under `.claude/worktrees/agent-*` and `.claude/worktrees/merge-staging` (branch `staging`), all clean with nothing unmerged.
-
-## Workspaces with unmerged work (keep)
-
-- Main checkout `/Volumes/Developer 2/Dependencies/OpenPluginSDK`: branch `vst3-controller-state` (#36–#40 stack), untracked `graphify-out/` (37 MB, not for git).
-- `hybrideq-host-values`: #37. Its local branch is the old `13e649e`; the remote is `e278893` (rebased), so reset to the remote.
-- `.claude/worktrees/linux-vst3`: #21. Its local branch is the old `156d65e`; the remote is `86c291d` (rebased), so reset to the remote.
-- `sdk-reorg`: this map (branch `MistaMin/sdk-reorg`).
+- The four with a local change: `fix-dsp-robust`, `fix-dsp-speed` and `fix-native-crash` (each has a modified `Cargo.lock`), and `v1-voice-info` (an untracked `build-voice/` folder).
+- Main checkout `/Volumes/Developer 2/Dependencies/OpenPluginSDK`: now on `fix-null-channels-clap-stepped`, which is pushed with no PR and built on the old pre-rebase stack. Untracked `graphify-out/`. Its local `vst3-controller-state` equals origin.
+- `hybrideq-host-values`: now on `MistaMin/linux-frame-pacing` (#42, merged).
+- `.claude/worktrees/linux-vst3`: still on the old `156d65e`. The remote branch was rebuilt, so reset it to the remote; don't merge it.
+- `.claude/worktrees/GoodLookinDri`: branch `MistaMin/semibold-text`, unmerged.
+- `sdk-reorg`: this map.
 
 ## Remaining, in priority order
 
-1. The #36 → #38 → #39 → #40 stack: rebased, all 19 checks pass on each; merge in order (#36 first). Merging is the owner's step.
-2. #21 and #37: rebased, CI green. #37 and #39 both set the Audio Unit component version (#39 opt-in with `--au-version release`, #37 always from `OP_VERSION`): the owner picks one, and the second to merge resolves two lines.
-3. 1.0 Beta run t10: the five API-docs tasks (`missing_docs`). Missing on `ded6d8d`: core 401, dsp 431, dri 133, targets 16, host 9 (also testing 69, port 318, which the run does not cover). The owner said go on 2026-11-22. The go is queued for the run's coordinator (the main checkout's agent), which Orca could not wake.
-4. 1.0 Beta run t11: the release check, last.
-5. Owner only: tagging 1.0, the crates.io publish, publishing GoodLookin DRI, the Windows items that wait for the PC (ROADMAP_WINDOWS_LINUX.md W3), real DAW sessions (Logic, Cubase, Bitwig), PACE signing.
+1. #21: merge once CI is green.
+2. #40: the owner decides whether to merge it alongside `3a8c9ca` or close it.
+3. `fix-null-channels-clap-stepped` in the main checkout: two commits (null host channels at a block offset, CLAP stepped grids; the AAX 2048-step limit) on the old stack. Open a PR after rebasing it onto main.
+4. 1.0 Beta run t10: the five API-docs tasks (`missing_docs`). Missing on `ded6d8d`: core 401, dsp 431, dri 133, targets 16, host 9 (also testing 69 and port 318, which the run does not cover).
+5. 1.0 Beta run t11: the release check, last.
+6. Linux VST3: the identity proof (`vst3_identity_proof`), which runs on macOS and Windows, is not yet built on Linux.
+7. Owner only: tagging 1.0, the crates.io publish, publishing GoodLookin DRI, the Windows items that wait for the PC (ROADMAP_WINDOWS_LINUX.md W3), real DAW sessions (Logic, Cubase, Bitwig), PACE signing.
