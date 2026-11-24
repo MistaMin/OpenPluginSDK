@@ -3,10 +3,25 @@
 //! Use it as a dev-dependency. In a test file of your plugin crate:
 //!
 //! ```
-//! # use example_editor::EditorGain as MyPlugin;
+//! # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+//! # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+//! # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+//! # #[derive(Default)]
+//! # struct MyPlugin { db: f32 }
+//! # impl Plugin for MyPlugin {
+//! #     fn info(&self) -> &'static PluginInfo { &INFO }
+//! #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+//! #     fn reset(&mut self) {}
+//! #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id != "gain" { return false; } self.db = PARAMS[0].clamp(v); true }
+//! #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+//! #     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+//! #         let g = 10f32.powf(self.db / 20.0);
+//! #         for c in io { for s in &mut c[..frames] { *s *= g; } }
+//! #     }
+//! # }
 //! openplugin_testing::install_allocator!();
 //!
-//! #[test]
+//! // In `tests/conformance.rs` of your plugin crate, mark this `#[test]`.
 //! fn conforms() {
 //!     openplugin_testing::conformance(MyPlugin::default, Default::default()).assert_pass();
 //! }
@@ -48,12 +63,28 @@ use openplugin_core::Plugin;
 /// A full run takes seconds in a release build; use [`Options::quick`] for debug builds.
 ///
 /// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct MyPlugin { db: f32 }
+/// # impl Plugin for MyPlugin {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id != "gain" { return false; } self.db = PARAMS[0].clamp(v); true }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+/// #         let g = 10f32.powf(self.db / 20.0);
+/// #         for c in io { for s in &mut c[..frames] { *s *= g; } }
+/// #     }
+/// # }
 /// openplugin_testing::install_allocator!();
 ///
 /// use openplugin_testing::{conformance, Options};
 ///
 /// let options = Options { sample_rates: vec![44_100.0], block_sizes: vec![1, 333], ..Options::quick() };
-/// conformance(example_editor::EditorGain::default, options).assert_pass();
+/// conformance(MyPlugin::default, options).assert_pass();
 /// ```
 pub fn conformance<P: Plugin>(make: impl Fn() -> P, options: Options) -> Report {
     conformance::run(make, options)

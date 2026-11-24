@@ -107,6 +107,22 @@ impl BenchCase {
 /// as the baseline of [`compare`].
 ///
 /// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct MyPlugin { db: f32 }
+/// # impl Plugin for MyPlugin {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id != "gain" { return false; } self.db = PARAMS[0].clamp(v); true }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+/// #         let g = 10f32.powf(self.db / 20.0);
+/// #         for c in io { for s in &mut c[..frames] { *s *= g; } }
+/// #     }
+/// # }
 /// use openplugin_testing::bench::{bench, compare, BenchOptions, BenchReport};
 ///
 /// let options = BenchOptions {
@@ -116,7 +132,7 @@ impl BenchCase {
 ///     iterations: 16,
 ///     ..BenchOptions::quick()
 /// };
-/// let report = bench(example_editor::EditorGain::default, &options);
+/// let report = bench(MyPlugin::default, &options);
 /// assert_eq!(report.cases.len(), 1);
 /// assert_eq!(report.cases[0].key(), "48000Hz/64fr/2ch");
 ///
@@ -463,10 +479,26 @@ pub fn compare(base: &BenchReport, new: &BenchReport, tolerance: f64) -> Compari
 /// passes `std::env::args().skip(1)`; here the arguments are given by hand:
 ///
 /// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct MyPlugin { db: f32 }
+/// # impl Plugin for MyPlugin {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id != "gain" { return false; } self.db = PARAMS[0].clamp(v); true }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+/// #         let g = 10f32.powf(self.db / 20.0);
+/// #         for c in io { for s in &mut c[..frames] { *s *= g; } }
+/// #     }
+/// # }
 /// use std::process::ExitCode;
 ///
 /// let args = ["--quick", "--iterations", "8", "--filter", "48000Hz/64fr"].map(String::from);
-/// let code = openplugin_testing::bench::cli(example_editor::EditorGain::default, args);
+/// let code = openplugin_testing::bench::cli(MyPlugin::default, args);
 /// assert_eq!(code, ExitCode::SUCCESS);
 /// ```
 pub fn cli<P: Plugin>(make: impl Fn() -> P, args: impl IntoIterator<Item = String>) -> std::process::ExitCode {

@@ -167,10 +167,26 @@ pub struct CheckResult {
 /// order of [`Check::ALL`]. Its `Display` is the multi-line text report.
 ///
 /// ```
+/// # use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// # static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// # static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// # #[derive(Default)]
+/// # struct MyPlugin { db: f32 }
+/// # impl Plugin for MyPlugin {
+/// #     fn info(&self) -> &'static PluginInfo { &INFO }
+/// #     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+/// #     fn reset(&mut self) {}
+/// #     fn set_param(&mut self, id: &str, v: f32) -> bool { if id != "gain" { return false; } self.db = PARAMS[0].clamp(v); true }
+/// #     fn param(&self, id: &str) -> Option<f32> { (id == "gain").then_some(self.db) }
+/// #     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+/// #         let g = 10f32.powf(self.db / 20.0);
+/// #         for c in io { for s in &mut c[..frames] { *s *= g; } }
+/// #     }
+/// # }
 /// use openplugin_testing::{conformance, Check, Options, Status};
 ///
 /// let options = Options { sample_rates: vec![48_000.0], block_sizes: vec![64], ..Options::quick() };
-/// let report = conformance(example_editor::EditorGain::default, options);
+/// let report = conformance(MyPlugin::default, options);
 /// assert!(report.passed(), "{report}");
 /// assert_eq!(report.status(Check::Locks), Status::Skip); // never detectable
 /// println!("{report}");
