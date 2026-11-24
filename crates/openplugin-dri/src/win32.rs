@@ -1707,6 +1707,27 @@ unsafe fn view_message(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> isize {
 
 /// An editor in a child window. Dropping it stops the timer, destroys the
 /// window, and drops the editor. Use it on one thread only.
+///
+/// ```no_run
+/// use openplugin_core::{Category, EditorHost, ParamInfo, PluginInfo, Unit};
+/// use openplugin_dri::{win32::EditorView, DesignEditor};
+///
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// const DESIGN: &str = "GoodLookinUI design version 1\n\
+///     id,parameter,label,style,colour,x,y,width,height,font size\n\
+///     gain,gain,Gain,Brit,#CE9435,10,10,70,76,10\n";
+///
+/// fn open(parent: openplugin_dri::win32::Hwnd) -> Option<EditorView> {
+///     let editor = DesignEditor::from_csv(DESIGN, &INFO, EditorHost::new(|_| {}))?;
+///     let view = EditorView::new(Box::new(editor), None)?;
+///     // SAFETY: the host gave a live HWND.
+///     if !unsafe { view.attach(parent) } { return None; }
+///     Some(view)
+/// }
+/// # let _ = open;
+/// ```
 pub struct EditorView {
     state: *mut State,
 }
@@ -1891,6 +1912,8 @@ impl EditorView {
         }
     }
 
+    /// Hide or show the view's window (`SW_HIDE`, or `SW_SHOWNA`, which does not
+    /// activate it). Remembered while the view has no window yet. UI thread.
     pub fn set_hidden(&self, hidden: bool) {
         let st = self.st();
         st.hidden = hidden;
@@ -2137,6 +2160,17 @@ unsafe fn top_message(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> isize {
 /// editor is, within the editor's range. It starts hidden. Dropping it
 /// destroys the window (and the view's child window with it; drop order
 /// between the two does not matter).
+///
+/// ```no_run
+/// use openplugin_dri::win32::{EditorView, TopWindow};
+///
+/// fn float(view: &EditorView) -> Option<TopWindow> {
+///     let window = TopWindow::new("Gain", view, None)?;
+///     window.set_visible(true);
+///     Some(window)
+/// }
+/// # let _ = float;
+/// ```
 pub struct TopWindow {
     hwnd: Hwnd,
 }
@@ -2189,11 +2223,13 @@ impl TopWindow {
         self.hwnd
     }
 
+    /// Show (`SW_SHOW`) or hide (`SW_HIDE`) the window. UI thread.
     pub fn set_visible(&self, visible: bool) {
         // SW_HIDE, SW_SHOW
         unsafe { ShowWindow(self.hwnd, if visible { 5 } else { 0 }) };
     }
 
+    /// Set the window's title bar text. UI thread.
     pub fn set_title(&self, title: &str) {
         unsafe { SetWindowTextW(self.hwnd, wide(title).as_ptr()) };
     }
@@ -2226,7 +2262,24 @@ pub fn set_process_dpi_aware() {
 }
 
 /// Show the editor in its own window and run the message loop until the
-/// window closes. Returns the exit code.
+/// window closes. Returns the exit code: 0, or 1 when the window could not be made.
+/// Makes the process DPI aware first ([`set_process_dpi_aware`]), so it is for
+/// applications, not plugins.
+///
+/// ```no_run
+/// use openplugin_core::{Category, EditorHost, ParamInfo, PluginInfo, Unit};
+/// use openplugin_dri::DesignEditor;
+///
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// const DESIGN: &str = "GoodLookinUI design version 1\n\
+///     id,parameter,label,style,colour,x,y,width,height,font size\n\
+///     gain,gain,Gain,Brit,#CE9435,10,10,70,76,10\n";
+///
+/// let editor = DesignEditor::from_csv(DESIGN, &INFO, EditorHost::new(|_| {})).unwrap();
+/// std::process::exit(openplugin_dri::win32::run_window("Gain", Box::new(editor), None));
+/// ```
 pub fn run_window(title: &str, editor: Box<dyn Editor>, poll: Option<Poll>) -> i32 {
     set_process_dpi_aware();
     let Some(view) = EditorView::new(editor, poll) else { return 1 };

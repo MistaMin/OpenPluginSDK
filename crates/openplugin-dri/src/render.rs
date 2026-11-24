@@ -1,4 +1,4 @@
-//! Paint a GoodLookin DRI [`Scene`] into the pixels an [`openplugin_core::Editor`]
+//! Paint a GoodLookin DRI [`Scene`](goodlookindri::scene::Scene) into the pixels an [`openplugin_core::Editor`]
 //! returns from `render`.
 //!
 //! [`SceneCanvas::frame`] does the bookkeeping the lit tier needs, then
@@ -60,6 +60,23 @@ pub(crate) fn paint_lock() -> MutexGuard<'static, ()> {
 /// frame paints and rasterises under one process-wide lock. Editors paint on the main
 /// thread, where it is never contended; a canvas painting on another thread at the same
 /// time (a snapshot tool) waits for the frame in progress.
+///
+/// The scale passed to a frame is clamped to 0.25..=4 (a non-finite scale draws at 2), and
+/// lowered further when the frame would pass 64 Mi pixels. Pixels are `0x00RRGGBB`, top row
+/// first, `round(points × scale)` wide and high. A frame allocates only when the pixel
+/// size changes, apart from what the paint closures allocate for their scenes.
+///
+/// ```
+/// use openplugin_dri::{draw_faceplate, draw_knob, Color, SceneCanvas};
+///
+/// let mut canvas = SceneCanvas::new(240.0, 160.0);
+/// let frame = canvas.frame(1.0, |dl| {
+///     draw_faceplate(dl, 240.0, 160.0, "Navy");
+///     draw_knob(dl, 60.0, 70.0, 28.0, 0.5, "GAIN", "0.0 dB", "Brit", Color::RED);
+/// });
+/// assert_eq!((frame.width, frame.height), (240, 160));
+/// assert_eq!(frame.pixels.len(), 240 * 160);
+/// ```
 pub struct SceneCanvas {
     width: f32,
     height: f32,
@@ -88,7 +105,8 @@ const FULL_SHARE: f64 = 0.6;
 const CLIP_SLACK: f32 = 0.01;
 
 impl SceneCanvas {
-    /// `width` and `height` in points: the editor's size.
+    /// `width` and `height` in points: the editor's size. Values below 1 (and NaN) become 1.
+    /// Allocates nothing large until the first frame.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             width: width.max(1.0),
@@ -113,6 +131,7 @@ impl SceneCanvas {
         self.background = GlColor(0xff00_0000 | (rgb & 0x00ff_ffff));
     }
 
+    /// The size in points, as set by [`Self::new`] or [`Self::resize`].
     pub fn size(&self) -> (f32, f32) {
         (self.width, self.height)
     }

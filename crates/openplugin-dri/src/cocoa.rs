@@ -1748,6 +1748,27 @@ unsafe fn view_class() -> Class { unsafe {
 
 /// An editor in an `NSView`. Dropping it stops the timer, removes the view
 /// from its parent, and drops the editor. Main thread only.
+///
+/// ```no_run
+/// use openplugin_core::{Category, EditorHost, ParamInfo, PluginInfo, Unit};
+/// use openplugin_dri::{cocoa::EditorView, DesignEditor};
+///
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// const DESIGN: &str = "GoodLookinUI design version 1\n\
+///     id,parameter,label,style,colour,x,y,width,height,font size\n\
+///     gain,gain,Gain,Brit,#CE9435,10,10,70,76,10\n";
+///
+/// fn open(parent: openplugin_dri::cocoa::NSViewPtr) -> Option<EditorView> {
+///     let editor = DesignEditor::from_csv(DESIGN, &INFO, EditorHost::new(|_| {}))?;
+///     let view = EditorView::new(Box::new(editor), None)?;
+///     // SAFETY: the host gave a live NSView.
+///     if !unsafe { view.attach(parent) } { return None; }
+///     Some(view)
+/// }
+/// # let _ = open;
+/// ```
 pub struct EditorView {
     view: Id,
     timer: Id,
@@ -1848,6 +1869,7 @@ impl EditorView {
         true
     }}
 
+    /// Hide or show the view (`-[NSView setHidden:]`). Main thread.
     pub fn set_hidden(&self, hidden: bool) {
         unsafe { send!((), self.view, b"setHidden:\0", i8 = hidden as i8) }
     }
@@ -1972,8 +1994,6 @@ impl Drop for EditorView {
     }
 }
 
-/// Show the editor in its own window and run the application until the
-/// window closes or the user quits. Returns the exit code. Main thread.
 /// Whether the caller is on the process's main thread, where every AppKit call belongs.
 pub fn on_main_thread() -> bool {
     unsafe extern "C" {
@@ -1982,6 +2002,24 @@ pub fn on_main_thread() -> bool {
     unsafe { pthread_main_np() == 1 }
 }
 
+/// Show the editor in its own window and run the application until the
+/// window closes or the user quits. Returns the exit code: 0, or 1 when the view
+/// could not be made. Main thread; `poll`, when given, runs before every tick.
+///
+/// ```no_run
+/// use openplugin_core::{Category, EditorHost, ParamInfo, PluginInfo, Unit};
+/// use openplugin_dri::DesignEditor;
+///
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// const DESIGN: &str = "GoodLookinUI design version 1\n\
+///     id,parameter,label,style,colour,x,y,width,height,font size\n\
+///     gain,gain,Gain,Brit,#CE9435,10,10,70,76,10\n";
+///
+/// let editor = DesignEditor::from_csv(DESIGN, &INFO, EditorHost::new(|_| {})).unwrap();
+/// std::process::exit(openplugin_dri::cocoa::run_window("Gain", Box::new(editor), None));
+/// ```
 pub fn run_window(title: &str, editor: Box<dyn Editor>, poll: Option<Poll>) -> i32 {
     unsafe {
         let pool = send!(Id, send!(Id, class(b"NSAutoreleasePool\0") as Id, b"alloc\0"), b"init\0");

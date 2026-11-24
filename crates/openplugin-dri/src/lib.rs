@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! GoodLookin Design Rust Interface (DRI).
 //!
 //! Drawing comes from [`goodlookindri`]: 47 knob styles, 40 faceplates, meters, faders,
@@ -10,8 +11,13 @@
 //! default; classic and flat remain), and [`SceneCanvas`] rasterises a whole scene into the
 //! pixels an [`openplugin_core::Editor`] returns, at the display's backing scale.
 //!
-//! On macOS, [`cocoa::EditorView`] hosts an [`openplugin_core::Editor`] in an `NSView`;
-//! every format bridge uses it. On Windows, [`win32::EditorView`] hosts it in a child `HWND`.
+//! On macOS, `cocoa::EditorView` hosts an [`openplugin_core::Editor`] in an `NSView`;
+//! every format bridge uses it. On Windows, `win32::EditorView` hosts it in a child `HWND`,
+//! and on Linux `x11::EditorView` in an X11 window. Each of those modules exists only on its
+//! own platform. They run on the host's UI thread.
+//!
+//! The drawing modules ([`canvas`], [`controls`], [`render`], [`hit`], [`design_editor`])
+//! are the same on every platform and run on the editor's (main) thread.
 
 pub mod canvas;
 #[cfg(target_os = "macos")]

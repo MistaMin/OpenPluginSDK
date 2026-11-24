@@ -394,6 +394,26 @@ fn device(points: u32, scale: f32) -> u32 {
 }
 
 /// An [`Editor`] in an X11 window.
+///
+/// ```no_run
+/// use openplugin_core::{Category, EditorHost, ParamInfo, PluginInfo, Unit};
+/// use openplugin_dri::{x11::EditorView, DesignEditor};
+///
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// const DESIGN: &str = "GoodLookinUI design version 1\n\
+///     id,parameter,label,style,colour,x,y,width,height,font size\n\
+///     gain,gain,Gain,Brit,#CE9435,10,10,70,76,10\n";
+///
+/// fn open(parent: openplugin_dri::x11::Window) -> Option<EditorView> {
+///     let editor = DesignEditor::from_csv(DESIGN, &INFO, EditorHost::new(|_| {}))?;
+///     let mut view = EditorView::new(Box::new(editor), None)?;
+///     if !view.attach(parent) { return None; }
+///     Some(view)
+/// }
+/// # let _ = open;
+/// ```
 pub struct EditorView {
     editor: Box<dyn Editor>,
     poll: Option<Poll>,
@@ -705,6 +725,7 @@ impl EditorView {
         Some(self.editor.as_mut())
     }
 
+    /// Replace the callback run before every tick with the editor (`None` removes it).
     pub fn set_poll(&mut self, poll: Option<Poll>) {
         self.poll = poll;
     }
@@ -1470,6 +1491,21 @@ fn device_rect(r: &DamageRect, editor: (u32, u32), win: (u32, u32)) -> Option<(u
 
 /// Show the editor in its own window and run until the window closes.
 /// Returns the exit code. Main thread.
+///
+/// ```no_run
+/// use openplugin_core::{Category, EditorHost, ParamInfo, PluginInfo, Unit};
+/// use openplugin_dri::DesignEditor;
+///
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// const DESIGN: &str = "GoodLookinUI design version 1\n\
+///     id,parameter,label,style,colour,x,y,width,height,font size\n\
+///     gain,gain,Gain,Brit,#CE9435,10,10,70,76,10\n";
+///
+/// let editor = DesignEditor::from_csv(DESIGN, &INFO, EditorHost::new(|_| {})).unwrap();
+/// std::process::exit(openplugin_dri::x11::run_window("Gain", Box::new(editor), None));
+/// ```
 pub fn run_window(title: &str, editor: Box<dyn Editor>, poll: Option<Poll>) -> i32 {
     let Some(mut view) = EditorView::new(editor, poll) else {
         eprintln!("openplugin: no X11 display to open a window on");

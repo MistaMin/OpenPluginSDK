@@ -23,3 +23,10 @@ log = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", default-features = false }
 rustix = { version = "1", default-features = false, features = ["event", "std"] }
+
+# The editor views are per platform (cocoa on macOS, win32 on Windows, x11 on Linux),
+# so docs.rs builds each of the three. The crate has no features.
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
