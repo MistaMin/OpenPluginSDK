@@ -10,11 +10,15 @@ use openplugin_dri::win32::EditorView;
 use std::cell::Cell;
 use std::rc::Rc;
 
+/// `LV2UI_Write_Function`.
 pub type WriteFn = unsafe extern "C" fn(controller: *mut c_void, port: u32, size: u32, protocol: u32, buffer: *const c_void);
 
+/// `LV2UI_Descriptor`, as `ui.h` lays it out: what `lv2ui_descriptor` returns.
 #[repr(C)]
 pub struct Lv2UiDescriptor {
+    /// The editor's URI (`<plugin uri>#ui`), a NUL-terminated static string.
     pub uri: *const c_char,
+    /// Opens the editor in the host's parent widget (main thread). Null on failure.
     pub instantiate: unsafe extern "C" fn(
         *const Lv2UiDescriptor,
         *const c_char,
@@ -24,8 +28,11 @@ pub struct Lv2UiDescriptor {
         *mut *mut c_void,
         *const *const Lv2Feature,
     ) -> *mut c_void,
+    /// Closes the editor and frees it (main thread).
     pub cleanup: unsafe extern "C" fn(*mut c_void),
+    /// A control port's new value from the host (main thread); other ports and protocols are ignored.
     pub port_event: unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_void),
+    /// `ui:idleInterface`, `ui:resize` and the other UI extensions by URI; null for one it does not have.
     pub extension_data: unsafe extern "C" fn(*const c_char) -> *const c_void,
 }
 
