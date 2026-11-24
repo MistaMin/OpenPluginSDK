@@ -88,12 +88,42 @@ pub const ACCESS_STEP: f32 = 0.05;
 
 /// Where a control answers the mouse, in points, origin top left.
 #[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// ```
+/// use openplugin_dri::Area;
+///
+/// let r = Area::rect(10.0, 10.0, 20.0, 20.0);
+/// assert!(r.contains(10.0, 29.9) && !r.contains(30.0, 15.0)); // half-open
+/// let c = Area::circle(50.0, 50.0, 10.0);
+/// assert!(c.contains(60.0, 50.0)); // the rim is inside
+/// assert_eq!(c.bounds(), (40.0, 40.0, 20.0, 20.0));
+/// ```
 pub enum Area {
-    Rect { x: f32, y: f32, w: f32, h: f32 },
-    Circle { cx: f32, cy: f32, r: f32 },
+    /// A rectangle: its top-left corner `x, y` and its size `w, h`.
+    Rect {
+        /// Left edge.
+        x: f32,
+        /// Top edge.
+        y: f32,
+        /// Width.
+        w: f32,
+        /// Height.
+        h: f32,
+    },
+    /// A circle: its centre `cx, cy` and radius `r`.
+    Circle {
+        /// Centre x.
+        cx: f32,
+        /// Centre y.
+        cy: f32,
+        /// Radius.
+        r: f32,
+    },
 }
 
 impl Area {
+    /// [`Self::Rect`] with its top-left corner at `x, y`, `w` wide and `h` high. A
+    /// negative size contains nothing.
     pub const fn rect(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self::Rect { x, y, w, h }
     }
@@ -103,6 +133,7 @@ impl Area {
         Self::Rect { x: r.0, y: r.1, w: r.2, h: r.3 }
     }
 
+    /// [`Self::Circle`] at `cx, cy` with radius `r`. A negative radius contains nothing.
     pub const fn circle(cx: f32, cy: f32, r: f32) -> Self {
         Self::Circle { cx, cy, r }
     }
@@ -127,6 +158,7 @@ impl Area {
         }
     }
 
+    /// The centre of the bounding box.
     pub fn center(&self) -> (f32, f32) {
         let (x, y, w, h) = self.bounds();
         (x + w * 0.5, y + h * 0.5)
@@ -155,7 +187,10 @@ pub enum ControlKind {
     Button,
     /// A choice parameter as equal keys along one axis. Click or drag across
     /// keys to select.
-    KeyBank { vertical: bool },
+    KeyBank {
+        /// Keys run top to bottom (`true`) or left to right (`false`).
+        vertical: bool,
+    },
 }
 
 /// What a double-click on a knob or fader does (see [`ControlSet::set_double_click`]).
@@ -177,12 +212,33 @@ pub enum DoubleClick {
 pub type ControlId = usize;
 
 /// One control. Built with the constructors, added with [`ControlSet::add`].
+///
+/// A control starts at its parameter's default (clamped) and keeps the plain value the
+/// set last stored. The constructors take any `area`, parameter index and `'static`
+/// [`ParamInfo`]; nothing is checked until input arrives.
+///
+/// ```
+/// use openplugin_core::{ParamInfo, Unit};
+/// use openplugin_dri::{Area, Control};
+///
+/// static GAIN: ParamInfo = ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db);
+///
+/// let knob = Control::knob(Area::circle(60.0, 70.0, 28.0), 0, &GAIN)
+///     .drag_range(300.0)
+///     .tooltip("Output gain");
+/// assert_eq!(knob.value(), 0.0);
+/// assert_eq!(knob.normalized(), 0.5);
+/// assert!(!knob.is_on());
+/// ```
 #[derive(Clone, Debug)]
 pub struct Control {
+    /// Where the control answers the mouse, in points.
     pub area: Area,
+    /// What the control is.
     pub kind: ControlKind,
     /// Parameter descriptor index, as sent in gestures.
     pub param: usize,
+    /// The parameter's range, default, taper and text.
     pub info: &'static ParamInfo,
     value: f32,
     hover: bool,
@@ -208,21 +264,28 @@ impl Control {
         Self { area, kind, param, info, value: info.clamp(info.default), hover: false, pressed: false, focused: false, drag_range: 0.0, tip: None, seen: None }
     }
 
+    /// A rotary knob, dragged vertically ([`DEFAULT_DRAG_RANGE`] points for the range).
     pub fn knob(area: Area, param: usize, info: &'static ParamInfo) -> Self {
         Self::new(ControlKind::Knob, area, param, info)
     }
+    /// A vertical fader: the range over the area's height, up raises the value.
     pub fn fader_v(area: Area, param: usize, info: &'static ParamInfo) -> Self {
         Self::new(ControlKind::FaderV, area, param, info)
     }
+    /// A horizontal fader: the range over the area's width, right raises the value.
     pub fn fader_h(area: Area, param: usize, info: &'static ParamInfo) -> Self {
         Self::new(ControlKind::FaderH, area, param, info)
     }
+    /// A switch that flips between the minimum and the maximum on every click.
     pub fn toggle(area: Area, param: usize, info: &'static ParamInfo) -> Self {
         Self::new(ControlKind::Toggle, area, param, info)
     }
+    /// A momentary button: the maximum while held, the minimum on release.
     pub fn button(area: Area, param: usize, info: &'static ParamInfo) -> Self {
         Self::new(ControlKind::Button, area, param, info)
     }
+    /// A row (or, `vertical`, a column) of equal keys, one per whole value from the
+    /// minimum to the maximum. Meant for choice parameters.
     pub fn key_bank(area: Area, param: usize, info: &'static ParamInfo, vertical: bool) -> Self {
         Self::new(ControlKind::KeyBank { vertical }, area, param, info)
     }
@@ -325,6 +388,36 @@ struct Grab {
 
 /// The registry. Create it with the editor's [`EditorHost`], add the controls,
 /// forward input, draw by iterating.
+///
+/// Main (editor) thread only, like the [`EditorHost`] it holds. Input methods never
+/// panic on bad coordinates: NaN or infinite positions are ignored. Lists it returns
+/// ([`Self::tooltips`], [`Self::take_changed`], [`Self::accessibility_nodes`]) are newly
+/// allocated; input handling allocates only for text and menus.
+///
+/// ```
+/// use std::{cell::RefCell, rc::Rc};
+/// use openplugin_core::{EditorHost, Gesture, ParamInfo, Unit};
+/// use openplugin_dri::{Area, Control, ControlSet};
+///
+/// static GAIN: ParamInfo = ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db);
+///
+/// let sent = Rc::new(RefCell::new(Vec::new()));
+/// let log = sent.clone();
+/// let mut set = ControlSet::new(EditorHost::new(move |g| log.borrow_mut().push(g)));
+/// let knob = set.add(Control::knob(Area::circle(50.0, 50.0, 20.0), 0, &GAIN));
+///
+/// // Drag up a quarter of the default 200-point range.
+/// set.mouse_down(50.0, 50.0, 1);
+/// set.mouse_move(50.0, 0.0);
+/// set.mouse_up(50.0, 0.0);
+/// assert_eq!(set.get(knob).unwrap().value(), 12.0);
+/// assert_eq!(sent.borrow().first(), Some(&Gesture::Begin(0)));
+/// assert_eq!(sent.borrow().last(), Some(&Gesture::End(0)));
+///
+/// // A value from the host is stored and sends nothing.
+/// set.param_changed(0, -6.0);
+/// assert_eq!(set.get(knob).unwrap().value(), -6.0);
+/// ```
 pub struct ControlSet {
     host: EditorHost,
     controls: Vec<Control>,
@@ -348,6 +441,8 @@ pub struct ControlSet {
 }
 
 impl ControlSet {
+    /// An empty set that sends its gestures to `host`. Double-click opens a text field
+    /// ([`DoubleClick::EditText`]).
     pub fn new(host: EditorHost) -> Self {
         Self {
             host,
@@ -378,6 +473,7 @@ impl ControlSet {
         self
     }
 
+    /// What a double-click on a knob or fader does now.
     pub fn double_click(&self) -> DoubleClick {
         self.double_click
     }
@@ -510,14 +606,17 @@ impl ControlSet {
         self
     }
 
+    /// The number of controls.
     pub fn len(&self) -> usize {
         self.controls.len()
     }
 
+    /// No controls have been added.
     pub fn is_empty(&self) -> bool {
         self.controls.is_empty()
     }
 
+    /// Control `id`, or `None` when there is no such control.
     pub fn get(&self, id: ControlId) -> Option<&Control> {
         self.controls.get(id)
     }
@@ -587,6 +686,12 @@ impl ControlSet {
         self.controls.iter().rposition(|c| c.interactive() && c.area.contains(x, y))
     }
 
+    /// A button went down at `x, y` (points), `clicks` the click count (2 for a
+    /// double-click). Focuses the topmost interactive control there (or clears focus) and
+    /// starts its gesture: a knob or fader begins a drag (or, on a double-click, opens a
+    /// text field or resets, see [`DoubleClick`]), a toggle flips in one gesture, a button
+    /// goes to its maximum, a key bank selects the key under the pointer. A release that
+    /// never came for an earlier press is closed first.
     pub fn mouse_down(&mut self, x: f32, y: f32, clicks: u32) {
         if self.grab.is_some() {
             // A release was lost; close the gesture it owed.
@@ -645,6 +750,9 @@ impl ControlSet {
         self.set_hover(Some(id));
     }
 
+    /// The pointer moved to `x, y`. While a control is held, its value follows the travel
+    /// (see the module docs) and each change is sent as a perform; otherwise only hover
+    /// changes.
     pub fn mouse_move(&mut self, x: f32, y: f32) {
         if !x.is_finite() || !y.is_finite() {
             return;
@@ -682,6 +790,8 @@ impl ControlSet {
         }
     }
 
+    /// The button came up at `x, y`: the last move is applied, the held control's gesture
+    /// ends (a button returns to its minimum), and hover is taken again.
     pub fn mouse_up(&mut self, x: f32, y: f32) {
         if self.grab.is_some() {
             self.mouse_move(x, y);

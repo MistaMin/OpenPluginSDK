@@ -29,6 +29,14 @@ fn commit(dl: &mut DrawList, scene: Scene) {
 
 /// Pointer angle for a rotary control, in radians from straight up: GoodLookin's sweep of
 /// ±0.8π, the one design files use. 0 is the start, 0.5 points up, 1 is the end.
+/// `normalized` is clamped to 0..=1; NaN counts as 0. Pure; any thread.
+///
+/// ```
+/// use std::f32::consts::PI;
+/// assert_eq!(openplugin_dri::knob_angle(0.5), 0.0);
+/// assert!((openplugin_dri::knob_angle(1.0) - 0.8 * PI).abs() < 1e-6);
+/// assert_eq!(openplugin_dri::knob_angle(f32::NAN), openplugin_dri::knob_angle(0.0));
+/// ```
 pub fn knob_angle(normalized: f32) -> f32 {
     let t = if normalized.is_nan() { 0.0 } else { normalized.clamp(0.0, 1.0) };
     (t * 1.6 - 0.8) * std::f32::consts::PI
@@ -36,6 +44,10 @@ pub fn knob_angle(normalized: f32) -> f32 {
 
 /// Draws one of the 40 GoodLookin faceplates by its code (`"Navy"`, `"Walnut"`, `"Cyber"`,
 /// `"Silver"`, `"Stealth"`, `"Slate"`, ...). An unknown code draws nothing.
+///
+/// The plate fills `0, 0, w, h` (points). Its middle colour becomes the floor the lit
+/// knobs drawn after it reflect, in `dl` and in GoodLookin DRI's process-wide knob floor.
+/// Editor (main) thread; allocates the plate's scene.
 pub fn draw_faceplate(dl: &mut DrawList, w: f32, h: f32, code: &str) {
     let Some(plate) = design::find_faceplate(code) else { return };
     // The lit knobs reflect the plate they sit on: its middle colour.
@@ -55,7 +67,12 @@ pub fn draw_faceplate(dl: &mut DrawList, w: f32, h: f32, code: &str) {
 
 /// Draws any GoodLookin knob by style code (`"Brit"`, `"N"`, `"A"`, `"Bk"`, `"Mtl"`, `"Chr"`,
 /// `"Wd"`, `"Neo"`, `"Seg"`, `"Chk"`, `"Rck"`, ...). A `lit_` or `flat_` prefix picks the tier
-/// for this knob.
+/// for this knob. The codes are listed in `goodlookindri::design::KNOB_STYLES`.
+///
+/// `cx`, `cy` and `radius` are in points; `normalized` is the value 0..=1 (clamped, NaN
+/// is 0) turned into an angle by [`knob_angle`]. `label` is drawn 14 points below the
+/// knob and `value_text` 12 points under it. `cap_color` is the accent. Editor (main)
+/// thread; allocates the knob's scenes.
 #[allow(clippy::too_many_arguments)] // public drawing API; grouping would break callers
 pub fn draw_knob(
     dl: &mut DrawList,
@@ -93,6 +110,10 @@ pub fn draw_knob(
     dl.append(legend);
 }
 
+/// Draws a level meter in the rectangle `x, y, w, h` (points), showing `level_db` (dBFS
+/// for the PPM, LED and retro styles; dB VU for [`MeterStyle::AnalogVu`]). The PPM scale
+/// runs -60..=0 dB and the retro bar -48..=0 dB; levels outside pin to the ends.
+/// Editor (main) thread; allocates the meter's scene.
 pub fn draw_vu_meter(dl: &mut DrawList, x: f32, y: f32, w: f32, h: f32, level_db: f32, style: MeterStyle) {
     let mut scene = Scene::new();
     let rect = Rect::new(x, y, w, h);
@@ -113,7 +134,17 @@ pub fn draw_vu_meter(dl: &mut DrawList, x: f32, y: f32, w: f32, h: f32, level_db
     commit(dl, scene);
 }
 
-/// Fader taper conversion: 0.0..1.0 position to dB (-144.0 .. +12.0)
+/// Fader taper: a position 0..=1 to dB, -144..=+12. The top three quarters are linear,
+/// -24 to +12 dB; the bottom quarter falls on a 1.5 power curve to -144 dB, which position
+/// 0 returns. Positions outside 0..=1 are clamped; NaN is 0. Pure; any thread.
+///
+/// ```
+/// use openplugin_dri::{fader_db_to_pos, fader_pos_to_db};
+/// assert_eq!(fader_pos_to_db(1.0), 12.0);
+/// assert_eq!(fader_pos_to_db(0.25), -24.0);
+/// assert_eq!(fader_pos_to_db(0.0), -144.0);
+/// assert!((fader_pos_to_db(fader_db_to_pos(-6.0)) + 6.0).abs() < 0.01);
+/// ```
 pub fn fader_pos_to_db(pos: f32) -> f32 {
     let p = if pos.is_nan() { 0.0 } else { pos.clamp(0.0, 1.0) };
     if p <= 0.0 {
@@ -126,7 +157,8 @@ pub fn fader_pos_to_db(pos: f32) -> f32 {
     }
 }
 
-/// Fader taper conversion: dB to 0.0..1.0 position
+/// Fader taper: dB to a position 0..=1, the inverse of [`fader_pos_to_db`]. Levels at or
+/// below -144 dB (and NaN) give 0; levels above +12 dB give 1. Pure; any thread.
 pub fn fader_db_to_pos(db: f32) -> f32 {
     let db = if db.is_nan() { -144.0 } else { db };
     if db <= -144.0 {
@@ -140,6 +172,12 @@ pub fn fader_db_to_pos(db: f32) -> f32 {
     }
 }
 
+/// Draws a console fader at `db` (through [`fader_db_to_pos`]) with its label and a
+/// readout (`-inf dB` at -90 dB and below, else one decimal).
+///
+/// The fader is drawn horizontally: `height` (at least 36 points) is the track length
+/// across, centred on `cx`, and the track is 40 points tall from `y`. The label sits at
+/// `y + 52` and the readout at `y + 66`. Editor (main) thread; allocates.
 pub fn draw_fader(dl: &mut DrawList, cx: f32, y: f32, height: f32, db: f32, label: &str) {
     let mut scene = Scene::new();
     let travel = height.max(36.0);
@@ -152,6 +190,9 @@ pub fn draw_fader(dl: &mut DrawList, cx: f32, y: f32, height: f32, db: f32, labe
     commit(dl, scene);
 }
 
+/// Draws a horizontal slider at `normalized` (0..=1) in a track `w` points wide and 28
+/// tall from `x, y`, with `label` above its left end and `value_text` starting above its
+/// right end (both 10 points above `y`). Editor (main) thread; allocates.
 pub fn draw_slider(dl: &mut DrawList, x: f32, y: f32, w: f32, normalized: f32, label: &str, value_text: &str) {
     let mut scene = Scene::new();
     let r = Rect::new(x, y, w, 28.0);
@@ -162,6 +203,8 @@ pub fn draw_slider(dl: &mut DrawList, x: f32, y: f32, w: f32, normalized: f32, l
     commit(dl, scene);
 }
 
+/// Draws a pan knob (the `"Ptr"` style, grey cap) at `pan`, -1 (left) to +1 (right),
+/// clamped, with a readout of `< C >`, `< L50` or `R50 >`. Otherwise as [`draw_knob`].
 pub fn draw_pan_knob(dl: &mut DrawList, cx: f32, cy: f32, radius: f32, pan: f32, label: &str) {
     let p = pan.clamp(-1.0, 1.0);
     draw_knob(

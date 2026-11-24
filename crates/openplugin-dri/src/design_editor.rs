@@ -94,6 +94,7 @@ pub struct RowIssue {
     pub id: String,
     /// What the row's `parameter` column said (possibly empty).
     pub parameter: String,
+    /// Why the row has no control.
     pub kind: IssueKind,
 }
 
@@ -141,7 +142,16 @@ impl fmt::Display for DesignEditorError {
 
 impl std::error::Error for DesignEditorError {}
 
-/// Layout and look choices a design file does not carry.
+/// Layout and look choices a design file does not carry. The builder methods store
+/// their values unchecked; [`DesignEditor::try_new`] checks them and returns
+/// [`DesignEditorError::Options`] or [`DesignEditorError::UnknownPlate`].
+///
+/// ```
+/// use openplugin_dri::DesignOptions;
+///
+/// let options = DesignOptions::default().plate("Walnut").scale(1.5).origin(8.0, 8.0).strict(true);
+/// # let _ = options;
+/// ```
 #[derive(Clone, Debug)]
 pub struct DesignOptions {
     plate: String,
@@ -193,11 +203,19 @@ impl DesignOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Look {
+    /// A rotary knob in the row's style.
     Knob,
+    /// A vertical fader: the row is at least twice as tall as wide.
     FaderV,
+    /// A horizontal fader: the row is at least twice as wide as tall.
     FaderH,
+    /// A switch, for a `Unit::Toggle` parameter.
     Switch,
-    Keys { vertical: bool },
+    /// Latching keys, for a `Unit::Choice` parameter.
+    Keys {
+        /// The keys run top to bottom (the row is taller than wide).
+        vertical: bool,
+    },
 }
 
 /// A design row bound to a parameter.
@@ -209,6 +227,7 @@ pub struct Binding {
     pub param: usize,
     /// The control in [`DesignEditor::controls`].
     pub control: ControlId,
+    /// What the row is drawn as.
     pub look: Look,
 }
 
@@ -226,6 +245,33 @@ struct Part {
 }
 
 /// An editor made from a GoodLookin design. See the [module documentation](self).
+///
+/// Built and used on the editor (main) thread, like every [`Editor`]. Building it reads
+/// the design, lays out the controls and allocates; painting reuses its [`SceneCanvas`].
+///
+/// ```
+/// use openplugin_core::{Category, EditorHost, ParamInfo, PluginInfo, Unit};
+/// use openplugin_dri::{DesignEditor, DesignEditorError, DesignOptions};
+///
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS)
+///         .with_editor(true);
+///
+/// let design = "GoodLookinUI design version 1\n\
+///               id,parameter,label,style,colour,x,y,width,height,font size\n\
+///               gain,gain,Gain,Brit,#CE9435,10,10,70,76,10\n\
+///               spare,,Spare,Brit,#CE9435,100,10,70,76,10\n";
+///
+/// let editor = DesignEditor::from_csv(design, &INFO, EditorHost::new(|_| {})).unwrap();
+/// assert_eq!(editor.bindings().len(), 1);
+/// assert_eq!(editor.issues().len(), 1); // `spare` names no parameter
+/// assert_eq!(editor.control_for("gain").unwrap().value(), 0.0);
+///
+/// let strict = DesignOptions::default().strict(true);
+/// let refused = DesignEditor::try_new(design, &INFO, EditorHost::new(|_| {}), &strict);
+/// assert!(matches!(refused, Err(DesignEditorError::Unbound(_))));
+/// ```
 pub struct DesignEditor {
     info: &'static PluginInfo,
     controls: ControlSet,
@@ -412,12 +458,12 @@ impl DesignEditor {
         })
     }
 
-    /// The controls, with their hit areas and current values.
     /// What a double-click on a knob or fader does (see [`crate::hit::DoubleClick`]).
     pub fn set_double_click(&mut self, action: crate::hit::DoubleClick) {
         self.controls.set_double_click(action);
     }
 
+    /// The controls, with their hit areas and current values.
     pub fn controls(&self) -> &ControlSet {
         &self.controls
     }
