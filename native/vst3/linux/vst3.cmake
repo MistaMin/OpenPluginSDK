@@ -119,6 +119,8 @@ op_vst3_module(OpenPluginVST3 "${OP_PRODUCT}")
 op_link_rust(OpenPluginVST3)
 op_vst3_proof(VST3Proof host.cpp
   "${OP_SDK_SOURCE}/common/memorystream.cpp"
+  "${OP_SDK_SOURCE}/vst/hosting/hostclasses.cpp"
+  "${OP_SDK_SOURCE}/vst/hosting/pluginterfacesupport.cpp"
   "${OP_SDK_SOURCE}/vst/hosting/parameterchanges.cpp")
 op_link_rust(VST3Proof)
 add_dependencies(VST3Proof OpenPluginVST3)
