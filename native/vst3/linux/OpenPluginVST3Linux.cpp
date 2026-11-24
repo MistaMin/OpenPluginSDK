@@ -15,6 +15,14 @@
 //     below registers a timer and the connection's descriptor with the host's
 //     Linux::IRunLoop (from its IPlugFrame) and pumps the view on both. A host
 //     without a run loop cannot drive the view, so attaching fails there.
+//   - A host that embeds through a socket (Ardour's GtkSocket) gives the view the size
+//     of its own area whatever the view answers: an editor with a fixed shape takes
+//     the width and the height that goes with it, and the view asks the frame for that
+//     size once (onSize, followSize below).
+//   - Timers. The shell's own timer (the poll for a new latency or parameter info) is
+//     the SDK's Timer, which on Linux runs on the run loop the host lends through
+//     IPluginFactory3::setHostContext. A host that lends none gets no timer: a change
+//     is then not announced until the host asks.
 //   - The entry points come from the VST3 SDK's linuxmain.cpp (ModuleEntry,
 //     ModuleExit); native/vst3/linux/vst3.cmake adds it.
 #include "op_shell.h"
@@ -45,35 +53,65 @@
 
 #if OP_HAS_EDITOR
 namespace openplugin_vst {
-// The shell's view, run by the host's loop.
+// The shell's view, driven from the host's run loop.
 class LinuxEditorView final : public EditorView, public Linux::ITimerHandler, public Linux::IEventHandler {
 public:
     explicit LinuxEditorView(Controller* controller) : EditorView(controller) {}
-    ~LinuxEditorView() override { leaveLoop(); }
+    ~LinuxEditorView() override { stopDriving(); }
 
     tresult PLUGIN_API attached(void* parent, FIDString type) SMTG_OVERRIDE {
-        // The loop first: without one the view would never draw.
-        Linux::IRunLoop* loop = nullptr;
-        if (!plugFrame || plugFrame->queryInterface(Linux::IRunLoop::iid, reinterpret_cast<void**>(&loop)) != kResultTrue || !loop)
-            return kResultFalse;
+        // The run loop first: without one the editor would open and never draw.
+        FUnknownPtr<Linux::IRunLoop> loop(plugFrame);
+        if (!loop) return kResultFalse;
+        stopDriving();
         const tresult result = EditorView::attached(parent, type);
-        if (result != kResultTrue) {
-            loop->release();
-            return result;
+        if (result != kResultOk) return result;
+        void* editor = ownEditor();
+        if (!editor || !startDriving(loop, editor)) {
+            EditorView::removed();
+            return kResultFalse;
         }
-        loop_ = loop;
-        loop_->registerTimer(this, OP_EDITOR_TICK_MS);
-        watchDescriptor();
-        return result;
+        // The host reads the size next (getSize): that is the size it knows.
+        hostW_ = hostH_ = askedW_ = askedH_ = 0;
+        op_editor_get_size(editor, &hostW_, &hostH_);
+        return kResultOk;
+    }
+    // A host that embeds through a socket (Ardour's GtkSocket) makes the view's
+    // window the size of its own area whatever the view answers, and gives that
+    // size here. An editor with a fixed shape takes the width it is given and the
+    // height that goes with it; followSize then asks the frame for that height.
+    // A size that already has the shape comes out as it went in.
+    tresult PLUGIN_API onSize(ViewRect* newSize) SMTG_OVERRIDE {
+        if (!newSize) return kInvalidArgument;
+        hostW_ = static_cast<uint32_t>(newSize->getWidth() > 0 ? newSize->getWidth() : 1);
+        hostH_ = static_cast<uint32_t>(newSize->getHeight() > 0 ? newSize->getHeight() : 1);
+        ViewRect shaped = *newSize;
+        if (aspectW_ > 0 && aspectH_ > 0) {
+            const long height = std::lround(static_cast<double>(hostW_) * aspectH_ / aspectW_);
+            shaped.bottom = shaped.top + static_cast<int32>(height < 1 ? 1 : height);
+        }
+        return EditorView::onSize(&shaped);
     }
     tresult PLUGIN_API removed() SMTG_OVERRIDE {
-        leaveLoop();
+        // The host stops calling before the view closes its connection.
+        stopDriving();
         return EditorView::removed();
     }
+    // A host may take its frame away, or give another, while the view is open: the
+    // view is driven from the run loop of the frame it has.
+    tresult PLUGIN_API setFrame(IPlugFrame* frame) SMTG_OVERRIDE {
+        if (frame == plugFrame) return kResultOk;
+        const bool driven = loop_ != nullptr;
+        stopDriving();
+        const tresult result = EditorView::setFrame(frame);
+        if (driven) {
+            FUnknownPtr<Linux::IRunLoop> loop(plugFrame);
+            if (void* editor = ownEditor(); loop && editor) startDriving(loop, editor);
+        }
+        return result;
+    }
 
-    // Linux::ITimerHandler: the view's tick.
     void PLUGIN_API onTimer() SMTG_OVERRIDE { pump(); }
-    // Linux::IEventHandler: the X connection has something to read.
     void PLUGIN_API onFDIsSet(Linux::FileDescriptor) SMTG_OVERRIDE { pump(); }
 
     tresult PLUGIN_API queryInterface(const TUID iid, void** obj) SMTG_OVERRIDE {
@@ -85,33 +123,67 @@ public:
     uint32 PLUGIN_API release() SMTG_OVERRIDE { return EditorView::release(); }
 
 private:
-    void pump() {
-        void* editor = ownEditor();
-        if (!editor) return;
-        op_editor_pump(editor);
-        // A lost connection stays readable for good: stop watching it.
-        if (fd_ >= 0 && op_editor_fd(editor) < 0) unwatchDescriptor();
+    bool startDriving(Linux::IRunLoop* loop, void* editor) {
+        if (loop->registerTimer(this, OP_EDITOR_TICK_MS) != kResultOk) return false;
+        loop_ = loop;
+        // The descriptor makes input prompt; the timer alone still runs the view.
+        const int32_t fd = op_editor_fd(editor);
+        watching_ = fd >= 0 && loop->registerEventHandler(this, fd) == kResultOk;
+        return true;
     }
-    void watchDescriptor() {
-        void* editor = ownEditor();
-        const int32_t fd = editor ? op_editor_fd(editor) : -1;
-        if (fd < 0 || !loop_) return;
-        if (loop_->registerEventHandler(this, fd) == kResultTrue) fd_ = fd;
-    }
-    void unwatchDescriptor() {
-        if (fd_ >= 0 && loop_) loop_->unregisterEventHandler(this);
-        fd_ = -1;
-    }
-    void leaveLoop() {
+    void stopDriving() {
         if (!loop_) return;
-        unwatchDescriptor();
+        if (watching_) loop_->unregisterEventHandler(this);
         loop_->unregisterTimer(this);
-        loop_->release();
+        watching_ = false;
         loop_ = nullptr;
     }
-
-    Linux::IRunLoop* loop_ = nullptr;
-    int32_t fd_ = -1;
+    void pump() {
+        void* editor = ownEditor();
+        if (!editor) {
+            // Another view took the editor over: its connection is closed, and
+            // nothing is left to watch.
+            stopDriving();
+            return;
+        }
+        // The editor may ask for a size inside the pump (requestResize), and the
+        // host may release the view from inside a call it makes then.
+        IPtr<LinuxEditorView> keep(this);
+        op_editor_pump(editor);
+        followSize();
+    }
+    // An X11 child window does not resize its parent. When the editor's size is
+    // not the one the host knows (it changed size on its own, its window was given
+    // a size directly, or it took another size than the host gave), the frame is
+    // asked for it: once for each size, so a host that cannot give it is not
+    // asked again on every turn.
+    void followSize() {
+        void* editor = ownEditor();
+        uint32_t width = 0;
+        uint32_t height = 0;
+        if (!editor || !op_editor_get_size(editor, &width, &height)) return;
+        if (width == hostW_ && height == hostH_) {
+            askedW_ = askedH_ = 0;
+            return;
+        }
+        if (width == askedW_ && height == askedH_) return;
+        askedW_ = width;
+        askedH_ = height;
+        ViewRect asked(rect.left, rect.top, rect.left + static_cast<int32>(width), rect.top + static_cast<int32>(height));
+        rect = asked;
+        // The host may call onSize from inside this, which sets what it knows.
+        if (plugFrame && plugFrame->resizeView(this, &asked) == kResultTrue && ownEditor() == editor) {
+            if (op_editor_get_size(editor, &width, &height)) {
+                hostW_ = width;
+                hostH_ = height;
+            }
+        }
+    }
+    IPtr<Linux::IRunLoop> loop_;
+    bool watching_ = false;
+    // The size the host has (from getSize after attached, onSize, or a resizeView
+    // it accepted) and the last one the frame was asked for, in pixels.
+    uint32_t hostW_ = 0, hostH_ = 0, askedW_ = 0, askedH_ = 0;
 };
 
 IPlugView* PLUGIN_API Controller::createView(FIDString name) {
