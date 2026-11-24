@@ -12,6 +12,12 @@
 #     -DOP_PRODUCT="Example Gain" -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid \
 #     -DOP_TAIL=ON -DOP_EDITOR=ON
 #   cmake --build build-shell -j 2
+#   ctest --test-dir build-shell --output-on-failure
+#
+# With OP_EDITOR=OFF this builds the proofs too (the macOS proofs, through Linux stand-ins);
+# libexample_role_tags.a and libexample_expression_synth.a next to OP_RUST_LIB add the
+# channel order and expression proofs. With OP_EDITOR=ON it builds vst3_editor_proof, which
+# needs an X display and libxcb.
 #
 # The module exports only the VST3 entry points (a version script): the Rust library's
 # op_shell_* and op_editor_* stay inside it, so two plug-ins built with this SDK in one
@@ -44,8 +50,37 @@ if(NOT EXISTS "${OP_RUST_LIB}")
   message(FATAL_ERROR "OP_RUST_LIB must be the built static library (target/release/lib<name>.a)")
 endif()
 
+# Role Tags (examples/role_tags) for the channel order proof, found next to OP_RUST_LIB.
+set(OP_ROLE_LIB "" CACHE FILEPATH "Rust static library of examples/role_tags, for the role proof")
+# Expression Synth (examples/expression_synth) for the per-note expression proof, likewise.
+set(OP_EXPRESSION_LIB "" CACHE FILEPATH "Rust static library of examples/expression_synth, for the expression proof")
+get_filename_component(OP_RUST_LIB_DIR "${OP_RUST_LIB}" DIRECTORY)
+if(NOT OP_ROLE_LIB AND EXISTS "${OP_RUST_LIB_DIR}/libexample_role_tags.a")
+  set(OP_ROLE_LIB "${OP_RUST_LIB_DIR}/libexample_role_tags.a")
+endif()
+if(NOT OP_EXPRESSION_LIB AND EXISTS "${OP_RUST_LIB_DIR}/libexample_expression_synth.a")
+  set(OP_EXPRESSION_LIB "${OP_RUST_LIB_DIR}/libexample_expression_synth.a")
+endif()
+if(OP_ROLE_LIB AND EXISTS "${OP_ROLE_LIB}")
+  set(OP_ROLE_PROOFS ON)
+else()
+  set(OP_ROLE_PROOFS OFF)
+  message(STATUS "Role proof not built: no libexample_role_tags.a (cargo build --release --lib -p example-role-tags)")
+endif()
+if(OP_EXPRESSION_LIB AND EXISTS "${OP_EXPRESSION_LIB}")
+  set(OP_EXPRESSION_PROOFS ON)
+else()
+  set(OP_EXPRESSION_PROOFS OFF)
+  message(STATUS "Expression proof not built: no libexample_expression_synth.a (cargo build --release --lib -p example-expression-synth)")
+endif()
+
+# Links the Rust library: OP_RUST_LIB, or the archive given as the second argument.
 function(op_link_rust target_name)
-  target_link_libraries(${target_name} PRIVATE "${OP_RUST_LIB}" ${OP_RUST_NATIVE_LIBS})
+  set(rust_lib "${OP_RUST_LIB}")
+  if(ARGC GREATER 1)
+    set(rust_lib "${ARGV1}")
+  endif()
+  target_link_libraries(${target_name} PRIVATE "${rust_lib}" ${OP_RUST_NATIVE_LIBS})
 endfunction()
 
 # No folder of the build machine in a shipped binary (an assert in an SDK header
@@ -53,6 +88,8 @@ endfunction()
 foreach(prefix IN LISTS OP_TRIM_PATHS)
   add_compile_options("-ffile-prefix-map=${prefix}/=")
 endforeach()
+
+enable_testing()
 
 if(OP_BUILD_VST3)
   include("${OP_NATIVE_DIR}/vst3/linux/vst3.cmake")

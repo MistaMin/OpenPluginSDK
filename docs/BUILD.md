@@ -190,6 +190,55 @@ On 15 November 2026, on Arch Linux (x86_64, Intel Core i7-2630QM, Rust 1.100), `
 
 CI runs the same commands in the `linux-package` job on `ubuntu-latest`. Its `apt-get install lv2-dev sordi` step has not run on GitHub yet; everything after it was run on the Arch machine.
 
+## Linux: VST3 shell
+
+VST3 is the one format on Linux that needs the native shell: CLAP and LV2 are Rust alone, and there is no Audio Unit or AAX. `native/CMakeLists.txt` hands a Linux build machine to `native/cmake/linux.cmake`, which holds the options, the Rust library and its system libraries, and includes `native/vst3/linux/vst3.cmake`. The compiler is GCC or Clang. `scripts/build_plugin_linux.sh --formats vst3` drives this build for a plugin crate; what follows is the build underneath it, which is also how the SDK's own proofs are built. From the repository root, with the VST3 SDK outside the tree:
+
+```bash
+cargo build --release --lib -p example-editor -p example-role-tags -p example-expression-synth
+cmake -S native -B build-shell -DCMAKE_BUILD_TYPE=Release \
+  -DOP_RUST_LIB="$PWD/target/release/libexample_editor.a" \
+  -DOP_VST3_SDK=/path/to/vst3sdk \
+  -DOP_PRODUCT="Example Gain" -DOP_BUNDLE_ID=com.opengrid.example \
+  -DOP_VERSION=0.3.1 -DOP_MANUFACTURER=OpenGrid \
+  -DOP_TAIL=ON -DOP_EDITOR=OFF
+cmake --build build-shell -j 4
+ctest --test-dir build-shell --output-on-failure
+```
+
+- **The module** is `<Name>.vst3/Contents/<arch>-linux/<Name>.so` (`x86_64-linux`, `aarch64-linux`) in the build folder, with the VST3 SDK licence in `Contents/Resources`. Its entry points are `ModuleEntry` and `ModuleExit` (the SDK's `linuxmain.cpp`). There is no `Info.plist`, `PkgInfo`, `moduleinfo.json` or signature. Install by copying the outer folder to `~/.vst3` or `/usr/lib/vst3`; nothing here does that.
+- **Exports.** A module exports `GetPluginFactory`, `ModuleEntry` and `ModuleExit` and nothing else (`native/vst3/linux/exports.map`): the plugin's `op_shell_*`, the VST3 SDK and the C++ runtime stay inside it, so two plug-ins in one host share no symbol.
+- **The C++ runtime** is linked into the module (`-static-libstdc++`), so it loads in a host whose `libstdc++` is older than the build machine's. That needs the static library on the build machine (part of GCC on Arch, Debian and Ubuntu; the `libstdc++-static` package on Fedora). The module needs `libc`, `libm` and `libgcc_s`; the glibc of the build machine is the oldest it runs on.
+- **Class ids** are the 16 bytes of the plugin's FUID strings, as on macOS, so a project saved on one system finds the plug-in on the other (Windows reorders them to the same strings).
+- **Timers.** Linux has no run loop of its own for a plug-in; the host lends one (`Linux::IRunLoop`). The shell's main-thread timer (the poll that announces a new latency or new parameter info) runs on the loop the host gives through `IPluginFactory3::setHostContext`. A host that gives none there gets no announcements; the plug-in works otherwise.
+- **System libraries.** `OP_RUST_NATIVE_LIBS` lists what the Rust library links (`gcc_s;util;rt;pthread;m;dl;c`). When a plugin needs more, take the list from `cargo rustc --release --lib -p <crate> --crate-type staticlib -- --print native-static-libs`.
+- **`-DOP_EDITOR=ON`** makes the shell host the plugin's editor (`native/include/op_editor_x11.h`): the X11 view, embedded with `kPlatformTypeX11EmbedWindowID`, which is how Linux hosts embed editors in a Wayland session too (through Xwayland). The view is driven from the run loop of the host's `IPlugFrame`: one timer of 33 ms and the X connection's descriptor. A frame that lends no run loop cannot show the editor, and `attached` fails there. The editor works in points and the host in pixels; the view converts at its own scale, which it reads from the display (`Xft.dpi` over 96). It does not offer `IPlugViewContentScaleSupport`: a host cannot set the scale, as with the CLAP view. The stand-in plugins have no editor, so, as on macOS, that build has fewer proofs and adds `vst3_editor_proof`, which opens windows and needs an X display (`DISPLAY`; a desktop session, Xwayland or Xvfb) and libxcb's headers (`libxcb1-dev`; `libxcb` on Arch) for the proof's own X client.
+
+The proofs are the macOS proof sources unchanged. `native/vst3/linux/compat` stands in for the CoreFoundation calls they make (a bundle loaded with `dlopen`, and the main run loop, which is also the `IRunLoop` each module is lent), `native/linux/compat/main_thread.h` for `pthread_main_np`, and `native/linux/alloc_hook.cpp` for libmalloc's `malloc_logger`: the proof executable replaces `malloc` and its relatives for the whole process (glibc allows that), so the count covers the module, its C++ runtime and the Rust library. glibc only.
+
+### Checks run on the example
+
+These checks ran on #21's first Linux shell; the shell in `native/vst3/linux` today is the one that came with #37, with #21's proofs, view sizing and CI job added, and CI repeats the proofs and the validator on it. On 16 November 2026, on Arch Linux (x86_64, GCC 16.2.1, Clang 23.1.3, CMake 4.4.4, Rust 1.100), with `examples/editor` as "Example Gain", against VST3 SDK 3.8.1_build_84 (Arch's `vst3sdk` package) and v3.8.0_build_66 (the one CI pins):
+
+- `ctest`, editor off: 12 of 12 with GCC against both SDK versions, and 12 of 12 with Clang. They are the 12 `vst3_*` proofs of the macOS build. `vst3_noalloc_events_proof` takes about 40 seconds, as on the other systems: it prepares a point per sample for 2081 parameters before it measures.
+- `ctest`, editor on, on the desktop's X display (Xwayland under Hyprland, scale 1): 3 of 3. `vst3_editor_proof`: no attach without a run loop; the view opens at 240 x 160 pixels with one timer and one descriptor registered, and the window shows the editor's picture; right click, click, the resize range (180 x 120 to 480 x 320), an editor-initiated size (360 x 240) through `resizeView`, a refusing frame, two views on one controller, and teardown with the processor first.
+- The VST3 SDK's own `validator` (built from the same checkout, `cmake --build build-shell --target validator`): 47 tests passed, 0 failed on each of `Example Gain.vst3`, `Expression Synth.vst3` and `Role Tags.vst3`; with `-e` (extensive) on the packaged bundle, 537 passed, 0 failed.
+- `scripts/build_plugin_linux.sh --formats vst3 --editor --tail --strip`: the script's checks passed. The module needs only `libgcc_s.so.1`, `libm.so.6`, `libc.so.6` and the loader, exports the three entry points, and contains no build, SDK or home path.
+- `openplugin-port scan` on the packaged bundle reads the plug-in: name, vendor and its three parameters, no warnings.
+- `cargo test -p example-editor --test x11_shell` on the same display: the `op_editor_*` calls of `op_editor_x11.h` as a shell makes them, without CMake or the VST3 SDK (attach, the scale, the descriptor and the pump, a click, resize in points, destroy).
+
+CI runs all of this in the `vst3-shell-linux` job on `ubuntu-latest`: the build, the twelve proofs, the validator on the three modules, the editor build with `vst3_editor_proof` under Xvfb, and the packaged bundle through the validator's extensive tests. It is not a required check yet.
+
+In hosts on the same machine, with the packaged example copied to `~/.vst3`, `~/.clap` and `~/.lv2` (`build_plugin_linux.sh --formats clap,lv2,vst3 --editor --tail --strip`):
+
+- pluginval 1.0.4, `--strictness-level 10 --validate-in-process`, on the VST3 with the desktop's display, so with its editor tests: `SUCCESS`.
+- Ardour 9.10 (a source build). `ardour-vst3-scanner` finds the VST3. In a Lua session on the dummy backend the VST3 and the LV2 are listed, instantiated and added to the master bus; the VST3 shows Gain, Warm and Bypass, and Gain set to 6 reads back 6; the saved session reopens with Gain at 6 in both. In Ardour's own window (the session opened with both plug-in windows marked open): the VST3 editor and the LV2 editor each appear inside Ardour's plug-in window, drawn with the knob at the saved 6.0 dB, and a click on the Warm switch flips it in each. No audio was rendered in Ardour.
+- SoundCraft 0.20.1 (`soundcraft-cli`, and the app through its control channel): its scans list the VST3 and the CLAP. On a soloed track of its demo session, a 4 second bounce peaks at -9.227 dB without the plug-in and with the VST3 at 0 dB (the same loudness too), and at -3.227 dB with the VST3 or the CLAP at Gain +6 dB: 6.000 dB more. A session saved with the VST3 at -12 dB and Warm on reopens and bounces to the same bytes as the session it was saved from. In the app the insert shows SoundCraft's own panel with Gain and Warm; its "Open Plugin Editor" button is disabled, because SoundCraft on Linux does not host embedded plug-in editors.
+
+Ardour makes the plug-in's place as wide as its own toolbar (374 pixels for a 240 x 160 editor) and gives the view that width with the old height. The view takes the width and the height of its shape and asks Ardour's frame for that size once, so the editor is 374 x 249 there and keeps its 3:2 shape (`vst3_editor_proof` has the case, with a frame that grants the size and one that refuses it).
+
+Not covered: a display with a scale other than 1 for the VST3 view, aarch64, and a C library other than glibc.
+
 ## Windows: CLAP
 
 On Windows a `.clap` is the plug-in DLL under another name, with no bundle folder. `scripts/windows/bundle_clap.ps1` builds examples in release and copies `target\release\<lib>.dll` to `<Out>\<Name>.clap` (default `target\clap`; nothing is installed in a plug-in folder):

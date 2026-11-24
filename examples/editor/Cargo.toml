@@ -46,6 +46,11 @@ harness = false
 name = "x11_typing_menu"
 harness = false
 
+# The shell's editor ABI (op_editor_*) on a real X display (Linux), as the VST3 shell calls it.
+[[test]]
+name = "x11_shell"
+harness = false
+
 # The test's own X connection: it plays the host.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.13", default-features = false }
