@@ -22,22 +22,44 @@ pub const CAPTURE_SCHEMA_VERSION: u32 = 1;
 /// The most bytes one blob may hold; a plugin that writes more is cut off and the state is skipped.
 pub const MAX_BLOB: usize = 256 << 20;
 
+/// The capture manifest: one plugin's saved states, written next to the blob folder as
+/// `<name>.<format>.capture.json` by [`run`].
+///
+/// ```
+/// use openplugin_port::capture::{Capture, State, CAPTURE_SCHEMA_VERSION};
+///
+/// let capture = Capture {
+///     schema_version: CAPTURE_SCHEMA_VERSION,
+///     states: vec![State { name: "default".into(), kind: "default".into(), ..Default::default() }],
+///     ..Default::default()
+/// };
+/// let json = serde_json::to_string(&capture).unwrap();
+/// assert_eq!(serde_json::from_str::<Capture>(&json).unwrap(), capture);
+/// ```
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Capture {
+    /// [`CAPTURE_SCHEMA_VERSION`] of the writer.
     pub schema_version: u32,
     /// `openplugin-port <version>`.
     pub tool: String,
+    /// Where the plugin was loaded from, as the scan reported it.
     pub source: Source,
+    /// The plugin's identity.
     pub plugin: CapturedPlugin,
+    /// The saved states, default first, in capture order.
     pub states: Vec<State>,
     /// Things the capture could not do (a format without presets, a preset that would not load).
     pub notes: Vec<String>,
 }
 
+/// The identity of a captured plugin, copied from its scan.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CapturedPlugin {
+    /// Display name.
     pub name: String,
+    /// Vendor name.
     pub vendor: String,
+    /// Version text.
     pub version: String,
     /// The same identity the scanner manifest holds.
     pub ids: Ids,
@@ -52,9 +74,11 @@ pub struct State {
     pub kind: String,
     /// Where the format says the preset came from (a file, a program list, a preset number).
     pub location: Option<String>,
+    /// The blob files of this state, one per role.
     pub blobs: Vec<Blob>,
     /// Every parameter's plain value read back from the plugin right after this state was loaded.
     pub params: Vec<ParamValue>,
+    /// What went wrong or was unusual for this state alone.
     pub notes: Vec<String>,
 }
 
@@ -65,16 +89,20 @@ pub struct Blob {
     pub role: String,
     /// Path of the file, relative to the manifest's folder.
     pub file: String,
+    /// Size of the file in bytes.
     pub bytes: u64,
     /// FNV-1a 64 of the file, 16 lower-case hex digits (a check against damage, not a signature).
     pub fnv1a64: String,
 }
 
+/// One parameter's value read back after a state was loaded.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParamValue {
     /// The format's parameter id (the scanner manifest's `params[].id`).
     pub id: u32,
+    /// Parameter name.
     pub name: String,
+    /// Plain value, in the format's own units.
     pub plain: f64,
     /// VST3 only: the normalised value the controller reported.
     pub normalized: Option<f64>,
@@ -83,28 +111,38 @@ pub struct ParamValue {
 /// One `--set` assignment: a parameter id or name and a plain value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SetSpec {
+    /// Parameter id (decimal) or name, matched by [`resolve_sets`].
     pub param: String,
+    /// Plain value to set; finite.
     pub value: f64,
 }
 
 /// The child's input.
+/// The child's input, passed as JSON on its command line. Built by [`run`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
+    /// `clap`, `vst3` or `au`.
     pub format: String,
+    /// Absolute path of the plugin bundle or file.
     pub path: PathBuf,
+    /// Which plugin of the bundle ([`Source::index`]).
     pub index: u32,
+    /// Sample rate the plugin is activated at, in Hz.
     pub rate: f64,
     /// Folder that receives the blob folder.
     pub out_dir: PathBuf,
     /// Name of the blob folder inside `out_dir`.
     pub blob_dir: String,
+    /// At most this many factory presets are captured.
     pub max_presets: usize,
+    /// `--set` assignments, applied for the `set` state.
     pub sets: Vec<SetSpec>,
     /// VST3 only: files holding a component state and a controller state, loaded the way a host
     /// restores a session (`IComponent::setState`, then `IEditController::setComponentState`
     /// and `setState`), so what a port does with an old plugin's states can be checked.
     #[serde(default)]
     pub load_component: Option<PathBuf>,
+    /// VST3 only: the controller state loaded after [`Job::load_component`].
     #[serde(default)]
     pub load_controller: Option<PathBuf>,
 }
@@ -112,11 +150,17 @@ pub struct Job {
 /// The child's output.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChildResult {
+    /// The states captured.
     pub states: Vec<State>,
+    /// Problems not tied to one state.
     pub notes: Vec<String>,
 }
 
-/// FNV-1a 64 as 16 hex digits.
+/// FNV-1a 64 as 16 lower-case hex digits.
+///
+/// ```
+/// assert_eq!(openplugin_port::capture::fnv1a64(b""), "cbf29ce484222325");
+/// ```
 pub fn fnv1a64(bytes: &[u8]) -> String {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for b in bytes {
@@ -136,14 +180,43 @@ fn slug(text: &str) -> String {
 }
 
 /// Writes blobs as states are captured.
+/// Writes blobs as states are captured, and collects the states for the [`ChildResult`].
+/// Used by the child; each format's capture fills it.
+///
+/// ```
+/// use openplugin_port::capture::{Job, Sink};
+///
+/// let out_dir = std::env::temp_dir().join(format!("op-port-sink-doc-{}", std::process::id()));
+/// let job = Job {
+///     format: "clap".into(),
+///     path: "Verb.clap".into(),
+///     index: 0,
+///     rate: 48_000.0,
+///     out_dir: out_dir.clone(),
+///     blob_dir: "verb.clap.blobs".into(),
+///     max_presets: 8,
+///     sets: Vec::new(),
+///     load_component: None,
+///     load_controller: None,
+/// };
+/// let mut sink = Sink::new(&job).unwrap();
+/// sink.add("Default", "default", None, vec![("clap-state", vec![1, 2, 3])], Vec::new(), Vec::new()).unwrap();
+/// let result = sink.finish();
+/// assert_eq!(result.states[0].blobs[0].file, "verb.clap.blobs/000-default.clap-state.bin");
+/// assert_eq!(result.states[0].blobs[0].bytes, 3);
+/// std::fs::remove_dir_all(&out_dir).unwrap();
+/// ```
 pub struct Sink {
     dir: PathBuf,
     rel: String,
+    /// States added so far.
     pub states: Vec<State>,
+    /// Notes not tied to one state.
     pub notes: Vec<String>,
 }
 
 impl Sink {
+    /// Create `job.out_dir/job.blob_dir`. `Err` with the reason when the folder cannot be created.
     pub fn new(job: &Job) -> Result<Self, String> {
         let dir = job.out_dir.join(&job.blob_dir);
         std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
@@ -163,12 +236,14 @@ impl Sink {
         Ok(())
     }
 
+    /// The states and notes collected, as the child prints them.
     pub fn finish(self) -> ChildResult {
         ChildResult { states: self.states, notes: self.notes }
     }
 }
 
 /// Match `--set` entries to a plugin's parameters: by id first, then by name (any case).
+/// `table` is `(id, name)` per parameter. `Err` names the first entry that matches nothing.
 pub fn resolve_sets(sets: &[SetSpec], table: &[(u32, String)]) -> Result<Vec<(u32, f64)>, String> {
     sets.iter()
         .map(|s| {
@@ -180,6 +255,19 @@ pub fn resolve_sets(sets: &[SetSpec], table: &[(u32, String)]) -> Result<Vec<(u3
 }
 
 /// Parse `--set` text: `id=value` or `name=value` (the last `=` splits, so names may hold one).
+/// `Err` with a message for text without `=`, a value that is not a finite number, or an empty
+/// name.
+///
+/// ```
+/// use openplugin_port::capture::{parse_set, resolve_sets};
+///
+/// let set = parse_set("Drive = 3.5").unwrap();
+/// assert_eq!((set.param.as_str(), set.value), ("Drive", 3.5));
+/// assert!(parse_set("Drive").is_err());
+///
+/// let table = [(7, "drive".to_string())];
+/// assert_eq!(resolve_sets(&[set], &table).unwrap(), [(7, 3.5)]);
+/// ```
 pub fn parse_set(text: &str) -> Result<SetSpec, String> {
     let (param, value) = text.rsplit_once('=').ok_or_else(|| format!("--set needs param=value, got {text:?}"))?;
     let value: f64 = value.trim().parse().map_err(|_| format!("--set: {value:?} is not a number"))?;
@@ -189,28 +277,50 @@ pub fn parse_set(text: &str) -> Result<SetSpec, String> {
     Ok(SetSpec { param: param.trim().to_string(), value })
 }
 
+/// What [`run`] does. Start from [`CaptureOptions::new`] and set fields.
+///
+/// ```
+/// use std::path::PathBuf;
+/// use openplugin_port::capture::{parse_set, CaptureOptions};
+///
+/// let mut options = CaptureOptions::new(PathBuf::from("openplugin-port"), PathBuf::from("captures"));
+/// options.max_presets = 16;
+/// options.sets.push(parse_set("Mix=0.5").unwrap());
+/// assert_eq!(options.timeout.as_secs(), 120);
+/// ```
 pub struct CaptureOptions {
     /// The executable to re-run as `__capture`. The CLI passes itself.
     pub helper: PathBuf,
+    /// How long the child may run before it is killed. Default 120 s.
     pub timeout: Duration,
     /// `clap`, `vst3` or `au`; by default the path's extension decides.
     pub format: Option<String>,
+    /// Folder that receives the manifests and blob folders; created when missing.
     pub out_dir: PathBuf,
+    /// At most this many factory presets per plugin. Default 128.
     pub max_presets: usize,
+    /// `--set` assignments; when any are given a `set` state is captured too.
     pub sets: Vec<SetSpec>,
     /// See [`Job::load_component`] and [`Job::load_controller`].
     pub load_component: Option<PathBuf>,
+    /// See [`Job::load_controller`].
     pub load_controller: Option<PathBuf>,
+    /// Extra environment variables for the child.
     pub env: Vec<(String, String)>,
 }
 
 impl CaptureOptions {
+    /// Options with the defaults: 120 s timeout, format from the extension, 128 presets, no sets.
     pub fn new(helper: PathBuf, out_dir: PathBuf) -> Self {
         Self { helper, timeout: Duration::from_secs(120), format: None, out_dir, max_presets: 128, sets: Vec::new(), load_component: None, load_controller: None, env: Vec::new() }
     }
 }
 
 /// Capture every plugin a bundle holds. Writes the blobs and one manifest per plugin; returns the manifests and their paths.
+///
+/// Scans first, then runs one child per plugin at 48 kHz. Blocks for up to `opts.timeout` per
+/// child. `Err` with a message for a path whose format cannot be told, AAX (it cannot be
+/// loaded), a failed scan, a child that crashed or timed out, or a file that cannot be written.
 pub fn run(path: &Path, opts: &CaptureOptions) -> Result<Vec<(Capture, PathBuf)>, String> {
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
     let format = match &opts.format {

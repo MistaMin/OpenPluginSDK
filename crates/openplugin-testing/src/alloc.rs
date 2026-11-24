@@ -4,8 +4,9 @@
 //! it for you. Add one line to the test binary that calls
 //! [`conformance`](crate::conformance):
 //!
-//! ```ignore
+//! ```
 //! openplugin_testing::install_allocator!();
+//! # assert!(openplugin_testing::alloc::is_installed());
 //! ```
 //!
 //! The allocator forwards every call to the system allocator. It counts only
@@ -44,6 +45,17 @@ fn bump_free() {
 }
 
 /// Forwards to [`System`] and counts while armed on the calling thread.
+///
+/// Install it with [`install_allocator!`](crate::install_allocator), or by hand:
+///
+/// ```
+/// use openplugin_testing::alloc::{is_installed, CountingAllocator};
+///
+/// #[global_allocator]
+/// static ALLOCATOR: CountingAllocator = CountingAllocator;
+///
+/// assert!(is_installed());
+/// ```
 pub struct CountingAllocator;
 
 unsafe impl GlobalAlloc for CountingAllocator {
@@ -70,10 +82,13 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 }
 
-/// Allocations and frees seen while armed.
+/// Allocations and frees seen while armed, as returned by [`measure`]. Both are zero when
+/// [`CountingAllocator`] is not the global allocator.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counts {
+    /// Calls to `alloc`, `alloc_zeroed` and `realloc` (a `realloc` counts as one of each).
     pub allocs: u64,
+    /// Calls to `dealloc` and `realloc`.
     pub frees: u64,
 }
 
@@ -86,7 +101,21 @@ impl Drop for Disarm {
 }
 
 /// Run `f` with the counters armed on this thread and return what it did.
-/// Not re-entrant. If `f` panics the counters are disarmed.
+/// Not re-entrant. If `f` panics the counters are disarmed. Only this thread's
+/// allocations are counted; other threads running meanwhile are not.
+///
+/// ```
+/// openplugin_testing::install_allocator!();
+///
+/// use openplugin_testing::alloc::measure;
+///
+/// let (sum, counts) = measure(|| [1.0f32, 2.0, 3.0].iter().sum::<f32>());
+/// assert_eq!(sum, 6.0);
+/// assert_eq!(counts.allocs, 0);
+///
+/// let (_, counts) = measure(|| drop(std::hint::black_box(vec![0u8; 16])));
+/// assert_eq!(counts.allocs, 1);
+/// ```
 pub fn measure<R>(f: impl FnOnce() -> R) -> (R, Counts) {
     ALLOCS.with(|c| c.set(0));
     FREES.with(|c| c.set(0));
@@ -110,6 +139,13 @@ pub fn is_installed() -> bool {
 
 /// Install the counting allocator as this binary's global allocator.
 /// Use once, at the top level of the test file (or `main.rs` under `cfg(test)`).
+/// A second `#[global_allocator]` in the same binary is a compile error.
+///
+/// ```
+/// openplugin_testing::install_allocator!();
+///
+/// assert!(openplugin_testing::alloc::is_installed());
+/// ```
 #[macro_export]
 macro_rules! install_allocator {
     () => {

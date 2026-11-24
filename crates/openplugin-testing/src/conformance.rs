@@ -18,12 +18,30 @@ pub const HOST_SAMPLE_RATES: [f32; 8] =
 /// Block sizes hosts use, including the awkward ones.
 pub const HOST_BLOCK_SIZES: [usize; 11] = [1, 2, 3, 7, 16, 64, 333, 512, 1024, 4096, 8192];
 
-/// What the suite does. [`Options::default`] is the full run.
+/// What the suite does. [`Options::default`] is the full run; [`Options::quick`] a shorter one.
+/// Override fields with struct-update syntax:
+///
+/// ```
+/// use openplugin_testing::{Check, Options};
+///
+/// let options = Options {
+///     sample_rates: vec![48_000.0],
+///     skip: vec![Check::Tail],
+///     ..Options::quick().with_seed(42)
+/// };
+/// assert_eq!(options.seed, 42);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Options {
     /// Master seed. Everything the suite randomises derives from it.
+    /// Read from `OPENPLUGIN_TEST_SEED` (decimal, or hex with `0x`) by [`Options::default`],
+    /// else `0x0BE05EED`; an unparsable variable falls back to that too.
     pub seed: u64,
+    /// Sample rates to run, in Hz. Rates the plugin refuses through
+    /// [`Plugin::accepts_sample_rate`] are skipped and listed in [`Report::rates_skipped`].
+    /// Default [`HOST_SAMPLE_RATES`].
     pub sample_rates: Vec<f32>,
+    /// Block sizes to run, in frames. Default [`HOST_BLOCK_SIZES`].
     pub block_sizes: Vec<usize>,
     /// Largest absolute output sample allowed. Default 64.0 (about +36 dBFS).
     pub max_output: f32,
@@ -102,6 +120,8 @@ impl Options {
         }
     }
 
+    /// The same options with [`Options::seed`] set to `seed`: rerun a failure with the seed
+    /// its report printed.
     pub fn with_seed(mut self, seed: u64) -> Self {
         self.seed = seed;
         self

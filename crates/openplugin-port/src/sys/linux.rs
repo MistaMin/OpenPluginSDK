@@ -7,14 +7,20 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::path::Path;
 
 unsafe extern "C" {
+    /// POSIX `dlopen`: load a shared library; null on failure. Raw FFI; prefer [`open_library`].
     pub fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+    /// POSIX `dlsym`: an exported symbol's address, or null. Raw FFI; prefer [`symbol`].
     pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    /// POSIX `dlerror`: the last `dl*` error as C text, or null.
     pub fn dlerror() -> *const c_char;
+    /// POSIX `_exit`: end the process with no teardown. Prefer [`exit_now`].
     pub fn _exit(code: c_int) -> !;
 }
 
+/// `RTLD_NOW`: resolve every symbol at load.
 pub const RTLD_NOW: c_int = 2;
 // Not the macOS value: on Linux 4 is RTLD_NOLOAD, and RTLD_LOCAL is 0.
+/// `RTLD_LOCAL`: keep the library's symbols out of the global namespace.
 pub const RTLD_LOCAL: c_int = 0;
 
 /// `dlopen` a file; the error text from `dlerror` on failure.
@@ -29,6 +35,8 @@ pub fn open_library(path: &Path) -> Result<*mut c_void, String> {
     Ok(h)
 }
 
+/// The address of `name` in a library from [`open_library`], or null when it is not exported
+/// (or `name` holds a NUL byte).
 pub fn symbol(handle: *mut c_void, name: &str) -> *mut c_void {
     let c = CString::new(name).unwrap_or_default();
     unsafe { dlsym(handle, c.as_ptr()) }
@@ -78,6 +86,7 @@ pub fn load_bundle(path: &Path) -> Result<ModuleRef, String> {
     open_library(&file).map(|h| h as ModuleRef)
 }
 
+/// The address of `name` in a module from [`load_bundle`], or null when it is not exported.
 pub fn bundle_function(module: ModuleRef, name: &str) -> *mut c_void {
     symbol(module as *mut c_void, name)
 }

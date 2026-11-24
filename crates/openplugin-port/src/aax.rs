@@ -40,6 +40,10 @@ fn xml_files(resources: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// Read an AAX bundle's identity from its `Info.plist` and page-table XML, without loading it.
+/// Runs in the calling process (nothing is executed). `Err` only when the path is not a folder;
+/// a missing `Info.plist` or page table leaves those fields empty (the name falls back to the
+/// folder name).
 pub fn probe(bundle_path: &Path) -> Result<ProbeResult, String> {
     if !bundle_path.is_dir() {
         return Err("an AAX plug-in is a bundle folder".into());

@@ -19,6 +19,7 @@ use crate::{au, clap, vst3};
 /// Test hook: a number the child multiplies its output by (a deliberately changed port).
 pub const GAIN_ENV: &str = "OPENPLUGIN_PORT_RENDER_GAIN";
 
+/// One parameter change on the render timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     /// Frame of the input timeline at which the value takes effect.
@@ -29,36 +30,68 @@ pub struct Event {
     pub value: f64,
 }
 
+/// The render child's input, passed as a JSON file. Built by [`crate::null::run_null`].
+///
+/// ```
+/// use openplugin_port::render::{Event, Job};
+///
+/// let job = Job {
+///     format: "clap".into(),
+///     path: "Verb.clap".into(),
+///     index: 0,
+///     rate: 48_000.0,
+///     block: 512,
+///     frames: 48_000,
+///     src_channels: 2,
+///     in_file: "input.f32".into(),
+///     out_file: "original.f32".into(),
+///     events: vec![Event { frame: 9_600, param: 3, value: 0.5 }, Event { frame: 0, param: 3, value: 0.0 }],
+/// };
+/// assert_eq!(job.sorted_events()[0].frame, 0);
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Job {
+    /// `clap`, `vst3` or `au`.
     pub format: String,
+    /// Absolute path of the plugin bundle or file.
     pub path: PathBuf,
     /// Which plugin of the bundle (the manifest's `source.index`).
     pub index: u32,
+    /// Sample rate, in Hz.
     pub rate: f64,
+    /// Block size, in frames.
     pub block: u32,
     /// Frames of input.
     pub frames: u32,
     /// Channels in the input file.
     pub src_channels: u32,
+    /// Raw planar little-endian `f32` input, `src_channels × frames` samples.
     pub in_file: PathBuf,
+    /// Where the child writes its output, raw planar little-endian `f32`.
     pub out_file: PathBuf,
+    /// Parameter changes, in any order.
     pub events: Vec<Event>,
 }
 
+/// What the render child reports besides the audio.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RenderInfo {
+    /// Latency the plugin reported after activation, in samples.
     pub latency: u32,
+    /// Input channels the plugin was given.
     pub in_channels: u32,
+    /// Output channels written.
     pub out_channels: u32,
     /// Frames written: the input frames plus the latency.
     pub out_frames: u32,
+    /// Things worth knowing about the render.
     pub notes: Vec<String>,
 }
 
 /// The input as the plugin's host loop reads it.
 pub struct Feed {
     src: Vec<Vec<f32>>,
+    /// Frames of input; [`Feed::fill`] writes silence past them.
     pub frames: usize,
 }
 
@@ -80,7 +113,9 @@ impl Feed {
 
 /// What a format's host loop returns.
 pub struct Rendered {
+    /// Latency reported after activation, in samples.
     pub latency: u32,
+    /// Input channels the plugin was given.
     pub in_channels: u32,
     /// `out_frames` long per channel.
     pub out: Vec<Vec<f32>>,
@@ -118,6 +153,17 @@ fn read_raw(path: &Path, channels: usize) -> Result<Vec<Vec<f32>>, String> {
     Ok((0..channels).map(|c| all[c * n..(c + 1) * n].to_vec()).collect())
 }
 
+/// Write channels as raw planar little-endian `f32`, one channel after the other. `Err` with a
+/// message when the file cannot be written.
+///
+/// ```
+/// use openplugin_port::render::{read_raw_channels, write_raw};
+///
+/// let path = std::env::temp_dir().join(format!("op-port-raw-doc-{}.f32", std::process::id()));
+/// write_raw(&path, &[vec![0.0, 0.5], vec![-0.5, 1.0]]).unwrap();
+/// assert_eq!(read_raw_channels(&path, 2).unwrap(), [vec![0.0, 0.5], vec![-0.5, 1.0]]);
+/// std::fs::remove_file(&path).unwrap();
+/// ```
 pub fn write_raw(path: &Path, channels: &[Vec<f32>]) -> Result<(), String> {
     let mut bytes = Vec::new();
     for ch in channels {
@@ -128,6 +174,9 @@ pub fn write_raw(path: &Path, channels: &[Vec<f32>]) -> Result<(), String> {
     std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
+/// Read a raw planar file written by [`write_raw`] as `channels` equal channels; trailing samples
+/// that do not fill a frame are dropped, and `channels == 0` reads nothing. `Err` with a message
+/// when the file cannot be read.
 pub fn read_raw_channels(path: &Path, channels: usize) -> Result<Vec<Vec<f32>>, String> {
     read_raw(path, channels)
 }

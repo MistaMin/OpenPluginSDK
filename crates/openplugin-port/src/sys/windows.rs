@@ -64,6 +64,8 @@ pub fn open_library(path: &Path) -> Result<*mut c_void, String> {
     Ok(h)
 }
 
+/// The address of `name` in a library from [`open_library`], or null when it is not exported
+/// (or `name` holds a NUL byte).
 pub fn symbol(handle: *mut c_void, name: &str) -> *mut c_void {
     let c = CString::new(name).unwrap_or_default();
     unsafe { GetProcAddress(handle, c.as_ptr()) }
@@ -120,6 +122,7 @@ pub fn load_bundle(path: &Path) -> Result<ModuleRef, String> {
     open_library(&file).map(|h| h as ModuleRef)
 }
 
+/// The address of `name` in a module from [`load_bundle`], or null when it is not exported.
 pub fn bundle_function(module: ModuleRef, name: &str) -> *mut c_void {
     symbol(module as *mut c_void, name)
 }
@@ -131,6 +134,7 @@ pub fn bundle_function(module: ModuleRef, name: &str) -> *mut c_void {
 /// result codes are COM's `E_NOINTERFACE` and `E_NOTIMPL`, not the small numbers
 /// the other systems use. `kResultOk` (0) and `kResultFalse` (1) are the same everywhere.
 pub const VST3_NO_INTERFACE: i32 = 0x8000_4002_u32 as i32;
+/// `kNotImplemented` in a Windows VST3 module: COM's `E_NOTIMPL`.
 pub const VST3_NOT_IMPLEMENTED: i32 = 0x8000_4001_u32 as i32;
 
 /// An interface id written as the four 32-bit words of `DECLARE_CLASS_IID`, laid

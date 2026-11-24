@@ -8,6 +8,7 @@
 //! Every plugin is loaded in a child process of the scanner itself
 //! ([`probe`]), so a plugin that crashes or hangs costs one scan result, not
 //! the scanner.
+#![deny(missing_docs)]
 
 pub mod aax;
 #[cfg(target_os = "macos")]
@@ -37,13 +38,28 @@ use std::time::Duration;
 use manifest::{Manifest, Source, SCHEMA_VERSION};
 
 /// The tool name and version written into every manifest.
+///
+/// ```
+/// assert!(openplugin_port::tool_id().starts_with("openplugin-port "));
+/// ```
 pub fn tool_id() -> String {
     format!("openplugin-port {}", env!("CARGO_PKG_VERSION"))
 }
 
+/// What [`scan`] does. Start from [`ScanOptions::new`] and set fields.
+///
+/// ```
+/// use std::time::Duration;
+/// use openplugin_port::ScanOptions;
+///
+/// let mut options = ScanOptions::new("openplugin-port".into());
+/// options.format = Some("vst3".into());
+/// options.timeout = Duration::from_secs(60);
+/// ```
 pub struct ScanOptions {
     /// The executable to re-run as `__probe`. The CLI passes itself.
     pub helper: PathBuf,
+    /// How long the child may run before it is killed and the scan fails. Default 30 s.
     pub timeout: Duration,
     /// `clap`, `vst3`, `au` or `aax`; by default the path's extension decides.
     pub format: Option<String>,
@@ -52,12 +68,18 @@ pub struct ScanOptions {
 }
 
 impl ScanOptions {
+    /// Options with the defaults: 30 s timeout, format from the extension, no extra environment.
     pub fn new(helper: PathBuf) -> Self {
         Self { helper, timeout: Duration::from_secs(30), format: None, env: Vec::new() }
     }
 }
 
 /// Scan one plugin file or bundle. One manifest per plugin it holds.
+///
+/// CLAP, VST3 and Audio Unit code runs only in a child process ([`probe::run_child`]); AAX is
+/// read from files. Blocks for up to `opts.timeout`. `Err` with a message for a path that does
+/// not exist, a format that cannot be told or is unknown, or a child that crashed, hung or
+/// found nothing.
 pub fn scan(path: &Path, opts: &ScanOptions) -> Result<Vec<Manifest>, String> {
     let path = std::path::absolute(path).map_err(|e| e.to_string())?;
     if !path.exists() {
