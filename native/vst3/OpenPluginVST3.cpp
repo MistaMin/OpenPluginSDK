@@ -553,12 +553,6 @@ inline int64_t steady_ms() {
 // Controller to processor: a state the old plugin saved for the controller (ABI 10,
 // op_shell_load_foreign_state). Attributes: "kind" (int, OP_FOREIGN_*), "data" (binary).
 constexpr const char* kForeignMessage = "openplugin.foreign";
-// Controller to processor: every parameter's value, from a controller state that was just loaded.
-// Attribute "values" (binary): count + 1 little-endian doubles, normalized, the last the bypass.
-constexpr const char* kValuesMessage = "openplugin.values";
-// The controller's own state: int32 magic, int32 version 1, int32 count, count doubles, the bypass double.
-constexpr int32 kControllerMagic = 0x5343504F;  // bytes 'O','P','C','S'
-constexpr int32 kControllerVersion = 1;
 // The most a foreign state may be. A larger stream is not offered to the plugin.
 constexpr uint32_t kMaxForeignState = 16u << 20;
 
@@ -775,25 +769,6 @@ public:
     // The controller's message with the host's track. Message thread. Kept for
     // an engine made later, and given to the one that exists now.
     tresult PLUGIN_API notify(IMessage* message) SMTG_OVERRIDE {
-        if (message && message->getMessageID() && std::strcmp(message->getMessageID(), kValuesMessage) == 0) {
-            // The controller's values (a session was loaded). A host that does not process a
-            // bypassed plug-in never carries parameter changes to the processor, so the processor's
-            // own values can be old; the controller's state is the one that is current.
-            IAttributeList* attributes = message->getAttributes();
-            const void* data = nullptr;
-            uint32 size = 0;
-            if (!attributes || attributes->getBinary("values", data, size) != kResultOk || !data || size % 8 != 0) return kInvalidArgument;
-            const uint32_t n = size / 8;
-            if (n < 2 || n - 1 > count_) return kInvalidArgument;
-            std::vector<double> loaded(n);
-            std::memcpy(loaded.data(), data, size);
-            for (double v : loaded) if (!std::isfinite(v) || v < 0.0 || v > 1.0) return kInvalidArgument;
-            for (uint32_t i = 0; i + 1 < n; ++i) values_[i].store(loaded[i]);
-            bypass_.store(loaded[n - 1] >= 0.5);
-            generation_.fetch_add(1, std::memory_order_release);
-            if (engine_) pushValues(engine_);
-            return kResultOk;
-        }
         if (message && message->getMessageID() && std::strcmp(message->getMessageID(), kForeignMessage) == 0) {
             IAttributeList* attributes = message->getAttributes();
             int64 kind = 0;
@@ -1901,45 +1876,12 @@ public:
         }
         return kResultOk;
     }
-    // The controller's state is every parameter's current value. A host that does not process a
-    // bypassed plug-in never carries a change made meanwhile to the processor, so the processor's
-    // state can be old; the controller always has the current values, and loading this state
-    // applies them here and tells the processor.
-    tresult PLUGIN_API getState(IBStream* state) SMTG_OVERRIDE {
-        if (!state || count_ == 0) return kResultFalse;
-        IBStreamer writer(state, kLittleEndian);
-        if (!writer.writeInt32(kControllerMagic) || !writer.writeInt32(kControllerVersion) || !writer.writeInt32(static_cast<int32>(count_))) return kResultFalse;
-        for (uint32_t i = 0; i < count_; ++i) {
-            if (!writer.writeDouble(getParamNormalized(ids_.id(i)))) return kResultFalse;
-        }
-        return writer.writeDouble(getParamNormalized(kBypassId)) ? kResultOk : kResultFalse;
-    }
-    // A state this shell wrote is applied here and sent to the processor. Any other state goes to
-    // the processor as the old plugin's controller state (ABI 10), which refuses what it does not read.
+    // The old plugin's controller state goes to the processor, which owns the plugin (ABI 10).
     tresult PLUGIN_API setState(IBStream* stream) SMTG_OVERRIDE {
-        if (!stream || count_ == 0) return kResultFalse;
+        if (!stream) return kResultFalse;
+        if (!(foreignKinds_ & (1u << (OP_FOREIGN_VST3_CONTROLLER - 1)))) return kResultOk;
         std::vector<uint8_t> raw;
         if (!read_all(stream, raw) || raw.empty()) return kResultOk;
-        int32 magic = 0;
-        std::memcpy(&magic, raw.data(), std::min<size_t>(sizeof magic, raw.size()));
-        if (raw.size() >= 12 && magic == kControllerMagic) {
-            int32 version = 0, count = 0;
-            std::memcpy(&version, raw.data() + 4, 4);
-            std::memcpy(&count, raw.data() + 8, 4);
-            if (version != kControllerVersion || count < 0 || static_cast<uint32_t>(count) > count_ || raw.size() != 12 + (static_cast<size_t>(count) + 1) * 8) return kResultFalse;
-            std::vector<double> loaded(static_cast<size_t>(count) + 1);
-            std::memcpy(loaded.data(), raw.data() + 12, loaded.size() * 8);
-            for (double v : loaded) if (!std::isfinite(v) || v < 0.0 || v > 1.0) return kResultFalse;
-            for (int32 i = 0; i < count; ++i) setParamNormalized(ids_.id(static_cast<uint32_t>(i)), loaded[static_cast<size_t>(i)]);
-            setParamNormalized(kBypassId, loaded[static_cast<size_t>(count)]);
-            if (IPtr<IMessage> message = owned(allocateMessage())) {
-                message->setMessageID(kValuesMessage);
-                message->getAttributes()->setBinary("values", loaded.data(), static_cast<uint32>(loaded.size() * 8));
-                sendMessage(message);
-            }
-            return kResultOk;
-        }
-        if (!(foreignKinds_ & (1u << (OP_FOREIGN_VST3_CONTROLLER - 1)))) return kResultOk;
         if (IPtr<IMessage> message = owned(allocateMessage())) {
             message->setMessageID(kForeignMessage);
             message->getAttributes()->setInt("kind", OP_FOREIGN_VST3_CONTROLLER);
