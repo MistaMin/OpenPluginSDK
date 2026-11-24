@@ -62,6 +62,17 @@ int main(int argc, char** argv) {
     // The unit's text follows the current value when none is given, and refuses bad requests.
     CHECK(AudioUnitSetParameter(unit, kMode, kAudioUnitScope_Global, 0, 1.0f, 0) == noErr);
     CHECK(proof_text_of(unit, kMode, nullptr) == "Soft");
+    // A switch or choice set between steps is stored on the nearest step, the value the plug-in uses.
+    auto stored = [&](UInt32 id, AudioUnitParameterValue v) {
+        CHECK(AudioUnitSetParameter(unit, id, kAudioUnitScope_Global, 0, v, 0) == noErr);
+        AudioUnitParameterValue got = -1.0f;
+        CHECK(AudioUnitGetParameter(unit, id, kAudioUnitScope_Global, 0, &got) == noErr);
+        return got;
+    };
+    CHECK(stored(kSwitch, 0.6f) == 1.0f && stored(kSwitch, 0.4f) == 0.0f);
+    CHECK(stored(kMode, 1.4f) == 1.0f && stored(kMode, 1.6f) == 2.0f);
+    CHECK(stored(kLevel, 1.25f) == 1.25f);
+    CHECK(AudioUnitSetParameter(unit, kMode, kAudioUnitScope_Global, 0, 1.0f, 0) == noErr);
     bool ok = true;
     CHECK(proof_text_of(unit, 77, &three, &ok).empty() && !ok);
     const AudioUnitParameterValue nan = std::numeric_limits<float>::quiet_NaN();

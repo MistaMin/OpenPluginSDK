@@ -892,12 +892,23 @@ public:
         const OpParamDesc& desc = params_[static_cast<size_t>(index)].desc;
         return value >= desc.min - 1e-4 && value <= desc.max + 1e-4;
     }
+    // A switch or choice set between its steps (a host's automation curve, a script) is stored on
+    // the nearest step, as the plugin uses it. Otherwise the unit keeps 0.6 for a switch that is on,
+    // and a host that labels Boolean and Indexed values itself shows it as off.
+    AudioUnitParameterValue snapDiscrete(AudioUnitParameterID id, AudioUnitParameterValue value) const {
+        const OpParamDesc& desc = params_[static_cast<size_t>(indexOf(id))].desc;
+        if (!(desc.flags & OP_PARAM_DISCRETE) || desc.steps < 2 || !(desc.max > desc.min)) return value;
+        const double divisions = static_cast<double>(desc.steps - 1);
+        const double position = std::round((value - desc.min) / (desc.max - desc.min) * divisions) / divisions;
+        return static_cast<AudioUnitParameterValue>(desc.min + (desc.max - desc.min) * std::clamp(position, 0.0, 1.0));
+    }
     // A value with no offset is stored at once and reaches the plugin at the start of the next
     // render. A value with an offset (AudioUnitSetParameter's buffer offset, a scheduled
     // immediate event) waits as a sample-offset event and reaches the plugin at that sample.
     OSStatus SetParameter(AudioUnitParameterID id, AudioUnitScope scope, AudioUnitElement element, AudioUnitParameterValue value, UInt32 offset) override {
         if (scope == kAudioUnitScope_Global && element == 0) {
             if (!validValue(id, value)) return kAudioUnitErr_InvalidParameter;
+            value = snapDiscrete(id, value);
             if (offset > 0) return queueParameter(id, value, offset) ? OSStatus(noErr) : OSStatus(kAudioUnitErr_InvalidParameter);
         }
         return Base::SetParameter(id, scope, element, value, offset);
