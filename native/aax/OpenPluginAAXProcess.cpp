@@ -530,8 +530,8 @@ void AAX_CALLBACK process(Context* const begin[], const void* end) {
             captureDry(state, context, offset, count);
             const float* inPointers[kMaxChannels];
             float* outPointers[kMaxChannels];
-            for (uint32_t k = 0; k < state.in.engine; ++k) inPointers[k] = context->input[state.in.map[k]] + offset;
-            for (uint32_t k = 0; k < state.out.engine; ++k) outPointers[k] = context->output[state.out.map[k]] + offset;
+            for (uint32_t k = 0; k < state.in.engine; ++k) { const float* ch = context->input[state.in.map[k]]; inPointers[k] = ch ? ch + offset : nullptr; }
+            for (uint32_t k = 0; k < state.out.engine; ++k) { float* ch = context->output[state.out.map[k]]; outPointers[k] = ch ? ch + offset : nullptr; }
             // The piece's events, with offsets from the piece's start.
             uint32_t pieceCount = 0;
             for (uint32_t i = 0; i < events; ++i) {
