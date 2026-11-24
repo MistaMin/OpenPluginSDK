@@ -54,12 +54,15 @@ set(OP_BUNDLE_ID "com.example.openplugin" CACHE STRING "Bundle identifier prefix
 set(OP_VERSION "0.1.0" CACHE STRING "Bundle version")
 # The Audio Unit's component version, the number hosts such as Logic compare: X.Y.Z as 0xXXYYZZ
 # (anything after the numbers, such as "-beta", is not part of it).
+set(OP_AU_VERSION "" CACHE STRING "Audio Unit component version, an integer; empty derives it from OP_VERSION")
 string(REGEX MATCHALL "[0-9]+" OP_VERSION_PARTS "${OP_VERSION}")
 list(APPEND OP_VERSION_PARTS 0 0 0)
 list(GET OP_VERSION_PARTS 0 OP_VERSION_MAJOR)
 list(GET OP_VERSION_PARTS 1 OP_VERSION_MINOR)
 list(GET OP_VERSION_PARTS 2 OP_VERSION_PATCH)
-math(EXPR OP_AU_VERSION "(${OP_VERSION_MAJOR} << 16) | (${OP_VERSION_MINOR} << 8) | ${OP_VERSION_PATCH}")
+if(OP_AU_VERSION STREQUAL "")
+    math(EXPR OP_AU_VERSION "(${OP_VERSION_MAJOR} << 16) | (${OP_VERSION_MINOR} << 8) | ${OP_VERSION_PATCH}")
+endif()
 set(OP_MANUFACTURER "OpenPlugin" CACHE STRING "Audio Unit manufacturer display name")
 set(OP_AU_SUBTYPE "OPSh" CACHE STRING "Audio Unit subtype, four characters")
 set(OP_AU_MANUFACTURER "OPSh" CACHE STRING "Audio Unit manufacturer code, four characters")

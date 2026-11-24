@@ -47,6 +47,7 @@ Each option has an environment variable (shown in `--help`), so a plugin can kee
 | `--version` | Bundle version, numbers only (a `-beta` suffix is cut off). Default: the manifest's `version`; give it when the manifest inherits the version from the workspace |
 | `--manufacturer` | Manufacturer display name for the Audio Unit |
 | `--au-subtype`, `--au-manufacturer` | Four-character codes. Required for `au` and for `--aax-pages`, unless the plugin pins its own with `Plugin::au_ids`: then both are left out (the shell build asks the plugin), and codes that differ from the pinned ones stop the build |
+| `--au-version` | The Audio Unit component version: a number, or `release` for `major * 65536 + minor * 256 + patch` of `--version`. A host takes a higher number for an update; the default is `release`. `OP_AU_VERSION` |
 | `--au-type` | `auto` (the default: from the plugin's kind), `aufx`, `aumu` or `aumf`. `OP_AU_TYPE` |
 | `--formats` | `clap,lv2,vst3,au,aax,standalone` or `all`. Default: `clap,lv2,vst3,au,aax` |
 | `--ttl-bin` | The plugin's bin that writes the LV2 files. Required for `lv2` |
