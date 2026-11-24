@@ -16,7 +16,7 @@ use openplugin_core::{
 use crate::{HostSession, Plugin};
 
 /// Version of the whole `op_shell_*` ABI. Additions raise it; see docs/SHELL.md.
-pub const ABI: u32 = 9;
+pub const ABI: u32 = 10;
 pub use crate::block::{
     OpEvent, OpMidiEvent, OpProcess, OpTransport, EVENT_MIDI, EVENT_NOTE_OFF, EVENT_NOTE_ON,
     EVENT_NOTE_EXPRESSION, EVENT_NOTE_OFF_ID, EVENT_NOTE_ON_ID, NOTE_ANY,
@@ -378,6 +378,12 @@ pub fn kind<P: Plugin + Default>() -> u32 {
     } else {
         KIND_EFFECT
     }
+}
+
+/// One bit for each foreign state container the plugin reads: bit `k - 1` for ABI kind `k`
+/// (`OP_FOREIGN_*`). 0 for a plugin that reads none.
+pub fn foreign_kinds<P: Plugin + Default>() -> u32 {
+    P::default().foreign_state_kinds().iter().fold(0, |mask, kind| mask | (1 << (kind.to_abi() - 1)))
 }
 
 /// [`NOTE_PORT_INPUT`], [`NOTE_PORT_OUTPUT`] and [`NOTE_PORT_MPE`] bits. MPE
@@ -1223,6 +1229,28 @@ pub unsafe fn load_state(ptr: *mut ShellInstance, data: *const u8, length: u32) 
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, length as usize) };
     let loaded = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.load_bytes(bytes) }));
+    u32::from(matches!(loaded, Ok(true)))
+}
+
+/// Restore a state the plugin this one replaces saved, in that plugin's container (`kind`:
+/// `OP_FOREIGN_*`). Returns 1 on success. Returns 0 and changes nothing for a null instance, a
+/// null `data`, a zero `length`, a kind this build does not know, bytes the plugin does not
+/// recognise or refuses, or a block that did not finish within [`crate::STATE_WAIT`].
+/// After a 1 the parameter values the host reads are the plugin's.
+///
+/// Main thread. Allocates. Same threading rule as [`save_state`].
+///
+/// # Safety
+/// `ptr` is null or a live [`ShellInstance`]. `data` is null or readable for `length` bytes.
+pub unsafe fn load_foreign_state(ptr: *mut ShellInstance, kind: u32, data: *const u8, length: u32) -> u32 {
+    if ptr.is_null() || data.is_null() || length == 0 {
+        return 0;
+    }
+    let Some(kind) = openplugin_core::foreign_state::ForeignStateKind::from_abi(kind) else {
+        return 0;
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(data, length as usize) };
+    let loaded = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe { (*ptr).ffi.load_foreign(kind, bytes) }));
     u32::from(matches!(loaded, Ok(true)))
 }
 

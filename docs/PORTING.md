@@ -56,7 +56,7 @@ Still on C++ DSP? [CPP_BRIDGE.md](CPP_BRIDGE.md) lets the port ship first and th
 Each guide lists what its SDK has that this one lacks. The ones that matter for every port:
 
 - **The old plugin's identity** is no longer on this list: every id a host stores can be pinned ([Identity pinning](#identity-pinning)).
-- **The old plugin's saved state through the shells.** The CLAP entry hands `load_state` the stream as the host stored it, for a plugin that saves a chunk of its own. The VST3, Audio Unit and AAX shells accept only state they wrote themselves; the Audio Unit shell does restore the parameters of a dictionary the old unit's base class wrote.
+- **The old plugin's saved state through the shells** is no longer on this list: a plugin that implements `Plugin::foreign_state_kinds` and `Plugin::load_foreign_state` reads the old plugin's VST3, Audio Unit and AAX states ([Foreign state through the shells](#foreign-state-through-the-shells)).
 - **Parameter values in a plugin's own chunk.** A plugin whose `save_state` returns a chunk has that chunk stored alone by the CLAP entry, and stored beside the parameter values by the shells. Until the entries agree, a chunk must hold the parameter values too.
 - **Factory presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`; no format entry publishes a program list yet.
 - **More than one output bus or sidechain, 64-bit audio buffers, and SysEx.**
@@ -350,6 +350,28 @@ FAIL: the port does not null against the original
 ```
 
 Start with `first sample over tolerance`. A difference at sample 0 of an input that starts at sample 0 is a gain or polarity error; at the latency, a delay that is not what the plugin reports; at the first automation frame, a parameter that does not reach the same value (check the map and the units); only late in the render, state that drifts (a filter or smoothing that differs). A small RMS with a large maximum is a few wrong samples (a block edge: try `--block 64` and `--block 997`); an RMS only a little below the signal is a different process. Listen to `difference.wav`: a faint copy of the input is a gain error, noise is a different algorithm or dither, a click at the automation frames is a smoothing difference. Plugins with random elements (a chorus with an LFO started at a random phase, dithered output) will never null; compare them with a tolerance at the level of the randomness, or switch the randomness off. Processing that is the same maths in a different order differs at about `1e-7`; the default tolerance leaves ten times that.
+
+### Foreign state through the shells
+
+The CLAP entry hands `load_state` the stream as the host stored it. The VST3, Audio Unit and AAX shells keep their own formats, so they ask the plugin before refusing a state they did not write (ABI 10). A plugin opts in with two methods of `Plugin`:
+
+```rust
+fn foreign_state_kinds(&self) -> &'static [ForeignStateKind] {
+    &[ForeignStateKind::Vst3Component, ForeignStateKind::Vst3Controller, ForeignStateKind::AuClassInfo, ForeignStateKind::AaxChunk]
+}
+fn load_foreign_state(&mut self, kind: ForeignStateKind, data: &[u8]) -> bool { /* read whole, then apply */ }
+```
+
+`foreign_state_kinds` is asked once, before any instance exists; a shell offers a state only for a kind listed, so a plugin that lists none costs a host nothing. `load_foreign_state` has the same rule as `load_state`: recognise the bytes, read all of them, and only then apply; return false having changed nothing for anything else. A state the shell wrote itself must be refused too (check the container: version, exact length, ranges). The parameter values the plugin holds afterwards are the ones the host sees.
+
+| Kind | What `data` is | Where the shell offers it |
+|---|---|---|
+| `Vst3Component` | what the old `IComponent::getState` wrote | `IComponent::setState`, and `IEditController::setComponentState` for the controller's values |
+| `Vst3Controller` | what the old `IEditController::getState` wrote | `IEditController::setState`; the controller sends it to the processor, which owns the plugin |
+| `AuClassInfo` | the old `kAudioUnitProperty_ClassInfo` dictionary, as a binary property list | after the base class restored its parameters, so a plugin only has to read its own keys and the values it wants to win |
+| `AaxChunk` | the chunk id as four bytes in reading order (`elck` is the bytes `elck`), then the chunk's data | `SetChunk` for a chunk id the shell does not know |
+
+The first plugin to use it reads the VST3, Audio Unit and AAX states of the freeware plugin it replaces, and its tests load states captured from that plugin and check every value against what the plugin itself read back. To check a port through a real VST3 host path, `openplugin-port capture <port.vst3> --load-component FILE --load-controller FILE` restores the captured files the way a host does and writes the result. `crates/openplugin-ffi/tests/shell_foreign_state.rs` proves the ABI: an accepted state moves the host's values, and a refused one, an unknown kind, a null pointer or a panicking plugin changes nothing.
 
 ### What the proof covers
 

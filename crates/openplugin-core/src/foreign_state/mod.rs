@@ -127,3 +127,40 @@ impl fmt::Display for ForeignError {
 impl std::error::Error for ForeignError {}
 
 pub type Result<T> = std::result::Result<T, ForeignError>;
+
+/// Which container a foreign state came from, as the format shells name them (`op_shell.h`,
+/// `OP_FOREIGN_*`). A plugin that replaces a shipped one reads the old plugin's own bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignStateKind {
+    /// What the old VST3 component's `IComponent::getState` wrote.
+    Vst3Component,
+    /// What the old VST3 controller's `IEditController::getState` wrote.
+    Vst3Controller,
+    /// The old Audio Unit's `kAudioUnitProperty_ClassInfo` dictionary, as a binary property list.
+    AuClassInfo,
+    /// The old AAX plug-in's chunk data.
+    AaxChunk,
+}
+
+impl ForeignStateKind {
+    /// From the ABI number (`OP_FOREIGN_VST3_COMPONENT` is 1), or `None` for a number this build does not know.
+    pub fn from_abi(kind: u32) -> Option<Self> {
+        match kind {
+            1 => Some(Self::Vst3Component),
+            2 => Some(Self::Vst3Controller),
+            3 => Some(Self::AuClassInfo),
+            4 => Some(Self::AaxChunk),
+            _ => None,
+        }
+    }
+
+    /// The ABI number.
+    pub fn to_abi(self) -> u32 {
+        match self {
+            Self::Vst3Component => 1,
+            Self::Vst3Controller => 2,
+            Self::AuClassInfo => 3,
+            Self::AaxChunk => 4,
+        }
+    }
+}

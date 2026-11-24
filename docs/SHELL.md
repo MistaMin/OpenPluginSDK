@@ -58,6 +58,8 @@ Class IDs are 16 bytes from a 128-bit mix of the plugin id. VST3 prints them wit
 | `op_shell_instance_param` (ABI 9) | message | no |
 | `op_shell_instance_param_format`, `op_shell_instance_param_parse` (ABI 9) | message | yes (the text) |
 | `op_shell_max_latency`, `op_shell_latency_now` (ABI 9) | any, the audio thread included | no |
+| `op_shell_load_foreign_state` (ABI 10) | message | yes |
+| `op_shell_foreign_kinds` (ABI 10) | message | yes (it builds a plugin to ask it) |
 | `op_shell_process_events` | audio | no |
 | `op_shell_midi_out`, `op_shell_midi_dropped` | audio thread, after the block | no |
 
@@ -159,6 +161,14 @@ The VST3 shell sends every note as `OP_EVENT_NOTE_ON_ID` / `OFF_ID` with `NoteOn
 `OP_NOTE_PORT_MPE` (4), added with no new ABI version (on ABI 8): an `op_shell_note_ports()` bit set when the plugin has a note input and `Plugin::mpe_input` is `Some`. A library from before it leaves the bit clear, which is the right answer for it (no MPE), so a shell needs no version check for it. The Audio Unit shell reports it as `kAudioUnitProperty_SupportsMPE`.
 
 Proofs: `vst3_expression_proof` (`native/vst3/expression_host.cpp`, over Expression Synth, `examples/expression_synth`, built when `libexample_expression_synth.a` is next to `OP_RUST_LIB` or given as `-DOP_EXPRESSION_LIB`), and on the Rust side `examples/expression_synth/tests/formats.rs`.
+
+### States the plugin replaces (ABI 10)
+
+`op_shell_load_foreign_state(instance, kind, data, length)` offers a state the shell did not write to the plugin: `OP_FOREIGN_VST3_COMPONENT` (1), `OP_FOREIGN_VST3_CONTROLLER` (2), `OP_FOREIGN_AU_CLASSINFO` (3), `OP_FOREIGN_AAX_CHUNK` (4). It returns 1 when the plugin recognised the bytes, read them whole and applied them; 0, with nothing changed, otherwise (a null instance or `data`, a zero `length`, a kind this build does not know, bytes the plugin refuses, a plugin that panics). After a 1 the values `op_shell_get_plain` and `op_shell_get_normalized` return are the plugin's. `op_shell_foreign_kinds()` is static and returns one bit for each kind the plugin reads (bit `kind - 1`); 0 means the shell never offers a state, so a plugin that reads none pays nothing. Main thread, never the audio thread. The Rust side is `Plugin::foreign_state_kinds` and `Plugin::load_foreign_state` ([PORTING.md](PORTING.md#foreign-state-through-the-shells)).
+
+- **VST3.** The processor's `setState` offers the stream first (read whole, 16 MiB at most) and falls back to its own head when the plugin refuses; a state the shell wrote is refused by the plugin and loads as before. With no engine yet the state goes into a scratch engine, as a blob does, and `setActive` adopts it. The controller's `setComponentState` asks a scratch plugin for the values; its `setState` sends the old controller state to the processor as the message `openplugin.foreign` (`kind`, `data`).
+- **Audio Unit.** A `ClassInfo` dictionary without the shell's key is restored by the base class as for any old preset, then offered as a binary property list; the plugin's values win.
+- **AAX.** `SetChunk` for an id other than `OpSt` offers the chunk, with its id in four bytes in front, and then reads every value back from the engine. `GetNumberOfChunks` stays 1: the shell writes only its own chunk.
 
 ### Identity pins (ABI 8)
 

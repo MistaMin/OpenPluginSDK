@@ -326,7 +326,12 @@ public:
     }
     AAX_Result SetChunk(AAX_CTypeID id, const AAX_SPlugInChunk* chunk) override {
         if (!chunk) return AAX_ERROR_NULL_ARGUMENT;
-        if (id != state::kChunkId) return AAX_ERROR_INVALID_CHUNK_ID;
+        if (id != state::kChunkId) {
+            // A chunk of the plug-in this one replaces (a Pro Tools session made before): offered
+            // to the plugin when it reads that kind (ABI 10), refused otherwise.
+            if (foreignKinds_ & (1u << (OP_FOREIGN_AAX_CHUNK - 1))) return setForeignChunk(id, chunk);
+            return AAX_ERROR_INVALID_CHUNK_ID;
+        }
         state::Values values{};
         if (!parse(chunk, values)) return AAX_ERROR_MALFORMED_CHUNK;
         return apply(values);
@@ -520,6 +525,21 @@ private:
         // The header version and the payload's own version must agree.
         return chunk->fVersion == static_cast<int32_t>(out.version);
     }
+    // The plugin gets the chunk's id as four bytes in reading order (so 'abcd' is the bytes "abcd"),
+    // then the chunk's data. All or nothing: the plugin refuses what it does not recognise and
+    // changes nothing. After a success the values the plugin holds are the ones the host sees.
+    AAX_Result setForeignChunk(AAX_CTypeID id, const AAX_SPlugInChunk* chunk) {
+        if (!state_.engine || chunk->fSize < 0 || chunk->fSize > (16 << 20) || params_.size() != ids_.size()) return AAX_ERROR_MALFORMED_CHUNK;
+        std::vector<uint8_t> bytes(4 + static_cast<size_t>(chunk->fSize));
+        for (int i = 0; i < 4; ++i) bytes[static_cast<size_t>(i)] = static_cast<uint8_t>(id >> (24 - 8 * i));
+        if (chunk->fSize > 0) std::memcpy(bytes.data() + 4, chunk->fData, static_cast<size_t>(chunk->fSize));
+        if (!op_shell_load_foreign_state(state_.engine, OP_FOREIGN_AAX_CHUNK, bytes.data(), static_cast<uint32_t>(bytes.size()))) return AAX_ERROR_MALFORMED_CHUNK;
+        state_.engineWritten();
+        for (uint32_t i = 0; i < ids_.size(); ++i) params_[i]->SetValueWithFloat(op_shell_get_plain(state_.engine, i));
+        dirty_ = true;
+        return AAX_SUCCESS;
+    }
+    const uint32_t foreignKinds_ = op_shell_foreign_kinds();
     // `values` is already validated. Everything that can still fail is checked before
     // anything changes: every parameter exists. Then the plugin's blob (version 2) is
     // applied; the plugin refuses a bad blob without changing anything, and then no

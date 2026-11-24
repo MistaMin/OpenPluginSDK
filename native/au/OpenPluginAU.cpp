@@ -684,7 +684,7 @@ public:
     OSStatus RestoreState(CFPropertyListRef plist) override {
         if (!plist || CFGetTypeID(plist) != CFDictionaryGetTypeID()) return restoreBase(plist);
         const void* value = CFDictionaryGetValue(static_cast<CFDictionaryRef>(plist), OP_AU_STATE_KEY);
-        if (!value) return restoreBase(plist);
+        if (!value) return (foreignKinds_ & (1u << (OP_FOREIGN_AU_CLASSINFO - 1))) ? restoreForeign(plist) : restoreBase(plist);
         if (CFGetTypeID(value) != CFDataGetTypeID()) return kAudioUnitErr_InvalidPropertyValue;
         const auto data = static_cast<CFDataRef>(value);
         const CFIndex length = CFDataGetLength(data);
@@ -723,6 +723,55 @@ public:
         scratchSetup_ = setup;
         return noErr;
     }
+    // A dictionary the shell did not write (no OP_AU_STATE_KEY: a session or preset made by the
+    // plugin this one replaces) and the plugin reads that kind (ABI 10). The base restore runs as
+    // for any old preset; then the whole dictionary, as a binary property list, is offered to the
+    // plugin, which reads what the base class cannot see (its own keys). The plugin's values then
+    // win. A refusal leaves the base restore as it was. Without an engine a scratch engine takes
+    // the state, as in RestoreState, and Initialize adopts it.
+    OSStatus restoreForeign(CFPropertyListRef plist) {
+        const OSStatus status = restoreBase(plist);
+        CFDataRef bytes = CFPropertyListCreateData(nullptr, plist, kCFPropertyListBinaryFormat_v1_0, 0, nullptr);
+        if (!bytes) return status;
+        const CFIndex length = CFDataGetLength(bytes);
+        if (length <= 0 || length > (16 << 20)) {
+            CFRelease(bytes);
+            return status;
+        }
+        void* target = engine_;
+        std::unique_ptr<void, EngineDeleter> scratch;
+        EngineSetup setup;
+        if (!target) {
+            Plan plan;
+            if (!makePlan(plan)) {
+                plan = Plan{};
+                plan.select = false;
+                plan.outChannels = 2;
+            }
+            setup = engineSetup(plan);
+            if (!(setup.rate > 0.0)) setup.rate = 44100.0;
+            scratch = std::move(scratch_);
+            if (!scratch || !(scratchSetup_ == setup)) scratch.reset(makeEngine(setup));
+            target = scratch.get();
+        }
+        const bool taken = target && op_shell_load_foreign_state(target, OP_FOREIGN_AU_CLASSINFO, CFDataGetBytePtr(bytes), static_cast<uint32_t>(length)) != 0;
+        CFRelease(bytes);
+        if (!taken) {
+            // The scratch engine, if one was made, goes with the refusal; nothing was kept from it.
+            return status;
+        }
+        syncParameters(target);
+        if (engine_) {
+            pushAll_.store(true, std::memory_order_release);
+        } else {
+            std::vector<uint8_t> blob;
+            if (saveBlob(target, blob)) pending_ = std::move(blob);
+            scratch_ = std::move(scratch);
+            scratchSetup_ = setup;
+        }
+        return status;
+    }
+    const uint32_t foreignKinds_ = op_shell_foreign_kinds();
     // The base restore, then every parameter value it left that SetParameter would refuse
     // is replaced by the default.
     OSStatus restoreBase(CFPropertyListRef plist) {

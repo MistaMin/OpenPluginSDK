@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 enum {
-    OP_SHELL_ABI = 9,
+    OP_SHELL_ABI = 10,
     OP_PARAM_LOG = 1,
     OP_PARAM_DISCRETE = 2,
     OP_PARAM_AUTOMATABLE = 4,
@@ -75,6 +75,28 @@ uint32_t op_shell_save_state(void* instance, uint8_t* out, uint32_t capacity, ui
 // parameter and no plugin state (a plugin whose load_state refuses a chunk
 // must itself have changed nothing).
 uint32_t op_shell_load_state(void* instance, const uint8_t* data, uint32_t length);
+// ---- ABI 10: states the plugin replaces ---------------------------------
+//
+// A plugin that replaces a shipped one can read the old plugin's own saved
+// state. A shell that is handed bytes it did not write (a host session or
+// preset made by the old plugin) offers them here before it refuses them.
+// `kind` names the container the bytes came from. Returns 1 when the plugin
+// recognised the bytes, read them whole and applied them, else 0 with nothing
+// changed; the default plugin refuses every kind. After a 1 the values
+// op_shell_get_plain and op_shell_get_normalized return are the plugin's.
+// Main thread, never the audio thread. Same all-or-nothing rule as
+// op_shell_load_state.
+enum {
+    OP_FOREIGN_VST3_COMPONENT = 1,   // what the old IComponent::getState wrote
+    OP_FOREIGN_VST3_CONTROLLER = 2,  // what the old IEditController::getState wrote
+    OP_FOREIGN_AU_CLASSINFO = 3,     // the old kAudioUnitProperty_ClassInfo, as a binary plist
+    OP_FOREIGN_AAX_CHUNK = 4         // the old plug-in's chunk data
+};
+uint32_t op_shell_load_foreign_state(void* instance, uint32_t kind, const uint8_t* data, uint32_t length);
+// The kinds the plugin reads, one bit each: bit (OP_FOREIGN_x - 1). 0 for a
+// plugin that reads none, which a shell then never offers a state. Static:
+// asked before any instance exists.
+uint32_t op_shell_foreign_kinds(void);
 // ---- ABI 2: events, transport, sidechain, MIDI out, layouts, kind --------
 //
 // Versioning: OP_SHELL_ABI is the version of this header. op_shell_abi_version()
