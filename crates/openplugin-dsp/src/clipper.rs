@@ -48,6 +48,23 @@ use crate::limiter::Limiter;
 use crate::linear_phase::{LinearPhaseOversampler, OversampleError};
 
 /// Oversampled soft/hard clipper with a true-peak ceiling.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::TruePeakClipper;
+///
+/// let mut clipper = TruePeakClipper::prepare(48_000.0, 4, 2, 512).expect("4x is supported");
+/// clipper.set_ceiling_db(-1.0);
+/// clipper.set_drive_db(6.0);
+///
+/// let mut left = [0.9f32; 512];
+/// let mut right = [-0.9f32; 512];
+/// clipper.process(&mut [&mut left[..], &mut right[..]]);
+/// assert!(left.iter().chain(right.iter()).all(|s| s.abs() <= 1.0));
+/// // Report this from `Plugin::latency`.
+/// assert!(clipper.latency_samples() > 0);
+/// ```
 pub struct TruePeakClipper {
     os: LinearPhaseOversampler,
     limiter: Limiter,
@@ -87,6 +104,7 @@ impl TruePeakClipper {
         self.os.latency_samples() + self.limiter.latency_samples()
     }
 
+    /// Clears the oversampler and limiter state. Settings are kept.
     pub fn reset(&mut self) {
         self.os.reset();
         self.limiter.reset();

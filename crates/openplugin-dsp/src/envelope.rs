@@ -63,7 +63,9 @@ fn flush(x: f64) -> f64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Topology {
+    /// Attack and release share one smoother, switched by direction.
     Branching,
+    /// A peak-hold release stage followed by an attack smoother; never overshoots.
     Decoupled,
 }
 
@@ -71,7 +73,9 @@ pub enum Topology {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Domain {
+    /// Smooth the linear amplitude.
     Linear,
+    /// Smooth the level in dB (the paper's recommended detector).
     Log,
 }
 
@@ -97,6 +101,21 @@ fn coefficient(ms: f32, fs: f64) -> f64 {
 /// Attack / release / hold smoother for any scalar (a level, or a gain
 /// reduction in dB). "Attack" is used while the input is at or above the
 /// output, "release" while it is below.
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Ballistics;
+///
+/// let mut b = Ballistics::new(48_000.0);
+/// b.set_attack_ms(1.0);
+/// b.set_release_ms(50.0);
+/// for _ in 0..480 {
+///     b.step(1.0); // 10 ms at the target, ten attack time constants
+/// }
+/// assert!((b.value() - 1.0).abs() < 1e-3);
+/// ```
 #[derive(Debug, Clone)]
 pub struct Ballistics {
     fs: f64,
@@ -140,6 +159,8 @@ impl Ballistics {
         self.hold_n = if h.is_finite() && h > 0.0 { h.min(u32::MAX as f64) as u32 } else { 0 };
     }
 
+    /// Changes the sample rate in Hz (clamped to the SDK range), keeping the times
+    /// in milliseconds.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.fs = effective_rate(sample_rate) as f64;
         self.update();
@@ -164,6 +185,7 @@ impl Ballistics {
         self.update();
     }
 
+    /// Selects branching or decoupled smoothing.
     pub fn set_topology(&mut self, t: Topology) {
         self.topology = t;
     }
@@ -176,6 +198,7 @@ impl Ballistics {
         self.hold_left = 0;
     }
 
+    /// The current output.
     pub fn value(&self) -> f32 {
         self.y as f32
     }
@@ -215,6 +238,21 @@ impl Ballistics {
 
 /// Peak or RMS level detector with ballistics. Input is audio (or a
 /// pre-filtered sidechain signal); output is the level in dB.
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::EnvelopeFollower;
+///
+/// let mut env = EnvelopeFollower::new(48_000.0);
+/// env.set_attack_ms(1.0);
+/// let mut db = 0.0;
+/// for _ in 0..4_800 {
+///     db = env.process(0.5);
+/// }
+/// assert!((db - -6.02).abs() < 0.05);
+/// ```
 #[derive(Debug, Clone)]
 pub struct EnvelopeFollower {
     detection: Detection,
@@ -244,12 +282,14 @@ impl EnvelopeFollower {
         e
     }
 
+    /// Changes the sample rate in Hz (clamped to the SDK range), keeping the times.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.fs = effective_rate(sample_rate) as f64;
         self.rms_coef = coefficient(self.rms_ms, self.fs);
         self.ballistics.set_sample_rate(sample_rate);
     }
 
+    /// Selects peak or RMS detection.
     pub fn set_detection(&mut self, d: Detection) {
         self.detection = d;
     }
@@ -260,18 +300,22 @@ impl EnvelopeFollower {
         self.reset();
     }
 
+    /// Selects branching or decoupled ballistics.
     pub fn set_topology(&mut self, t: Topology) {
         self.ballistics.set_topology(t);
     }
 
+    /// Attack time constant, milliseconds.
     pub fn set_attack_ms(&mut self, ms: f32) {
         self.ballistics.set_attack_ms(ms);
     }
 
+    /// Release time constant, milliseconds.
     pub fn set_release_ms(&mut self, ms: f32) {
         self.ballistics.set_release_ms(ms);
     }
 
+    /// Hold at the last peak before release starts, milliseconds.
     pub fn set_hold_ms(&mut self, ms: f32) {
         self.ballistics.set_hold_ms(ms);
     }

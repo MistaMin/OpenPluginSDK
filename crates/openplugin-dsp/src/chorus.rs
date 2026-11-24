@@ -42,6 +42,25 @@ struct ChannelState {
 
 /// Chorus with up to [`MAX_CHORUS_VOICES`] voices per channel.
 #[derive(Clone, Debug)]
+///
+/// [`new`](Self::new) and [`prepare`](Self::prepare) allocate; the setters and
+/// `process*` do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Chorus;
+///
+/// let mut chorus = Chorus::new(2, 48_000.0);
+/// chorus.set_voices(3);
+/// chorus.set_delay_ms(12.0);
+/// chorus.set_depth_ms(3.0);
+/// chorus.set_mix(0.5);
+///
+/// let mut left = [0.1f32; 256];
+/// chorus.process(0, &mut left);
+/// assert!(left.iter().all(|s| s.is_finite()));
+/// ```
 pub struct Chorus {
     sample_rate: f32,
     channels: Vec<ChannelState>,
@@ -105,6 +124,7 @@ impl Chorus {
         }
     }
 
+    /// Number of channels prepared.
     pub fn channels(&self) -> usize {
         self.channels.len()
     }
@@ -127,11 +147,13 @@ impl Chorus {
         self.apply_lfo_setup();
     }
 
+    /// LFO rate of every voice, in Hz or locked to the tempo (see [`LfoRate`]).
     pub fn set_rate(&mut self, rate: LfoRate) {
         self.rate = rate;
         self.apply_lfo_setup();
     }
 
+    /// LFO waveform of every voice.
     pub fn set_shape(&mut self, shape: LfoShape) {
         self.shape = shape;
         self.apply_lfo_setup();

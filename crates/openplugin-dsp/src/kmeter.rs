@@ -29,8 +29,11 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KScale {
+    /// 0 at -12 dBFS (broadcast).
     K12,
+    /// 0 at -14 dBFS (most popular music).
     K14,
+    /// 0 at -20 dBFS (wide-range material: film, classical).
     K20,
 }
 
@@ -49,12 +52,16 @@ impl KScale {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KZone {
+    /// Up to 0 on the K scale.
     Green,
+    /// Above 0 up to +4.
     Yellow,
+    /// Above +4.
     Red,
 }
 
 impl KZone {
+    /// The zone of a reading on the K scale (dB re the scale's 0).
     pub fn of(k_reading: f32) -> Self {
         if k_reading > 4.0 {
             Self::Red
@@ -81,6 +88,25 @@ struct Channel {
 }
 
 /// Per-channel K-system RMS and peak meter.
+/// `new` allocates the 600 ms windows; `process` and the readouts do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{KMeter, KScale, KZone};
+///
+/// let rate = 48_000.0;
+/// let mut meter = KMeter::new(rate, KScale::K14, 1);
+/// // A sine peaking at -14 dBFS reads 0 on K-14.
+/// let amp = 10f32.powf(-14.0 / 20.0);
+/// let sine: Vec<f32> = (0..48_000)
+///     .map(|n| amp * (2.0 * std::f32::consts::PI * 1_000.0 * n as f32 / rate).sin())
+///     .collect();
+/// meter.process(0, &sine);
+/// assert!(meter.rms_k(0).abs() < 0.1);
+/// assert_eq!(KZone::of(-3.0), KZone::Green);
+/// assert_eq!(KZone::of(6.0), KZone::Red);
+/// ```
 #[derive(Clone, Debug)]
 pub struct KMeter {
     scale: KScale,
@@ -90,6 +116,8 @@ pub struct KMeter {
 }
 
 impl KMeter {
+    /// A meter for `sample_rate` (Hz, clamped to the SDK range) and `channels`
+    /// (at least 1). Allocates.
     pub fn new(sample_rate: f32, scale: KScale, channels: usize) -> Self {
         let rate = crate::rate::effective_rate(sample_rate);
         let len = ((rate * 0.6).round() as usize).max(1);
@@ -110,14 +138,17 @@ impl KMeter {
         }
     }
 
+    /// The scale in use.
     pub fn scale(&self) -> KScale {
         self.scale
     }
 
+    /// Changes the scale; the readings in dBFS are unaffected.
     pub fn set_scale(&mut self, scale: KScale) {
         self.scale = scale;
     }
 
+    /// Clears every channel's window and peaks.
     pub fn reset(&mut self) {
         for ch in &mut self.channels {
             ch.ring.fill(0.0);

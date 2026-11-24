@@ -78,6 +78,25 @@ impl DelayFade {
 }
 
 /// Dry delay and a 10 ms crossfade. `wet == 1` is the processed signal.
+///
+/// [`prepare`](Self::prepare) allocates; nothing after it does. Non-finite dry
+/// samples count as `0.0`.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::SoftBypass;
+///
+/// let mut bypass = SoftBypass::prepare(1, 64, 48_000.0);
+/// bypass.set_latency(0);
+/// bypass.set_bypassed(true);
+/// bypass.snap(); // no fade: fully bypassed now
+///
+/// let dry = [0.5f32; 8];
+/// let mut wet = [0.0f32; 8]; // what the plugin's processing produced
+/// bypass.mix(&[&dry[..]], &mut [&mut wet[..]]);
+/// assert_eq!(wet, dry);
+/// ```
 pub struct SoftBypass {
     line: DelayFade,
 }
@@ -88,10 +107,13 @@ impl SoftBypass {
         Self { line: DelayFade::new(channels, max_latency, sample_rate, 0.01, 1.0) }
     }
 
+    /// Delay of the dry path in samples: the latency the plugin reports. Clamped
+    /// to the `max_latency` given to [`prepare`](Self::prepare). Does not allocate.
     pub fn set_latency(&mut self, latency: usize) {
         self.line.set_latency(latency);
     }
 
+    /// The dry-path delay in samples.
     pub fn latency(&self) -> usize {
         self.line.latency()
     }
@@ -106,10 +128,12 @@ impl SoftBypass {
         self.line.value = self.line.target;
     }
 
+    /// Current crossfade position: 1.0 is fully processed, 0.0 fully bypassed.
     pub fn wet(&self) -> f32 {
         self.line.value
     }
 
+    /// Clears the dry delay. The crossfade position is kept.
     pub fn reset(&mut self) {
         self.line.reset();
     }

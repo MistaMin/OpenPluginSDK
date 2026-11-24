@@ -35,7 +35,9 @@ use openplugin_core::Transport;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LfoShape {
+    /// A sine, -1 to 1, starting at 0 and rising.
     Sine,
+    /// A triangle, -1 to 1, starting at 0 and rising.
     Triangle,
     /// Rising ramp, -1 to 1.
     Saw,
@@ -51,6 +53,7 @@ pub enum LfoShape {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Feel {
+    /// The plain note length.
     Straight,
     /// 1.5 times as long.
     Dotted,
@@ -60,6 +63,14 @@ pub enum Feel {
 
 /// A musical length: `1/denominator` of a whole note (four quarter notes) in a
 /// feel. `NoteDivision::new(8, Feel::Dotted)` is a dotted eighth.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Feel, NoteDivision};
+///
+/// assert_eq!(NoteDivision::new(4, Feel::Straight).quarters(), 1.0);
+/// assert_eq!(NoteDivision::new(8, Feel::Dotted).quarters(), 0.75);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NoteDivision {
     denominator: u32,
@@ -98,6 +109,25 @@ pub enum LfoRate {
 }
 
 /// Low-frequency oscillator.
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Feel, Lfo, LfoRate, LfoShape, NoteDivision};
+///
+/// let mut lfo = Lfo::new(48_000.0);
+/// lfo.set_shape(LfoShape::Triangle);
+/// lfo.set_rate(LfoRate::Hz(2.0));
+/// let mut block = [0.0f32; 256];
+/// lfo.fill(&mut block);
+/// assert!(block.iter().all(|v| (-1.0..=1.0).contains(v)));
+///
+/// // Locked to the host tempo: one cycle per quarter note at 120 BPM.
+/// lfo.set_rate(LfoRate::Sync(NoteDivision::new(4, Feel::Straight)));
+/// lfo.set_tempo(120.0);
+/// assert!((lfo.increment() - 2.0 / 48_000.0).abs() < 1e-12);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Lfo {
     shape: LfoShape,
@@ -111,6 +141,8 @@ pub struct Lfo {
 }
 
 impl Lfo {
+    /// A 1 Hz sine at phase 0 for `sample_rate` in Hz (clamped to the SDK range),
+    /// 120 BPM until told otherwise. Does not allocate.
     pub fn new(sample_rate: f32) -> Self {
         Self {
             shape: LfoShape::Sine,
@@ -124,14 +156,17 @@ impl Lfo {
         }
     }
 
+    /// Changes the sample rate in Hz, keeping the phase.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.sample_rate = f64::from(effective_rate(sample_rate));
     }
 
+    /// Changes the waveform, keeping the phase.
     pub fn set_shape(&mut self, shape: LfoShape) {
         self.shape = shape;
     }
 
+    /// The waveform in use.
     pub fn shape(&self) -> LfoShape {
         self.shape
     }
@@ -149,6 +184,7 @@ impl Lfo {
         }
     }
 
+    /// The rate in use.
     pub fn rate(&self) -> LfoRate {
         self.rate
     }

@@ -93,10 +93,20 @@ pub enum PhaseLocking {
 }
 
 /// Vocoder settings.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{PhaseLocking, VocoderConfig};
+///
+/// let config = VocoderConfig { transients: true, ..VocoderConfig::for_rate(48_000.0) };
+/// assert_eq!(config.frame, 2048);
+/// assert_eq!(config.locking, PhaseLocking::Identity);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct VocoderConfig {
     /// Frame size, a power of two in 256..=16384.
     pub frame: usize,
+    /// Plain phase vocoder or identity phase locking.
     pub locking: PhaseLocking,
     /// Reset phases at detected onsets.
     pub transients: bool,
@@ -433,6 +443,22 @@ impl Engine {
 /// to input time `(q - lead) / ratio`, so the first [`TimeStretch::lead`]
 /// output samples belong to the time before the first input sample. [`stretch_offline`](Self::stretch_offline)
 /// handles that and the flush; it allocates and is for offline rendering.
+/// `new` allocates every buffer; `push`, `pop` and the setters do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{TimeStretch, VocoderConfig};
+///
+/// let rate = 48_000.0;
+/// let mut ts = TimeStretch::new(1, rate, VocoderConfig::for_rate(rate));
+/// ts.set_ratio(1.5);
+/// let input: Vec<f32> = (0..24_000)
+///     .map(|n| 0.5 * (2.0 * std::f32::consts::PI * 440.0 * n as f32 / rate).sin())
+///     .collect();
+/// let out = ts.stretch_offline(0, &input); // offline: allocates the result
+/// assert_eq!(out.len(), 36_000);
+/// ```
 pub struct TimeStretch {
     e: Engine,
     ratio: f64,
@@ -444,18 +470,23 @@ impl TimeStretch {
         Self { e: Engine::new(channels, sample_rate, config), ratio: 1.0 }
     }
 
+    /// Output length over input length, clamped to 0.25..=4; a non-finite ratio
+    /// sets 1. Takes effect at the next frame. Realtime-safe.
     pub fn set_ratio(&mut self, ratio: f32) {
         self.ratio = if ratio.is_finite() { f64::from(ratio).clamp(0.25, 4.0) } else { 1.0 };
     }
 
+    /// The ratio in use.
     pub fn ratio(&self) -> f32 {
         self.ratio as f32
     }
 
+    /// The analysis frame size, samples.
     pub fn frame(&self) -> usize {
         self.e.sh.n
     }
 
+    /// The synthesis hop, samples.
     pub fn hop(&self) -> usize {
         self.e.sh.hs
     }
@@ -477,6 +508,7 @@ impl TimeStretch {
         self.e.cores.get(channel).map_or(0, |c| c.onsets)
     }
 
+    /// Clears every channel's history and queued output.
     pub fn reset(&mut self) {
         self.e.reset();
     }
@@ -486,6 +518,7 @@ impl TimeStretch {
         self.e.push(channel, input, self.ratio, usize::MAX)
     }
 
+    /// Finished output samples waiting on `channel` (0 for a missing channel).
     pub fn available(&self, channel: usize) -> usize {
         self.e.available(channel)
     }
@@ -550,6 +583,22 @@ struct Shift {
 
 /// Real-time pitch shifter: phase-vocoder stretch plus resample. See the
 /// module docs. Fixed latency [`PitchShifter::latency`].
+/// `new` allocates every buffer; `process` does not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{PitchShifter, VocoderConfig};
+///
+/// let rate = 48_000.0;
+/// let mut shifter = PitchShifter::new(2, rate, VocoderConfig::for_rate(rate));
+/// shifter.set_semitones(7.0); // a fifth up
+/// let mut left = vec![0.0f32; 512];
+/// let mut right = vec![0.0f32; 512];
+/// shifter.process(0, &mut left);
+/// shifter.process(1, &mut right);
+/// assert_eq!(shifter.latency(), 2048 / 2 + 2048 + 64);
+/// ```
 pub struct PitchShifter {
     e: Engine,
     ratio: f64,
@@ -630,6 +679,7 @@ impl PitchShifter {
         (n * 0.5 + n / (2.0 * self.min_ratio)).ceil() as usize + MARGIN
     }
 
+    /// The analysis frame size, samples.
     pub fn frame(&self) -> usize {
         self.e.sh.n
     }
@@ -640,10 +690,12 @@ impl PitchShifter {
         self.shift.get(channel).map_or(0, |s| s.underruns)
     }
 
+    /// Onsets at which phases were reset (transient mode) on `channel`.
     pub fn onsets(&self, channel: usize) -> u64 {
         self.e.cores.get(channel).map_or(0, |c| c.onsets)
     }
 
+    /// Clears every channel's history; the latency stays the same.
     pub fn reset(&mut self) {
         self.e.reset();
         for s in &mut self.shift {

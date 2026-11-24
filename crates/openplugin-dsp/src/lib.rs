@@ -42,6 +42,8 @@
 //! default). A plugin that turns that off, or code that uses this crate
 //! outside a format entry, should run them under a [`DenormalGuard`].
 
+#![deny(missing_docs)]
+
 pub mod adaa;
 pub mod adsr;
 pub mod biquad;

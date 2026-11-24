@@ -192,6 +192,20 @@ pub fn gain_to_db(gain: f32) -> f32 {
 
 /// A gain in dB, smoothed per sample by the core one-pole (default 10 ms), so
 /// a parameter step does not click.
+/// Plain state, no allocation.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Gain;
+///
+/// let mut gain = Gain::new(48_000.0, 0.0);
+/// gain.set_db(-6.0); // glides over about 10 ms
+/// let mut buf = vec![1.0f32; 4_800];
+/// gain.process(&mut buf);
+/// assert!(buf[0] > 0.9); // no step at the start
+/// assert!((buf[4_799] - 0.501).abs() < 1e-3);
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Gain {
     smoother: OnePole,
@@ -199,6 +213,8 @@ pub struct Gain {
 }
 
 impl Gain {
+    /// A gain at `db` with a 10 ms smoothing time at `sample_rate` Hz. Does not
+    /// allocate.
     pub fn new(sample_rate: f32, db: f32) -> Self {
         let mut smoother = OnePole::new();
         smoother.set_time(crate::rate::effective_rate(sample_rate), 10.0);
@@ -247,6 +263,20 @@ impl Gain {
 }
 
 /// Smoothed pan or balance for a stereo bus.
+/// Plain state, no allocation.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{PanLaw, Panner};
+///
+/// let mut panner = Panner::new(48_000.0, PanLaw::ConstantPower);
+/// panner.set_pan(-1.0); // hard left, glided
+/// let input = vec![1.0f32; 4_800];
+/// let (mut left, mut right) = (vec![0.0f32; 4_800], vec![0.0f32; 4_800]);
+/// panner.pan_mono(&input, &mut left, &mut right);
+/// assert!(left[4_799] > 0.99 && right[4_799] < 0.01);
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Panner {
     law: PanLaw,
@@ -255,6 +285,7 @@ pub struct Panner {
 }
 
 impl Panner {
+    /// A centred panner with `law` and 10 ms smoothing at `sample_rate` Hz.
     pub fn new(sample_rate: f32, law: PanLaw) -> Self {
         let mut smoother = OnePole::new();
         smoother.set_time(crate::rate::effective_rate(sample_rate), 10.0);
@@ -262,6 +293,7 @@ impl Panner {
         Self { law, smoother, target: 0.0 }
     }
 
+    /// Changes the pan law.
     pub fn set_law(&mut self, law: PanLaw) {
         self.law = law;
     }

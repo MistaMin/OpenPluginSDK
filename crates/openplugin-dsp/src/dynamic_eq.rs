@@ -57,8 +57,11 @@ const SINE_PEAK_DB: f32 = 3.0103;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DynEqKind {
+    /// A peaking bell at `freq_hz`, detector band-passed there.
     Bell,
+    /// A low shelf with its corner at `freq_hz`, detector low-passed.
     LowShelf,
+    /// A high shelf with its corner at `freq_hz`, detector high-passed.
     HighShelf,
 }
 
@@ -74,9 +77,28 @@ pub enum DynEqMode {
 }
 
 /// Settings of a [`DynamicEqBand`].
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{DynEqKind, DynEqMode, DynamicEqParams};
+///
+/// // Tame harshness: cut up to 6 dB at 3.5 kHz above -30 dBFS.
+/// let p = DynamicEqParams {
+///     kind: DynEqKind::Bell,
+///     mode: DynEqMode::Above,
+///     freq_hz: 3_500.0,
+///     threshold_db: -30.0,
+///     range_db: -6.0,
+///     ..DynamicEqParams::default()
+/// };
+/// assert_eq!(p.static_gain_db(-60.0), 0.0); // below threshold: the resting gain
+/// assert!(p.static_gain_db(0.0) <= -5.9); // far above: the full range
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct DynamicEqParams {
+    /// Bell, low shelf or high shelf.
     pub kind: DynEqKind,
+    /// React above or below the threshold.
     pub mode: DynEqMode,
     /// Centre (bell) or corner (shelf) frequency in Hz.
     pub freq_hz: f32,
@@ -84,13 +106,17 @@ pub struct DynamicEqParams {
     pub q: f32,
     /// Resting gain in dB when the detector is idle.
     pub gain_db: f32,
+    /// Detector threshold, dBFS of a sine.
     pub threshold_db: f32,
     /// 1 (no reaction) to infinity.
     pub ratio: f32,
+    /// Soft-knee width, dB; 0 is a hard knee.
     pub knee_db: f32,
     /// Largest dynamic gain change in dB; negative cuts, positive boosts.
     pub range_db: f32,
+    /// Attack time constant of the engagement, milliseconds.
     pub attack_ms: f32,
+    /// Release time constant of the engagement, milliseconds.
     pub release_ms: f32,
     /// RMS window of the detector.
     pub rms_ms: f32,
@@ -162,6 +188,20 @@ impl DynamicEqParams {
 }
 
 /// One dynamic EQ band for any number of channels. See the [module docs](self).
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{DynamicEqBand, DynamicEqParams};
+///
+/// let mut band = DynamicEqBand::new(48_000.0, 2);
+/// band.set_params(DynamicEqParams { freq_hz: 1_000.0, threshold_db: -40.0, ..DynamicEqParams::default() });
+/// let tone: Vec<f32> = (0..9_600)
+///     .map(|n| 0.5 * (2.0 * std::f32::consts::PI * 1_000.0 * n as f32 / 48_000.0).sin())
+///     .collect();
+/// let (mut l, mut r) = (tone.clone(), tone);
+/// band.process(&mut [&mut l, &mut r]);
+/// assert!(band.dynamic_gain_db() < -6.0); // the loud tone pulls the bell down
+/// ```
 #[derive(Debug, Clone)]
 pub struct DynamicEqBand {
     fs: f32,
@@ -179,6 +219,9 @@ pub struct DynamicEqBand {
 }
 
 impl DynamicEqBand {
+    /// A band for `sample_rate` (Hz, clamped to the SDK range) and `channels`
+    /// (at least 1) with [`DynamicEqParams::default`]. Allocates the per-channel
+    /// filters; nothing allocates after this.
     pub fn new(sample_rate: f32, channels: usize) -> Self {
         let fs = effective_rate(sample_rate);
         let channels = channels.max(1);
@@ -202,10 +245,12 @@ impl DynamicEqBand {
         b
     }
 
+    /// The channel count given to `new` (at least 1).
     pub fn channels(&self) -> usize {
         self.channels
     }
 
+    /// The settings in use.
     pub fn params(&self) -> &DynamicEqParams {
         &self.params
     }
@@ -220,6 +265,7 @@ impl DynamicEqBand {
         self.dirty = true;
     }
 
+    /// Clears the filters, the detector and the engagement.
     pub fn reset(&mut self) {
         for f in self.audio.iter_mut().chain(self.det.iter_mut()) {
             f.reset();

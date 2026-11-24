@@ -51,6 +51,24 @@ struct ChannelState {
 }
 
 /// Flanger.
+/// `new` and `prepare` allocate; processing and the setters do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Flanger, LfoRate};
+///
+/// let mut flanger = Flanger::new(2, 48_000.0);
+/// flanger.set_delay_ms(3.0);
+/// flanger.set_depth_ms(2.0);
+/// flanger.set_feedback(0.6);
+/// flanger.set_rate(LfoRate::Hz(0.25));
+/// let mut left = vec![0.25f32; 512];
+/// let mut right = vec![0.25f32; 512];
+/// flanger.process(0, &mut left);
+/// flanger.process(1, &mut right);
+/// assert!(left.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Clone, Debug)]
 pub struct Flanger {
     sample_rate: f32,
@@ -125,6 +143,7 @@ impl Flanger {
         }
     }
 
+    /// The channel count given to `new`.
     pub fn channels(&self) -> usize {
         self.channels.len()
     }
@@ -157,15 +176,18 @@ impl Flanger {
         }
     }
 
+    /// Through-zero flanging: the dry path is delayed so the sweep can cross it.
     pub fn set_through_zero(&mut self, on: bool) {
         self.through_zero = on;
     }
 
+    /// The sweep rate, free in Hz or synced to the host tempo.
     pub fn set_rate(&mut self, rate: LfoRate) {
         self.rate = rate;
         self.apply_lfo_setup();
     }
 
+    /// The sweep waveform.
     pub fn set_shape(&mut self, shape: LfoShape) {
         self.shape = shape;
         self.apply_lfo_setup();

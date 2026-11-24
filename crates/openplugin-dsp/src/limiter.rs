@@ -74,6 +74,23 @@ const MARGIN_DB_FRAMES: f32 = 4.5;
 const MAX_MARGIN_DB: f32 = 1.0;
 
 /// Lookahead brickwall limiter. See the module docs.
+/// `prepare` allocates; `process` and the setters do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Limiter;
+///
+/// let mut limiter = Limiter::prepare(48_000.0, 2, 1.5, 100.0);
+/// limiter.set_ceiling_db(-1.0);
+/// let mut left = vec![2.0f32; 4_800]; // +6 dBFS
+/// let mut right = vec![2.0f32; 4_800];
+/// limiter.process(&mut [&mut left, &mut right]);
+/// let ceiling = 10f32.powf(-1.0 / 20.0);
+/// assert!(left.iter().all(|s| s.abs() <= ceiling + 1e-4));
+/// assert!(limiter.gain_reduction_db() > 6.0);
+/// // Report limiter.latency_samples() to the host and delay the dry path by it.
+/// ```
 #[derive(Debug, Clone)]
 pub struct Limiter {
     fs: f64,
@@ -170,6 +187,7 @@ impl Limiter {
         self.lookahead
     }
 
+    /// The channel count given to `new`.
     pub fn channels(&self) -> usize {
         self.channels
     }
@@ -206,6 +224,7 @@ impl Limiter {
         -20.0 * self.gain.max(1.0e-6).log10()
     }
 
+    /// Clears the lookahead, the detector and the gain.
     pub fn reset(&mut self) {
         self.detector.reset();
         self.audio.fill(0.0);

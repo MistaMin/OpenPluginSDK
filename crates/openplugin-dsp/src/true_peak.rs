@@ -72,6 +72,24 @@ pub(crate) fn standard_taps() -> [[f32; MAX_TAPS]; MAX_PHASES] {
 }
 
 /// One channel's 4x true-peak detector.
+/// Plain state, no allocation.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::TruePeak;
+///
+/// let mut tp = TruePeak::new();
+/// // A sine at a quarter of the rate, sampled at +-45 degrees: samples read
+/// // 0.707 but the waveform peaks at 1.0 between them.
+/// let x = std::f32::consts::FRAC_1_SQRT_2;
+/// let mut peak = 0.0f32;
+/// for n in 0..64 {
+///     let s = if n % 4 < 2 { x } else { -x };
+///     peak = peak.max(tp.push(s));
+/// }
+/// assert!(peak > 0.95);
+/// ```
 #[derive(Debug, Clone)]
 pub struct TruePeak {
     taps: [[f32; MAX_TAPS]; MAX_PHASES],
@@ -108,6 +126,7 @@ impl TruePeak {
         self.n / 2 + usize::from(self.refine)
     }
 
+    /// Clears the interpolation history and the peak.
     pub fn reset(&mut self) {
         self.hist = [0.0; MAX_TAPS];
         self.tail = [0.0; 2];

@@ -89,6 +89,21 @@ impl Section {
 }
 
 /// The K-weighting filter of BS.1770-4 for one channel.
+/// Plain state, no allocation; one per channel, owned by the audio thread.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::KWeighting;
+///
+/// let mut k = KWeighting::new(48_000.0);
+/// // The K filter cuts low frequencies hard: a DC step settles to zero.
+/// let mut y = 0.0;
+/// for _ in 0..48_000 {
+///     y = k.process(1.0);
+/// }
+/// assert!(y.abs() < 1e-3);
+/// ```
 #[derive(Clone, Debug)]
 pub struct KWeighting {
     shelf: Section,
@@ -96,6 +111,8 @@ pub struct KWeighting {
 }
 
 impl KWeighting {
+    /// The filter for `sample_rate` in Hz, with cleared state. A rate that is not
+    /// finite and positive is treated as 48 kHz. Does not allocate.
     pub fn new(sample_rate: f32) -> Self {
         let fs = rate_of(sample_rate);
         // Stage 1: the head's acoustic effect, a high shelf.
@@ -127,11 +144,14 @@ impl KWeighting {
         Self { shelf, high_pass }
     }
 
+    /// Clears the filter state, as after silence.
     pub fn reset(&mut self) {
         self.shelf.z = [0.0; 2];
         self.high_pass.z = [0.0; 2];
     }
 
+    /// Filters one sample and returns the K-weighted value in `f64`. A non-finite
+    /// input counts as 0. Realtime-safe.
     #[inline]
     pub fn process(&mut self, x: f32) -> f64 {
         let x = if x.is_finite() { f64::from(x) } else { 0.0 };
@@ -337,6 +357,25 @@ pub const LRA_GATE_LU: f64 = -20.0;
 /// Evaluated every 10 ms (windows of 400 ms and 3 s). Integrated loudness
 /// gates 400 ms blocks every 100 ms (75 % overlap); the range uses the 3 s
 /// values every 100 ms.
+/// `new`, `with_roles` and `for_layout` allocate (per-channel filters and the
+/// histograms); `push` and the readouts never allocate, so feed it on the audio
+/// thread and read it there or from a copy.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Loudness;
+///
+/// let rate = 48_000.0;
+/// let mut meter = Loudness::new(rate);
+/// // Two seconds of a 997 Hz sine at -20 dBFS on both channels.
+/// let sine: Vec<f32> = (0..96_000)
+///     .map(|n| 0.1 * (2.0 * std::f32::consts::PI * 997.0 * n as f32 / rate).sin())
+///     .collect();
+/// meter.push(&[&sine, &sine]);
+/// // Stereo: -20 dBFS per channel reads about -20 LUFS.
+/// assert!((meter.integrated_lufs() + 20.0).abs() < 0.5);
+/// ```
 #[derive(Clone, Debug)]
 pub struct Loudness {
     steps: Steps,
@@ -416,6 +455,8 @@ impl Loudness {
         self.integrating = running;
     }
 
+    /// Whether integrated loudness and range are running (see
+    /// [`Self::set_integrating`]).
     pub fn is_integrating(&self) -> bool {
         self.integrating
     }
@@ -511,6 +552,21 @@ impl Loudness {
 /// holds the gain and stops learning (a host bypass, an offline preview).
 /// Measure the reference where the plugin's input enters it, before any
 /// input gain the user means as drive.
+/// `new` allocates the measuring windows; `process` and the setters never
+/// allocate.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::LoudnessMatch;
+///
+/// let mut lm = LoudnessMatch::new(48_000.0);
+/// let reference = vec![0.25f32; 4_800];
+/// let mut left = vec![0.05f32; 4_800];
+/// let mut right = vec![0.05f32; 4_800];
+/// lm.process(&[&reference, &reference], &mut [&mut left, &mut right]);
+/// assert!(lm.gain_db().is_finite());
+/// ```
 #[derive(Clone, Debug)]
 pub struct LoudnessMatch {
     reference: Steps,
@@ -573,10 +629,13 @@ impl LoudnessMatch {
         self
     }
 
+    /// Turns matching on or off. Off glides back to unity gain and keeps
+    /// measuring. Realtime-safe.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
     }
 
+    /// Whether matching is on.
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
@@ -691,20 +750,37 @@ impl EbuScale {
 /// -24 LKFS +/- 2 dB, true peak at most -2 dBTP. Streaming targets (EBU R 128
 /// s1, AES TD1004) are left out: their values are not stated here because
 /// they could not be checked against the documents.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Target;
+///
+/// assert!(Target::EBU_R128.met_by(-23.2, -1.5));
+/// assert!(!Target::EBU_R128.met_by(-23.2, -0.5)); // true peak too high
+/// let custom = Target { name: "Podcast", loudness_lufs: -16.0, tolerance_lu: 1.0, max_true_peak_dbtp: -1.0 };
+/// assert!(custom.met_by(-16.5, -2.0));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Target {
+    /// Display name of the target.
     pub name: &'static str,
+    /// Programme loudness, LUFS.
     pub loudness_lufs: f32,
+    /// Permitted deviation either side of `loudness_lufs`, LU.
     pub tolerance_lu: f32,
+    /// Highest permitted true peak, dBTP.
     pub max_true_peak_dbtp: f32,
 }
 
 impl Target {
+    /// EBU R 128: -23 LUFS ± 0.5 LU, true peak at most -1 dBTP.
     pub const EBU_R128: Self =
         Self { name: "EBU R 128", loudness_lufs: -23.0, tolerance_lu: 0.5, max_true_peak_dbtp: -1.0 };
+    /// ATSC A/85: -24 LKFS ± 2 dB, true peak at most -2 dBTP.
     pub const ATSC_A85: Self =
         Self { name: "ATSC A/85", loudness_lufs: -24.0, tolerance_lu: 2.0, max_true_peak_dbtp: -2.0 };
 
+    /// Every built-in target, for a menu.
     pub const ALL: [Self; 2] = [Self::EBU_R128, Self::ATSC_A85];
 
     /// Whether an integrated reading and a true peak meet the target.
@@ -715,6 +791,21 @@ impl Target {
 
 /// An EBU Mode meter (EBU Tech 3341): loudness, range, maxima and true peak,
 /// with relative (LU) and absolute (LUFS) readouts on the +9 or +18 scale.
+/// `new` allocates (filters, true-peak state); `push` and the readouts never
+/// allocate.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{EbuMeter, EbuScale, Target};
+///
+/// let mut meter = EbuMeter::stereo(48_000.0);
+/// meter.set_target(Target::EBU_R128);
+/// meter.set_scale(EbuScale::Plus18);
+/// let silence = vec![0.0f32; 4_800];
+/// meter.push(&[&silence, &silence]);
+/// assert_eq!(meter.momentary_lufs(), f32::NEG_INFINITY); // below every gate
+/// ```
 #[derive(Clone, Debug)]
 pub struct EbuMeter {
     loudness: Loudness,
@@ -741,14 +832,18 @@ impl EbuMeter {
         Self::new(sample_rate, &[openplugin_core::layout::SURROUND_FL, openplugin_core::layout::SURROUND_FR])
     }
 
+    /// Sets the target the relative (LU) readouts refer to; only its loudness is
+    /// used here.
     pub fn set_target(&mut self, target: Target) {
         self.target_lufs = target.loudness_lufs;
     }
 
+    /// Selects the +9 or +18 display scale.
     pub fn set_scale(&mut self, scale: EbuScale) {
         self.scale = scale;
     }
 
+    /// The display scale in use.
     pub fn scale(&self) -> EbuScale {
         self.scale
     }
@@ -758,10 +853,14 @@ impl EbuMeter {
         &self.loudness
     }
 
+    /// The loudness meter underneath, to start, pause or reset parts of it.
     pub fn loudness_mut(&mut self) -> &mut Loudness {
         &mut self.loudness
     }
 
+    /// Feeds a block, one slice per channel, as [`Loudness::push`]; also updates
+    /// the true peak. Channels beyond those given to `new` are ignored.
+    /// Realtime-safe.
     pub fn push(&mut self, channels: &[&[f32]]) {
         self.loudness.push(channels);
         for (i, ch) in channels.iter().take(self.channels).enumerate() {
@@ -788,12 +887,16 @@ impl EbuMeter {
         }
     }
 
+    /// Momentary loudness (400 ms), LUFS; [`f32::NEG_INFINITY`] with no signal.
     pub fn momentary_lufs(&self) -> f32 {
         self.loudness.momentary_lufs()
     }
+    /// Short-term loudness (3 s), LUFS; [`f32::NEG_INFINITY`] with no signal.
     pub fn short_term_lufs(&self) -> f32 {
         self.loudness.short_term_lufs()
     }
+    /// Gated integrated loudness, LUFS; [`f32::NEG_INFINITY`] before any block
+    /// passes the gates.
     pub fn integrated_lufs(&self) -> f32 {
         self.loudness.integrated_lufs()
     }
@@ -801,18 +904,23 @@ impl EbuMeter {
     pub fn momentary_lu(&self) -> f32 {
         self.rel(self.momentary_lufs())
     }
+    /// Short-term loudness relative to the target, LU.
     pub fn short_term_lu(&self) -> f32 {
         self.rel(self.short_term_lufs())
     }
+    /// Integrated loudness relative to the target, LU.
     pub fn integrated_lu(&self) -> f32 {
         self.rel(self.integrated_lufs())
     }
+    /// Highest momentary loudness since the last reset, LUFS.
     pub fn max_momentary_lufs(&self) -> f32 {
         self.loudness.max_momentary_lufs()
     }
+    /// Highest short-term loudness since the last reset, LUFS.
     pub fn max_short_term_lufs(&self) -> f32 {
         self.loudness.max_short_term_lufs()
     }
+    /// Loudness range (EBU Tech 3342), LU.
     pub fn loudness_range_lu(&self) -> f32 {
         self.loudness.loudness_range_lu()
     }

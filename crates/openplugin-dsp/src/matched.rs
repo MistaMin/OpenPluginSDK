@@ -45,17 +45,38 @@ use std::f64::consts::PI;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MatchedKind {
+    /// Second-order low-pass with resonance `q`.
     LowPass,
+    /// Second-order high-pass with resonance `q`.
     HighPass,
     /// Constant 0 dB peak gain at `f0`.
     BandPass,
+    /// Notch at `f0` with width set by `q`.
     Notch,
+    /// Bell of `gain_db` at `f0`.
     Peaking,
+    /// Low shelf of `gain_db` with its corner at `f0`.
     LowShelf,
+    /// High shelf of `gain_db` with its corner at `f0`.
     HighShelf,
 }
 
 /// Analog-matched biquad. See the [module documentation](self).
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{MatchedBiquad, MatchedKind};
+///
+/// let mut eq = MatchedBiquad::new();
+/// eq.configure(MatchedKind::Peaking, 48_000.0, 16_000.0, 1.0, 6.0);
+/// // Matched to the analogue bell: about +6 dB at 16 kHz, no cramping.
+/// let db = 20.0 * eq.magnitude_at(48_000.0, 16_000.0).log10();
+/// assert!((db - 6.0).abs() < 0.5);
+/// let y = eq.process_sample(0.25);
+/// assert!(y.is_finite());
+/// ```
 #[derive(Debug, Clone)]
 pub struct MatchedBiquad {
     b: [f64; 3],

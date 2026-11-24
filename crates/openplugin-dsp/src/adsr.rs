@@ -53,7 +53,10 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Curve {
+    /// A straight line from the stage's start level to its target.
     Linear,
+    /// The normalised exponential of the module documentation, with the
+    /// curvature set by [`Adsr::set_curvature`].
     Exponential,
 }
 
@@ -71,11 +74,17 @@ pub enum RetriggerMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Stage {
+    /// Not running; the level is exactly 0.
     Idle,
+    /// Rising to 1.0.
     Attack,
+    /// Holding 1.0 for the hold time.
     Hold,
+    /// Falling from 1.0 to the sustain level.
     Decay,
+    /// Staying at the sustain level until the gate goes off.
     Sustain,
+    /// Falling to 0 after the gate went off.
     Release,
 }
 
@@ -83,7 +92,9 @@ pub enum Stage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Gate {
+    /// The note starts: same as [`Adsr::gate_on`].
     On,
+    /// The note ends: same as [`Adsr::gate_off`].
     Off,
 }
 
@@ -91,6 +102,23 @@ const MAX_SECONDS: f32 = 3600.0;
 
 /// ADSR (hold of zero) or AHDSR envelope. See the module documentation.
 #[derive(Clone, Copy, Debug)]
+/// `Copy`, no allocation anywhere; one per voice, owned by the audio thread.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Adsr, Gate, Stage};
+///
+/// let mut env = Adsr::new(48_000.0);
+/// env.set_adsr(0.01, 0.1, 0.5, 0.2); // seconds, seconds, level, seconds
+///
+/// // Gate on at the block start, off 600 samples in.
+/// let mut block = [0.0f32; 1024];
+/// env.process(&mut block, &[(0, Gate::On), (600, Gate::Off)]);
+/// assert_eq!(block[0], 0.0);
+/// assert_eq!(block[480], 1.0); // the 10 ms attack lands exactly on 1.0
+/// assert_eq!(env.stage(), Stage::Release);
+/// ```
 pub struct Adsr {
     sample_rate: f64,
     attack: f64,
@@ -173,6 +201,8 @@ impl Adsr {
         }
     }
 
+    /// Shape of the attack, decay and release stages. Takes effect at the next
+    /// stage that starts; hold and sustain have no shape.
     pub fn set_curves(&mut self, attack: Curve, decay: Curve, release: Curve) {
         self.attack_curve = attack;
         self.decay_curve = decay;
@@ -186,14 +216,17 @@ impl Adsr {
         }
     }
 
+    /// What a [`gate_on`](Self::gate_on) does while the gate is already held.
     pub fn set_mode(&mut self, mode: RetriggerMode) {
         self.mode = mode;
     }
 
+    /// The retrigger mode set by [`set_mode`](Self::set_mode).
     pub fn mode(&self) -> RetriggerMode {
         self.mode
     }
 
+    /// The stage the next sample belongs to.
     pub fn stage(&self) -> Stage {
         self.stage
     }

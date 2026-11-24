@@ -35,9 +35,23 @@ pub enum DynamicsMode {
 /// (zero or negative, never below `-range_db`) for an input level and carries
 /// the gate's hysteresis state; [`static_gain_db`](Self::static_gain_db) is the
 /// stateless curve.
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{DynamicsMode, GainComputer};
+///
+/// // 4:1 above -18 dB, hard knee.
+/// let gc = GainComputer::new(DynamicsMode::Compressor, -18.0, 4.0, 0.0);
+/// assert_eq!(gc.static_gain_db(-30.0), 0.0); // below the threshold
+/// assert!((gc.static_gain_db(-6.0) - -9.0).abs() < 1e-4); // 12 dB over -> 3 dB over
+/// ```
 #[derive(Debug, Clone)]
 pub struct GainComputer {
+    /// Compressor, expander or gate.
     pub mode: DynamicsMode,
+    /// Threshold, dB (dBFS for a full-scale detector).
     pub threshold_db: f32,
     /// 1 (no effect) to infinity (limiter / gate). Values below 1 count as 1.
     pub ratio: f32,
@@ -65,10 +79,13 @@ impl Default for GainComputer {
 }
 
 impl GainComputer {
+    /// A gain computer with the given mode, threshold (dB), ratio and knee width
+    /// (dB); range 120 dB and no hysteresis. Does not allocate.
     pub fn new(mode: DynamicsMode, threshold_db: f32, ratio: f32, knee_db: f32) -> Self {
         Self { mode, threshold_db, ratio, knee_db, ..Self::default() }
     }
 
+    /// Closes the gate/expander hysteresis state.
     pub fn reset(&mut self) {
         self.open = false;
     }
@@ -166,24 +183,59 @@ pub enum Smoothing {
 }
 
 /// Settings for [`Dynamics`].
+/// Times are in milliseconds and levels in dB. Out-of-range values are
+/// clamped where they are used (a ratio below 1 counts as 1).
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{DynamicsMode, DynamicsParams};
+///
+/// let gate = DynamicsParams {
+///     mode: DynamicsMode::Gate,
+///     threshold_db: -50.0,
+///     range_db: 40.0,
+///     hysteresis_db: 6.0,
+///     attack_ms: 1.0,
+///     release_ms: 80.0,
+///     ..DynamicsParams::default()
+/// };
+/// assert_eq!(gate.ratio, 4.0); // untouched fields keep their defaults
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct DynamicsParams {
+    /// Compressor, expander or gate.
     pub mode: DynamicsMode,
+    /// Threshold, dB.
     pub threshold_db: f32,
+    /// Ratio, 1 to infinity; values below 1 count as 1.
     pub ratio: f32,
+    /// Soft-knee width centred on the threshold, dB; 0 is a hard knee.
     pub knee_db: f32,
+    /// Largest attenuation, positive dB.
     pub range_db: f32,
+    /// Expander and gate: how far below the threshold the level must fall before
+    /// they close again, dB.
     pub hysteresis_db: f32,
+    /// Attack time, milliseconds.
     pub attack_ms: f32,
+    /// Release time, milliseconds.
     pub release_ms: f32,
+    /// Hold before release starts, milliseconds.
     pub hold_ms: f32,
+    /// Make-up gain applied after the gain computer, dB.
     pub makeup_db: f32,
+    /// Peak or RMS level detection.
     pub detection: Detection,
     /// RMS window (time constant) when `detection` is [`Detection::Rms`].
     pub rms_ms: f32,
+    /// Whether the level ballistics run on the linear or the dB level.
     pub domain: Domain,
+    /// Branching or decoupled attack/release.
     pub topology: Topology,
+    /// Whether the ballistics act on the level or on the gain.
     pub smoothing: Smoothing,
+    /// How the channels' detector levels combine.
     pub link: Link,
 }
 
@@ -216,6 +268,19 @@ impl Default for DynamicsParams {
 /// No state is kept per channel, so any channel count works, and nothing
 /// allocates. A sidechain filter plugs in as a closure, see
 /// [`process_filtered`](Self::process_filtered).
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Dynamics, DynamicsParams};
+///
+/// let mut comp = Dynamics::new(48_000.0);
+/// comp.set_params(DynamicsParams { threshold_db: -20.0, ratio: 4.0, ..DynamicsParams::default() });
+/// let mut left = vec![0.5f32; 4_800];
+/// let mut right = vec![0.5f32; 4_800];
+/// comp.process(&mut [&mut left, &mut right]);
+/// assert!(comp.gain_reduction_db() > 0.0);
+/// assert_eq!(left[4_799], right[4_799]); // linked: both channels get the same gain
+/// ```
 #[derive(Debug, Clone)]
 pub struct Dynamics {
     params: DynamicsParams,
@@ -226,6 +291,8 @@ pub struct Dynamics {
 }
 
 impl Dynamics {
+    /// A compressor with [`DynamicsParams::default`] for `sample_rate` in Hz
+    /// (clamped to the SDK's range). Does not allocate.
     pub fn new(sample_rate: f32) -> Self {
         let fs = effective_rate(sample_rate);
         let mut d = Self {
@@ -239,11 +306,13 @@ impl Dynamics {
         d
     }
 
+    /// Changes the sample rate in Hz, keeping the settings and the state.
     pub fn set_sample_rate(&mut self, sample_rate: f32) {
         self.follower.set_sample_rate(sample_rate);
         self.gain_smoother.set_sample_rate(sample_rate);
     }
 
+    /// The settings in use.
     pub fn params(&self) -> &DynamicsParams {
         &self.params
     }
@@ -280,6 +349,7 @@ impl Dynamics {
         }
     }
 
+    /// Clears the detector, the smoother and the gate state; the gain returns to 0 dB.
     pub fn reset(&mut self) {
         self.follower.reset();
         self.gain_smoother.reset(0.0);
@@ -349,8 +419,18 @@ impl Dynamics {
     /// linking, and returns the filtered sample. Keep one filter state per
     /// channel and index it by `channel`:
     ///
-    /// ```ignore
-    /// dynamics.process_filtered(&mut chans, None, |ch, x| high_pass[ch].process(x));
+    /// ```
+    /// use openplugin_dsp::{Dynamics, OnePoleFilter, OnePoleMode};
+    ///
+    /// let mut dynamics = Dynamics::new(48_000.0);
+    /// let mut high_pass = [OnePoleFilter::new(), OnePoleFilter::new()];
+    /// for f in &mut high_pass {
+    ///     f.set(OnePoleMode::HighPass, 48_000.0, 150.0); // the detector ignores the bass
+    /// }
+    /// let (mut left, mut right) = (vec![0.5f32; 480], vec![0.5f32; 480]);
+    /// let mut chans = [left.as_mut_slice(), right.as_mut_slice()];
+    /// dynamics.process_filtered(&mut chans, None, |ch, x| high_pass[ch].process_sample(x));
+    /// assert!(dynamics.gain_reduction_db() < 0.5); // the steady offset is filtered out of the detector
     /// ```
     ///
     /// Any `f32 -> f32` filter fits (a biquad, state-variable filter or

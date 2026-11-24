@@ -56,6 +56,24 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// 2x oversampling with a designed minimum-phase half-band filter.
+/// `design` allocates; `upsample_2x` and `downsample_2x` do not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::MinPhaseHalfband;
+///
+/// let mut up = MinPhaseHalfband::design(48_000.0, 20_000.0, 90.0).unwrap();
+/// let mut down = up.clone();
+/// let input = vec![0.5f32; 256];
+/// let mut oversampled = vec![0.0f32; 512];
+/// up.upsample_2x(&input, &mut oversampled);
+/// // ... the non-linear stage runs at 96 kHz here ...
+/// let mut output = vec![0.0f32; 256];
+/// down.downsample_2x(&oversampled, &mut output);
+/// assert!((output[255] - 0.5).abs() < 1e-3); // DC passes at unity
+/// assert!(MinPhaseHalfband::design(48_000.0, 30_000.0, 90.0).is_err()); // passband above Nyquist
+/// ```
 #[derive(Clone, Debug)]
 pub struct MinPhaseHalfband {
     taps: Vec<f32>,
@@ -123,6 +141,7 @@ impl MinPhaseHalfband {
         &self.taps
     }
 
+    /// Clears the filter history. Does not allocate.
     pub fn reset(&mut self) {
         self.up.clear();
         self.down_even.clear();

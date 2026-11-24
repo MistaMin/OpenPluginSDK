@@ -112,6 +112,17 @@ type MatFn = fn(&mut [f32], &[f32], &[f32], Option<&[f32]>);
 type BiqFn = fn(&[[f32; 5]], &mut [f32], &mut [f32]);
 
 /// A table of kernels for one instruction set. `Copy`; pass it by value.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::simd::Kernels;
+///
+/// let k = Kernels::detect(); // in prepare; keep the value
+/// let mut dst = [0.0f32; 8];
+/// k.gain(&mut dst, &[1.0; 8], 0.5);
+/// assert_eq!(dst, [0.5; 8]);
+/// assert_eq!(k.dot(&[1.0, 2.0], &[3.0, 4.0]), 11.0);
+/// ```
 #[derive(Clone, Copy)]
 pub struct Kernels {
     isa: Isa,
@@ -316,6 +327,18 @@ impl Kernels {
 /// the layout). Coefficients are shared by the four channels; each section is
 /// `[b0, b1, b2, a1, a2]` with `a0 = 1`. Built off the audio thread (it
 /// allocates); processing does not allocate.
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::simd::BiquadBank4;
+///
+/// // One pass-through section, [b0, b1, b2, a1, a2].
+/// let mut bank = BiquadBank4::new(&[[1.0, 0.0, 0.0, 0.0, 0.0]]);
+/// let (mut a, mut b, mut c, mut d) = ([1.0f32; 16], [2.0f32; 16], [3.0f32; 16], [4.0f32; 16]);
+/// bank.process([&mut a, &mut b, &mut c, &mut d]);
+/// assert_eq!(d[15], 4.0);
+/// assert_eq!(bank.sections(), 1);
+/// ```
 #[derive(Clone, Debug)]
 pub struct BiquadBank4 {
     kernels: Kernels,

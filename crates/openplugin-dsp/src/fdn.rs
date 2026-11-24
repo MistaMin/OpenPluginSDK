@@ -202,6 +202,25 @@ fn parity(x: usize) -> f32 {
 ///
 /// The output is the wet signal only (early reflections plus the tail); mix
 /// it with the dry path yourself.
+/// `new` and `set_sample_rate` allocate; `process` and the other setters do
+/// not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{FdnMatrix, FdnReverb};
+///
+/// let mut reverb = FdnReverb::new(48_000.0, 8);
+/// reverb.set_rt60(2.5, 2.0, 1.2); // seconds at the low, mid and high references
+/// reverb.set_matrix(FdnMatrix::Hadamard);
+/// reverb.set_predelay_ms(20.0);
+/// let mut left = vec![0.0f32; 9_600];
+/// let mut right = vec![0.0f32; 9_600];
+/// left[0] = 1.0;
+/// reverb.process(&mut left, &mut right);
+/// assert!(right.iter().any(|s| s.abs() > 1e-4)); // the tail reaches both sides
+/// assert!(left.iter().chain(&right).all(|s| s.is_finite()));
+/// ```
 #[derive(Clone, Debug)]
 pub struct FdnReverb {
     sample_rate: f32,
@@ -434,6 +453,7 @@ impl FdnReverb {
         }
     }
 
+    /// Selects the feedback matrix. Takes effect at the next sample.
     pub fn set_matrix(&mut self, matrix: FdnMatrix) {
         self.matrix = matrix;
     }
@@ -473,6 +493,7 @@ impl FdnReverb {
         }
     }
 
+    /// Whether freeze is on.
     pub fn is_frozen(&self) -> bool {
         self.frozen
     }

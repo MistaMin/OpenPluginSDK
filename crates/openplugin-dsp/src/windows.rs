@@ -25,7 +25,9 @@ use std::f64::consts::PI;
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum WindowKind {
+    /// All ones.
     Rectangular,
+    /// Raised cosine, `0.5 - 0.5 cos`.
     Hann,
     /// Classic 0.54 / 0.46 Hamming.
     Hamming,
@@ -33,9 +35,13 @@ pub enum WindowKind {
     Blackman,
     /// Four-term minimum-sidelobe window (-92 dB), Harris 1978.
     BlackmanHarris,
+    /// Five-term flat-top window, for amplitude-accurate readings.
     FlatTop,
     /// Kaiser with shape `beta` (0 is rectangular; about 8.6 gives -90 dB sidelobes).
-    Kaiser { beta: f32 },
+    Kaiser {
+        /// Shape parameter, 0 or more.
+        beta: f32,
+    },
     /// Square root of the periodic Hann window. Used as both the analysis and
     /// synthesis window, the product is Hann.
     SqrtHann,

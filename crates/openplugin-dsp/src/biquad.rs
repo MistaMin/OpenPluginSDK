@@ -4,19 +4,50 @@ use std::f64::consts::PI;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+/// Response computed by [`Biquad::configure`].
+///
+/// `q` is the cookbook's Q for every type; `gain_db` is used by `Peaking`,
+/// `LowShelf` and `HighShelf` only.
 pub enum FilterType {
+    /// 12 dB/octave low-pass, unity gain at DC.
     LowPass,
+    /// 12 dB/octave high-pass, unity gain at Nyquist.
     HighPass,
+    /// Band-pass with 0 dB peak gain at `freq`.
     BandPass,
+    /// Notch at `freq`, unity gain away from it.
     Notch,
+    /// Bell of `gain_db` at `freq`.
     Peaking,
+    /// Shelf of `gain_db` below `freq`.
     LowShelf,
+    /// Shelf of `gain_db` above `freq`.
     HighShelf,
 }
 
 /// Coefficients and state are `f64`: in `f32` a 20 to 40 Hz shelf or
 /// low-pass is off by up to 1 dB at 96 and 192 kHz.
 #[derive(Debug, Clone, Default)]
+/// A second-order section in transposed direct form with RBJ cookbook
+/// coefficients.
+///
+/// One instance per channel. No allocation. Non-finite parameters to
+/// [`configure`](Self::configure) keep the previous coefficients.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Biquad, FilterType};
+///
+/// let mut lowpass = Biquad::new();
+/// lowpass.configure(FilterType::LowPass, 48_000.0, 1_000.0, 0.707, 0.0);
+///
+/// let mut y = 0.0;
+/// for _ in 0..4_800 {
+///     y = lowpass.process_sample(1.0);
+/// }
+/// assert!((y - 1.0).abs() < 1e-3); // unity gain at DC
+/// ```
 pub struct Biquad {
     b0: f64,
     b1: f64,
@@ -30,6 +61,8 @@ pub struct Biquad {
 }
 
 impl Biquad {
+    /// A pass-through filter (`b0 = 1`) with cleared state, until
+    /// [`configure`](Self::configure) is called.
     pub fn new() -> Self {
         Self {
             b0: 1.0,
@@ -37,6 +70,7 @@ impl Biquad {
         }
     }
 
+    /// Clears the filter state and keeps the coefficients.
     pub fn reset(&mut self) {
         self.x1 = 0.0;
         self.x2 = 0.0;

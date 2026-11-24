@@ -15,6 +15,20 @@ pub fn hann(phase: f32) -> f32 {
     0.5 * (1.0 - (phase * std::f32::consts::TAU).cos())
 }
 
+/// A rectangular sliding RMS window; see the module documentation.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::WindowRms;
+///
+/// let mut rms = WindowRms::new(4);
+/// let mut level = 0.0;
+/// for _ in 0..4 {
+///     level = rms.push(0.5);
+/// }
+/// assert!((level - 0.5).abs() < 1e-6);
+/// ```
 #[derive(Clone, Debug)]
 pub struct WindowRms {
     squares: Vec<f32>,
@@ -24,6 +38,7 @@ pub struct WindowRms {
 }
 
 impl WindowRms {
+    /// A window of `window` samples (at least 1). Allocates.
     pub fn new(window: usize) -> Self {
         Self {
             squares: vec![0.0; window.max(1)],
@@ -32,6 +47,7 @@ impl WindowRms {
         }
     }
 
+    /// Clears the window.
     pub fn reset(&mut self) {
         self.squares.fill(0.0);
         self.index = 0;

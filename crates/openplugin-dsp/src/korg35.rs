@@ -63,6 +63,21 @@ pub enum Korg35Mode {
 }
 
 /// Korg-35 style Sallen-Key two-pole. See the [module documentation](self).
+/// Plain state, no allocation; realtime-safe.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Korg35, Korg35Mode};
+///
+/// let mut filter = Korg35::new(48_000.0);
+/// filter.set_mode(Korg35Mode::LowPass);
+/// filter.set_cutoff(800.0);
+/// filter.set_resonance(0.5);
+/// let mut buf = vec![0.5f32; 4_800];
+/// filter.process(&mut buf);
+/// assert!(buf.iter().all(|s| s.is_finite()));
+/// ```
 #[derive(Debug, Clone)]
 pub struct Korg35 {
     sample_rate: f64,

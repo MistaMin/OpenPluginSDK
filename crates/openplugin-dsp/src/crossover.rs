@@ -38,8 +38,12 @@ use crate::filters::{Butterworth, ButterworthKind};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LrOrder {
+    /// Second order, 12 dB/octave. The high band is polarity-inverted (see the
+    /// module documentation).
     Lr2,
+    /// Fourth order, 24 dB/octave.
     Lr4,
+    /// Eighth order, 48 dB/octave.
     Lr8,
 }
 
@@ -56,6 +60,17 @@ impl LrOrder {
 /// One two-band Linkwitz-Riley split. [`LinkwitzRiley::process_sample`] returns
 /// `(low, high)`; for LR2 `high` is polarity-inverted (see the module docs).
 #[derive(Debug, Clone)]
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{LinkwitzRiley, LrOrder};
+///
+/// let mut split = LinkwitzRiley::new(LrOrder::Lr4);
+/// split.set(48_000.0, 1_000.0);
+/// let (low, high) = split.process_sample(1.0);
+/// assert!(low.is_finite() && high.is_finite());
+/// ```
 pub struct LinkwitzRiley {
     order: LrOrder,
     low: [Butterworth; 2],
@@ -63,6 +78,8 @@ pub struct LinkwitzRiley {
 }
 
 impl LinkwitzRiley {
+    /// A split of the given order. It passes nothing useful until
+    /// [`set`](Self::set) gives it a frequency. Does not allocate.
     pub fn new(order: LrOrder) -> Self {
         Self {
             order,
@@ -71,16 +88,21 @@ impl LinkwitzRiley {
         }
     }
 
+    /// The order chosen at construction.
     pub fn order(&self) -> LrOrder {
         self.order
     }
 
+    /// Clears the filter state and keeps the crossover frequency.
     pub fn reset(&mut self) {
         for f in self.low.iter_mut().chain(self.high.iter_mut()) {
             f.reset();
         }
     }
 
+    /// Sets the crossover frequency `freq` in Hz for `sample_rate` in Hz. Safe
+    /// to call every sample; non-finite values are ignored (see
+    /// [`Butterworth::set`]).
     pub fn set(&mut self, sample_rate: f32, freq: f32) {
         let n = self.order.butterworth_order();
         for f in &mut self.low {
@@ -118,6 +140,18 @@ pub const MAX_BANDS: usize = 4;
 
 /// 2-, 3- or 4-band crossover whose bands sum to an all-pass of the input.
 #[derive(Debug, Clone)]
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Crossover, LrOrder};
+///
+/// let mut crossover = Crossover::new(LrOrder::Lr4, 3, 48_000.0, &[200.0, 2_000.0]);
+/// let bands = crossover.process_sample(1.0);
+/// // Only the first `bands()` entries are used; they sum to an all-pass of the input.
+/// let sum: f32 = bands[..crossover.bands()].iter().sum();
+/// assert!(sum.is_finite());
+/// ```
 pub struct Crossover {
     bands: usize,
     splits: [LinkwitzRiley; 3],
@@ -147,10 +181,12 @@ impl Crossover {
         c
     }
 
+    /// Number of bands, 2..=4.
     pub fn bands(&self) -> usize {
         self.bands
     }
 
+    /// Clears the filter state and keeps the crossover frequencies.
     pub fn reset(&mut self) {
         for f in self.splits.iter_mut().chain(self.comp.iter_mut()) {
             f.reset();

@@ -53,6 +53,21 @@ pub enum Tuning {
 }
 
 /// Karplus-Strong / Jaffe-Smith plucked string.
+/// `new` and `prepare` allocate the loop; everything else is allocation-free.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::PluckedString;
+///
+/// let mut string = PluckedString::new(48_000.0, 40.0);
+/// string.set_frequency(196.0);
+/// string.set_decay(2.0);
+/// string.pluck(0.9);
+/// let mut out = vec![0.0f32; 4_800];
+/// string.process(&mut out);
+/// assert!(out.iter().any(|s| s.abs() > 0.01));
+/// ```
 #[derive(Clone, Debug)]
 pub struct PluckedString {
     fs: f64,
@@ -145,6 +160,7 @@ impl PluckedString {
         }
     }
 
+    /// How the fractional part of the loop delay is tuned.
     pub fn set_tuning(&mut self, tuning: Tuning) {
         self.tuning = tuning;
         self.redesign();

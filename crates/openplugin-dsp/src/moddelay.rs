@@ -26,6 +26,22 @@ use crate::rate::effective_rate;
 const FLUSH: f32 = 1e-30;
 
 /// Circular delay with a fractional, modulated read position.
+/// `new` and `prepare` allocate the line; `write`, `read` and `process` do
+/// not.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Interpolation, ModDelay};
+///
+/// let mut delay = ModDelay::new(48_000.0, 20.0, Interpolation::Hermite);
+/// let mut out = [0.0f32; 16];
+/// for (n, y) in out.iter_mut().enumerate() {
+///     let x = if n == 0 { 1.0 } else { 0.0 };
+///     *y = delay.process(x, 10.0); // an integer delay is exact
+/// }
+/// assert!((out[10] - 1.0).abs() < 1e-6);
+/// ```
 #[derive(Clone, Debug)]
 pub struct ModDelay {
     buf: Vec<f32>,
@@ -71,6 +87,7 @@ impl ModDelay {
         self.thiran.reset();
     }
 
+    /// The sample rate the delay was prepared for, Hz.
     pub fn sample_rate(&self) -> f32 {
         self.sample_rate
     }
@@ -85,6 +102,7 @@ impl ModDelay {
         self.interp.min_delay()
     }
 
+    /// The interpolator in use.
     pub fn interpolation(&self) -> Interpolation {
         self.interp
     }
@@ -156,6 +174,21 @@ impl ModDelay {
 ///
 /// `next(target)` moves a fraction `1 - exp(-1 / (tau * fs))` of the way to
 /// `target` each call. A non-finite target is ignored.
+/// Plain state, no allocation.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::Glide;
+///
+/// let mut glide = Glide::new(48_000.0, 5.0);
+/// assert_eq!(glide.next(2.0), 2.0); // the first call lands on the target
+/// let mut v = 0.0;
+/// for _ in 0..4_800 {
+///     v = glide.next(4.0);
+/// }
+/// assert!((v - 4.0).abs() < 1e-3);
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Glide {
     value: f32,
@@ -171,6 +204,8 @@ impl Glide {
         g
     }
 
+    /// Sets the glide time constant in milliseconds at `sample_rate` Hz; 0 (or
+    /// a non-finite value) jumps.
     pub fn set_time(&mut self, sample_rate: f32, ms: f32) {
         let fs = f64::from(effective_rate(sample_rate));
         let tau = if ms.is_finite() { f64::from(ms.max(0.0)) / 1000.0 } else { 0.0 };
@@ -185,6 +220,7 @@ impl Glide {
         }
     }
 
+    /// The current (glided) value.
     pub fn value(&self) -> f32 {
         self.value
     }

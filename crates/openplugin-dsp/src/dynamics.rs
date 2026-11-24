@@ -1,6 +1,8 @@
 //! Feed-forward log-domain dynamics processor.
 #![allow(deprecated)] // this module defines the deprecated items
 
+/// The original feed-forward compressor, kept as it was. Plain state, no
+/// allocation.
 #[derive(Debug, Clone)]
 #[deprecated(since = "1.0.0", note = "use `Dynamics`, the compressor, expander and gate with a soft knee and a sidechain")]
 pub struct Compressor {
@@ -16,6 +18,7 @@ impl Default for Compressor {
 }
 
 impl Compressor {
+    /// A compressor at rest, at 44.1 kHz until [`Self::set_sample_rate`] is called.
     pub fn new() -> Self {
         Self {
             sample_rate: 44100.0,
@@ -24,15 +27,18 @@ impl Compressor {
         }
     }
 
+    /// Sets the sample rate in Hz; values below 1 kHz are raised to 1 kHz.
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr.max(1000.0);
     }
 
+    /// Clears the detector and the gain reduction.
     pub fn reset(&mut self) {
         self.envelope_db = -120.0;
         self.gain_reduction_db = 0.0;
     }
 
+    /// Gain reduction of the last frame, positive dB.
     pub fn current_gain_reduction_db(&self) -> f32 {
         self.gain_reduction_db
     }

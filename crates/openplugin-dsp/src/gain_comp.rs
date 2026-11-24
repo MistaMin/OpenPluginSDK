@@ -4,6 +4,23 @@
 //! gate, and a correction clamped to ±12 dB. It is not LUFS and it is not a
 //! limiter. While disabled, the correction releases back to unity.
 
+/// Plain state, no allocation; `process` runs per frame on the audio thread.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::GainComp;
+///
+/// let mut gc = GainComp::new(48_000.0);
+/// let mut gain = 1.0;
+/// // 20 s in which the processing made the signal 6 dB quieter (the
+/// // estimates have 2 s time constants).
+/// for _ in 0..48_000 * 20 {
+///     gain = gc.process([0.5, 0.5], [0.25, 0.25], true);
+/// }
+/// assert!((gc.correction_db() - 6.02).abs() < 0.05);
+/// assert!((gain - 2.0).abs() < 0.01);
+/// ```
 #[derive(Clone, Debug)]
 pub struct GainComp {
     input_power: f64,
@@ -41,14 +58,17 @@ impl GainComp {
         }
     }
 
+    /// The correction cap, dB.
     pub fn limit_db(&self) -> f32 {
         self.limit_db as f32
     }
 
+    /// The current correction, dB (positive is a boost).
     pub fn correction_db(&self) -> f32 {
         self.correction_db as f32
     }
 
+    /// Clears the power estimates; the correction returns to 0 dB.
     pub fn reset(&mut self) {
         self.input_power = 0.0;
         self.output_power = 0.0;

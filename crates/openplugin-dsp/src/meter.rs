@@ -9,6 +9,8 @@
 //! from the input/output ratio.
 #![allow(deprecated)] // this module defines the deprecated items
 
+/// A one-pole VU approximation with a 300 ms time constant (see the module
+/// documentation for why it is deprecated). Plain state, no allocation.
 #[derive(Debug, Clone)]
 #[deprecated(since = "1.0.0", note = "a one-pole approximation; use `VuIec`, which meets IEC 60268-17")]
 pub struct VuMeter {
@@ -23,6 +25,7 @@ impl Default for VuMeter {
 }
 
 impl VuMeter {
+    /// A meter at rest, at 44.1 kHz until [`Self::set_sample_rate`] is called.
     pub fn new() -> Self {
         Self {
             sample_rate: 44100.0,
@@ -30,10 +33,12 @@ impl VuMeter {
         }
     }
 
+    /// Sets the sample rate in Hz; values below 1 kHz are raised to 1 kHz.
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr.max(1000.0);
     }
 
+    /// Returns the needle to rest.
     pub fn reset(&mut self) {
         self.envelope = 0.0;
     }
@@ -91,6 +96,22 @@ mod vu_meter_tests {
 /// discretised with the bilinear transform. The input is the full-wave
 /// rectified (average-responding) signal scaled by `pi / (2 sqrt 2)`, so a
 /// steady sine reads its RMS, the VU convention.
+/// Plain state, no allocation; one per channel, owned by the audio thread.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::VuIec;
+///
+/// let rate = 48_000.0;
+/// let mut vu = VuIec::new(rate);
+/// // One second of a full-scale sine: the needle settles at its RMS, -3 dB.
+/// let sine: Vec<f32> = (0..48_000)
+///     .map(|n| (2.0 * std::f32::consts::PI * 1_000.0 * n as f32 / rate).sin())
+///     .collect();
+/// vu.process(&sine);
+/// assert!((vu.level_db() + 3.0).abs() < 0.3);
+/// ```
 #[derive(Clone, Debug)]
 pub struct VuIec {
     b: [f64; 3],
@@ -122,6 +143,8 @@ impl VuIec {
     /// Seconds to 99 % of a steady tone's reading.
     pub const RISE_SECONDS: f64 = 0.3;
 
+    /// A needle at rest for `sample_rate` in Hz (an out-of-range rate is clamped
+    /// to the SDK's range). Does not allocate.
     pub fn new(sample_rate: f32) -> Self {
         let fs = f64::from(crate::rate::effective_rate(sample_rate));
         let zeta = Self::DAMPING;
@@ -138,6 +161,7 @@ impl VuIec {
         }
     }
 
+    /// Returns the needle to rest.
     pub fn reset(&mut self) {
         self.z = [0.0; 2];
         self.y = 0.0;
@@ -154,6 +178,8 @@ impl VuIec {
         y as f32
     }
 
+    /// Feeds a block and returns the needle position after its last sample
+    /// (linear, RMS-calibrated). Non-finite samples count as 0. Realtime-safe.
     pub fn process(&mut self, block: &[f32]) -> f32 {
         for &x in block {
             self.next(x);
@@ -184,19 +210,46 @@ struct ChannelMeter {
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct MeterReadings {
+    /// Input sample peak per channel (held 750 ms, then a 650 ms decay), dBFS.
     pub input_peak: [f64; 2],
+    /// Output sample peak per channel, as `input_peak`, dBFS.
     pub output_peak: [f64; 2],
+    /// Input RMS per channel (300 ms one-pole on the power), dBFS.
     pub input_rms: [f64; 2],
+    /// Output RMS per channel, dBFS.
     pub output_rms: [f64; 2],
+    /// Input quasi-peak per channel (5 ms rise, 650 ms fall), dBFS.
     pub input_ppm: [f64; 2],
+    /// Output quasi-peak per channel, dBFS.
     pub output_ppm: [f64; 2],
+    /// Input VU per channel, dB with 0 VU at a -18 dBFS sine.
     pub input_vu: [f64; 2],
+    /// Output VU per channel, dB with 0 VU at a -18 dBFS sine.
     pub output_vu: [f64; 2],
+    /// Gain reduction with PPM ballistics, positive dB of attenuation.
     pub reduction_ppm: f64,
+    /// Gain reduction with VU ballistics, positive dB of attenuation.
     pub reduction_vu: f64,
 }
 
 /// Stereo peak, RMS, PPM, and VU for input and output, plus envelope GR.
+/// Plain state, no allocation; `push` runs per frame on the audio thread.
+/// Levels floor at -120 dB.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::MeterBank;
+///
+/// let mut bank = MeterBank::new(48_000).expect("supported rate");
+/// for _ in 0..4_800 {
+///     bank.push([0.5, 0.5], [0.25, 0.25], 6.0);
+/// }
+/// let r = bank.readings();
+/// assert!((r.input_peak[0] - (-6.02)).abs() < 0.1);
+/// assert!(r.reduction_ppm > 5.0);
+/// assert!(MeterBank::new(500).is_none()); // below the SDK's rate range
+/// ```
 pub struct MeterBank {
     input: [ChannelMeter; 2],
     output: [ChannelMeter; 2],
@@ -276,6 +329,7 @@ impl MeterBank {
         self.gr_average += (gr - self.gr_average) * self.vu;
     }
 
+    /// The current readings of both channels, in dB. Does not allocate.
     pub fn readings(&self) -> MeterReadings {
         let ppm = |x: [ChannelMeter; 2]| x.map(|channel| db(channel.ppm));
         let vu = |x: [ChannelMeter; 2]| {
@@ -295,6 +349,7 @@ impl MeterBank {
         }
     }
 
+    /// Clears every meter to silence.
     pub fn reset(&mut self) {
         self.input = [ChannelMeter::default(); 2];
         self.output = [ChannelMeter::default(); 2];
@@ -364,6 +419,19 @@ fn catmull(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
 /// Short-term is a 400 ms power average in dBFS. Integrated is the mean square
 /// since the last reset, also in dBFS. The cubic peak is not an ITU-R BS.1770
 /// true-peak meter.
+/// Plain state, no allocation.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::BlockLevel;
+///
+/// let mut level = BlockLevel::new(48_000.0);
+/// let block = [0.5f32; 480];
+/// level.push_stereo(&block, &block);
+/// assert!(level.integrated_db() > -10.0);
+/// assert!(level.true_peak_db()[0] <= 0.0);
+/// ```
 #[derive(Clone, Debug)]
 pub struct BlockLevel {
     short: f64,
@@ -375,6 +443,8 @@ pub struct BlockLevel {
 }
 
 impl BlockLevel {
+    /// A cleared meter for `sample_rate` in Hz (clamped to the SDK's range). Does
+    /// not allocate.
     pub fn new(sample_rate: f32) -> Self {
         let rate = f64::from(crate::rate::effective_rate(sample_rate));
         Self {
@@ -387,6 +457,7 @@ impl BlockLevel {
         }
     }
 
+    /// Clears the short-term, integrated and peak values.
     pub fn reset(&mut self) {
         self.short = 0.0;
         self.integrated = 0.0;
@@ -395,6 +466,8 @@ impl BlockLevel {
         self.true_peak = [0.0; 2];
     }
 
+    /// Feeds a stereo block. Slices of different lengths are padded with zeros
+    /// to the longer one; non-finite samples count as 0. Realtime-safe.
     pub fn push_stereo(&mut self, left: &[f32], right: &[f32]) {
         let n = left.len().max(right.len());
         for index in 0..n {
@@ -430,14 +503,18 @@ impl BlockLevel {
         }
     }
 
+    /// Short-term (400 ms) level, dBFS.
     pub fn short_db(&self) -> f32 {
         db_fs(self.short)
     }
 
+    /// Ungated mean level since the last reset, dBFS.
     pub fn integrated_db(&self) -> f32 {
         db_fs(self.integrated)
     }
 
+    /// Interpolated (4x cubic) peak per channel since the last reset, dBFS;
+    /// -100 when below -120 dBFS.
     pub fn true_peak_db(&self) -> [f32; 2] {
         self.true_peak.map(|peak| {
             if peak <= 1e-6 {

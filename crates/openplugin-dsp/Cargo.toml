@@ -20,3 +20,9 @@ serde_json = "1"
 
 [dev-dependencies]
 openplugin-testing = { workspace = true }
+
+[package.metadata.docs.rs]
+# No cargo features. The SIMD paths differ by architecture, so docs.rs builds each target.
+all-features = true
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-pc-windows-msvc"]

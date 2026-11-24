@@ -61,6 +61,15 @@ pub enum Quality {
 }
 
 /// Kernel design parameters. See [`SincKernel::with_config`].
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Quality, SincConfig, SincKernel};
+///
+/// let config = SincConfig { stopband_db: 90.0, ..SincConfig::from(Quality::Medium) };
+/// let kernel = SincKernel::with_config(config);
+/// assert_eq!(kernel.half_width(), 16);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SincConfig {
     /// Zero crossings each side of the centre; `2 * half_width` taps. 4..=256.
@@ -93,6 +102,20 @@ fn kaiser_beta(a: f64) -> f64 {
 }
 
 /// Precomputed windowed-sinc kernel (the polyphase table).
+/// `new` and `with_config` allocate the table; reading it does not, so share
+/// one kernel between voices on the audio thread.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{Quality, SincKernel};
+///
+/// let kernel = SincKernel::new(Quality::High);
+/// let input: Vec<f32> = (0..1_000).map(|n| (n as f32 * 0.01).sin()).collect();
+/// let mut out = vec![0.0f32; 2_000];
+/// let written = kernel.resample(&input, 0.5, &mut out); // twice as many samples
+/// assert_eq!(written, 2_000);
+/// ```
 #[derive(Clone, Debug)]
 pub struct SincKernel {
     half: usize,
@@ -254,6 +277,24 @@ pub fn playback_ratio(root_hz: f32, note_hz: f32, source_rate: f32, host_rate: f
 }
 
 /// A playhead over one sample, with an optional loop.
+/// Plain state, no allocation; one per voice.
+///
+/// # Example
+///
+/// ```
+/// use openplugin_dsp::{playback_ratio, Quality, SincKernel, SincPlayer};
+///
+/// let kernel = SincKernel::new(Quality::Medium);
+/// let sample: Vec<f32> = (0..4_800).map(|n| (n as f32 * 0.05).sin()).collect();
+/// let mut voice = SincPlayer::new();
+/// // A sample recorded at 44.1 kHz with root A4, played as A5 at 48 kHz.
+/// voice.start(playback_ratio(440.0, 880.0, 44_100.0, 48_000.0));
+/// let mut out = [0.0f32; 256];
+/// for y in &mut out {
+///     *y = voice.next(&kernel, &sample);
+/// }
+/// assert!(voice.position() > 400.0);
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct SincPlayer {
     pos: f64,
@@ -269,6 +310,7 @@ impl Default for SincPlayer {
 }
 
 impl SincPlayer {
+    /// A stopped player at position 0 and ratio 1.
     pub const fn new() -> Self {
         Self { pos: 0.0, ratio: 1.0, looping: None, done: false }
     }
@@ -292,6 +334,7 @@ impl SincPlayer {
         self.looping = looping;
     }
 
+    /// The read position in source samples.
     pub fn position(&self) -> f64 {
         self.pos
     }
