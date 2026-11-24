@@ -23,7 +23,7 @@
 //! bounds checks and no allocation; truncated, oversized or mistyped atoms
 //! are skipped.
 //!
-//! [`export_lv2!`] emits `lv2_descriptor` from a cdylib, and with
+//! [`export_lv2!`](crate::export_lv2) emits `lv2_descriptor` from a cdylib, and with
 //! `editor = make_editor` also `lv2ui_descriptor`: a `ui:CocoaUI` on macOS.
 //! On Linux it is a `ui:X11UI` the host drives through `ui:idleInterface`.
 //! Its gestures are control-port writes plus `ui:touch` grabs, values come
@@ -83,7 +83,8 @@ type CreateFn = fn() -> Box<dyn Plugin>;
 static CREATOR: Mutex<Option<CreateFn>> = Mutex::new(None);
 static EDITOR: Mutex<Option<EditorFactory>> = Mutex::new(None);
 
-/// Audio ports in front of the control ports.
+/// Audio ports in front of the control ports of an effect (in L, in R, out L, out R).
+/// An instrument has 2; see [`PortMap::first_param`].
 pub const AUDIO_PORTS: u32 = 4;
 
 /// Most sidechain channels given a port each.
@@ -114,17 +115,58 @@ pub fn layout_of(plugin: &dyn Plugin) -> IoConfig {
 /// editor and the description file agree.
 ///
 /// Order: audio, parameters, `freeWheeling`, note input, note output,
-/// sidechain inputs.
+/// sidechain inputs, latency. Every index is an LV2 port index (`u32`, from 0).
+/// The methods are plain arithmetic: any thread, no allocation.
+///
+/// ```
+/// use openplugin_core::{Category, ParamInfo, Plugin, PluginInfo, Unit};
+/// use openplugin_targets::lv2::PortMap;
+///
+/// static PARAMS: [ParamInfo; 2] = [
+///     ParamInfo::new("gain", "Gain", 0.0, 1.0, 1.0, Unit::None),
+///     ParamInfo::new("pan", "Pan", -1.0, 1.0, 0.0, Unit::None),
+/// ];
+/// static INFO: PluginInfo =
+///     PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+///
+/// struct Gain;
+/// impl Plugin for Gain {
+///     fn info(&self) -> &'static PluginInfo { &INFO }
+///     fn prepare(&mut self, _: f32, _: usize, _: usize) {}
+///     fn reset(&mut self) {}
+///     fn set_param(&mut self, _: &str, _: f32) -> bool { false }
+///     fn param(&self, _: &str) -> Option<f32> { None }
+///     fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
+/// }
+///
+/// let ports = PortMap::of(&Gain);
+/// assert_eq!(ports.first_param(), 4); // after in L, in R, out L, out R
+/// assert_eq!(ports.freewheel(), 6);
+/// // `Plugin::note_ports` keeps a MIDI input by default.
+/// assert_eq!(ports.atom_in(), Some(7));
+/// assert_eq!(ports.atom_out(), None);
+/// assert_eq!(ports.latency(), 8);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortMap {
+    /// The plugin is an instrument: no main audio input, outputs at ports 0 and 1.
     pub instrument: bool,
+    /// Number of parameter control ports, one per [`ParamInfo`].
     pub params: u32,
+    /// An `atom:Sequence` input for MIDI and transport is present.
     pub notes_in: bool,
+    /// An `atom:Sequence` output for MIDI is present.
     pub notes_out: bool,
+    /// Sidechain audio inputs, one port per channel, at most 8.
     pub sidechain: u32,
 }
 
 impl PortMap {
+    /// The map for `plugin`, from its [`PluginInfo`](openplugin_core::PluginInfo),
+    /// [`Plugin::note_ports`] and the layout the LV2 entry picks from
+    /// [`Plugin::supported_layouts`] (stereo output, a sidechain preferred). A
+    /// sidechain wider than 8 channels gets 8 ports. Does not allocate unless
+    /// the plugin's own `supported_layouts` does.
     pub fn of(plugin: &dyn Plugin) -> Self {
         let info = plugin.info();
         let ports = plugin.note_ports();
@@ -142,18 +184,23 @@ impl PortMap {
         if self.instrument { 2 } else { AUDIO_PORTS }
     }
 
+    /// The `lv2:freeWheeling` control input, right after the parameters.
     pub fn freewheel(self) -> u32 {
         self.first_param() + self.params
     }
 
+    /// The `atom:Sequence` input, after `freeWheeling`; `None` when the plugin takes no notes.
     pub fn atom_in(self) -> Option<u32> {
         self.notes_in.then(|| self.freewheel() + 1)
     }
 
+    /// The `atom:Sequence` MIDI output, after the input; `None` when the plugin sends no MIDI.
     pub fn atom_out(self) -> Option<u32> {
         self.notes_out.then(|| self.freewheel() + 1 + u32::from(self.notes_in))
     }
 
+    /// The first sidechain audio input, after the atom ports. With no sidechain
+    /// ([`sidechain`](Self::sidechain) is 0) this is the latency port's index.
     pub fn sidechain_first(self) -> u32 {
         self.freewheel() + 1 + u32::from(self.notes_in) + u32::from(self.notes_out)
     }
@@ -781,7 +828,9 @@ struct Instance {
 
 const PREPARED: usize = 8192;
 
-/// The plugin's URI: [`Plugin::lv2_uri`], else its id.
+/// The plugin's URI: [`Plugin::lv2_uri`], else its id. Any thread; does not
+/// allocate. The id is used as is, so a plugin whose id is not a URI should
+/// return one from `lv2_uri`.
 pub fn plugin_uri(plugin: &dyn Plugin) -> &'static str {
     plugin.lv2_uri().unwrap_or(plugin.info().id)
 }
@@ -1468,11 +1517,15 @@ mod ui {
     use std::cell::Cell;
     use std::rc::Rc;
 
+    /// `LV2UI_Write_Function`.
     pub type WriteFn = unsafe extern "C" fn(controller: *mut c_void, port: u32, size: u32, protocol: u32, buffer: *const c_void);
 
+    /// `LV2UI_Descriptor`, as `ui.h` lays it out: what `lv2ui_descriptor` returns.
     #[repr(C)]
     pub struct Lv2UiDescriptor {
+        /// The editor's URI (`<plugin uri>#ui`), a NUL-terminated static string.
         pub uri: *const c_char,
+        /// Opens the editor in the host's parent widget (main thread). Null on failure.
         pub instantiate: unsafe extern "C" fn(
             *const Lv2UiDescriptor,
             *const c_char,
@@ -1482,8 +1535,11 @@ mod ui {
             *mut *mut c_void,
             *const *const Lv2Feature,
         ) -> *mut c_void,
+        /// Closes the editor and frees it (main thread).
         pub cleanup: unsafe extern "C" fn(*mut c_void),
+        /// A control port's new value from the host (main thread); other ports and protocols are ignored.
         pub port_event: unsafe extern "C" fn(*mut c_void, u32, u32, u32, *const c_void),
+        /// `ui:idleInterface`, `ui:resize` and the other UI extensions by URI; null for one it does not have.
         pub extension_data: unsafe extern "C" fn(*const c_char) -> *const c_void,
     }
 
@@ -1694,7 +1750,14 @@ mod ui {
     }
 }
 
-/// The plugin library's file name in an LV2 bundle on this system.
+/// The plugin library's file name in an LV2 bundle on this system: `stem`
+/// plus `.dylib` on macOS, `.dll` on Windows and `.so` elsewhere. `stem` is
+/// not checked. Allocates the returned string.
+///
+/// ```
+/// let file = openplugin_targets::lv2::binary_file("gain");
+/// assert!(file.starts_with("gain."));
+/// ```
 pub fn binary_file(stem: &str) -> String {
     let ext = if cfg!(target_os = "macos") {
         "dylib"
@@ -1804,7 +1867,10 @@ fn lv2_version(version: &str) -> (u32, u32) {
 }
 
 /// `manifest.ttl`: what a host reads to find the plugin and its editor.
-/// `binary_stem` is the library's name in the bundle without its extension.
+/// `binary_stem` is the library's name in the bundle without its extension
+/// ([`binary_file`] adds it). With `with_ui` the editor is listed as the
+/// system's UI class (`ui:CocoaUI`, `ui:X11UI` or `ui:WindowsUI`). Build-time
+/// call: allocates, never fails, and does not check `binary_stem`.
 pub fn manifest_ttl(plugin: &dyn Plugin, binary_stem: &str, with_ui: bool) -> String {
     let uri = plugin_uri(plugin);
     let binary = binary_file(binary_stem);
@@ -1829,7 +1895,9 @@ pub fn manifest_ttl(plugin: &dyn Plugin, binary_stem: &str, with_ui: bool) -> St
     out
 }
 
-/// `<binary_stem>.ttl`: the plugin, its ports, and its editor.
+/// `<binary_stem>.ttl`: the plugin, its ports (in [`PortMap`] order, with each
+/// parameter's range, default, unit and steps), and with `with_ui` its editor as
+/// a fixed-size one. Build-time call: allocates and never fails.
 pub fn plugin_ttl(plugin: &dyn Plugin, with_ui: bool) -> String {
     plugin_ttl_sized(plugin, with_ui.then_some(false))
 }
@@ -1837,6 +1905,7 @@ pub fn plugin_ttl(plugin: &dyn Plugin, with_ui: bool) -> String {
 /// [`plugin_ttl`] for an editor of known size behaviour: `ui` is `None` for no
 /// editor, `Some(false)` for a fixed-size one (`ui:noUserResize`), and
 /// `Some(true)` for one the host can resize (`ui:resize` extension data).
+/// Build-time call: allocates and never fails.
 pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
     let with_ui = ui.is_some();
     let resizable = ui == Some(true);
@@ -2007,8 +2076,20 @@ pub fn plugin_ttl_sized(plugin: &dyn Plugin, ui: Option<bool>) -> String {
 }
 
 /// Write `manifest.ttl` and `<binary_stem>.ttl` into an LV2 bundle folder.
-/// The editor is described on macOS when `with_ui` is set (`ui:CocoaUI`),
-/// and on Linux (`ui:X11UI`).
+/// With `with_ui` the editor is described as fixed-size on macOS (`ui:CocoaUI`),
+/// Linux (`ui:X11UI`) and Windows; on other systems it is left out. `dir` must
+/// exist; files already there are overwritten. Returns the first write error.
+/// Build-time call, not for the audio thread.
+///
+/// ```no_run
+/// # use openplugin_core::Plugin;
+/// # fn bundle(plugin: &dyn Plugin) -> std::io::Result<()> {
+/// let dir = std::path::Path::new("target/gain.lv2");
+/// std::fs::create_dir_all(dir)?;
+/// openplugin_targets::lv2::write_bundle(plugin, dir, "gain", false)?;
+/// // Then copy the cdylib in as `dir.join(openplugin_targets::lv2::binary_file("gain"))`.
+/// # Ok(()) }
+/// ```
 pub fn write_bundle(plugin: &dyn Plugin, dir: &std::path::Path, binary_stem: &str, with_ui: bool) -> std::io::Result<()> {
     let with_ui = with_ui && cfg!(any(target_os = "macos", target_os = "linux", windows));
     std::fs::write(dir.join("manifest.ttl"), manifest_ttl(plugin, binary_stem, with_ui))?;
@@ -2018,7 +2099,9 @@ pub fn write_bundle(plugin: &dyn Plugin, dir: &std::path::Path, binary_stem: &st
 /// [`write_bundle`] for a plugin whose editor is made by `editor`: the editor
 /// is asked for its size range, and the description lists `ui:noUserResize`
 /// only if it is fixed. Without an editor (`None`, or one that cannot be made)
-/// no editor is described.
+/// no editor is described. The editor is made once with a detached host to
+/// read its size and dropped, so call this from a build step on the main
+/// thread, not inside a host. Errors as [`write_bundle`].
 pub fn write_bundle_for_editor(
     plugin: &dyn Plugin,
     dir: &std::path::Path,
@@ -2103,7 +2186,11 @@ impl<P: Plugin> Lv2Harness<P> {
 /// Export `lv2_descriptor` from a cdylib. `$plugin` implements [`Plugin`] and [`Default`].
 ///
 /// `export_lv2!(P, editor = make_editor)` also exports `lv2ui_descriptor`
-/// (a `ui:CocoaUI` on macOS, a `ui:X11UI` on Linux). Describe it with [`write_bundle`]`(.., true)`.
+/// (a `ui:CocoaUI` on macOS, a `ui:X11UI` on Linux, a `ui:WindowsUI` on
+/// Windows). Describe it with [`write_bundle`]`(.., true)` or
+/// [`write_bundle_for_editor`]. Use it once per cdylib. `lv2_descriptor(0)` is
+/// the plugin and any other index is null; `run` is the audio thread and does
+/// not allocate or lock. See the [crate example](crate#example).
 #[macro_export]
 macro_rules! export_lv2 {
     ($plugin:ty, editor = $editor:path) => {

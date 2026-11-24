@@ -14,7 +14,7 @@
 //! from the next `process` or `flush`, after a `request_flush`. Values that
 //! the host changes reach the editor from the plane, polled by the view.
 //!
-//! A host loads the `clap_entry` symbol from a cdylib that called [`export_clap!`].
+//! A host loads the `clap_entry` symbol from a cdylib that called [`export_clap!`](crate::export_clap).
 //! [`ClapAdapter`] builds the same instance in-process so a test can drive it.
 
 use std::ffi::{CStr, CString, c_char, c_void};
@@ -51,7 +51,7 @@ unsafe impl Sync for Published {}
 
 static PUBLISHED: std::sync::OnceLock<Box<Published>> = std::sync::OnceLock::new();
 
-/// Install the plugin a CLAP host will create. [`export_clap!`] does this from `clap_entry.init`.
+/// Install the plugin a CLAP host will create. [`export_clap!`](crate::export_clap) does this from `clap_entry.init`.
 pub fn set_creator(create: CreateFn) {
     *CREATOR.lock().expect("clap creator lock") = Some(create);
 }
@@ -2708,8 +2708,14 @@ mod gui;
 /// Export `clap_entry` from a cdylib. `$plugin` must implement [`Plugin`] and [`Default`].
 ///
 /// The host calls `clap_entry.init`, which registers the plugin, then `get_factory`.
-/// `export_clap!(P, editor = make_editor)` also offers `clap.gui` on macOS,
-/// with the editor `make_editor` ([`openplugin_core::EditorFactory`]) returns.
+/// `export_clap!(P, editor = make_editor)` also offers `clap.gui` (Cocoa on macOS,
+/// X11 on Linux, Win32 on Windows), with the editor `make_editor`
+/// ([`openplugin_core::EditorFactory`]) returns.
+///
+/// Use it once per cdylib; a second use is a duplicate-symbol error. The host
+/// picks the threads: `process` is the audio thread and does not allocate or
+/// lock, and a panic in the plugin there gives a silent block. Every other call
+/// is the main thread's. See the [crate example](crate#example).
 #[macro_export]
 macro_rules! export_clap {
     ($plugin:ty, editor = $editor:path) => {

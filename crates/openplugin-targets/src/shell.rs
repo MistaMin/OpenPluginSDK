@@ -4,8 +4,9 @@
 //! calls `op_shell_*`. One plugin binary exports one shell.
 //!
 //! `export_shell!(P, editor = make_editor)` also exports the editor ABI of
-//! `native/include/op_editor.h` (`op_editor_*`, macOS), written here in Rust
-//! over [`openplugin_dri::cocoa::EditorView`]. Build the shells with
+//! `native/include/op_editor.h` (`op_editor_*`, on macOS, Linux and Windows),
+//! written here in Rust over the `EditorView` of `openplugin_dri` (`cocoa`,
+//! `x11` or `win32`). Build the shells with
 //! `-DOP_EDITOR=ON` for it. Resizing is a second, optional block of that
 //! header (`OP_EDITOR_RESIZE`): the size range, `op_editor_resize`, and a
 //! callback for an editor that asks its host for a size. Both forms export `op_shell_tail_seconds` from
@@ -462,7 +463,10 @@ pub mod editor {
 /// Export `op_shell_*` from the plugin crate. `$plugin` implements [`Plugin`](openplugin_core::Plugin)
 /// and [`Default`]. Link the staticlib into `native/`.
 ///
-/// `export_shell!(P, editor = make_editor)` adds `op_editor_*` on macOS.
+/// `export_shell!(P, editor = make_editor)` adds `op_editor_*` on macOS, Linux
+/// and Windows. The C contract (threads, return values, null handles) is the one
+/// in `native/include`; `op_shell_process` is the audio thread and does not
+/// allocate or lock. Use it once per staticlib. See the [crate example](crate#example).
 #[macro_export]
 macro_rules! export_shell {
     ($plugin:ty, editor = $editor:path) => {
