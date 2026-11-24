@@ -1453,8 +1453,12 @@ fn host_to_plain_infos(params: &[ParamInfo], index: usize, value: f64) -> f32 {
 
 fn clap_param_flags(param: &ParamInfo) -> u32 {
     // A parameter shown normalized is continuous travel to the host, as in the SDK it came from.
+    // CLAP's stepped parameters take whole values only, so a grid finer than 1 (0.1 dB steps,
+    // for example) stays continuous: a host would round it to whole numbers. The same rule as
+    // the LV2 `lv2:integer` property.
+    let whole_grid = param.steps > 1 && param.min.fract() == 0.0 && (param.max - param.min) == (param.steps - 1) as f32;
     let stepped = !param.normalized_in.contains(HostSpace::CLAP) && (param.flags.contains(ParamFlags::STEPPED)
-        || param.steps > 1
+        || whole_grid
         || !param.choices.is_empty()
         || matches!(param.unit, openplugin_core::Unit::Toggle | openplugin_core::Unit::Choice));
     let mut flags = 0;
@@ -2756,6 +2760,18 @@ macro_rules! export_clap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_whole_number_grids_are_stepped() {
+        let fine = ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db).with_steps(481);
+        let odd_max = ParamInfo::new("threshold", "Threshold", -25.0, 0.1, 0.0, Unit::Db).with_steps(252);
+        let whole = ParamInfo::new("mode", "Mode", -3.0, 3.0, 0.0, Unit::None).with_steps(7);
+        let toggle = ParamInfo::new("on", "On", 0.0, 1.0, 0.0, Unit::Toggle);
+        assert_eq!(clap_param_flags(&fine) & PARAM_IS_STEPPED, 0, "0.1 dB grid stays continuous");
+        assert_eq!(clap_param_flags(&odd_max) & PARAM_IS_STEPPED, 0, "fractional maximum stays continuous");
+        assert_ne!(clap_param_flags(&whole) & PARAM_IS_STEPPED, 0, "whole-number grid is stepped");
+        assert_ne!(clap_param_flags(&toggle) & PARAM_IS_STEPPED, 0, "a toggle is stepped");
+    }
     use openplugin_core::{Category, ParamInfo, PluginInfo, Taper, Unit};
 
     struct Gain {
