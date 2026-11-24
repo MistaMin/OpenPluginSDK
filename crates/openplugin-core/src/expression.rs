@@ -28,6 +28,14 @@
 /// the host's note id, or `-1` when the host gives none (MIDI, the Audio Unit,
 /// AAX, LV2). An expression or modulation names the notes it is for the same
 /// way; see [`NoteRef::matches`].
+///
+/// ```
+/// use openplugin_core::NoteRef;
+/// let played = NoteRef::new(17, 0, 3, 60);
+/// assert!(NoteRef::ALL.matches(played));
+/// assert!(NoteRef::midi(3, 60).matches(played));
+/// assert!(!NoteRef::key(61).matches(played));
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NoteRef {
     /// Host note id, 0 or more, or -1.
@@ -44,6 +52,8 @@ impl NoteRef {
     /// Every note (all four fields are wildcards): a monophonic or global event.
     pub const ALL: Self = Self { id: -1, port: -1, channel: -1, key: -1 };
 
+    /// A note from all four fields, unchecked: `-1` is a wildcard, and any
+    /// other negative value matches nothing but itself.
     pub const fn new(id: i32, port: i16, channel: i16, key: i16) -> Self {
         Self { id, port, channel, key }
     }
@@ -318,11 +328,21 @@ fn number(text: &str) -> Option<f32> {
 }
 
 /// A set of [`Expression`]s, one bit per CLAP id.
+///
+/// ```
+/// use openplugin_core::{Expression, ExpressionSet};
+/// let set = ExpressionSet::NONE.with(Expression::Tuning).with(Expression::Volume);
+/// assert!(set.contains(Expression::Tuning) && !set.contains(Expression::Pan));
+/// assert_eq!(set.len(), 2);
+/// assert_eq!(ExpressionSet::MPE.len(), 3);
+/// ```
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ExpressionSet(u8);
 
 impl ExpressionSet {
+    /// No expression (the default).
     pub const NONE: Self = Self(0);
+    /// All seven expressions.
     pub const ALL: Self = Self(0x7F);
     /// What MPE carries: tuning (pitch bend), pressure and brightness (CC 74).
     pub const MPE: Self = Self(
@@ -334,10 +354,12 @@ impl ExpressionSet {
         Self(self.0 | (1 << expression as u8))
     }
 
+    /// Whether `expression` is in the set.
     pub const fn contains(self, expression: Expression) -> bool {
         self.0 & (1 << expression as u8) != 0
     }
 
+    /// Whether the set has no member.
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
@@ -357,6 +379,7 @@ impl ExpressionSet {
         Expression::ALL.into_iter().filter(move |e| self.contains(*e))
     }
 
+    /// Number of members, 0..=7.
     pub fn len(self) -> usize {
         self.0.count_ones() as usize
     }

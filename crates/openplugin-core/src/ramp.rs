@@ -7,7 +7,18 @@
 
 const POINTS: usize = 32;
 
-/// One parameter across one block.
+/// One parameter across one block. Holds up to 32 points per block; nothing
+/// allocates, so every method is safe on the audio thread.
+///
+/// ```
+/// use openplugin_core::SampleRamp;
+/// let mut ramp = SampleRamp::new(0.0);
+/// ramp.begin(8);
+/// assert!(ramp.push(4, 1.0));
+/// let block: Vec<f32> = (0..8).map(|_| ramp.next_value()).collect();
+/// assert_eq!(block, [0.0, 0.25, 0.5, 0.75, 1.0, 1.0, 1.0, 1.0]);
+/// assert_eq!(ramp.value(), 1.0);
+/// ```
 #[derive(Clone, Debug)]
 pub struct SampleRamp {
     value: f32,
@@ -20,6 +31,7 @@ pub struct SampleRamp {
 }
 
 impl SampleRamp {
+    /// A ramp holding `value`, with no points queued.
     pub const fn new(value: f32) -> Self {
         Self {
             value,
@@ -32,11 +44,13 @@ impl SampleRamp {
         }
     }
 
+    /// The value of the last point reached (or the last [`Self::set`]).
     pub const fn value(&self) -> f32 {
         self.value
     }
 
-    /// Replace the value and drop any queued points.
+    /// Replace the value and drop any queued points. A value that is not
+    /// finite keeps the old value (the points are still dropped).
     pub fn set(&mut self, value: f32) {
         if value.is_finite() {
             self.value = value;

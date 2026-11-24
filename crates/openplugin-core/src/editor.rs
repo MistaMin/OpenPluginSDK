@@ -41,15 +41,29 @@ pub type EditorState = Arc<dyn Any + Send + Sync>;
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum Gesture {
+    /// The user grabbed the control: the host starts an automation touch.
     Begin(u32),
+    /// A new plain value while the control is held.
     Perform(u32, f32),
+    /// The user let go: the host ends the touch.
     End(u32),
 }
 
 type ContextMenuFn = Rc<dyn Fn(u32, i32, i32) -> bool>;
 
 /// Where an editor sends its gestures. Created by the format bridge; cheap to
-/// clone, main thread only.
+/// clone, main thread only (it is `!Send`).
+///
+/// ```
+/// use openplugin_core::{EditorHost, Gesture};
+/// use std::{cell::RefCell, rc::Rc};
+/// let seen = Rc::new(RefCell::new(Vec::new()));
+/// let sink = seen.clone();
+/// let host = EditorHost::new(move |g| sink.borrow_mut().push(g));
+/// host.set(2, 0.5);
+/// host.perform(2, f32::NAN); // dropped: not finite
+/// assert_eq!(*seen.borrow(), [Gesture::Begin(2), Gesture::Perform(2, 0.5), Gesture::End(2)]);
+/// ```
 #[derive(Clone)]
 pub struct EditorHost {
     sink: Rc<dyn Fn(Gesture)>,
@@ -58,6 +72,9 @@ pub struct EditorHost {
 }
 
 impl EditorHost {
+    /// A host that hands every gesture to `sink`, with no resize or context
+    /// menu handler. Format bridges make these; a test or a standalone app
+    /// can too.
     pub fn new(sink: impl Fn(Gesture) + 'static) -> Self {
         Self { sink: Rc::new(sink), resize: None, context_menu: None }
     }
@@ -111,6 +128,9 @@ impl EditorHost {
         Self::new(|_| {})
     }
 
+    /// Send one gesture as is. [`Self::begin`], [`Self::perform`],
+    /// [`Self::end`] and [`Self::set`] are the usual forms; this one does not
+    /// drop a non-finite value.
     pub fn send(&self, gesture: Gesture) {
         (self.sink)(gesture);
     }
@@ -146,13 +166,18 @@ impl EditorHost {
 /// and the editor sees none held.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modifiers {
+    /// Shift.
     pub shift: bool,
+    /// Control.
     pub ctrl: bool,
+    /// Alt (Option on a Mac).
     pub alt: bool,
+    /// Command on a Mac, the Windows key elsewhere.
     pub command: bool,
 }
 
 impl Modifiers {
+    /// No key held.
     pub const NONE: Self = Self { shift: false, ctrl: false, alt: false, command: false };
 
     /// The modifiers that ask for fine adjustment: Shift or Command. Control
@@ -168,23 +193,35 @@ impl Modifiers {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Key {
+    /// Left arrow.
     Left,
+    /// Right arrow.
     Right,
+    /// Up arrow.
     Up,
+    /// Down arrow.
     Down,
+    /// Page Up.
     PageUp,
+    /// Page Down.
     PageDown,
+    /// Home.
     Home,
+    /// End.
     End,
+    /// Tab (with Shift for backwards).
     Tab,
     /// Return and the keypad Enter.
     Return,
+    /// Escape.
     Escape,
     /// The key that deletes forward (Fn-Delete on a Mac keyboard).
     Delete,
     /// The key above Return, which deletes backward.
     Backspace,
+    /// The space bar.
     Space,
+    /// Any other key that types a character: that character, unmodified, lower case.
     Char(char),
 }
 
@@ -193,12 +230,17 @@ pub enum Key {
 #[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct Frame<'a> {
+    /// `width * height` pixels, `0x00RRGGBB`, row by row from the top.
     pub pixels: &'a [u32],
+    /// Width in device pixels.
     pub width: usize,
+    /// Height in device pixels.
     pub height: usize,
 }
 
 impl<'a> Frame<'a> {
+    /// A frame over `pixels`. The length is not checked: keep it
+    /// `width * height`.
     pub const fn new(pixels: &'a [u32], width: usize, height: usize) -> Self {
         Self { pixels, width, height }
     }
@@ -207,14 +249,29 @@ impl<'a> Frame<'a> {
 /// A rectangle of the editor in points, origin top left. What [`Editor::damage`]
 /// reports.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+///
+/// ```
+/// use openplugin_core::editor::DamageRect;
+/// let a = DamageRect::new(0.0, 0.0, 10.0, 10.0);
+/// let b = DamageRect::new(10.0, 0.0, 5.0, 5.0);
+/// assert!(a.touches(&b));
+/// assert_eq!(a.union(&b), DamageRect::new(0.0, 0.0, 15.0, 10.0));
+/// assert!(DamageRect::default().is_empty());
+/// ```
 pub struct DamageRect {
+    /// Left edge, points.
     pub x: f32,
+    /// Top edge, points.
     pub y: f32,
+    /// Width, points.
     pub w: f32,
+    /// Height, points.
     pub h: f32,
 }
 
 impl DamageRect {
+    /// A rectangle at (`x`, `y`), `w` by `h` points. Not checked: see
+    /// [`Self::is_finite`] and [`Self::is_empty`].
     pub const fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }
@@ -256,6 +313,20 @@ impl DamageRect {
 /// [`Editor::render`]. It starts as "everything" (nothing was drawn yet).
 /// [`Self::add`] marks a rectangle, [`Self::add_all`] the whole editor, and
 /// the editor calls [`Self::clear`] once a frame has drawn what it held.
+///
+/// Main thread. [`Self::add`] may allocate while the list grows to its
+/// limit of 16 rectangles, past which it becomes "everything".
+///
+/// ```
+/// use openplugin_core::editor::{DamageRect, DamageTracker};
+/// let mut damage = DamageTracker::new();
+/// assert!(damage.pending().is_none()); // nothing drawn yet: everything
+/// damage.clear();
+/// damage.add(DamageRect::new(4.0, 4.0, 20.0, 8.0));
+/// assert_eq!(damage.pending().map(|r| r.len()), Some(1));
+/// damage.add(DamageRect::new(f32::NAN, 0.0, 1.0, 1.0)); // not finite: everything
+/// assert!(damage.pending().is_none());
+/// ```
 #[derive(Clone, Debug)]
 pub struct DamageTracker {
     everything: bool,
@@ -272,6 +343,7 @@ impl DamageTracker {
     /// More rectangles than this become "everything": a long list costs more than it saves.
     const MAX_RECTS: usize = 16;
 
+    /// A tracker with everything marked. Does not allocate.
     pub fn new() -> Self {
         Self { everything: true, rects: Vec::new() }
     }
@@ -326,9 +398,22 @@ impl DamageTracker {
 
 /// The sizes an editor can take, in points. [`SizeRange::fixed`] is the
 /// default for every editor.
+///
+/// Bounds out of order or below 1 x 1 are read as in order and at least
+/// 1 x 1; an aspect with a zero side is ignored.
+///
+/// ```
+/// use openplugin_core::editor::SizeRange;
+/// let range = SizeRange::between((400, 300), (1200, 900)).with_aspect(4, 3);
+/// assert_eq!(range.clamp(2000, 2000), (1200, 900));
+/// assert!(range.can_resize_horizontally());
+/// assert!(SizeRange::fixed(600, 400).is_fixed());
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SizeRange {
+    /// Smallest width and height, points.
     pub min: (u32, u32),
+    /// Largest width and height, points.
     pub max: (u32, u32),
     /// Width and height of the shape to keep (3, 2 for 3:2), or `None` for any shape.
     pub aspect: Option<(u32, u32)>,
@@ -363,11 +448,13 @@ impl SizeRange {
         min == max
     }
 
+    /// The width can change.
     pub fn can_resize_horizontally(&self) -> bool {
         let (min, max) = self.bounds();
         min.0 < max.0
     }
 
+    /// The height can change.
     pub fn can_resize_vertically(&self) -> bool {
         let (min, max) = self.bounds();
         min.1 < max.1
@@ -439,6 +526,7 @@ pub struct AccessNode {
     pub label: String,
     /// The value as text (`ParamInfo::format`).
     pub value: String,
+    /// What kind of control it is.
     pub role: AccessRole,
     /// A [`AccessRole::Switch`] is on.
     pub on: bool,
@@ -455,8 +543,11 @@ pub struct AccessNode {
 /// [`Editor::accessibility_range`] returns. Plain values.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AccessRange {
+    /// Lowest plain value.
     pub min: f64,
+    /// Highest plain value.
     pub max: f64,
+    /// Current plain value.
     pub value: f64,
     /// One step: what a screen reader's "increase" adds.
     pub step: f64,
@@ -518,14 +609,48 @@ pub enum ParamMenuAction {
 pub struct ParamMenu {
     /// The parameter's descriptor index.
     pub param: u32,
-    /// Where the click was, in editor points, origin top left.
+    /// Where the click was, in editor points from the left.
     pub x: f32,
+    /// Where the click was, in editor points from the top.
     pub y: f32,
     /// The parameter's name, for the menu's title.
     pub label: String,
 }
 
 /// The plugin's editor. Main thread only; it is never sent to another thread.
+/// Calls may allocate. Three methods are required: `size`, `param_changed`
+/// and `render`.
+///
+/// ```
+/// use openplugin_core::{Editor, EditorHost, Frame};
+///
+/// struct Swatch { pixels: Vec<u32>, gain: f32, host: EditorHost }
+///
+/// impl Editor for Swatch {
+///     fn size(&self) -> (u32, u32) { (64, 32) }
+///     fn param_changed(&mut self, _index: usize, plain: f32) { self.gain = plain; }
+///     fn render(&mut self, scale: f32) -> Frame<'_> {
+///         let (w, h) = ((64.0 * scale) as usize, (32.0 * scale) as usize);
+///         let shade = (self.gain.clamp(0.0, 1.0) * 255.0) as u32;
+///         self.pixels.clear();
+///         self.pixels.resize(w * h, shade << 8);
+///         Frame::new(&self.pixels, w, h)
+///     }
+///     fn mouse_down(&mut self, _x: f32, y: f32, _clicks: u32) {
+///         self.host.set(0, 1.0 - y / 32.0);
+///     }
+/// }
+///
+/// fn make_editor(host: EditorHost) -> Option<Box<dyn Editor>> {
+///     Some(Box::new(Swatch { pixels: Vec::new(), gain: 0.0, host }))
+/// }
+///
+/// let factory: openplugin_core::EditorFactory = make_editor;
+/// let mut editor = factory(EditorHost::detached()).unwrap();
+/// editor.param_changed(0, 0.5);
+/// let frame = editor.render(2.0);
+/// assert_eq!((frame.width, frame.height), (128, 64));
+/// ```
 pub trait Editor {
     /// The current size in points (logical pixels). A fixed editor never
     /// changes it; a resizable one changes it in [`Self::resize`].
@@ -597,9 +722,12 @@ pub trait Editor {
     /// The view gained or lost keyboard focus. On a loss, forget keys held.
     fn focus_changed(&mut self, _focused: bool) {}
 
-    /// Mouse input in points, origin at the top left.
+    /// The left button went down at (`x`, `y`) points, origin at the top
+    /// left. `clicks` is the click count: 1, then 2 for a double click.
     fn mouse_down(&mut self, _x: f32, _y: f32, _clicks: u32) {}
+    /// The pointer moved, with or without a button held.
     fn mouse_move(&mut self, _x: f32, _y: f32) {}
+    /// The left button went up.
     fn mouse_up(&mut self, _x: f32, _y: f32) {}
     /// Wheel or trackpad scroll; positive `dy` is away from the user.
     fn wheel(&mut self, _x: f32, _y: f32, _dy: f32) {}

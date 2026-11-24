@@ -100,6 +100,7 @@ pub enum Step {
 }
 
 /// A loader's background half, for an [`Executor`] to run on its own thread.
+/// The SDK implements it; an executor only calls it (see [`Executor`]).
 pub trait Task: Send {
     /// Runs at most one job, or hands over a result that was waiting for
     /// room. Not for the audio thread: it may run a long job. One thread at
@@ -107,7 +108,8 @@ pub trait Task: Send {
     fn work(&mut self) -> Step;
 }
 
-/// Wakes a task. Callable from any thread, including the audio thread.
+/// Wakes a task. Callable from any thread, including the audio thread. An
+/// [`Executor`] implements it; see the example there.
 pub trait Waker: Send + Sync {
     /// Asks the executor to call [`Task::work`] once more. Lock-free and
     /// allocation-free.
@@ -118,6 +120,37 @@ pub trait Waker: Send + Sync {
 }
 
 /// A way to run loader tasks other than on a thread of their own.
+///
+/// ```
+/// use openplugin_core::worker::{loader, with_executor, Executor, Step, Task, Waker};
+/// use std::sync::{Arc, Mutex};
+///
+/// type Held = Arc<Mutex<Option<Box<dyn Task>>>>;
+///
+/// // Runs the task only when asked: what a host worker queue does in its own time.
+/// #[derive(Default)]
+/// struct Manual(Held);
+/// struct Wake(Held);
+///
+/// impl Waker for Wake {
+///     fn wake(&self) {} // a real executor schedules a call of `work` here
+///     fn detach(&self) { *self.0.lock().unwrap() = None; }
+/// }
+/// impl Executor for Manual {
+///     fn spawn(&self, task: Box<dyn Task>) -> Result<Arc<dyn Waker>, Box<dyn Task>> {
+///         *self.0.lock().unwrap() = Some(task);
+///         Ok(Arc::new(Wake(self.0.clone())))
+///     }
+/// }
+///
+/// let executor = Arc::new(Manual::default());
+/// let (mut loader, mut slot) = with_executor(executor.clone(), || loader::<u32>(0, 2));
+/// loader.submit(|| 7).unwrap();
+/// let step = executor.0.lock().unwrap().as_mut().unwrap().work();
+/// assert_eq!(step, Step::Done);
+/// assert!(slot.poll());
+/// assert_eq!(*slot.get(), 7);
+/// ```
 pub trait Executor: Send + Sync {
     /// Takes over `task`. An `Err` hands the task back (no room, say); the
     /// loader then starts its own thread for it.
@@ -154,7 +187,8 @@ struct Counters {
     stop: AtomicBool,
 }
 
-/// The main-thread half: submits jobs to the background worker.
+/// The main-thread half: submits jobs to the background worker. Made by
+/// [`loader`]; the module documentation has an example.
 ///
 /// Dropping the `Loader` stops and joins the worker. Jobs not yet started are
 /// dropped without running.
@@ -169,7 +203,8 @@ enum Backend {
     Host(Arc<dyn Waker>),
 }
 
-/// The audio-thread half: owns the live value and picks up new ones.
+/// The audio-thread half: owns the live value and picks up new ones. Made by
+/// [`loader`]; the module documentation has an example.
 pub struct Slot<T: Send + 'static> {
     current: T,
     ready: spsc::Consumer<T>,

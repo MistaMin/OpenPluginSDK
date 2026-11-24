@@ -8,24 +8,42 @@
 /// Largest bus the process scratch will size. Seventh-order ambisonics is 64.
 pub const MAX_AUDIO_CHANNELS: usize = 64;
 
-/// CLAP `CLAP_SURROUND_*` channel ids.
+// The CLAP `CLAP_SURROUND_*` channel ids, each the same number as in CLAP.
+/// Front left (`CLAP_SURROUND_FL`).
 pub const SURROUND_FL: u8 = 0;
+/// Front right (`CLAP_SURROUND_FR`).
 pub const SURROUND_FR: u8 = 1;
+/// Front centre (`CLAP_SURROUND_FC`).
 pub const SURROUND_FC: u8 = 2;
+/// Low-frequency effects (`CLAP_SURROUND_LFE`).
 pub const SURROUND_LFE: u8 = 3;
+/// Back left (`CLAP_SURROUND_BL`).
 pub const SURROUND_BL: u8 = 4;
+/// Back right (`CLAP_SURROUND_BR`).
 pub const SURROUND_BR: u8 = 5;
+/// Front left of centre (`CLAP_SURROUND_FLC`).
 pub const SURROUND_FLC: u8 = 6;
+/// Front right of centre (`CLAP_SURROUND_FRC`).
 pub const SURROUND_FRC: u8 = 7;
+/// Back centre (`CLAP_SURROUND_BC`).
 pub const SURROUND_BC: u8 = 8;
+/// Side left (`CLAP_SURROUND_SL`).
 pub const SURROUND_SL: u8 = 9;
+/// Side right (`CLAP_SURROUND_SR`).
 pub const SURROUND_SR: u8 = 10;
+/// Top centre (`CLAP_SURROUND_TC`).
 pub const SURROUND_TC: u8 = 11;
+/// Top front left (`CLAP_SURROUND_TFL`).
 pub const SURROUND_TFL: u8 = 12;
+/// Top front centre (`CLAP_SURROUND_TFC`).
 pub const SURROUND_TFC: u8 = 13;
+/// Top front right (`CLAP_SURROUND_TFR`).
 pub const SURROUND_TFR: u8 = 14;
+/// Top back left (`CLAP_SURROUND_TBL`).
 pub const SURROUND_TBL: u8 = 15;
+/// Top back centre (`CLAP_SURROUND_TBC`).
 pub const SURROUND_TBC: u8 = 16;
+/// Top back right (`CLAP_SURROUND_TBR`).
 pub const SURROUND_TBR: u8 = 17;
 
 /// SDK-only role ids. CLAP has no ids for these channels, so a layout that
@@ -34,8 +52,11 @@ pub const SURROUND_TBR: u8 = 17;
 /// the overhead pair of the x.y.2 Atmos beds (Dolby "top middle", Ltm/Rtm);
 /// wide left and right are the 9.1.6 front wides (Lw/Rw).
 pub const SURROUND_TSL: u8 = 18;
+/// Top side right (Dolby Rtm). SDK-only; see [`SURROUND_TSL`].
 pub const SURROUND_TSR: u8 = 19;
+/// Front left wide (Dolby Lw). SDK-only; see [`SURROUND_TSL`].
 pub const SURROUND_FLW: u8 = 20;
+/// Front right wide (Dolby Rw). SDK-only; see [`SURROUND_TSL`].
 pub const SURROUND_FRW: u8 = 21;
 /// Highest id CLAP defines (`CLAP_SURROUND_TBR`).
 pub const CLAP_SURROUND_MAX: u8 = SURROUND_TBR;
@@ -186,28 +207,53 @@ const MAP_916: [u8; 16] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum PortKind {
+    /// No channels ([`SpeakerLayout::Absent`]).
     Empty,
+    /// One channel.
     Mono,
+    /// Left and right.
     Stereo,
+    /// A speaker layout with roles beyond stereo.
     Surround,
+    /// An ambisonic bus (ACN, SN3D).
     Ambisonic,
+    /// Unnamed channels.
     Discrete,
 }
 
 /// One bus. `Ambisonic(order)` uses `(order + 1)²` channels, orders 1 through 7.
 /// `Discrete(n)` is an unnamed bus of `n` channels, from 1 to [`MAX_AUDIO_CHANNELS`].
+///
+/// ```
+/// use openplugin_core::layout::{SpeakerLayout, SURROUND_LFE};
+/// let bus = SpeakerLayout::Surround51;
+/// assert_eq!(bus.channels(), Some(6));
+/// assert_eq!(bus.index_of(SURROUND_LFE), Some(3));
+/// assert_eq!(bus.pairs().collect::<Vec<_>>(), [(0, 1), (4, 5)]);
+/// assert_eq!(SpeakerLayout::Ambisonic(8).channels(), None);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SpeakerLayout {
+    /// No bus: 0 channels.
     Absent,
+    /// One channel, no speaker role.
     Mono,
+    /// FL FR.
     Stereo,
+    /// FL FR FC.
     Lcr,
+    /// FL FR BL BR.
     Quad,
+    /// FL FR FC BL BR.
     Surround50,
+    /// FL FR FC LFE BL BR.
     Surround51,
+    /// FL FR FC LFE BL BR BC.
     Surround61,
+    /// FL FR FC LFE SL SR BL BR.
     Surround71,
+    /// 7.1 then TFL TFR TBL TBR, 12 channels.
     Surround714,
     /// 5.1.2 Atmos bed. Uses SDK-only roles: not offered through CLAP.
     Surround512,
@@ -217,11 +263,15 @@ pub enum SpeakerLayout {
     Surround712,
     /// 9.1.6 Atmos bed, 16 channels. Not offered through CLAP.
     Surround916,
+    /// Ambisonics of the given order (1..=7), `(order + 1)²` channels.
     Ambisonic(u8),
+    /// `n` unnamed channels, 1..=[`MAX_AUDIO_CHANNELS`].
     Discrete(u16),
 }
 
 impl SpeakerLayout {
+    /// Channel count; `None` for an ambisonic order outside 1..=7 or a
+    /// discrete count outside 1..=[`MAX_AUDIO_CHANNELS`].
     pub const fn channels(self) -> Option<u16> {
         match self {
             Self::Absent => Some(0),
@@ -255,6 +305,7 @@ impl SpeakerLayout {
         }
     }
 
+    /// How a host should label the bus.
     pub const fn kind(self) -> PortKind {
         match self {
             Self::Absent => PortKind::Empty,
@@ -393,6 +444,7 @@ impl SpeakerLayout {
         })
     }
 
+    /// Short English name (`"5.1"`, `"HOA3"`); `"HOA"` for an invalid order.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Absent => "None",
@@ -425,10 +477,24 @@ impl SpeakerLayout {
 /// Main input, main output, and an optional sidechain input.
 ///
 /// The sidechain is a separate bus. It is not mixed into the main channels.
+///
+/// ```
+/// use openplugin_core::{IoConfig, SpeakerLayout};
+/// static LAYOUTS: [IoConfig; 2] = [
+///     IoConfig::STEREO,
+///     IoConfig { input: SpeakerLayout::Mono, output: SpeakerLayout::Stereo, sidechain: Some(SpeakerLayout::Stereo) },
+/// ];
+/// assert_eq!(LAYOUTS[1].main_channels(), 2);
+/// assert_eq!(LAYOUTS[1].sidechain_channels(), 2);
+/// assert_eq!(LAYOUTS[1].name(), "Mono to Stereo + Stereo sidechain");
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IoConfig {
+    /// Main input bus; [`SpeakerLayout::Absent`] for an instrument.
     pub input: SpeakerLayout,
+    /// Main output bus.
     pub output: SpeakerLayout,
+    /// Sidechain input bus, if any.
     pub sidechain: Option<SpeakerLayout>,
 }
 
@@ -436,12 +502,15 @@ pub struct IoConfig {
 pub static STEREO_LAYOUTS: &[IoConfig] = &[IoConfig::STEREO];
 
 impl IoConfig {
+    /// Stereo in, stereo out, no sidechain.
     pub const STEREO: Self = Self {
         input: SpeakerLayout::Stereo,
         output: SpeakerLayout::Stereo,
         sidechain: None,
     };
 
+    /// The wider of the main input and output, in channels: the number of
+    /// slices `process` gets. An invalid layout counts as 0.
     pub const fn main_channels(self) -> usize {
         let input = match self.input.channels() {
             Some(n) => n as usize,
@@ -454,6 +523,7 @@ impl IoConfig {
         if input > output { input } else { output }
     }
 
+    /// Main input channels; 0 for an absent or invalid layout.
     pub const fn input_channels(self) -> usize {
         match self.input.channels() {
             Some(n) => n as usize,
@@ -461,6 +531,7 @@ impl IoConfig {
         }
     }
 
+    /// Main output channels; 0 for an absent or invalid layout.
     pub const fn output_channels(self) -> usize {
         match self.output.channels() {
             Some(n) => n as usize,
@@ -468,6 +539,7 @@ impl IoConfig {
         }
     }
 
+    /// Sidechain channels; 0 without a sidechain or for an invalid layout.
     pub const fn sidechain_channels(self) -> usize {
         match self.sidechain {
             Some(layout) => match layout.channels() {
@@ -478,7 +550,8 @@ impl IoConfig {
         }
     }
 
-    /// Main-thread name. Not for the audio thread.
+    /// Name for a host menu, such as `"Mono to Stereo + Stereo sidechain"`.
+    /// Allocates: main thread only.
     pub fn name(self) -> String {
         let mut text = if self.input == SpeakerLayout::Absent {
             format!("{} out", self.output.label())
@@ -497,15 +570,25 @@ impl IoConfig {
 }
 
 /// Decay after the input stops. This is not the delay-compensation latency.
+///
+/// ```
+/// use openplugin_core::Tail;
+/// let two_seconds = Tail::from_samples(96_000);
+/// assert_eq!(two_seconds.to_clap_samples(), Some(96_000));
+/// assert_eq!(Tail::from_samples(0), Tail::None);
+/// assert_eq!(Tail::Unknown.to_clap_samples(), None);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Tail {
     /// The plugin reports zero samples of tail.
     None,
+    /// A tail of this many samples.
     Finite(u32),
     /// The plugin does not know. Hosts that treat a missing property as
     /// "unsupported" can omit the tail extension.
     Unknown,
+    /// The output may never fall silent (an infinite reverb or a drone).
     Infinite,
 }
 
@@ -532,9 +615,19 @@ impl Tail {
 }
 
 /// Which note ports a plugin wants. The CLAP bridge still defaults to one input.
+///
+/// ```
+/// use openplugin_core::NotePorts;
+/// // An audio effect that reads no MIDI.
+/// let ports = NotePorts { input: false, output: false };
+/// assert!(NotePorts::default().input);
+/// # let _ = ports;
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotePorts {
+    /// One note input port (notes and MIDI in).
     pub input: bool,
+    /// One note output port (what [`crate::Plugin::pull_midi`] returns).
     pub output: bool,
 }
 
@@ -554,15 +647,33 @@ impl Default for NotePorts {
 /// `PRESET_EXCLUDE` 64, `NOT_REALTIME` 128, `MODULATABLE` 256,
 /// `POLY_MODULATION` 256 + 512.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+///
+/// ```
+/// use openplugin_core::{ParamFlags, ParamInfo, Unit};
+/// let listen = ParamInfo::new("listen", "Listen", 0.0, 1.0, 0.0, Unit::Toggle)
+///     .with_flag(ParamFlags::MOMENTARY)
+///     .with_flag(ParamFlags::PRESET_EXCLUDE);
+/// assert!(listen.flags.contains(ParamFlags::AUTOMATABLE.union(ParamFlags::MOMENTARY)));
+/// assert_eq!(listen.flags.bits(), 1 | 32 | 64);
+/// ```
 pub struct ParamFlags(u32);
 
 impl ParamFlags {
+    /// The host may record and play automation for it.
     pub const AUTOMATABLE: Self = Self(1 << 0);
+    /// The host shows it as discrete (whole values).
     pub const STEPPED: Self = Self(1 << 1);
+    /// Not shown in the host's generic parameter list.
     pub const HIDDEN: Self = Self(1 << 2);
+    /// The plugin sets it (a meter, a readout); the host may not. Not automatable.
     pub const READ_ONLY: Self = Self(1 << 3);
+    /// The plugin's bypass switch; a host may map its own bypass button to it.
     pub const BYPASS: Self = Self(1 << 4);
+    /// Springs back to its default: reset by [`crate::release_momentary`].
     pub const MOMENTARY: Self = Self(1 << 5);
+    /// Marks a parameter a preset should leave alone (an output trim, a
+    /// listen switch). No SDK code reads it yet: presets and saved state
+    /// still include the parameter.
     pub const PRESET_EXCLUDE: Self = Self(1 << 6);
     /// Changes latency or does work the audio thread cannot finish. Not automatable.
     pub const NOT_REALTIME: Self = Self(1 << 7);
@@ -576,18 +687,22 @@ impl ParamFlags {
     /// [`Self::MODULATABLE`].
     pub const POLY_MODULATION: Self = Self((1 << 8) | (1 << 9));
 
+    /// The flag word, as serialised and passed across the shell ABI.
     pub const fn bits(self) -> u32 {
         self.0
     }
 
+    /// Whether every flag in `other` is set (true for an empty `other`).
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
+    /// The flags of both.
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    /// The flags of `self` that are not in `other`.
     pub const fn difference(self, other: Self) -> Self {
         Self(self.0 & !other.0)
     }
@@ -597,14 +712,27 @@ impl ParamFlags {
 /// are stored. `channels` is the full bus width.
 pub const BUS_METER_CHANNELS: usize = 16;
 
+/// Per-channel peak and gain reduction of a bus wider than stereo, returned
+/// by [`crate::Plugin::bus_meters`] on the audio thread.
+///
+/// ```
+/// use openplugin_core::BusMeters;
+/// let mut meters = BusMeters::SILENT;
+/// meters.channels = 6;
+/// meters.peak_db[3] = -18.0; // the LFE of a 5.1 bus
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BusMeters {
+    /// The bus width; only the first [`BUS_METER_CHANNELS`] are stored. 0 for no meters.
     pub channels: u8,
+    /// Peak level per channel, dBFS.
     pub peak_db: [f32; BUS_METER_CHANNELS],
+    /// Gain reduction per channel in dB, positive for attenuation.
     pub reduction_db: [f32; BUS_METER_CHANNELS],
 }
 
 impl BusMeters {
+    /// No channels, every peak at -100 dB and no reduction.
     pub const SILENT: Self = Self {
         channels: 0,
         peak_db: [-100.0; BUS_METER_CHANNELS],

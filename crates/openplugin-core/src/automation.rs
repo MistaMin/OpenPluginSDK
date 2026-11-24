@@ -1,7 +1,22 @@
 //! One automation lane.
 //!
 //! Breakpoints are sample time and value. `curve` and `heard` do not allocate.
-//! Edits may grow the point list. Record spacing is 64 samples.
+//! Edits may grow the point list. Record spacing is 64 samples. A lane is a
+//! plain value with one owner: it does no locking, and whichever thread owns
+//! it may call it.
+//!
+//! ```
+//! use openplugin_core::{AutomationLane, AutomationMode};
+//! let mut lane = AutomationLane::new(0.0, 1.0, 0.5);
+//! lane.insert_point(0, 0.0);
+//! lane.insert_point(1000, 1.0);
+//! assert_eq!(lane.curve(500), 0.5);
+//! lane.set_mode(AutomationMode::Play);
+//! lane.set_playhead(250);
+//! assert_eq!(lane.heard(), 0.25);
+//! lane.set_hand(0.9); // Play ignores the hand
+//! assert_eq!(lane.heard(), 0.25);
+//! ```
 
 const RECORD_SPACING: u64 = 64;
 
@@ -9,10 +24,17 @@ const RECORD_SPACING: u64 = 64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AutomationMode {
+    /// The hand is heard; the curve is neither played nor recorded (the default).
     Manual,
+    /// The curve is heard; the hand is ignored.
     Play,
+    /// While rolling, the hand is heard and recorded. Stopping turns the lane to Touch.
     Write,
+    /// The curve is heard until the control is touched; while touched the
+    /// hand is heard and, when rolling, recorded.
     Touch,
+    /// Like Touch, but after a gesture the hand keeps being heard until the
+    /// pass stops.
     Latch,
 }
 
@@ -20,7 +42,9 @@ pub enum AutomationMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AutomationInterpolation {
+    /// A straight line between neighbouring points (the default).
     Linear,
+    /// The earlier point's value holds until the next point.
     Discrete,
 }
 
@@ -68,22 +92,28 @@ impl AutomationLane {
         }
     }
 
+    /// Lower limit (inclusive).
     pub fn lower(&self) -> f32 {
         self.lower
     }
 
+    /// Upper limit (inclusive).
     pub fn upper(&self) -> f32 {
         self.upper
     }
 
+    /// The current mode.
     pub fn mode(&self) -> AutomationMode {
         self.mode
     }
 
+    /// Change the mode. The heard value is not recomputed until the next
+    /// playhead, transport or hand change.
     pub fn set_mode(&mut self, mode: AutomationMode) {
         self.mode = mode;
     }
 
+    /// How the curve joins points.
     pub fn interpolation(&self) -> AutomationInterpolation {
         self.interpolation
     }
@@ -93,6 +123,7 @@ impl AutomationLane {
         self.interpolation = interpolation;
     }
 
+    /// The last value the user's control gave that the mode accepted.
     pub fn hand(&self) -> f32 {
         self.hand
     }
@@ -134,6 +165,7 @@ impl AutomationLane {
         }
     }
 
+    /// The value the parameter has now: the hand or the curve, by mode.
     pub fn heard(&self) -> f32 {
         self.heard
     }
@@ -168,6 +200,7 @@ impl AutomationLane {
         start_value + (end_value - start_value) * (along / span)
     }
 
+    /// The user grabbed (`true`) or let go of (`false`) the control.
     pub fn touch(&mut self, down: bool) {
         self.touch_down = down;
         if self.rolling && self.mode == AutomationMode::Touch {
@@ -175,6 +208,7 @@ impl AutomationLane {
         }
     }
 
+    /// Whether the control is held.
     pub fn touching(&self) -> bool {
         self.touch_down
     }
@@ -200,10 +234,12 @@ impl AutomationLane {
         }
     }
 
+    /// Whether the transport is running (same as [`Self::is_rolling`]).
     pub fn rolling(&self) -> bool {
         self.rolling
     }
 
+    /// Whether the transport is running.
     pub fn is_rolling(&self) -> bool {
         self.rolling
     }
@@ -213,10 +249,13 @@ impl AutomationLane {
         self.upsert(sample, value);
     }
 
+    /// Remove every point; the curve is then the initial value. Keeps the
+    /// list's capacity.
     pub fn clear_points(&mut self) {
         self.points.clear();
     }
 
+    /// Move the playhead to `sample` and update what is heard.
     pub fn set_playhead(&mut self, sample: u64) {
         self.playhead = sample;
         if self.rolling {
@@ -226,10 +265,12 @@ impl AutomationLane {
         }
     }
 
+    /// The playhead, in samples.
     pub fn playhead(&self) -> u64 {
         self.playhead
     }
 
+    /// The breakpoints, `(sample, value)`, in ascending sample order.
     pub fn points(&self) -> &[(u64, f32)] {
         &self.points
     }

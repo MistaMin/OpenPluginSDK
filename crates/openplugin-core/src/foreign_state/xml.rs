@@ -24,21 +24,38 @@
 
 use super::{ErrorKind, ForeignError, Limits, Result};
 
+/// One child of an element.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Node {
+    /// A nested element.
     Element(Element),
+    /// A run of text or CDATA, entities already replaced.
     Text(String),
 }
 
+/// One element: its name, attributes and children.
+///
+/// ```
+/// use openplugin_core::foreign_state::xml;
+/// let root = xml::parse(br#"<state v="2"><param id="gain">-6</param></state>"#).unwrap();
+/// assert_eq!(root.attr("v"), Some("2"));
+/// let gain = root.children_named("param").find(|p| p.attr("id") == Some("gain")).unwrap();
+/// assert_eq!(gain.text(), "-6");
+/// assert!(xml::parse(b"<a><b></a>").is_err());
+/// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Element {
+    /// The tag name, prefix included (`ns:name`).
     pub name: String,
+    /// `(name, value)` per attribute, in file order; names are unique.
     pub attrs: Vec<(String, String)>,
+    /// Child elements and text, in file order.
     pub children: Vec<Node>,
 }
 
 impl Element {
+    /// The value of attribute `name`, or `None`.
     pub fn attr(&self, name: &str) -> Option<&str> {
         self.attrs.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
     }
@@ -78,6 +95,8 @@ pub fn parse(data: &[u8]) -> Result<Element> {
     parse_with(data, &Limits::default())
 }
 
+/// Parse a document within `limits` and return its root element. A UTF-8
+/// byte-order mark is skipped.
 pub fn parse_with(data: &[u8], limits: &Limits) -> Result<Element> {
     if data.len() > limits.max_len {
         return Err(ForeignError::new(ErrorKind::TooLarge, 0, "input larger than the limit"));

@@ -24,6 +24,8 @@ pub struct ChannelsMut<'a> {
 }
 
 impl<'a> ChannelsMut<'a> {
+    /// Borrow each buffer as a channel; past [`MAX_AUDIO_CHANNELS`] buffers
+    /// the rest are left out. Does not allocate (the slices live inline).
     pub fn new<B: AsMut<[f32]>>(buffers: &'a mut [B]) -> Self {
         let mut slices: [&'a mut [f32]; MAX_AUDIO_CHANNELS] = std::array::from_fn(|_| Default::default());
         let len = buffers.len().min(MAX_AUDIO_CHANNELS);
@@ -55,6 +57,16 @@ pub struct Channels<'a> {
 }
 
 impl<'a> Channels<'a> {
+    /// Borrow each buffer as a channel; past [`MAX_AUDIO_CHANNELS`] buffers
+    /// the rest are left out. Does not allocate.
+    ///
+    /// ```
+    /// use openplugin_core::Channels;
+    /// let sidechain = vec![vec![0.5_f32; 32]; 2];
+    /// let channels = Channels::new(&sidechain);
+    /// let slices: &[&[f32]] = &channels;
+    /// assert_eq!(slices[1][0], 0.5);
+    /// ```
     pub fn new<B: AsRef<[f32]>>(buffers: &'a [B]) -> Self {
         let mut slices: [&'a [f32]; MAX_AUDIO_CHANNELS] = [&[]; MAX_AUDIO_CHANNELS];
         let len = buffers.len().min(MAX_AUDIO_CHANNELS);

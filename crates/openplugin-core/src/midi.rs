@@ -2,7 +2,21 @@
 //!
 //! Channel and system messages match the set in the MIT `wmidi` crate. This
 //! parser is separate code: it reports bytes consumed, keeps running status,
-//! and leaves a note-on with velocity 0 as a note-on. Nothing here allocates.
+//! and leaves a note-on with velocity 0 as a note-on. Nothing here allocates
+//! or panics, so all of it is safe on the audio thread.
+//!
+//! ```
+//! use openplugin_core::midi::{Message, Parser};
+//! let bytes = [0x90, 60, 100, 62, 0]; // note-on, then a second one by running status
+//! let mut parser = Parser::new();
+//! let mut at = 0;
+//! let mut notes = 0;
+//! while let Ok(Some((message, used))) = parser.pull(&bytes[at..]) {
+//!     if let Message::NoteOn { .. } = message { notes += 1; }
+//!     at += used;
+//! }
+//! assert_eq!(notes, 2);
+//! ```
 
 use crate::Plugin;
 
@@ -11,6 +25,13 @@ use crate::Plugin;
 pub struct U7(u8);
 
 impl U7 {
+    /// `value` if it is below `0x80`, else `None`.
+    ///
+    /// ```
+    /// use openplugin_core::midi::U7;
+    /// assert_eq!(U7::try_new(127).map(U7::get), Some(127));
+    /// assert_eq!(U7::try_new(128), None);
+    /// ```
     pub const fn try_new(value: u8) -> Option<Self> {
         if value < 0x80 {
             Some(Self(value))
@@ -19,6 +40,7 @@ impl U7 {
         }
     }
 
+    /// The value, 0..=127.
     pub const fn get(self) -> u8 {
         self.0
     }
@@ -29,6 +51,14 @@ impl U7 {
 pub struct Channel(u8);
 
 impl Channel {
+    /// Channel `index` (0..=15), else `None`.
+    ///
+    /// ```
+    /// use openplugin_core::midi::Channel;
+    /// let ch = Channel::try_new(9).unwrap();
+    /// assert_eq!((ch.index(), ch.number()), (9, 10));
+    /// assert!(Channel::try_new(16).is_none());
+    /// ```
     pub const fn try_new(index: u8) -> Option<Self> {
         if index < 16 {
             Some(Self(index))
@@ -37,10 +67,12 @@ impl Channel {
         }
     }
 
+    /// 0-based index, 0..=15: the low nibble of the status byte.
     pub const fn index(self) -> u8 {
         self.0
     }
 
+    /// 1-based channel number, 1..=16.
     pub const fn number(self) -> u8 {
         self.0 + 1
     }
@@ -50,58 +82,110 @@ impl Channel {
 pub const PITCH_BEND_CENTER: u16 = 8192;
 
 /// One decoded message. `SysEx` borrows the payload between `F0` and `F7`.
+///
+/// Data fields are 0..=127 when the [`Parser`] made the message (14-bit
+/// values 0..=16383). A message built by hand is written as given:
+/// [`Message::write_bytes`] does not mask the fields.
+///
+/// ```
+/// use openplugin_core::midi::{Channel, Message};
+/// let cc = Message::ControlChange { channel: Channel::try_new(0).unwrap(), controller: 74, value: 64 };
+/// let mut out = [0u8; 3];
+/// assert_eq!(cc.write_bytes(&mut out), Some(3));
+/// assert_eq!(out, [0xB0, 74, 64]);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Message<'a> {
+    /// `8n`: note released.
     NoteOff {
+        /// Channel.
         channel: Channel,
+        /// Key number, 60 is middle C.
         note: u8,
+        /// Release velocity.
         velocity: u8,
     },
+    /// `9n`: note pressed. Velocity 0 is kept as a note-on, not turned into a note-off.
     NoteOn {
+        /// Channel.
         channel: Channel,
+        /// Key number, 60 is middle C.
         note: u8,
+        /// Strike velocity; 0 conventionally means note-off.
         velocity: u8,
     },
+    /// `An`: polyphonic key pressure (aftertouch).
     PolyPressure {
+        /// Channel.
         channel: Channel,
+        /// Key number.
         note: u8,
+        /// Pressure.
         pressure: u8,
     },
+    /// `Bn`: control change.
     ControlChange {
+        /// Channel.
         channel: Channel,
+        /// Controller number (CC 120..=127 are channel mode messages).
         controller: u8,
+        /// Controller value.
         value: u8,
     },
+    /// `Cn`: program change.
     ProgramChange {
+        /// Channel.
         channel: Channel,
+        /// Program number, 0-based.
         program: u8,
     },
+    /// `Dn`: channel pressure (aftertouch).
     ChannelPressure {
+        /// Channel.
         channel: Channel,
+        /// Pressure.
         pressure: u8,
     },
+    /// `En`: pitch bend.
     PitchBend {
+        /// Channel.
         channel: Channel,
+        /// 14-bit bend, 0..=16383; [`PITCH_BEND_CENTER`] is no bend.
         value: u16,
     },
+    /// `F0 .. F7`: system exclusive; the payload without `F0` and `F7`.
     SysEx(&'a [u8]),
+    /// `F1`: MIDI time code quarter frame.
     QuarterFrame {
+        /// The data byte: message type in the high three bits, value in the low four.
         data: u8,
     },
+    /// `F2`: song position pointer.
     SongPosition {
+        /// 14-bit position in MIDI beats (sixteenth notes) from the start.
         beats: u16,
     },
+    /// `F3`: song select.
     SongSelect {
+        /// Song number.
         song: u8,
     },
+    /// A status byte the specification leaves undefined (`F4`, `F5`, `F9`, `FD`).
     Undefined(u8),
+    /// `F6`: tune request.
     TuneRequest,
+    /// `F8`: timing clock, 24 per quarter note.
     TimingClock,
+    /// `FA`: start.
     Start,
+    /// `FB`: continue.
     Continue,
+    /// `FC`: stop.
     Stop,
+    /// `FE`: active sensing.
     ActiveSensing,
+    /// `FF`: system reset.
     SystemReset,
 }
 
@@ -109,9 +193,13 @@ pub enum Message<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum MidiError {
+    /// The buffer ends before the message's data bytes.
     Truncated,
+    /// A data byte is `0x80` or more, or a lone `F7` appears.
     BadData,
+    /// The buffer starts with a data byte and there is no running status.
     NoStatus,
+    /// A `F0` has no `F7` after it in the buffer.
     UnclosedSysEx,
 }
 
@@ -122,10 +210,13 @@ pub struct Parser {
 }
 
 impl Parser {
+    /// A parser with no running status.
     pub const fn new() -> Self {
         Self { running: None }
     }
 
+    /// The channel status byte a following data byte would use, if any.
+    /// System common messages and SysEx clear it; realtime bytes do not.
     pub const fn running_status(self) -> Option<u8> {
         self.running
     }

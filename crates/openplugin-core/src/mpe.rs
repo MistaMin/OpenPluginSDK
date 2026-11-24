@@ -6,7 +6,7 @@
 //!
 //! Every format entry that carries MIDI (CLAP's MIDI dialect, LV2, and the
 //! VST3, Audio Unit and AAX shells through `op_shell_process_events`) feeds a
-//! plugin that asks for MPE ([`Plugin::mpe_input`](crate::Plugin::mpe_input))
+//! plugin that asks for MPE ([`Plugin::mpe_input`])
 //! through one [`MpeReceiver`]. A plugin that does not ask gets plain MIDI as
 //! before. The receiver turns MIDI into note-ons and note-offs with a
 //! [`NoteRef`] and [`Expression`] events, and passes everything else on as raw
@@ -50,12 +50,36 @@
 //!   whole stream is plain MIDI.
 //!
 //! The receiver keeps fixed arrays (16 channels, a 128-bit set of keys per
-//! channel); it never allocates and never panics on any byte.
+//! channel); it never allocates and never panics on any byte, so it runs on
+//! the audio thread.
+//!
+//! ```
+//! use openplugin_core::expression::Expression;
+//! use openplugin_core::mpe::{MpeEvent, MpeReceiver, MpeZones};
+//! let mut mpe = MpeReceiver::new(MpeZones::LOWER_15);
+//! let mut events = Vec::new();
+//! mpe.receive([0x91, 60, 100], |e| events.push(e)); // note-on, member channel 2
+//! mpe.receive([0xE1, 0x00, 0x60], |e| events.push(e)); // bend up on that channel
+//! assert!(matches!(events[0], MpeEvent::NoteOn { velocity: 100, .. }));
+//! let tuning = events.iter().rev().find_map(|e| match e {
+//!     MpeEvent::Expression { expression: Expression::Tuning, value, .. } => Some(*value),
+//!     _ => None,
+//! });
+//! assert!(tuning.unwrap() > 23.0); // half of the 48-semitone member range
+//! ```
 
 use crate::expression::{Expression, NoteRef};
 use crate::Plugin;
 
 /// Member channel counts of the two zones (2.1.1). `0` turns a zone off.
+///
+/// ```
+/// use openplugin_core::mpe::{MpeZones, Zone};
+/// let zones = MpeZones::new(7, 7);
+/// assert_eq!(zones.zone_of(0).map(|z| z.master), Some(true));
+/// assert_eq!(zones.zone_of(8).map(|z| z.zone), Some(Zone::Upper));
+/// assert_eq!(MpeZones::new(15, 15).upper(), 0); // the Lower Zone keeps its channels
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MpeZones {
     lower: u8,
@@ -81,10 +105,12 @@ impl MpeZones {
         Self { lower, upper }
     }
 
+    /// Member channels of the Lower Zone, 0..=15.
     pub const fn lower(self) -> u8 {
         self.lower
     }
 
+    /// Member channels of the Upper Zone, 0..=15.
     pub const fn upper(self) -> u8 {
         self.upper
     }
@@ -123,7 +149,9 @@ impl Default for MpeZones {
 /// Lower (master channel 1) or Upper (master channel 16).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Zone {
+    /// Master channel 1, members counting up from channel 2.
     Lower,
+    /// Master channel 16, members counting down from channel 15.
     Upper,
 }
 
@@ -147,6 +175,7 @@ impl Zone {
 /// Where a channel sits in a zone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ZoneChannel {
+    /// The zone.
     pub zone: Zone,
     /// The zone's master channel, rather than a member.
     pub master: bool,
@@ -156,9 +185,30 @@ pub struct ZoneChannel {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum MpeEvent {
-    NoteOn { note: NoteRef, velocity: u8 },
-    NoteOff { note: NoteRef, velocity: u8 },
-    Expression { note: NoteRef, expression: Expression, value: f32 },
+    /// A note started.
+    NoteOn {
+        /// The note: port 0, its channel and key, and the id given to
+        /// [`MpeReceiver::receive_with_id`] (or -1).
+        note: NoteRef,
+        /// Strike velocity, 0..=127.
+        velocity: u8,
+    },
+    /// A note ended.
+    NoteOff {
+        /// The note, as at its note-on.
+        note: NoteRef,
+        /// Release velocity, 0..=127 (64 for a note-on with velocity 0 or a zone reset).
+        velocity: u8,
+    },
+    /// A per-note expression changed.
+    Expression {
+        /// The note it is for.
+        note: NoteRef,
+        /// Which expression: [`Expression::Tuning`], [`Expression::Pressure`] or [`Expression::Brightness`].
+        expression: Expression,
+        /// Semitones for tuning; 0..=1 for pressure and brightness.
+        value: f32,
+    },
     /// A message the receiver does not turn into note events, as received.
     Midi([u8; 3]),
 }
@@ -229,6 +279,7 @@ impl MpeReceiver {
         plugin.mpe_input().map(Self::new)
     }
 
+    /// The zones in force: the starting ones, as changed by any MCM since.
     pub const fn zones(&self) -> MpeZones {
         self.zones
     }

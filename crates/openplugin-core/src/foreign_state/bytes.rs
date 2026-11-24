@@ -1,23 +1,34 @@
 //! A bounds-checked cursor over binary data.
+//!
+//! Nothing here panics. The fixed-width reads and slices do not allocate;
+//! [`Reader::utf16`] does.
 
 use super::{ErrorKind, ForeignError, Result};
 
+/// Byte order of multi-byte fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endian {
+    /// Least significant byte first (x86, Arm, most plugin chunks).
     Little,
+    /// Most significant byte first (network order, `bplist00`, IFF and RIFF-like tags).
     Big,
 }
 
 /// The width of a length prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LenWidth {
+    /// One byte.
     U8,
+    /// Two bytes.
     U16,
+    /// Four bytes.
     U32,
+    /// Eight bytes.
     U64,
 }
 
 impl LenWidth {
+    /// The width in bytes: 1, 2, 4 or 8.
     pub fn bytes(self) -> usize {
         match self {
             LenWidth::U8 => 1,
@@ -30,7 +41,20 @@ impl LenWidth {
 
 /// Reads fields from a byte slice. Every read checks the bytes are there and
 /// returns an error, not a panic, when they are not. A declared length is
-/// compared with what remains before anything is allocated.
+/// compared with what remains before anything is allocated. A read that
+/// fails for want of bytes does not move the position; one whose text is
+/// not valid UTF-8 has already moved past it.
+///
+/// ```
+/// use openplugin_core::foreign_state::bytes::{LenWidth, Reader};
+/// let data = [b'G', b'a', b'i', b'n', 1, 0, 3, b'a', b'b', b'c'];
+/// let mut r = Reader::little(&data);
+/// assert!(r.eat(b"Gain"));
+/// assert_eq!(r.u16().unwrap(), 1);
+/// assert_eq!(r.prefixed_str(LenWidth::U8).unwrap(), "abc");
+/// assert!(r.is_empty());
+/// assert!(r.u32().is_err()); // nothing left
+/// ```
 #[derive(Debug, Clone)]
 pub struct Reader<'a> {
     data: &'a [u8],
@@ -39,22 +63,27 @@ pub struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
+    /// A reader at the start of `data`.
     pub fn new(data: &'a [u8], endian: Endian) -> Self {
         Self { data, pos: 0, endian }
     }
 
+    /// A little-endian reader at the start of `data`.
     pub fn little(data: &'a [u8]) -> Self {
         Self::new(data, Endian::Little)
     }
 
+    /// A big-endian reader at the start of `data`.
     pub fn big(data: &'a [u8]) -> Self {
         Self::new(data, Endian::Big)
     }
 
+    /// The byte order of the multi-byte reads.
     pub fn endian(&self) -> Endian {
         self.endian
     }
 
+    /// Change the byte order for the reads that follow.
     pub fn set_endian(&mut self, endian: Endian) {
         self.endian = endian;
     }
@@ -64,14 +93,17 @@ impl<'a> Reader<'a> {
         self.pos
     }
 
+    /// Bytes not yet consumed.
     pub fn remaining(&self) -> usize {
         self.data.len() - self.pos
     }
 
+    /// Nothing is left to read.
     pub fn is_empty(&self) -> bool {
         self.remaining() == 0
     }
 
+    /// The unread bytes, without consuming them.
     pub fn rest(&self) -> &'a [u8] {
         &self.data[self.pos..]
     }
@@ -90,6 +122,7 @@ impl<'a> Reader<'a> {
         Ok(s)
     }
 
+    /// Move past `n` bytes; an error, without moving, when fewer remain.
     pub fn skip(&mut self, n: usize) -> Result<()> {
         self.bytes(n).map(|_| ())
     }
@@ -116,14 +149,18 @@ impl<'a> Reader<'a> {
         Ok(a)
     }
 
+    /// One byte. [`ErrorKind::Truncated`] when none is left, as for every
+    /// fixed-width read below.
     pub fn u8(&mut self) -> Result<u8> {
         Ok(self.array::<1>()?[0])
     }
 
+    /// One byte, two's complement.
     pub fn i8(&mut self) -> Result<i8> {
         Ok(self.u8()? as i8)
     }
 
+    /// Two bytes in the reader's byte order.
     pub fn u16(&mut self) -> Result<u16> {
         let a = self.array::<2>()?;
         Ok(match self.endian {
@@ -132,6 +169,7 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Four bytes in the reader's byte order.
     pub fn u32(&mut self) -> Result<u32> {
         let a = self.array::<4>()?;
         Ok(match self.endian {
@@ -140,6 +178,7 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Eight bytes in the reader's byte order.
     pub fn u64(&mut self) -> Result<u64> {
         let a = self.array::<8>()?;
         Ok(match self.endian {
@@ -148,22 +187,28 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// Two bytes, two's complement.
     pub fn i16(&mut self) -> Result<i16> {
         Ok(self.u16()? as i16)
     }
 
+    /// Four bytes, two's complement.
     pub fn i32(&mut self) -> Result<i32> {
         Ok(self.u32()? as i32)
     }
 
+    /// Eight bytes, two's complement.
     pub fn i64(&mut self) -> Result<i64> {
         Ok(self.u64()? as i64)
     }
 
+    /// An IEEE 754 single. NaN and infinities are returned as stored: check
+    /// before using the value.
     pub fn f32(&mut self) -> Result<f32> {
         Ok(f32::from_bits(self.u32()?))
     }
 
+    /// An IEEE 754 double, as stored (it may be NaN or infinite).
     pub fn f64(&mut self) -> Result<f64> {
         Ok(f64::from_bits(self.u64()?))
     }

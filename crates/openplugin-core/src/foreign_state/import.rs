@@ -78,10 +78,15 @@ pub enum ValueKind {
     Normalized,
 }
 
+/// One parameter value read from an old state. The module example builds
+/// these through [`ImportedState::push_plain`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportedParam {
+    /// The old plugin's id for the parameter.
     pub id: ForeignId,
+    /// The value as stored; not checked (it may be NaN until [`ParamMap::apply`] drops it).
     pub value: f64,
+    /// Whether `value` is plain or normalised.
     pub kind: ValueKind,
 }
 
@@ -90,29 +95,35 @@ pub struct ImportedParam {
 pub struct ImportedState {
     /// The format's name, as given by [`StateFormat::name`].
     pub format: &'static str,
+    /// The format version `detect` named.
     pub version: u32,
+    /// The parameter values found, in the order they were read.
     pub params: Vec<ImportedParam>,
     /// Anything the port must interpret itself: samples, a patch name, a table.
     pub chunk: Vec<u8>,
 }
 
 impl ImportedState {
+    /// An empty state of `format`, `version`. Does not allocate until a push.
     pub fn new(format: &'static str, version: u32) -> Self {
         Self { format, version, params: Vec::new(), chunk: Vec::new() }
     }
 
+    /// Add a value in the old plugin's own units.
     pub fn push_plain(&mut self, id: ForeignId, value: f64) {
         self.params.push(ImportedParam { id, value, kind: ValueKind::Plain });
     }
 
+    /// Add a value stored as 0 to 1 across the old parameter's range.
     pub fn push_normalized(&mut self, id: ForeignId, value: f64) {
         self.params.push(ImportedParam { id, value, kind: ValueKind::Normalized });
     }
 }
 
-/// One format the port reads.
+/// One format the port reads. See the module example.
 #[derive(Clone, Copy)]
 pub struct StateFormat {
+    /// A name for the format, copied into [`ImportedState::format`] by convention.
     pub name: &'static str,
     /// `Some(version)` if the bytes are this format. Must be cheap and must
     /// not fail: look at a magic, not at the whole document.
@@ -152,6 +163,7 @@ pub struct Applied {
 }
 
 impl ParamMap {
+    /// An empty map. Allocates as entries are added; build it on the main thread.
     pub fn new() -> Self {
         Self::default()
     }

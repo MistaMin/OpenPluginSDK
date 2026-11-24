@@ -28,9 +28,25 @@ use crate::PluginInfo;
 
 /// One parsed preset: a name and a plain value for every parameter, in
 /// descriptor order.
+///
+/// ```
+/// use openplugin_core::preset::{self, Preset};
+/// use openplugin_core::{Category, ParamInfo, PluginInfo, Unit};
+/// static PARAMS: [ParamInfo; 2] = [
+///     ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db),
+///     ParamInfo::new("cutoff", "Cutoff", 20.0, 20_000.0, 1_000.0, Unit::Hz),
+/// ];
+/// static INFO: PluginInfo = PluginInfo::new("com.example.eq", "Eq", "Example", "1.0.0", Category::Eq, &PARAMS);
+/// let p = preset::parse(&INFO, "name = Bright\ncutoff = 8 kHz\n", "file").unwrap();
+/// assert_eq!(p, Preset { name: "Bright".into(), values: vec![0.0, 8000.0] });
+/// assert_eq!(preset::write(&INFO, &p), "name = Bright\ncutoff = 8.00 kHz\n");
+/// assert!(preset::parse(&INFO, "volume = 3", "file").is_err());
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Preset {
+    /// The preset's name, never empty.
     pub name: String,
+    /// One plain, clamped value per parameter, in descriptor order.
     pub values: Vec<f32>,
 }
 
@@ -40,13 +56,31 @@ pub struct Preset {
 #[non_exhaustive]
 pub enum PresetError {
     /// A line is not `key = value`.
-    Syntax { line: usize },
+    Syntax {
+        /// The line, from 1.
+        line: usize,
+    },
     /// `name =` with nothing after it.
-    EmptyName { line: usize },
+    EmptyName {
+        /// The line, from 1.
+        line: usize,
+    },
     /// The key names no parameter, by id or by display name.
-    UnknownParameter { line: usize, key: String },
+    UnknownParameter {
+        /// The line, from 1.
+        line: usize,
+        /// The key as written.
+        key: String,
+    },
     /// [`crate::ParamInfo::parse`] did not read the value.
-    BadValue { line: usize, param: &'static str, value: String },
+    BadValue {
+        /// The line, from 1.
+        line: usize,
+        /// The parameter's display name.
+        param: &'static str,
+        /// The value as written.
+        value: String,
+    },
     /// No `name` line, and the fallback name is empty.
     NoName,
 }
@@ -128,7 +162,25 @@ pub fn write(info: &PluginInfo, preset: &Preset) -> String {
 
 /// Parsed presets with `'static` names and values, as the [`crate::Plugin`]
 /// preset methods hand them out. Build it once, in a `static OnceLock`; the
-/// strings and slices live for the rest of the process.
+/// strings and slices live for the rest of the process (each parse leaks
+/// them, so parse once).
+///
+/// ```
+/// use openplugin_core::{Category, ParamInfo, PluginInfo, PresetBank, Unit};
+/// use std::sync::OnceLock;
+/// static PARAMS: [ParamInfo; 1] = [ParamInfo::new("gain", "Gain", -24.0, 24.0, 0.0, Unit::Db)];
+/// static INFO: PluginInfo = PluginInfo::new("com.example.gain", "Gain", "Example", "1.0.0", Category::Utility, &PARAMS);
+/// static BANK: OnceLock<PresetBank> = OnceLock::new();
+///
+/// let bank = BANK.get_or_init(|| {
+///     let (bank, errors) = PresetBank::parse_all(&INFO, &[("presets/Quiet.txt", "gain = -12 dB")]);
+///     assert!(errors.is_empty(), "{errors:?}");
+///     bank
+/// });
+/// assert_eq!(bank.name(0), "Quiet"); // from the file name
+/// assert_eq!(bank.values(0), Some(&[-12.0][..]));
+/// assert_eq!(bank.name(1), "");
+/// ```
 #[derive(Debug, Default)]
 pub struct PresetBank {
     names: Vec<&'static str>,
@@ -157,10 +209,12 @@ impl PresetBank {
         (bank, errors)
     }
 
+    /// Number of presets, for [`crate::Plugin::preset_count`].
     pub fn len(&self) -> usize {
         self.names.len()
     }
 
+    /// No presets.
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
