@@ -22,6 +22,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+// The most steps an AAX parameter may have ("Number of parameter steps exceeds limit
+// (2048)" in the AAX Validator 2024.6).
+static constexpr int64_t kMaxDiscreteSteps = 2048;
+
 namespace openplugin_aax {
 namespace {
 PacketBuffer defaults() {
@@ -231,7 +235,7 @@ public:
                     AAX_CLogTaperDelegate<float, 0>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
                     ShellDisplay(i, &state_), true);
                 parameter->SetType(AAX_eParameterType_Continuous);
-            } else if ((desc.flags & OP_PARAM_DISCRETE) && desc.steps > 1) {
+            } else if ((desc.flags & OP_PARAM_DISCRETE) && desc.steps > 1 && desc.steps <= kMaxDiscreteSteps) {
                 parameter = std::make_unique<AAX_CParameter<float>>(
                     ids_[i].c_str(), AAX_CString(desc.name), initial,
                     AAX_CLinearTaperDelegate<float>(static_cast<float>(desc.min), static_cast<float>(desc.max)),
@@ -245,6 +249,9 @@ public:
                     ShellDisplay(i, &state_), true);
                 // The step count stays at the AAX default for a continuous parameter.
                 // The AAX Validator rejects 10001 ("Number of parameter steps exceeds limit").
+                // A discrete parameter with more steps than AAX takes (a bit mask of
+                // shown items, for example) is described as continuous too; its plain
+                // value still crosses the ABI unchanged.
                 parameter->SetType(AAX_eParameterType_Continuous);
             }
             params_.push_back(parameter.get());
