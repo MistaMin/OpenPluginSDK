@@ -49,6 +49,7 @@ set(OP_RUST_LIB "" CACHE FILEPATH "Rust static library exporting op_shell_*")
 set(OP_VST3_SDK "" CACHE PATH "Existing VST3 SDK checkout")
 set(OP_AU_SDK "" CACHE PATH "Existing AudioUnitSDK checkout")
 set(OP_AAX_SDK "" CACHE PATH "Existing AAX SDK checkout")
+set(OP_ARA_SDK "" CACHE PATH "Existing ARA SDK checkout: makes the VST3 an ARA 2 plug-in")
 set(OP_PRODUCT "Plugin" CACHE STRING "Bundle executable and display name")
 set(OP_BUNDLE_ID "com.example.openplugin" CACHE STRING "Bundle identifier prefix")
 set(OP_VERSION "0.1.0" CACHE STRING "Bundle version")
@@ -204,6 +205,27 @@ if(OP_BUILD_VST3)
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-Info.plist")
   target_link_libraries(OpenPluginVST3 PRIVATE sdk)
   op_link_rust(OpenPluginVST3)
+  # ARA 2: with an ARA SDK checkout, the VST3 is an ARA plug-in (vst3/ara_glue.h) and the
+  # plugin exports op_ara_analyze. The ARA Library (Apache 2.0) is compiled in; its licence
+  # and notice go into the bundle.
+  if(OP_ARA_SDK)
+    if(NOT EXISTS "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp")
+      message(FATAL_ERROR "OP_ARA_SDK must point at an ARA SDK checkout (ARA_API, ARA_Library)")
+    endif()
+    target_sources(OpenPluginVST3 PRIVATE
+      vst3/ara_glue.cpp
+      "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Utilities/ARAChannelFormat.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Debug/ARADebug.c")
+    target_include_directories(OpenPluginVST3 PRIVATE "${OP_ARA_SDK}")
+    target_compile_definitions(OpenPluginVST3 PRIVATE OP_HAS_ARA=1 ARA_VALIDATE_API_CALLS=0)
+    add_custom_command(TARGET OpenPluginVST3 POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources"
+      COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/ARA_Library/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources/ARA-SDK-LICENSE.txt"
+      COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/NOTICE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources/ARA-SDK-NOTICE.txt")
+  endif()
   add_custom_command(TARGET OpenPluginVST3 POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_VST3_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources/VST3-SDK-LICENSE.txt"

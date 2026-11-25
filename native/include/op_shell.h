@@ -457,6 +457,19 @@ uint32_t op_shell_latency_now(const void* instance);
 // thread while the instance exists.
 double op_shell_tail_seconds(void* instance);
 #endif
+
+#if OP_HAS_ARA
+// Required with -DOP_ARA_SDK=<ARA SDK>: an ARA host gave the plugin a whole audio source
+// (a clip's file). `id` is the source's persistent ID (stable across sessions), `data` holds
+// `channels` pointers to `frames` samples each, at `sample_rate`. Called on the host's main
+// thread when the host enables sample access and again when the samples change; the plugin
+// analyses it and keeps the result by `id` (no instance: a document is shared by them).
+// The data is valid only during the call.
+void op_ara_analyze(const char* id, uint32_t channels, uint64_t frames, double sample_rate, const float* const* data);
+// Required with -DOP_ARA_SDK too: the plugin's web page for the ARA factory (ARA requires one),
+// a NUL-terminated string that lives as long as the module.
+const char* op_ara_url(void);
+#endif
 #ifdef __cplusplus
 }
 #endif

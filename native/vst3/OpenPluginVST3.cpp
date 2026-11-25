@@ -44,6 +44,8 @@
 #include <string>
 #include <vector>
 
+#include "ara_glue.h"
+
 using namespace Steinberg;
 using namespace Steinberg::Vst;
 
@@ -644,8 +646,26 @@ private:
     Timer* timer_ = nullptr;
 };
 
-class Processor final : public AudioEffect {
+class Processor final : public AudioEffect
+#if OP_HAS_ARA
+    , public ARA::IPlugInEntryPoint, public ARA::IPlugInEntryPoint2
+#endif
+{
 public:
+#if OP_HAS_ARA
+    // ARA: the host binds this instance to its document (ara_glue.h).
+    DEFINE_INTERFACES
+        DEF_INTERFACE(ARA::IPlugInEntryPoint)
+        DEF_INTERFACE(ARA::IPlugInEntryPoint2)
+    END_DEFINE_INTERFACES(AudioEffect)
+    REFCOUNT_METHODS(AudioEffect)
+    const ARA::ARAFactory* PLUGIN_API getFactory() SMTG_OVERRIDE { return openplugin_ara::factory(); }
+    // ARA 1 binding: not offered (ARA 2 hosts call the call below).
+    const ARA::ARAPlugInExtensionInstance* PLUGIN_API bindToDocumentController(ARA::ARADocumentControllerRef) SMTG_OVERRIDE { return nullptr; }
+    const ARA::ARAPlugInExtensionInstance* PLUGIN_API bindToDocumentControllerWithRoles(ARA::ARADocumentControllerRef ref, ARA::ARAPlugInInstanceRoleFlags known, ARA::ARAPlugInInstanceRoleFlags assigned) SMTG_OVERRIDE {
+        return ara_.bindToARA(ref, known, assigned);
+    }
+#endif
     Processor() {
         OpShellInfo info{};
         if (!load_info(info)) return;
@@ -764,6 +784,16 @@ public:
         announce(engine_);
         applyTrack();
         startPolling();
+#if OP_HAS_ARA
+        // A playback renderer plays the host's regions into the input; its buffers are made
+        // here (the largest block VST3 allows), never on the audio thread.
+        if (auto* renderer = ara_.getPlaybackRenderer<openplugin_ara::Renderer>(); renderer && inCh_ > 0) {
+            renderer->enable(processSetup.sampleRate, static_cast<int>(inCh_));
+            araBuf_.assign(static_cast<size_t>(inCh_) * kAraFrames, 0.0f);
+            araPtrs_.resize(inCh_);
+            for (uint32_t c = 0; c < inCh_; ++c) araPtrs_[c] = araBuf_.data() + static_cast<size_t>(c) * kAraFrames;
+        }
+#endif
         return AudioEffect::setActive(active);
     }
     // The controller's message with the host's track. Message thread. Kept for
@@ -950,6 +980,19 @@ public:
             data.inputs[sideBus].channelBuffers32)
             hostSide = &data.inputs[sideBus];
 
+#if OP_HAS_ARA
+        // Bound as an ARA playback renderer: the input is the host's playback regions at the
+        // song position, read from the document's copies of the audio sources.
+        AudioBusBuffers araIn{};
+        if (auto* renderer = ara_.getPlaybackRenderer<openplugin_ara::Renderer>(); renderer && !araPtrs_.empty() && data.numSamples <= kAraFrames) {
+            const ProcessContext* ctx = data.processContext;
+            const bool playing = ctx && (ctx->state & ProcessContext::kPlaying) != 0;
+            renderer->render(araPtrs_.data(), ctx ? ctx->projectTimeSamples : 0, data.numSamples, playing);
+            araIn.numChannels = static_cast<int32>(inCh_);
+            araIn.channelBuffers32 = araPtrs_.data();
+            hostIn = &araIn;
+        }
+#endif
         const bool offline = data.processMode == kOffline;
         if (offline != offline_) {
             op_shell_set_offline(engine_, offline ? 1 : 0);
@@ -1649,6 +1692,12 @@ private:
     ShellExpressions expressions_;
     uint32_t layoutIndex_ = 0;
     uint32_t inCh_ = 0, outCh_ = 0, sideCh_ = 0;
+#if OP_HAS_ARA
+    static constexpr int32 kAraFrames = 65536;
+    ARA::PlugIn::PlugInExtension ara_;
+    std::vector<float> araBuf_;
+    std::vector<float*> araPtrs_;
+#endif
     uint8_t inMap_[OP_MAX_CHANNELS] = {}, outMap_[OP_MAX_CHANNELS] = {}, sideMap_[OP_MAX_CHANNELS] = {};
 
     // Everything below is touched only by the audio thread after setActive.
@@ -2228,6 +2277,12 @@ extern "C" SMTG_EXPORT_SYMBOL IPluginFactory* GetPluginFactory() {
         PClassInfo2 controllerClass(controller, PClassInfo::kManyInstances, kVstComponentControllerClass, info.name, 0, "", info.vendor, info.version, kVstVersionString);
         gPluginFactory->registerClass(&processorClass, openplugin_vst::Processor::create);
         gPluginFactory->registerClass(&controllerClass, openplugin_vst::Controller::create);
+#if OP_HAS_ARA
+        TUID araCid{};
+        openplugin_ara::main_factory_cid(info.processor_cid, reinterpret_cast<uint8_t*>(araCid));
+        PClassInfo2 araClass(araCid, PClassInfo::kManyInstances, kARAMainFactoryClass, info.name, 0, "", info.vendor, info.version, kVstVersionString);
+        gPluginFactory->registerClass(&araClass, openplugin_ara::MainFactory::create);
+#endif
     } else {
         gPluginFactory->addRef();
     }
