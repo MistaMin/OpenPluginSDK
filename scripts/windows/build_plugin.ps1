@@ -43,6 +43,8 @@
 #   -Editor             the shells host the plugin's editor (OP_EDITOR)  [OP_EDITOR=1]
 #   -Tail               the shells report the plugin's tail (OP_TAIL)    [OP_TAIL=1]
 #   -AaxPages           write the AAX page table into the bundle         [OP_AAX_PAGES=1]
+#   -AraSdk DIR         ARA SDK checkout: the VST3 is an ARA 2 plug-in; the plugin exports
+#                       op_ara_analyze, op_ara_url and op_ara_select       [OP_ARA_SDK]
 #   -AllowLib DLL       a DLL the plug-in may import besides the system
 #                       ones; repeatable. The Visual C++ runtime cannot
 #                       be allowed
@@ -91,6 +93,7 @@ param(
     [string[]]$AllowLib = @(),
     [string]$Vst3Sdk = $env:VST3_SDK,
     [string]$AaxSdk = $env:AAX_SDK,
+    [string]$AraSdk = $env:OP_ARA_SDK,
     [string]$Out = $env:OP_OUT,
     [string]$WorkDir = $env:OP_WORK_DIR,
     [string]$Jobs = $env:OP_JOBS,
@@ -330,6 +333,8 @@ if ($needShell) {
         "-DOP_EDITOR=$(& $onOff $Editor)", "-DOP_TAIL=$(& $onOff $Tail)", "-DOP_AAX_PAGES=$(& $onOff ($AaxPages -and (Has 'aax')))",
         "-DOP_TRIM_PATHS=$(($private | ForEach-Object { $_ -replace '\\', '/' }) -join ';')")
     if (Has 'vst3') { $configure += "-DOP_VST3_SDK=$Vst3Sdk" }
+    # ARA 2 in the VST3 (an ARA SDK checkout; the plugin exports op_ara_analyze, op_ara_url, op_ara_select).
+    if ((Has 'vst3') -and $AraSdk) { $configure += "-DOP_ARA_SDK=$(($AraSdk -replace '\\', '/'))" }
     if (Has 'aax') { $configure += "-DOP_AAX_SDK=$AaxSdk" }
     Run 'cmake' $configure
     # Only the bundles, not the SDK's own proofs.

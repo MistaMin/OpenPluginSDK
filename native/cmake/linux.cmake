@@ -35,6 +35,7 @@ set(OP_NATIVE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
 set(OP_RUST_LIB "" CACHE FILEPATH "Rust static library exporting op_shell_*")
 set(OP_VST3_SDK "" CACHE PATH "Existing VST3 SDK checkout")
+set(OP_ARA_SDK "" CACHE PATH "Existing ARA SDK checkout: makes the VST3 an ARA 2 plug-in")
 set(OP_PRODUCT "Plugin" CACHE STRING "Module file and display name")
 set(OP_BUNDLE_ID "com.example.openplugin" CACHE STRING "Bundle identifier prefix (not used on Linux)")
 set(OP_VERSION "0.1.0" CACHE STRING "Version")

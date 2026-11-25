@@ -45,6 +45,8 @@ Formats and options
                          "all" (clap,lv2,standalone; default: clap,lv2).
                          au and aax are not built on Linux             [OP_FORMATS]
   --vst3-sdk DIR         VST3 SDK checkout, for vst3                   [VST3_SDK]
+  --ara-sdk DIR          ARA SDK checkout: the VST3 is an ARA 2 plug-in; the
+                         plugin exports op_ara_analyze, _url and _select  [OP_ARA_SDK]
   --manufacturer NAME    the vendor, for the VST3 shell                [OP_MANUFACTURER]
   --editor               the VST3 shell hosts the plugin's editor (an
                          X11 view run by the host's loop)              [OP_EDITOR=1]
@@ -75,7 +77,7 @@ NAME="${OP_NAME:-}"; VERSION="${OP_VERSION:-}"
 TTL_BIN="${OP_TTL_BIN:-}"; STANDALONE_BIN="${OP_STANDALONE_BIN:-}"; FEATURES="${OP_FEATURES:-}"
 FORMATS="${OP_FORMATS:-clap,lv2}"
 STRIP="${OP_STRIP:-0}"; ALLOW_LIBS="${OP_ALLOW_LIBS:-}"
-VST3_SDK="${VST3_SDK:-}"; MANUFACTURER="${OP_MANUFACTURER:-OpenPlugin}"
+ARA_SDK="${OP_ARA_SDK:-}"; VST3_SDK="${VST3_SDK:-}"; MANUFACTURER="${OP_MANUFACTURER:-OpenPlugin}"
 EDITOR="${OP_EDITOR:-0}"; TAIL="${OP_TAIL:-0}"
 OUT="${OP_OUT:-$PWD/dist}"; WORK="${OP_WORK_DIR:-$PWD/build/openplugin-linux}"
 JOBS="${OP_JOBS:-$(nproc 2>/dev/null || echo 2)}"
@@ -96,6 +98,7 @@ while [ $# -gt 0 ]; do
     --formats) need "$@"; FORMATS="$2"; shift 2 ;;
     --strip) STRIP=1; shift ;;
     --vst3-sdk) need "$@"; VST3_SDK="$2"; shift 2 ;;
+    --ara-sdk) need "$@"; ARA_SDK="$2"; shift 2 ;;
     --manufacturer) need "$@"; MANUFACTURER="$2"; shift 2 ;;
     --editor) EDITOR=1; shift ;;
     --tail) TAIL=1; shift ;;
@@ -250,7 +253,7 @@ if has_format vst3; then
   NATIVE="$WORK/native"
   onoff() { if [ "$1" = 1 ]; then echo ON; else echo OFF; fi; }
   run cmake -S "$SDK_ROOT/native" -B "$NATIVE" -DCMAKE_BUILD_TYPE=Release \
-    "-DOP_RUST_LIB=$STATIC" "-DOP_VST3_SDK=$VST3_SDK" "-DOP_PRODUCT=$NAME" "-DOP_VERSION=$VERSION" \
+    "-DOP_RUST_LIB=$STATIC" "-DOP_VST3_SDK=$VST3_SDK" "-DOP_ARA_SDK=${ARA_SDK:+$(abspath "$ARA_SDK")}" "-DOP_PRODUCT=$NAME" "-DOP_VERSION=$VERSION" \
     "-DOP_MANUFACTURER=$MANUFACTURER" "-DOP_EDITOR=$(onoff "$EDITOR")" "-DOP_TAIL=$(onoff "$TAIL")" \
     "-DOP_TRIM_PATHS=$WORK;$WS_PARENT;$SDK_ROOT;$VST3_SDK;$HOME"
   run cmake --build "$NATIVE" --target OpenPluginVST3 -j "$JOBS"
