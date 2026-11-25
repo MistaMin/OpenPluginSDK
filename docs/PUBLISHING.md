@@ -4,7 +4,7 @@ Nothing here has been run for real. Every crate in `crates/` is ready to publish
 
 ## Prerequisite: GoodLookin DRI
 
-`openplugin-dri` depends on two crates that live outside this repository:
+`openplugin-dri` depends on two crates that live outside this repository. GoodLookin DRI stays a repository of its own, not crates in this workspace (owner's decision, 2026-11-25), so drawing changes land there first and reach the SDK through a new tag.
 
 | Crate                | Version | Source                                    |
 |----------------------|---------|-------------------------------------------|
