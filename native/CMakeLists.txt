@@ -179,6 +179,26 @@ endfunction()
 
 enable_testing()
 
+# ARA 2 for the CLAP entry: a library the .clap bundle carries and loads (ara/ara_c.cpp).
+if(OP_ARA_SDK)
+  if(NOT EXISTS "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp")
+    message(FATAL_ERROR "OP_ARA_SDK must point at an ARA SDK checkout (ARA_API, ARA_Library)")
+  endif()
+  add_library(OpenPluginARA SHARED
+    ara/ara_c.cpp
+    ara/ara_glue.cpp
+    "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp"
+    "${OP_ARA_SDK}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
+    "${OP_ARA_SDK}/ARA_Library/Utilities/ARAChannelFormat.cpp"
+    "${OP_ARA_SDK}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
+    "${OP_ARA_SDK}/ARA_Library/Debug/ARADebug.c")
+  target_include_directories(OpenPluginARA PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_ARA_SDK}")
+  target_compile_definitions(OpenPluginARA PRIVATE OP_HAS_ARA=1 ARA_VALIDATE_API_CALLS=0)
+  target_compile_features(OpenPluginARA PRIVATE cxx_std_17)
+  set_target_properties(OpenPluginARA PROPERTIES CXX_VISIBILITY_PRESET hidden C_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON
+    OUTPUT_NAME OpenPluginARA)
+endif()
+
 if(OP_BUILD_VST3)
   if(NOT EXISTS "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
     message(FATAL_ERROR "OP_VST3_SDK must point at a VST3 SDK checkout")

@@ -85,6 +85,32 @@ private:
     size_t frames_ = 0, channels_ = 0;
 };
 
+// The editor view: the host tells it which regions (or region sequences) the user selected;
+// their clips go to the plugin (op_ara_select), so its editor works on what is selected.
+class View : public ARA::PlugIn::EditorView {
+public:
+    // ARA forwards selections only to an open editor. The plugin's editor reads the selection
+    // whenever it shows, so the view counts as open from the start.
+    explicit View(ARA::PlugIn::DocumentController* controller) noexcept : ARA::PlugIn::EditorView(controller) { setEditorOpen(true); }
+
+protected:
+    void doNotifySelection(const ARA::PlugIn::ViewSelection* selection) noexcept override {
+        std::vector<std::string> ids;
+        auto add = [&ids](const ARA::PlugIn::PlaybackRegion* region) {
+            const std::string& id = region->getAudioModification()->getAudioSource()->getPersistentID();
+            if (std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+        };
+        if (selection) {
+            for (const auto* region : selection->getPlaybackRegions()) add(region);
+            for (const auto* sequence : selection->getRegionSequences())
+                for (const auto* region : sequence->getPlaybackRegions()) add(region);
+        }
+        std::vector<const char*> ptrs;
+        for (const auto& id : ids) ptrs.push_back(id.c_str());
+        op_ara_select(ptrs.data(), static_cast<uint32_t>(ptrs.size()));
+    }
+};
+
 class Controller : public ARA::PlugIn::DocumentController {
 public:
     using ARA::PlugIn::DocumentController::DocumentController;
@@ -145,6 +171,7 @@ protected:
         if (!editing) open();
     }
     ARA::PlugIn::PlaybackRenderer* doCreatePlaybackRenderer() noexcept override { return new Renderer(this); }
+    ARA::PlugIn::EditorView* doCreateEditorView() noexcept override { return new View(this); }
 
 private:
     std::atomic<bool> open_{true};

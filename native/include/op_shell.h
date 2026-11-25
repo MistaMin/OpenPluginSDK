@@ -469,6 +469,10 @@ void op_ara_analyze(const char* id, uint32_t channels, uint64_t frames, double s
 // Required with -DOP_ARA_SDK too: the plugin's web page for the ARA factory (ARA requires one),
 // a NUL-terminated string that lives as long as the module.
 const char* op_ara_url(void);
+// Required with -DOP_ARA_SDK too: the clips the user selected in the host (the audio sources of
+// the selected playback regions and region sequences), by persistent ID; `count` may be 0 (the
+// selection was cleared). Main thread; the strings are valid only during the call.
+void op_ara_select(const char* const* ids, uint32_t count);
 #endif
 #ifdef __cplusplus
 }

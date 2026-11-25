@@ -190,6 +190,8 @@ SHELLS=""
 if has_format vst3; then SHELLS="$SHELLS OpenPluginVST3"; fi
 if has_format au; then SHELLS="$SHELLS OpenPluginAU"; fi
 if has_format aax; then SHELLS="$SHELLS OpenPluginAAX"; fi
+# ARA in the CLAP entry: a small library the .clap carries (native/ara/ara_c.cpp). macOS only for now.
+if has_format clap && [ -n "$ARA_SDK" ] && [ "$(uname -s)" = Darwin ]; then SHELLS="$SHELLS OpenPluginARA"; fi
 check_sdk() { # variable, value, probe file, what
   [ -n "$2" ] || die "$1 is not set; the $4 shell needs it"
   if [ "$DRY" = 1 ] || [ -e "$2/$3" ]; then return 0; fi
@@ -368,6 +370,16 @@ if [ -n "$SHELLS" ]; then
       BUNDLES+=("$OUT/$NAME.$ext")
     fi
   done
+  # The CLAP entry finds ARA next to itself, in its bundle's Resources; it is signed before the bundle.
+  if has_format clap && [ -f "$CM/libOpenPluginARA.dylib" ]; then
+    R="$OUT/$NAME.clap/Contents/Resources"
+    run mkdir -p "$R"
+    run cp "$CM/libOpenPluginARA.dylib" "$R/libOpenPluginARA.dylib"
+    run install_name_tool -id "@loader_path/libOpenPluginARA.dylib" "$R/libOpenPluginARA.dylib"
+    run cp "$ARA_SDK/ARA_Library/LICENSE.txt" "$R/ARA-SDK-LICENSE.txt"
+    run cp "$ARA_SDK/NOTICE.txt" "$R/ARA-SDK-NOTICE.txt"
+    BUNDLES=("$R/libOpenPluginARA.dylib" "${BUNDLES[@]}")
+  fi
 fi
 
 if has_format standalone; then
