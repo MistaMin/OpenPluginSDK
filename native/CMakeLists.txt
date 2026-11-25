@@ -213,14 +213,14 @@ if(OP_BUILD_VST3)
       message(FATAL_ERROR "OP_ARA_SDK must point at an ARA SDK checkout (ARA_API, ARA_Library)")
     endif()
     target_sources(OpenPluginVST3 PRIVATE
-      vst3/ara_glue.cpp
+      ara/ara_glue.cpp
       "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp"
       "${OP_ARA_SDK}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
       "${OP_ARA_SDK}/ARA_Library/Utilities/ARAChannelFormat.cpp"
       "${OP_ARA_SDK}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
       "${OP_ARA_SDK}/ARA_Library/Debug/ARADebug.c")
     target_include_directories(OpenPluginVST3 PRIVATE "${OP_ARA_SDK}")
-    target_compile_definitions(OpenPluginVST3 PRIVATE OP_HAS_ARA=1 ARA_VALIDATE_API_CALLS=0)
+    target_compile_definitions(OpenPluginVST3 PRIVATE OP_HAS_ARA=1 OP_ARA_VST3=1 ARA_VALIDATE_API_CALLS=0)
     add_custom_command(TARGET OpenPluginVST3 POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources"
       COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/ARA_Library/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources/ARA-SDK-LICENSE.txt"
@@ -596,7 +596,12 @@ if(OP_BUILD_AU)
       message(FATAL_ERROR "OP_AU_${code} must be four characters: pass it (--au-subtype, --au-manufacturer) or pin the codes in the plugin (Plugin::au_ids)")
     endif()
   endforeach()
+  # An ARA Audio Unit says so in its component tags, so hosts know without loading it.
+  if(OP_ARA_SDK)
+    set(OP_AU_EXTRA "<key>tags</key><array><string>ARA</string></array>")
+  endif()
   configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-Info.plist" @ONLY)
+  set(OP_AU_EXTRA "")
   add_library(OpenPluginAU MODULE au/OpenPluginAU.cpp)
   op_au_set_type(OpenPluginAU "${OP_AU_TYPE}")
   if(OP_EDITOR)
@@ -618,6 +623,23 @@ if(OP_BUILD_AU)
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-Info.plist")
   target_link_libraries(OpenPluginAU PRIVATE openplugin_au_sdk)
   op_link_rust(OpenPluginAU)
+  # ARA 2 in the Audio Unit too (ara/ara_glue.h), from the same ARA SDK checkout.
+  if(OP_ARA_SDK)
+    target_sources(OpenPluginAU PRIVATE
+      ara/ara_glue.cpp
+      "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Utilities/ARAChannelFormat.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Debug/ARADebug.c")
+    target_include_directories(OpenPluginAU PRIVATE "${OP_ARA_SDK}")
+    target_compile_definitions(OpenPluginAU PRIVATE OP_HAS_ARA=1 ARA_VALIDATE_API_CALLS=0)
+    add_custom_command(TARGET OpenPluginAU POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources"
+      COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/ARA_Library/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources/ARA-SDK-LICENSE.txt"
+      COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/NOTICE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources/ARA-SDK-NOTICE.txt"
+      COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
+  endif()
   add_custom_command(TARGET OpenPluginAU POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_AU_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources/AudioUnitSDK-LICENSE.txt"

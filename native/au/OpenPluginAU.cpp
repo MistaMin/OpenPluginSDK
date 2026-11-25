@@ -35,6 +35,11 @@
 #include <type_traits>
 #include <vector>
 
+#include "../ara/ara_glue.h"
+#if OP_HAS_ARA
+#include "ARA_API/ARAAudioUnit.h"
+#endif
+
 #ifndef OP_AU_TYPE_CODE
 #define OP_AU_TYPE_CODE 0
 #endif
@@ -314,6 +319,19 @@ public:
 
     // ---- properties --------------------------------------------------------------------
     OSStatus GetPropertyInfo(AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement element, UInt32& size, bool& writable) override {
+#if OP_HAS_ARA
+        // ARA 2: the factory and the binding of this instance to a host's document (ara_glue.h).
+        if (scope == kAudioUnitScope_Global && id == ARA::kAudioUnitProperty_ARAFactory) {
+            size = sizeof(ARA::ARAAudioUnitFactory);
+            writable = false;
+            return noErr;
+        }
+        if (scope == kAudioUnitScope_Global && id == ARA::kAudioUnitProperty_ARAPlugInExtensionBindingWithRoles) {
+            size = sizeof(ARA::ARAAudioUnitPlugInExtensionBinding);
+            writable = false;
+            return noErr;
+        }
+#endif
 #if OP_HAS_EDITOR
         if (scope == kAudioUnitScope_Global && id == kAudioUnitProperty_CocoaUI) {
             size = sizeof(AudioUnitCocoaViewInfo);
@@ -368,6 +386,21 @@ public:
         return Base::GetPropertyInfo(id, scope, element, size, writable);
     }
     OSStatus GetProperty(AudioUnitPropertyID id, AudioUnitScope scope, AudioUnitElement element, void* data) override {
+#if OP_HAS_ARA
+        // The property IDs may be used outside ARA with other meanings: only ARA's magic number counts.
+        if (scope == kAudioUnitScope_Global && id == ARA::kAudioUnitProperty_ARAFactory) {
+            auto* factory = static_cast<ARA::ARAAudioUnitFactory*>(data);
+            if (!factory || factory->inOutMagicNumber != ARA::kARAAudioUnitMagic) return kAudioUnitErr_InvalidProperty;
+            factory->outFactory = openplugin_ara::factory();
+            return noErr;
+        }
+        if (scope == kAudioUnitScope_Global && id == ARA::kAudioUnitProperty_ARAPlugInExtensionBindingWithRoles) {
+            auto* binding = static_cast<ARA::ARAAudioUnitPlugInExtensionBinding*>(data);
+            if (!binding || binding->inOutMagicNumber != ARA::kARAAudioUnitMagic) return kAudioUnitErr_InvalidProperty;
+            binding->outPlugInExtension = ara_.bindToARA(binding->inDocumentControllerRef, binding->knownRoles, binding->assignedRoles);
+            return noErr;
+        }
+#endif
 #if OP_HAS_EDITOR
         if (scope == kAudioUnitScope_Global && id == kAudioUnitProperty_CocoaUI) {
             CFBundleRef bundle = CFBundleGetBundleWithIdentifier(CFSTR(OP_AU_BUNDLE_ID));
@@ -629,6 +662,24 @@ public:
         pendingEvents_.resize(OP_MAX_EVENTS);
         chunkEvents_.resize(OP_MAX_EVENTS);
         midiPacketBuffer_.assign(kMidiPacketBytes, 0);
+#if OP_HAS_ARA
+        // A playback renderer plays the host's regions into the input; its buffers are made here.
+        araFrames_ = 0;
+        if (auto* renderer = ara_.getPlaybackRenderer<openplugin_ara::Renderer>(); renderer && hasMainIn_ && plan.inChannels > 0) {
+            renderer->enable(rate, static_cast<int>(plan.inChannels));
+            araFrames_ = frames;
+            araBuf_.assign(static_cast<size_t>(plan.inChannels) * frames, 0.0f);
+            araList_.assign(offsetof(AudioBufferList, mBuffers) + sizeof(AudioBuffer) * plan.inChannels, 0);
+            auto* list = reinterpret_cast<AudioBufferList*>(araList_.data());
+            list->mNumberBuffers = plan.inChannels;
+            for (uint32_t c = 0; c < plan.inChannels; ++c) {
+                araPtrs_[c] = araBuf_.data() + static_cast<size_t>(c) * frames;
+                list->mBuffers[c].mNumberChannels = 1;
+                list->mBuffers[c].mDataByteSize = static_cast<UInt32>(frames * sizeof(float));
+                list->mBuffers[c].mData = araPtrs_[c];
+            }
+        }
+#endif
         return noErr;
     }
     void Cleanup() override {
@@ -1194,6 +1245,22 @@ private:
         }
         // Pull the inputs: the main one for an effect, the sidechain when one is connected.
         AudioBufferList* inList = nullptr;
+#if OP_HAS_ARA
+        // Bound as an ARA playback renderer: the input is the host's playback regions at the song
+        // position, read from the document's copies of the audio sources; nothing is pulled.
+        auto* araRenderer = ara_.getPlaybackRenderer<openplugin_ara::Renderer>();
+        if (araRenderer && araFrames_ >= frames) {
+            OpTransport at;
+            const bool known = fillTransport(time, at);
+            const bool playing = known && (at.flags & OP_TRANSPORT_PLAYING) != 0;
+            araRenderer->render(araPtrs_, known ? at.sample_pos : static_cast<int64_t>(time.mSampleTime), frames, playing);
+            inList = reinterpret_cast<AudioBufferList*>(araList_.data());
+            for (uint32_t c = 0; c < inList->mNumberBuffers; ++c) {
+                inList->mBuffers[c].mData = araPtrs_[c];
+                inList->mBuffers[c].mDataByteSize = frames * sizeof(float);
+            }
+        } else
+#endif
         if (hasMainIn_) {
             auto& input = this->Input(0);
             if (!input.IsActive()) return kAudioUnitErr_NoConnection;
@@ -1259,7 +1326,12 @@ private:
             }
             for (uint32_t j = 0; j < nSc; ++j) canSc[plan_.scPerm[j]] = static_cast<const float*>(scList->mBuffers[j].mData) + base;
 
-            const float target = bypass_.load(std::memory_order_relaxed) ? 0.0f : 1.0f;
+#if OP_HAS_ARA
+            const bool araThrough = openplugin_ara::renderer_only(ara_);
+#else
+            const bool araThrough = false;
+#endif
+            const float target = (bypass_.load(std::memory_order_relaxed) || araThrough) ? 0.0f : 1.0f;
             const bool settledWet = !bypassable || (mix_ == 1.0f && target == 1.0f && delayCap_ == 0);
             // The latency now (ABI 9; not the host's read, so no change is lost to it), within the
             // delay sized at Initialize.
@@ -1517,6 +1589,13 @@ private:
     UInt32 maxFrames_ = 512;
     static constexpr double kCrossfadeSeconds = 0.010;
     std::atomic<bool> bypass_{false};
+#if OP_HAS_ARA
+    ARA::PlugIn::PlugInExtension ara_;
+    std::vector<float> araBuf_;
+    std::vector<uint8_t> araList_;
+    float* araPtrs_[OP_MAX_CHANNELS] = {};
+    UInt32 araFrames_ = 0;
+#endif
     // The bypass delay of this render (the latency now, at most delayCap_), and the largest
     // latency the delay holds, sized at Initialize. Larger than this is not a latency: past
     // it the shell delays the bypassed signal by the cap.

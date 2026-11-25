@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// ARA 2 for the VST3 shell: see ara_glue.h. The region rendering follows the ARA SDK
+// ARA 2 for the VST3 and Audio Unit shells: see ara_glue.h. The region rendering follows the ARA SDK
 // examples' test plug-in (Celemony Software GmbH, Apache 2.0).
 #if OP_HAS_ARA
 
@@ -13,12 +13,14 @@
 
 #include "op_shell.h"
 
+#if OP_ARA_VST3
 ARA_DISABLE_VST3_WARNINGS_BEGIN
 DEF_CLASS_IID(ARA::IMainFactory)
 DEF_CLASS_IID(ARA::IPlugInEntryPoint)
 DEF_CLASS_IID(ARA::IPlugInEntryPoint2)
 IMPLEMENT_FUNKNOWN_METHODS(openplugin_ara::MainFactory, ARA::IMainFactory, ARA::IMainFactory::iid)
 ARA_DISABLE_VST3_WARNINGS_END
+#endif
 
 namespace openplugin_ara {
 namespace {
@@ -166,11 +168,13 @@ const ARA::ARAFactory* factory() noexcept {
     return ARA::PlugIn::PlugInEntry::getPlugInEntry<Config, Controller>()->getFactory();
 }
 
+#if OP_ARA_VST3
 void main_factory_cid(const uint8_t processor[16], uint8_t out[16]) noexcept {
     std::memcpy(out, processor, 16);
     out[15] = static_cast<uint8_t>(~out[15]);
     out[14] = static_cast<uint8_t>(out[14] ^ 0xA5);
 }
+#endif
 
 void Renderer::render(float* const* out, int64_t position, int64_t frames, bool playing) noexcept {
     for (int c = 0; c < channels_; ++c) std::memset(out[c], 0, sizeof(float) * static_cast<size_t>(frames));

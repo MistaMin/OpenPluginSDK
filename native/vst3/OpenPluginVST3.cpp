@@ -44,7 +44,7 @@
 #include <string>
 #include <vector>
 
-#include "ara_glue.h"
+#include "../ara/ara_glue.h"
 
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -999,7 +999,7 @@ public:
         // plugin's settings are its parameters, so processing stays with the editor instance:
         // a renderer-only instance plays the clips unprocessed, latency-aligned like the bypass,
         // and the track insert processes them. An instance with every role does both.
-        const bool araThrough = ara_.getPlaybackRenderer<openplugin_ara::Renderer>() && !ara_.getEditorRenderer() && !ara_.getEditorView();
+        const bool araThrough = openplugin_ara::renderer_only(ara_);
 #else
         const bool araThrough = false;
 #endif
