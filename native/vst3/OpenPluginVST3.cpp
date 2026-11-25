@@ -993,6 +993,16 @@ public:
             hostIn = &araIn;
         }
 #endif
+#if OP_HAS_ARA
+        // A host may split the roles over two instances (a hidden playback renderer per clip and
+        // the editor instance on the track, whose parameters the user edits and automates). The
+        // plugin's settings are its parameters, so processing stays with the editor instance:
+        // a renderer-only instance plays the clips unprocessed, latency-aligned like the bypass,
+        // and the track insert processes them. An instance with every role does both.
+        const bool araThrough = ara_.getPlaybackRenderer<openplugin_ara::Renderer>() && !ara_.getEditorRenderer() && !ara_.getEditorView();
+#else
+        const bool araThrough = false;
+#endif
         const bool offline = data.processMode == kOffline;
         if (offline != offline_) {
             op_shell_set_offline(engine_, offline ? 1 : 0);
@@ -1063,7 +1073,7 @@ public:
             args.event_count = count;
             args.events = count ? chunk_ : nullptr;
             args.transport = haveTransport ? &transport_ : nullptr;
-            const float target = bypass_.load() ? 1.0f : 0.0f;
+            const float target = (bypass_.load() || araThrough) ? 1.0f : 0.0f;
             // The delayed dry signal is taken before the engine runs, because the
             // host may have given the same buffer for input and output.
             if (hostOut) captureDry(hostIn, start, frames);
