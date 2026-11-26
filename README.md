@@ -285,3 +285,5 @@ OpenPluginSDK is dual-licensed under either:
 * [Apache License, Version 2.0](LICENSE-APACHE) ([http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0))
 
 at your option. This provides maximum flexibility for both commercial/proprietary plugins and open-source audio software.
+
+The fonts in `crates/goodlookindri/shell/fonts` are not under these licences: each keeps its own, the SIL Open Font License 1.1, in its folder. A plugin that uses one ships that licence with it. Fonts installed on a user's computer (`text::system`) are read there and never copied into the plugin. See [docs/DRI_GUIDE.md](docs/DRI_GUIDE.md#fonts).

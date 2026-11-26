@@ -83,6 +83,25 @@ Measured with `examples/editor/src/bin/frames.rs` (the view's loop without the C
 
 A drag does not get faster because the lit knob is shaded per pixel for each new value (milliseconds, then cached by GoodLookin DRI); repainting less does not change that. At 1× the same runs give idle 0.49 ms to 0, a dragged knob 1.76 to 1.58 ms, cached knob values 0.48 to 0.34 ms and the meter 0.60 to 0.09 ms. The Cocoa side (a smaller CoreGraphics blit and compositing) is not in these numbers.
 
+## Fonts
+
+Text draws in Source Sans Pro Semibold unless a scene picks another face. `scene.font(id)` sets the face for the `text` calls after it in the same scene; each scene starts with the default. A `FontId` comes from one of two places, both in `openplugin_dri::text`:
+
+- **A font that ships with the plugin.** `text::register(text::bundled::INTER_REGULAR)` adds one of the open-licence faces that come with GoodLookin DRI: Inter, Source Sans 3, JetBrains Mono (monospaced readouts), Barlow Condensed (narrow panel lettering) and DSEG7 / DSEG14 (segment displays). `register` takes the bytes of any TrueType or OpenType font, so a plugin can also embed its own with `include_bytes!`. A plugin carries only the faces it names; ship the licence of each (`crates/goodlookindri/shell/fonts/<font>/OFL.txt`) with the plugin.
+- **A font installed on the user's computer.** `text::system("Helvetica Neue")` finds an installed font by full name, PostScript name, or family name for its regular style, in the system's font folders (macOS, Windows and Linux), and reads it there. Nothing is copied into the plugin, as with JUCE's system fonts. It returns `None` when the font is not installed, so fall back to a bundled face. The first lookup of a name scans the folders; call it when the editor opens, not from the audio thread.
+
+```rust
+use openplugin_dri::text;
+
+let label = text::system("Helvetica Neue")
+    .or_else(|| text::register(text::bundled::INTER_REGULAR))
+    .unwrap_or_default();
+scene.font(label);
+scene.text(at, "GAIN", ink, 11.0, true);
+```
+
+`text::width_in`, `line_height_in`, `wrap_in` and `ellipsize_in` measure in a chosen face. Registered faces stay loaded for the life of the process, and registering the same bundled bytes again returns the same id.
+
 ## Resizable editors
 
 `SceneCanvas::resize(width, height)` sets a new size in points. The next frame has the new pixel size, and the cached layer is dropped, so `frame_layered` paints the plate again at that size and then reuses it. The same size changes nothing, and going back to an earlier size repaints it once. The layer's cache key already includes the pixel size, so a canvas that is resized without `resize` repaints too; `resize` is the call that changes the size the editor draws for.
