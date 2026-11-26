@@ -713,6 +713,13 @@ static void check_idle_edits(IPluginFactory* factory, const TUID effectId, Param
     CHECK(processor->setProcessing(false) == kResultOk);
     CHECK(controller->setParamNormalized(gain, other) == kResultOk);
     CHECK(std::fabs(saved_value(component, gain, bypass) - other) < 1e-12);
+    // Processing just turned on, no block yet (a host that loads a project and does not
+    // render): the processor still takes the edit.
+    CHECK(processor->setProcessing(true) == kResultOk);
+    CHECK(controller->setParamNormalized(gain, before) == kResultOk);
+    CHECK(std::fabs(saved_value(component, gain, bypass) - before) < 1e-12);
+    CHECK(controller->setParamNormalized(gain, other) == kResultOk);
+    CHECK(std::fabs(saved_value(component, gain, bypass) - other) < 1e-12);
     // Processing on but no block for longer than the idle time: the same, bypass too.
     CHECK(processor->setProcessing(true) == kResultOk);
     render_host(processor, 2, 1, {}, false);
@@ -723,7 +730,7 @@ static void check_idle_edits(IPluginFactory* factory, const TUID effectId, Param
     CHECK(saved_value(component, bypass, bypass) == 1.0);
     CHECK(controller->setParamNormalized(bypass, 0.0) == kResultOk);
     CHECK(saved_value(component, bypass, bypass) == 0.0);
-    std::puts("VST3 edits while no audio runs: left to the host while blocks run, saved while processing is off or no block came for the idle time (bypass too)");
+    std::puts("VST3 edits while no audio runs: left to the host while blocks run, saved while processing is off, before the first block or when no block came for the idle time (bypass too)");
 
     CHECK(processor->setProcessing(false) == kResultOk);
     CHECK(component->setActive(false) == kResultOk);
