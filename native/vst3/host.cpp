@@ -745,6 +745,85 @@ static void check_idle_edits(IPluginFactory* factory, const TUID effectId, Param
     component->release();
 }
 
+// A component and its controller, connected, as a host makes them.
+struct Pair {
+    IComponent* component = nullptr;
+    IAudioProcessor* processor = nullptr;
+    IEditController* controller = nullptr;
+    IConnectionPoint* fromComponent = nullptr;
+    IConnectionPoint* fromController = nullptr;
+    Pair(IPluginFactory* factory, const TUID effectId, FUnknown* host) {
+        CHECK(factory->createInstance(effectId, IComponent::iid, reinterpret_cast<void**>(&component)) == kResultOk && component);
+        CHECK(component->initialize(host) == kResultOk);
+        CHECK(component->queryInterface(IAudioProcessor::iid, reinterpret_cast<void**>(&processor)) == kResultOk && processor);
+        TUID controllerId{};
+        CHECK(component->getControllerClassId(controllerId) == kResultOk);
+        CHECK(factory->createInstance(controllerId, IEditController::iid, reinterpret_cast<void**>(&controller)) == kResultOk && controller);
+        CHECK(controller->initialize(host) == kResultOk);
+        CHECK(component->queryInterface(IConnectionPoint::iid, reinterpret_cast<void**>(&fromComponent)) == kResultOk);
+        CHECK(controller->queryInterface(IConnectionPoint::iid, reinterpret_cast<void**>(&fromController)) == kResultOk);
+        CHECK(fromComponent->connect(fromController) == kResultOk && fromController->connect(fromComponent) == kResultOk);
+    }
+    ~Pair() {
+        fromComponent->disconnect(fromController);
+        fromController->disconnect(fromComponent);
+        fromComponent->release();
+        fromController->release();
+        processor->release();
+        CHECK(controller->terminate() == kResultOk);
+        controller->release();
+        CHECK(component->terminate() == kResultOk);
+        component->release();
+    }
+};
+
+// A host that saves before its queued parameter changes reach the processor (OpenGrid9 and
+// Ardour without a GUI): the controller has the value the host set, the processor an older
+// one. The controller's state carries it, and loading the session gives it to the processor.
+static void check_save_before_delivery(IPluginFactory* factory, const TUID effectId, ParamID gain) {
+    IPtr<HostApplication> host = owned(new HostApplication);
+    MemoryStream componentState, controllerState;
+    double older = 0.0, newer = 0.0;
+    bool controllerSaved = false;
+    {
+        Pair a(factory, effectId, host);
+        const ParamID bypass = check_bypass_parameter(a.controller);
+        SpeakerArrangement arrangement = SpeakerArr::kStereo;
+        CHECK(a.processor->setBusArrangements(&arrangement, 1, &arrangement, 1) == kResultOk);
+        CHECK(a.component->activateBus(kAudio, kInput, 0, true) == kResultOk);
+        CHECK(a.component->activateBus(kAudio, kOutput, 0, true) == kResultOk);
+        ProcessSetup setup{kRealtime, kSample32, 512, 48000.0};
+        CHECK(a.processor->setupProcessing(setup) == kResultOk);
+        CHECK(a.component->setActive(true) == kResultOk);
+        CHECK(a.processor->setProcessing(true) == kResultOk);
+        older = 0.25;
+        newer = 0.75;
+        // The host delivers one value in a block, then sets a newer one that it has not
+        // delivered yet when it saves.
+        render_host(a.processor, 2, 1, {{gain, older}}, false);
+        CHECK(a.controller->setParamNormalized(gain, newer) == kResultOk);
+        CHECK(std::fabs(saved_value(a.component, gain, bypass) - older) < 1e-12);
+        CHECK(a.component->getState(&componentState) == kResultOk);
+        // A controller with no state of its own leaves the host nothing to give back.
+        controllerSaved = a.controller->getState(&controllerState) == kResultOk;
+        CHECK(a.processor->setProcessing(false) == kResultOk);
+        CHECK(a.component->setActive(false) == kResultOk);
+    }
+    Pair b(factory, effectId, host);
+    const ParamID bypass = check_bypass_parameter(b.controller);
+    componentState.seek(0, IBStream::kIBSeekSet, nullptr);
+    CHECK(b.component->setState(&componentState) == kResultOk);
+    componentState.seek(0, IBStream::kIBSeekSet, nullptr);
+    CHECK(b.controller->setComponentState(&componentState) == kResultOk);
+    if (controllerSaved) {
+        controllerState.seek(0, IBStream::kIBSeekSet, nullptr);
+        CHECK(b.controller->setState(&controllerState) == kResultOk);
+    }
+    CHECK(std::fabs(saved_value(b.component, gain, bypass) - newer) < 1e-12);
+    CHECK(std::fabs(b.controller->getParamNormalized(gain) - newer) < 1e-12);
+    std::puts("VST3 save before the host delivered a value: the controller's state carries it, and the reopened processor has it");
+}
+
 // A host that starts its render thread before setProcessing(true) reaches the processor
 // (seen as a mid-render knock in REAPER): the late call must not reset a stream that has
 // already begun. Two instances run the same blocks; one also gets the late call, mid-way
@@ -1137,6 +1216,7 @@ int main(int argc, char** argv) {
         component->release();
     }
     check_idle_edits(factory, effect.cid, find_shell_param("Gain"));
+    check_save_before_delivery(factory, effect.cid, find_shell_param("Gain"));
     check_late_processing_start(factory, effect.cid);
     factory->release();
     CHECK(exitFn());
