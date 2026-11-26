@@ -1,0 +1,11 @@
+[package]
+name = "goodlookindri-shell"
+version = "0.2.1"
+edition = "2021"
+license = "MIT"
+description = "Window, software rasteriser and input for GoodLookin DRI scenes. Win32 (Windows 7 to 11) and Cocoa (macOS 10.6 to current), no GPU."
+authors = ["Marcos Quirino Deida"]
+
+[dependencies]
+fontdue = "=0.8.0"
+goodlookindri = { path = ".." }

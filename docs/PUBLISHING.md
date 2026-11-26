@@ -4,14 +4,19 @@ Nothing here has been run for real. Every crate in `crates/` is ready to publish
 
 ## Prerequisite: GoodLookin DRI
 
-`openplugin-dri` depends on two crates that live outside this repository:
+`openplugin-dri` depends on two crates whose source is in this repository under `crates/goodlookindri`:
 
 | Crate                | Version | Source                                    |
 |----------------------|---------|-------------------------------------------|
-| `goodlookindri`      | 0.2.1   | git tag `v0.2.1` of GoodLookinDri         |
-| `goodlookindri-shell`| 0.2.1   | git tag `v0.2.1` of GoodLookinDri         |
+| `goodlookindri`      | 0.2.1   | `crates/goodlookindri`                    |
+| `goodlookindri-shell`| 0.2.1   | `crates/goodlookindri/shell`              |
 
-The workspace `Cargo.toml` names both by git tag, and `Cargo.lock` pins the exact commit, so every build uses the same GoodLookin DRI. To update it, release a new GoodLookin DRI tag, change the two `tag = "..."` entries in the workspace `Cargo.toml`, run `cargo update -p goodlookindri -p goodlookindri-shell`, and run the tests. Before publishing to crates.io, GoodLookin DRI's owner publishes `goodlookindri`, then `goodlookindri-shell`, and the two entries change to `version = "..."` (crates.io rejects git-only dependencies).
+GoodLookin DRI stays its own project, with its own repository ([MistaMin/GoodLookinDri](https://github.com/MistaMin/GoodLookinDri)), version, licence and Rust 1.80 / legacy macOS support. `crates/goodlookindri` is a git subtree of that repository: it keeps its own workspace (so the SDK workspace excludes it) and its own tests, which CI runs. The workspace `Cargo.toml` names both crates by path and version.
+
+- Bring in a new GoodLookin DRI release: `git subtree pull --prefix=crates/goodlookindri https://github.com/MistaMin/GoodLookinDri <tag>`, then change the two versions in the workspace `Cargo.toml` if they moved, and run the tests.
+- Send a DRI change made here back to its repository: `git subtree push --prefix=crates/goodlookindri https://github.com/MistaMin/GoodLookinDri <branch>`, and open a pull request there. Keep commits that touch `crates/goodlookindri` free of other changes, so they split out cleanly.
+
+Before publishing to crates.io, `goodlookindri`, then `goodlookindri-shell`, go up first; the path entries keep their `version`, so the SDK crates then package against the registry copies.
 
 `openplugin-targets` and `openplugin` reach GoodLookin DRI only through `openplugin-dri`, so the whole chain waits on this step.
 

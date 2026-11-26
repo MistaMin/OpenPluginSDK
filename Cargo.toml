@@ -23,6 +23,7 @@ members = [
     "examples/pinned/builds/plain_a",
     "examples/pinned/builds/plain_b",
 ]
+exclude = ["crates/goodlookindri"]
 resolver = "2"
 
 [workspace.package]
@@ -44,8 +45,10 @@ openplugin-targets = { path = "crates/openplugin-targets", version = "1.0.0-beta
 openplugin-host = { path = "crates/openplugin-host", version = "1.0.0-beta" }
 openplugin-testing = { path = "crates/openplugin-testing", version = "1.0.0-beta" }
 openplugin = { path = "crates/openplugin", version = "1.0.0-beta" }
-goodlookindri = { git = "https://github.com/MistaMin/GoodLookinDri", tag = "v0.2.1" }
-goodlookindri-shell = { git = "https://github.com/MistaMin/GoodLookinDri", tag = "v0.2.1" }
+# GoodLookin DRI lives in the tree (git subtree of MistaMin/GoodLookinDri) and
+# keeps its own workspace, so it is excluded from this one.
+goodlookindri = { path = "crates/goodlookindri", version = "0.2.1" }
+goodlookindri-shell = { path = "crates/goodlookindri/shell", version = "0.2.1" }
 
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"

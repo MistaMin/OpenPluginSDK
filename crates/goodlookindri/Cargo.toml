@@ -1,0 +1,15 @@
+[workspace]
+members = [".", "shell", "hello"]
+resolver = "2"
+
+[package]
+name = "goodlookindri"
+version = "0.2.1"
+edition = "2021"
+license = "MIT"
+description = "JUCE-free Rust port of GoodLookinUI: design files, meters, spectrum, and procedural hardware drawing."
+authors = ["Marcos Quirino Deida"]
+
+[dependencies]
+
+[dev-dependencies]
