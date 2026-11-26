@@ -1,0 +1,119 @@
+name: shell
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace
+      - name: Offscreen render
+        run: cargo run --release -p goodlookindri-hello -- --render hello.ppm 2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hello-${{ matrix.os }}
+          path: hello.ppm
+
+  macos-modern:
+    name: macOS 10.12 to current (universal)
+    runs-on: macos-14
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.12"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - run: cargo build --release -p goodlookindri-hello --target x86_64-apple-darwin
+      - run: cargo build --release -p goodlookindri-hello --target aarch64-apple-darwin
+      - name: Universal binary
+        run: |
+          mkdir -p dist
+          lipo -create -output dist/gldri-hello \
+            target/x86_64-apple-darwin/release/gldri-hello \
+            target/aarch64-apple-darwin/release/gldri-hello
+          lipo -info dist/gldri-hello
+          otool -l target/x86_64-apple-darwin/release/gldri-hello | grep -A4 -E 'LC_BUILD_VERSION|LC_VERSION_MIN'
+      - name: Window smoke test
+        run: ./dist/gldri-hello --smoke 1500
+      - name: Widgets smoke test
+        run: ./target/x86_64-apple-darwin/release/gldri-widgets --smoke 1500
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gldri-hello-macos-modern
+          path: dist/gldri-hello
+
+  # macOS 10.6.8 to 10.11. Current Rust cannot target 10.6: its std needs thread-local storage
+  # (dyld 10.7+). This lane pins a nightly from before the 10.12 floor and builds std from
+  # source for legacy/x86_64-apple-darwin.json, which turns thread-locals off.
+  macos-legacy:
+    name: macOS 10.6.8 to 10.11 (Intel, custom target)
+    runs-on: macos-13
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "10.6"
+      LEGACY_TOOLCHAIN: nightly-2023-09-01
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install "$LEGACY_TOOLCHAIN" --profile minimal -c rust-src
+      - name: Build
+        run: |
+          rm -f Cargo.lock
+          cargo +"$LEGACY_TOOLCHAIN" build --release -p goodlookindri-hello \
+            -Zbuild-std=std,panic_abort --target legacy/x86_64-apple-darwin.json
+      - name: Check the binary can load on 10.6
+        run: |
+          B=target/x86_64-apple-darwin/release/gldri-hello
+          otool -l "$B" | grep -A3 LC_VERSION_MIN_MACOSX | tee minos.txt
+          grep -q 'version 10.6' minos.txt
+          if nm -u "$B" | grep -E 'tlv|clock_gettime|getentropy|copyfile|os_unfair'; then
+            echo "binary imports a symbol newer than 10.6"; exit 1
+          fi
+      - name: Window smoke test (runs on the runner's newer macOS)
+        run: ./target/x86_64-apple-darwin/release/gldri-hello --smoke 1500
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gldri-hello-macos-legacy
+          path: target/x86_64-apple-darwin/release/gldri-hello
+
+  # Windows 7 SP1 to 11. The *-win7-* targets are tier 3, so std is built from source.
+  windows-win7:
+    name: Windows 7 to 11 (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-win7-windows-msvc, i686-win7-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal -c rust-src
+      - run: cargo +nightly build --release -p goodlookindri-hello -Zbuild-std=std,panic_abort --target ${{ matrix.target }}
+      - name: Window smoke test
+        run: target\${{ matrix.target }}\release\gldri-hello.exe --smoke 1500
+      - name: Widgets smoke test
+        run: target\${{ matrix.target }}\release\gldri-widgets.exe --smoke 1500
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gldri-hello-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/gldri-hello.exe
+
+  windows-arm64:
+    name: Windows 11 on Arm
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add aarch64-pc-windows-msvc
+      - run: cargo build --release -p goodlookindri-hello --target aarch64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gldri-hello-windows-arm64
+          path: target/aarch64-pc-windows-msvc/release/gldri-hello.exe
