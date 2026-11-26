@@ -859,7 +859,9 @@ public:
     // pass through dry and the engine would lose its state mid-render. A host that starts
     // its blocks before this call has already begun the stream, so nothing is reset then.
     tresult PLUGIN_API setProcessing(TBool active) SMTG_OVERRIDE {
-        if (active) lastBlockMs_.store(steady_ms(), std::memory_order_relaxed);
+        // No block of this stream yet: edits land until the first one (a host that loads a
+        // project and does not render would lose them otherwise).
+        lastBlockMs_.store(0, std::memory_order_relaxed);
         processing_.store(active != 0, std::memory_order_release);
         if (!active) {
             stream_.store(kStreamStopped, std::memory_order_release);
@@ -1703,7 +1705,7 @@ private:
     std::atomic<bool> bypass_{false};
     // Moves when the main thread writes values_ or the engine's values.
     std::atomic<uint32_t> generation_{1};
-    // For idle(): set by setProcessing and by every block (audio thread).
+    // For idle(): set by every block (audio thread), cleared by setProcessing.
     std::atomic<bool> processing_{false};
     // The stream setProcessing starts and stops: stopped, a reset wanted before the next
     // block (setProcessing(true) with no block since the stop), or running.
