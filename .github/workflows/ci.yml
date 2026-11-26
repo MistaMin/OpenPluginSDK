@@ -11,8 +11,6 @@ permissions:
 
 env:
   CARGO_BUILD_JOBS: "2"
-  # GoodLookinDri c9773b6: 0.2 lit rendering.
-  GOODLOOKINDRI_REF: c9773b6a44cf5bf9b4b3c207d51a2db5fb464ae1
   # AudioUnitSDK-1.4.0.
   AUDIOUNITSDK_REF: bd98b31feff57a15989fcfab4cd86dc63382b1ac
   CARGO_TERM_COLOR: always
@@ -27,15 +25,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      # The SDK has a path dependency on ../GoodLookinDri. Pinned, so a push to
-      # GoodLookinDri cannot change this build; move the pin in the same commit
-      # that adapts the SDK to a newer GoodLookinDri.
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -43,6 +32,11 @@ jobs:
       - name: Run the workspace tests
         working-directory: OpenPluginSDK
         run: cargo test --workspace
+      # GoodLookin DRI (crates/goodlookindri, a git subtree) keeps its own
+      # workspace, so the workspace run above does not include its tests.
+      - name: GoodLookin DRI tests
+        working-directory: OpenPluginSDK/crates/goodlookindri
+        run: cargo test --workspace --locked
       # The C++ bridge's fault tests need a test-only feature (an operator new that
       # reports to Rust's allocator), so the workspace run above skips them.
       - name: C++ bridge fault tests
@@ -70,12 +64,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Report the CPU's vector features
@@ -106,8 +94,7 @@ jobs:
   # W1 on Linux: build the whole workspace and run every test that needs no
   # window or display (core, DSP, DRI, the CLAP and LV2 targets, the shell ABI in
   # openplugin-host, the plug-in port and the testing crate), then clippy. The
-  # macOS-only editor view is compiled out on Linux. GoodLookinDri is a public
-  # repository, so the plain checkout needs no token.
+  # macOS-only editor view is compiled out on Linux.
   linux:
     name: Linux build, tests and clippy (ubuntu-latest)
     runs-on: ubuntu-latest
@@ -117,14 +104,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      # Path dependency ../GoodLookinDri: both checkouts are children of
-      # $GITHUB_WORKSPACE, so it resolves next to OpenPluginSDK.
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -140,6 +119,11 @@ jobs:
           -p openplugin-targets -p openplugin-host -p openplugin-port
           -p openplugin-testing -p openplugin
           -p example-porting-guides
+      # GoodLookin DRI (crates/goodlookindri, a git subtree) keeps its own
+      # workspace, so the workspace run above does not include its tests.
+      - name: GoodLookin DRI tests
+        working-directory: OpenPluginSDK/crates/goodlookindri
+        run: cargo test --workspace --locked
       - name: Clippy, warnings as errors
         working-directory: OpenPluginSDK
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -154,12 +138,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install Rust 1.85.0
         uses: dtolnay/rust-toolchain@1.85.0
       - name: Check the workspace on the minimum Rust version
@@ -184,12 +162,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -270,12 +242,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Check out the public VST3 SDK
         uses: actions/checkout@v4
         with:
@@ -359,12 +325,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Check out the public VST3 SDK
         uses: actions/checkout@v4
         with:
@@ -468,12 +428,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install Rust 1.85.0
         uses: dtolnay/rust-toolchain@1.85.0
       - name: Check the workspace on the minimum Rust version
@@ -489,15 +443,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      # The SDK has a path dependency on ../GoodLookinDri. Pinned, so a push to
-      # GoodLookinDri cannot change this build; move the pin in the same commit
-      # that adapts the SDK to a newer GoodLookinDri.
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install Rust 1.85.0
         uses: dtolnay/rust-toolchain@1.85.0
       - name: Check the workspace on the minimum Rust version
@@ -519,15 +464,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      # The SDK has a path dependency on ../GoodLookinDri. Pinned, so a push to
-      # GoodLookinDri cannot change this build; move the pin in the same commit
-      # that adapts the SDK to a newer GoodLookinDri.
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
       # Nothing from the download runs unless the checksum matches.
@@ -596,15 +532,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      # The SDK has a path dependency on ../GoodLookinDri. Pinned, so a push to
-      # GoodLookinDri cannot change this build; move the pin in the same commit
-      # that adapts the SDK to a newer GoodLookinDri.
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Check out the public VST3 SDK
         uses: actions/checkout@v4
         with:
@@ -652,13 +579,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      # Pinned like GoodLookinDri below.
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       # Apple's public AudioUnitSDK (Apache-2.0), tag AudioUnitSDK-1.4.0. The
       # Audio Unit shell compiles against its sources; nothing is installed.
       - name: Check out AudioUnitSDK
@@ -710,12 +630,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Check out the public VST3 SDK
         uses: actions/checkout@v4
         with:
@@ -759,12 +673,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Check out the public VST3 SDK
         uses: actions/checkout@v4
         with:
@@ -885,13 +793,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      # Pinned like GoodLookinDri in the other jobs.
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Check out the public VST3 SDK
         uses: actions/checkout@v4
         with:
@@ -1016,12 +917,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
       # lv2 has lv2_validate and the specifications; lilv has lv2apply, lv2ls
@@ -1106,12 +1001,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
       # lv2-dev has lv2_validate and the specifications it reads; sordi has
@@ -1167,12 +1056,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Install Xvfb
@@ -1207,12 +1090,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: OpenPluginSDK
-      - name: Check out GoodLookinDri as a sibling
-        uses: actions/checkout@v4
-        with:
-          repository: MistaMin/GoodLookinDri
-          ref: ${{ env.GOODLOOKINDRI_REF }}
-          path: GoodLookinDri
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
       # lilv-utils has lv2ls and lv2apply.
