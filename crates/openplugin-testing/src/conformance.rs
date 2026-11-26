@@ -18,6 +18,10 @@ pub const HOST_SAMPLE_RATES: [f32; 8] =
 /// Block sizes hosts use, including the awkward ones.
 pub const HOST_BLOCK_SIZES: [usize; 11] = [1, 2, 3, 7, 16, 64, 333, 512, 1024, 4096, 8192];
 
+/// How long after a parameter write or a state load a latency change still
+/// counts as caused by it (with `latency_depends_on_params`), in milliseconds.
+pub const LATENCY_SETTLE_MS: f64 = 50.0;
+
 /// What the suite does. [`Options::default`] is the full run; [`Options::quick`] a shorter one.
 /// Override fields with struct-update syntax:
 ///
@@ -61,7 +65,10 @@ pub struct Options {
     pub max_tail_seconds: f32,
     /// Rates the tail and reset checks run at (those the plugin accepts).
     pub tail_sample_rates: Vec<f32>,
-    /// Allow `latency()` to change when a parameter is written. Default false.
+    /// Allow `latency()` to change when a parameter is written or a state is
+    /// loaded: in that block, or in a block that starts within
+    /// [`LATENCY_SETTLE_MS`] after it (a plugin that fades out before it
+    /// switches to a mode with another latency). Default false.
     pub latency_depends_on_params: bool,
     /// Also measure latency with an impulse and compare it with `latency()`.
     /// Only meaningful for plugins whose impulse response peaks at the
@@ -386,6 +393,8 @@ struct Session<'s, P: Plugin> {
     prepared_latency: usize,
     /// A parameter was written since the last latency check (between blocks counts too).
     params_moved: bool,
+    /// `frames_done` after the last block with a parameter write or a state load.
+    moved_at: Option<u64>,
     parity: bool,
     pos: i64,
     note_ports: openplugin_core::NotePorts,
@@ -440,6 +449,7 @@ impl<'s, P: Plugin> Session<'s, P> {
             latency: 0,
             prepared_latency: 0,
             params_moved: false,
+            moved_at: None,
             parity: false,
             pos: 0,
             note_ports: openplugin_core::NotePorts { input: false, output: false },
@@ -782,7 +792,7 @@ impl<'s, P: Plugin> Session<'s, P> {
         self.frames_done += frames as u64;
         self.blocks += 1;
         let moved = std::mem::take(&mut self.params_moved);
-        self.check_latency(had_params || moved);
+        self.check_latency(had_params || moved, frames);
         self.inspect(frames, inspect)
     }
 
@@ -801,11 +811,19 @@ impl<'s, P: Plugin> Session<'s, P> {
         self.fail(Check::NoPanic, "pull_midi never returned None in 4096 calls".to_string());
     }
 
-    fn check_latency(&mut self, had_params: bool) {
+    fn check_latency(&mut self, had_params: bool, frames: usize) {
         let Some(now) = self.catching("latency", |p| p.latency()) else { return };
+        if had_params {
+            self.moved_at = Some(self.frames_done);
+        }
+        // The block began this soon after the last write or load (a change at its start was caused by it).
+        let settling = self.moved_at.is_some_and(|at| {
+            let start = self.frames_done.saturating_sub(frames as u64);
+            start.saturating_sub(at) as f64 <= LATENCY_SETTLE_MS * 1e-3 * f64::from(self.rate)
+        });
         if now == self.latency {
             self.rec.pass(Check::Latency);
-        } else if had_params && self.opts.latency_depends_on_params {
+        } else if (had_params || settling) && self.opts.latency_depends_on_params {
             self.latency = now;
         } else {
             let before = self.latency;
@@ -1028,7 +1046,7 @@ impl<'s, P: Plugin> Session<'s, P> {
         self.process_range(0, frames, true);
         self.frames_done += frames as u64;
         self.blocks += 1;
-        self.check_latency(false);
+        self.check_latency(false, frames);
         self.inspect(frames, Inspect::ALL);
     }
 }
