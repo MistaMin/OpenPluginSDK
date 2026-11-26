@@ -1,7 +1,7 @@
 //! Outline text for [`goodlookindri::scene::Cmd::Text`], plus measuring, wrapping and ellipsis
 //! for widgets.
 //!
-//! The face is Source Sans Pro Regular, unmodified, under the SIL Open Font License 1.1
+//! The face is Source Sans Pro Semibold (holds up at small sizes on 1x screens), unmodified, under the SIL Open Font License 1.1
 //! (`fonts/OFL.txt`). `fontdue` rasterises it. Sizes are in scene units, the same as
 //! `Cmd::Text::size`; the rasteriser passes `size * scale` as pixels.
 //!
@@ -11,7 +11,7 @@ use fontdue::{Font, FontSettings};
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-const FACE: &[u8] = include_bytes!("../fonts/SourceSansPro-Regular.otf");
+const FACE: &[u8] = include_bytes!("../fonts/SourceSansPro-Semibold.otf");
 
 /// Where the anchor of `Cmd::Text` sits, as a share of the pixel size below the baseline. This is
 /// about half the cap height, so a line centred on `at.y` looks centred.

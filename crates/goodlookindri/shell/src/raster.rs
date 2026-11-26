@@ -434,6 +434,8 @@ fn over_pre(dst: &mut u32, p: [f32; 4], k: f32) {
 }
 
 /// Blends one glyph's coverage with its top-left corner at (`ox`, `oy`), skipping pixels off the buffer.
+fn luma(r: u8, g: u8, b: u8) -> u32 { 2 * r as u32 + 5 * g as u32 + b as u32 }
+
 fn blit(pixels: &mut [u32], width: usize, height: usize, clips: &[Clip], g: &Glyph, ox: i64, oy: i64, col: Color) {
     for row in 0..g.height {
         let py = oy + row as i64;
@@ -443,8 +445,11 @@ fn blit(pixels: &mut [u32], width: usize, height: usize, clips: &[Clip], g: &Gly
             if px < 0 || px >= width as i64 { continue; }
             let cov = g.coverage[row * g.width + column] as f32 / 255.0;
             if cov <= 0.0 { continue; }
+            let dst = &mut pixels[py as usize * width + px as usize];
+            // Edges blended in sRGB come out too dark, which thins light text on a dark ground; lift them there.
+            let cov = if luma(col.r(), col.g(), col.b()) > luma((*dst >> 16) as u8, (*dst >> 8) as u8, *dst as u8) { cov.powf(1.0 / 1.45) } else { cov };
             let cov = cov * clip_coverage(clips, px as f32 + 0.5, py as f32 + 0.5);
-            blend(&mut pixels[py as usize * width + px as usize], col, cov);
+            blend(dst, col, cov);
         }
     }
 }
@@ -463,6 +468,17 @@ mod tests {
         fb
     }
     fn px(fb: &Framebuffer, x: usize, y: usize) -> u32 { fb.pixels[y * fb.width + x] }
+
+    #[test]
+    fn glyph_edges_lift_only_light_text_on_dark() {
+        let g = Glyph { width: 1, height: 1, left: 0, top: 0, coverage: vec![128] };
+        let mut p = [0xff000000u32];
+        blit(&mut p, 1, 1, &[], &g, 0, 0, Color(0xffffffff));
+        assert!(rgb(p[0])[0] > 150, "white edge on black lifted: {:?}", rgb(p[0]));
+        let mut p = [0xffffffffu32];
+        blit(&mut p, 1, 1, &[], &g, 0, 0, Color(0xff000000));
+        assert_eq!(rgb(p[0])[0], 127, "black edge on white unchanged");
+    }
 
     #[test]
     fn shadow_is_darkest_in_the_middle_and_falls_off() {

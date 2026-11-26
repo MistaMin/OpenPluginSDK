@@ -33,7 +33,7 @@ CoreGraphics `CGImage`). Nothing uses thread-local storage, so the legacy lane c
 
 - Replay of every `Cmd`: gradients, ellipses, round rects, arcs, polygons, strokes, clips.
   One pixel of anti-aliasing from signed distance fields.
-- Text is outline text in Source Sans Pro Regular (SIL OFL 1.1, `fonts/OFL.txt`), rasterised by
+- Text is outline text in Source Sans Pro Semibold (SIL OFL 1.1, `fonts/OFL.txt`), rasterised by
   `fontdue` with a glyph cache. `text::width`, `text::wrap` and `text::ellipsize` measure and
   fit labels in the same units as the scene.
 
