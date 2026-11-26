@@ -738,6 +738,72 @@ static void check_idle_edits(IPluginFactory* factory, const TUID effectId, Param
     component->release();
 }
 
+// A host that starts its render thread before setProcessing(true) reaches the processor
+// (seen as a mid-render knock in REAPER): the late call must not reset a stream that has
+// already begun. Two instances run the same blocks; one also gets the late call, mid-way
+// through a bypass fade (10 ms, so still moving after a 64-frame block). Their output
+// must be the same. A proper restart (false, then true, then a block) still starts fresh:
+// a bypassed stream is fully bypassed from its first sample.
+static void check_late_processing_start(IPluginFactory* factory, const TUID effectId) {
+    IPtr<HostApplication> host = owned(new HostApplication);
+    struct Instance {
+        IComponent* component = nullptr;
+        IAudioProcessor* processor = nullptr;
+        IEditController* controller = nullptr;
+    };
+    auto make = [&](Instance& it) {
+        CHECK(factory->createInstance(effectId, IComponent::iid, reinterpret_cast<void**>(&it.component)) == kResultOk && it.component);
+        CHECK(it.component->initialize(host) == kResultOk);
+        CHECK(it.component->queryInterface(IAudioProcessor::iid, reinterpret_cast<void**>(&it.processor)) == kResultOk && it.processor);
+        TUID controllerId{};
+        CHECK(it.component->getControllerClassId(controllerId) == kResultOk);
+        CHECK(factory->createInstance(controllerId, IEditController::iid, reinterpret_cast<void**>(&it.controller)) == kResultOk && it.controller);
+        CHECK(it.controller->initialize(host) == kResultOk);
+        SpeakerArrangement arrangement = SpeakerArr::kStereo;
+        CHECK(it.processor->setBusArrangements(&arrangement, 1, &arrangement, 1) == kResultOk);
+        CHECK(it.component->activateBus(kAudio, kInput, 0, true) == kResultOk);
+        CHECK(it.component->activateBus(kAudio, kOutput, 0, true) == kResultOk);
+        ProcessSetup setup{kRealtime, kSample32, 64, 48000.0};
+        CHECK(it.processor->setupProcessing(setup) == kResultOk);
+        CHECK(it.component->setActive(true) == kResultOk);
+    };
+    Instance late, plain;
+    make(late);
+    make(plain);
+    const ParamID bypass = check_bypass_parameter(late.controller);
+    Stereo in;
+    make_input(in, 64);
+    for (Instance* it : {&late, &plain}) {
+        CHECK(it->processor->setProcessing(true) == kResultOk);
+        host_block(it->processor, 2, in, {{0, static_cast<int>(find_shell_param("Gain")), 0.9}}, bypass, false);
+        CHECK(it->processor->setProcessing(false) == kResultOk);
+    }
+    // The render thread starts on its own, with a bypass fade; setProcessing(true) comes late.
+    const Stereo a1 = host_block(late.processor, 2, in, {{0, -1, 1.0}}, bypass, false);
+    const Stereo b1 = host_block(plain.processor, 2, in, {{0, -1, 1.0}}, bypass, false);
+    CHECK(stereo_difference(a1, b1, 2) == 0.0);
+    CHECK(late.processor->setProcessing(true) == kResultOk);
+    const Stereo a2 = host_block(late.processor, 2, in, {}, bypass, false);
+    const Stereo b2 = host_block(plain.processor, 2, in, {}, bypass, false);
+    CHECK(stereo_difference(a2, b2, 2) == 0.0);
+    CHECK(stereo_difference(a2, in, 2) > 0.0);  // the fade is still moving: the check can see a reset
+    // A proper restart: stop, start, block. Bypassed, so fully dry from the first sample.
+    CHECK(late.processor->setProcessing(false) == kResultOk);
+    CHECK(late.processor->setProcessing(true) == kResultOk);
+    const Stereo a3 = host_block(late.processor, 2, in, {}, bypass, false);
+    CHECK(stereo_difference(a3, in, 2) == 0.0);
+    std::puts("VST3 late setProcessing(true): a stream already running is not reset; a stop and start still begins fresh");
+    for (Instance* it : {&late, &plain}) {
+        CHECK(it->processor->setProcessing(false) == kResultOk);
+        CHECK(it->component->setActive(false) == kResultOk);
+        it->processor->release();
+        CHECK(it->controller->terminate() == kResultOk);
+        it->controller->release();
+        CHECK(it->component->terminate() == kResultOk);
+        it->component->release();
+    }
+}
+
 int main(int argc, char** argv) {
     CHECK(argc == 2);
     CFURLRef url = CFURLCreateFromFileSystemRepresentation(nullptr, reinterpret_cast<const UInt8*>(argv[1]), static_cast<CFIndex>(std::strlen(argv[1])), true);
@@ -1064,6 +1130,7 @@ int main(int argc, char** argv) {
         component->release();
     }
     check_idle_edits(factory, effect.cid, find_shell_param("Gain"));
+    check_late_processing_start(factory, effect.cid);
     factory->release();
     CHECK(exitFn());
     CFRelease(bundle);
