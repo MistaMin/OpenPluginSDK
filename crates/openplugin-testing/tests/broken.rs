@@ -36,6 +36,8 @@ enum Fault {
     Slow(u32),
     BadGroup,
     BadPin,
+    /// Latency follows the gain two process calls after it is written (a fade before a mode switch).
+    LatencyLags,
 }
 
 struct Faulty {
@@ -45,11 +47,19 @@ struct Faulty {
     state: f32,
     delay: Vec<f32>,
     pos: usize,
+    lag_latency: usize,
+    lag_wait: u32,
 }
 
 impl Faulty {
     fn new(fault: Fault) -> Self {
-        Self { fault, gain: 1.0, calls: 0, state: 0.0, delay: vec![0.0; 32], pos: 0 }
+        Self { fault, gain: 1.0, calls: 0, state: 0.0, delay: vec![0.0; 32], pos: 0, lag_latency: 0, lag_wait: 0 }
+    }
+}
+
+impl Faulty {
+    fn lag_target(gain: f32) -> usize {
+        if gain > 1.0 { 64 } else { 0 }
     }
 }
 
@@ -63,6 +73,8 @@ impl Plugin for Faulty {
     }
     fn prepare(&mut self, _: f32, _: usize, _: usize) {
         self.calls = 0;
+        self.lag_latency = Self::lag_target(self.gain);
+        self.lag_wait = 0;
         self.state = 0.0;
         self.pos = 0;
         self.delay.iter_mut().for_each(|s| *s = 0.0);
@@ -75,6 +87,7 @@ impl Plugin for Faulty {
     fn set_param(&mut self, id: &str, value: f32) -> bool {
         if id == "gain" {
             self.gain = PARAMS[0].clamp(value);
+            self.lag_wait = 2;
             true
         } else {
             false
@@ -88,6 +101,12 @@ impl Plugin for Faulty {
     }
     fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
         self.calls += 1;
+        if self.lag_wait > 0 {
+            self.lag_wait -= 1;
+            if self.lag_wait == 0 {
+                self.lag_latency = Self::lag_target(self.gain);
+            }
+        }
         match self.fault {
             Fault::Alloc => {
                 let v = vec![0u8; 16];
@@ -166,6 +185,7 @@ impl Plugin for Faulty {
     fn latency(&self) -> usize {
         match self.fault {
             Fault::LatencyFlaps if self.calls > 3 => 64,
+            Fault::LatencyLags => self.lag_latency,
             _ => 0,
         }
     }
@@ -237,6 +257,17 @@ fn panic_fails_no_panic() {
 #[test]
 fn changing_latency_fails_latency() {
     only(Fault::LatencyFlaps, Check::Latency);
+}
+
+#[test]
+fn latency_that_settles_after_a_parameter_write_passes_when_allowed() {
+    let report = run(Fault::LatencyLags, Options { latency_depends_on_params: true, ..Options::quick() });
+    assert!(report.failed_checks().is_empty(), "{report}");
+}
+
+#[test]
+fn latency_that_settles_after_a_parameter_write_fails_when_not_allowed() {
+    only(Fault::LatencyLags, Check::Latency);
 }
 
 #[test]

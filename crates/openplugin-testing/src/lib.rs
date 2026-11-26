@@ -47,7 +47,7 @@ mod json;
 mod report;
 pub mod rng;
 
-pub use conformance::{Options, HOST_BLOCK_SIZES, HOST_SAMPLE_RATES};
+pub use conformance::{Options, HOST_BLOCK_SIZES, HOST_SAMPLE_RATES, LATENCY_SETTLE_MS};
 pub use report::{Check, CheckResult, Failure, Report, Status};
 
 use openplugin_core::Plugin;
