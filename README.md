@@ -12,7 +12,7 @@
 
 ## Summary
 
-**OpenPluginSDK** is an independent, pure-Rust audio plugin framework designed to build high-performance, real-time safe audio plugins and virtual instruments that run everywhere.
+**OpenPluginSDK** is an independent, Rust-based audio plugin framework designed to build high-performance, real-time safe audio plugins and virtual instruments that run everywhere.
 
 It combines:
 1. **Realtime-safe DSP core:** Zero-allocation processing loop (`process()`), hostile parameter sanitization, and no panics.
@@ -38,6 +38,7 @@ It combines:
   - [Audio Unit (macOS)](#audio-unit-macos)
   - [Avid AAX (Pro Tools)](#avid-aax-pro-tools)
   - [Standalone](#standalone)
+- [Rust and C++](#rust-and-c)
 - [Quality Guarantees](#quality-guarantees)
 - [Roadmap](#roadmap)
 - [License](#license)
@@ -230,6 +231,27 @@ An unsigned native adapter in `native/aax` links an external Avid SDK and calls 
 
 ### Standalone
 The plugin's own binary opens its editor in a window with `run_window` (`openplugin::dri::cocoa`, `win32` or `x11`), and `scripts/build_plugin.sh --standalone-bin` wraps it as an application. It opens no audio device: it is for working on the editor, not for performance.
+
+---
+
+## Rust and C++
+
+A plugin is written in Rust: its DSP, parameters, state and editor. About 85% of this repository is Rust. The C and C++ (about 15%) sits in `native/` and does three jobs:
+
+| What | Share of the C/C++ | Why it is C++ |
+|---|---|---|
+| Test hosts (`native/*/host*.cpp`, `events_host.cpp`, `editor_host.*`, the AAX proof stub) | about half | They load a built plugin the way a DAW does, through each format's official SDK. Written apart from the Rust they test, they catch bugs a Rust test would share. |
+| Format shells (`native/vst3`, `native/au`, `native/aax`, `native/ara`) | about a quarter | Thin adapters: each turns a format's calls into calls over the `op_shell_*` C ABI to the plugin's Rust code. Nothing a plugin does runs in them. |
+| Headers and helpers (`native/include`, `examples/cpp_bridge`, format parity) | the rest | The C ABI between the shells and Rust, and an example that hosts existing C++ DSP. |
+
+Why each format is what it is:
+
+- **CLAP and LV2** are C interfaces, so they are pure Rust here, with no C++.
+- **AAX** stays C++. Avid's SDK is C++ and not redistributable, and an AAX plugin is built against it, signed with PACE and checked by Avid's tools. There is no supported way to write one in Rust.
+- **VST3** uses Steinberg's C++ SDK (MIT since 3.8). The interfaces underneath are COM-style tables that Rust could implement directly; the SDK is used for Steinberg's own handling of the edge cases that pluginval and hosts check.
+- **Audio Unit** uses Apple's AudioUnitSDK (Apache 2.0) for its property and parameter rules. AUv2 is a C interface underneath, so it too could move to Rust.
+
+So C++ is required for AAX and chosen for the test hosts; for the VST3 and Audio Unit shells it was the faster way to validated shells, and moving them to Rust is a possible later step.
 
 ---
 
