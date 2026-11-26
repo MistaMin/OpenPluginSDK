@@ -5,6 +5,7 @@
 //! CoreGraphics (10.6 to current). Everything the app draws is a `Scene`.
 
 mod core;
+mod sysfont;
 pub mod text;
 pub mod ui;
 pub mod raster;
