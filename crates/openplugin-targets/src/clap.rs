@@ -264,12 +264,15 @@ struct Instance {
     /// [`Plugin::flush_denormals`], read once at creation: `process`, `params.flush` and
     /// `reset` hold a [`DenormalGuard`] while they are inside the plugin.
     flush_denormals: bool,
-    /// ARA 2 (macOS, when the bundle carries the ARA library): see [`ara`].
+    /// ARA 2 (macOS, when the bundle carries the ARA library): see the `ara` module.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     ara: AraState,
 }
 
 /// One instance's ARA binding and, when it is a playback renderer, the buffers it plays the
-/// host's regions into and the delay a renderer-only instance passes them through.
+/// host's regions into and the delay a renderer-only instance passes them through. Used on
+/// macOS only (the ARA library for CLAP is built there); elsewhere it stays empty.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct AraState {
     ext: *mut c_void,
     rendering: bool,
