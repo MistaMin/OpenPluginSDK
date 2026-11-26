@@ -117,6 +117,8 @@ set(OP_SDK_SOURCE "${OP_VST3_SDK}/public.sdk/source")
 
 op_vst3_module(OpenPluginVST3 "${OP_PRODUCT}")
 op_link_rust(OpenPluginVST3)
+include("${OP_NATIVE_DIR}/ara/ara.cmake")
+op_ara_vst3(OpenPluginVST3 "${OP_VST3_DIR_OpenPluginVST3}")
 op_vst3_proof(VST3Proof host.cpp
   "${OP_SDK_SOURCE}/common/memorystream.cpp"
   "${OP_SDK_SOURCE}/vst/hosting/hostclasses.cpp"

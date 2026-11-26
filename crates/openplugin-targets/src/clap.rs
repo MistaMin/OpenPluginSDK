@@ -103,7 +103,12 @@ fn publish() -> Option<&'static Published> {
             cstring(info.version),
             cstring(info.name),
         ];
-        let features_owned = feature_labels(plugin.as_ref()).into_iter().map(cstring).collect();
+        #[allow(unused_mut)]
+        let mut features_owned: Vec<CString> = feature_labels(plugin.as_ref()).into_iter().map(cstring).collect();
+        #[cfg(target_os = "macos")]
+        if ara::lib([owned[0].as_c_str(), owned[1].as_c_str(), owned[2].as_c_str(), owned[6].as_c_str(), owned[3].as_c_str()]).is_some() {
+            features_owned.push(cstring("ara:supported"));
+        }
         let mut published = Box::new(Published {
             owned,
             features_owned,
@@ -259,6 +264,29 @@ struct Instance {
     /// [`Plugin::flush_denormals`], read once at creation: `process`, `params.flush` and
     /// `reset` hold a [`DenormalGuard`] while they are inside the plugin.
     flush_denormals: bool,
+    /// ARA 2 (macOS, when the bundle carries the ARA library): see the `ara` module.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    ara: AraState,
+}
+
+/// One instance's ARA binding and, when it is a playback renderer, the buffers it plays the
+/// host's regions into and the delay a renderer-only instance passes them through. Used on
+/// macOS only (the ARA library for CLAP is built there); elsewhere it stays empty.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct AraState {
+    ext: *mut c_void,
+    rendering: bool,
+    buf: Vec<Vec<f32>>,
+    ptrs: Vec<*mut f32>,
+    delay: Vec<Vec<f32>>,
+    delay_len: usize,
+    delay_pos: usize,
+}
+
+impl Default for AraState {
+    fn default() -> Self {
+        Self { ext: std::ptr::null_mut(), rendering: false, buf: Vec::new(), ptrs: Vec::new(), delay: Vec::new(), delay_len: 0, delay_pos: 0 }
+    }
 }
 
 fn instance<'a>(plugin: *const clap_plugin) -> Option<&'a mut Instance> {
@@ -780,6 +808,11 @@ unsafe extern "C" fn plugin_destroy(plugin: *const clap_plugin) {
             {
                 instance.gui = None;
             }
+            #[cfg(target_os = "macos")]
+            if let (Some(lib), false) = (ara::loaded(), instance.ara.ext.is_null()) {
+                unsafe { (lib.ext_delete)(instance.ara.ext) };
+                instance.ara.ext = std::ptr::null_mut();
+            }
             drop(instance);
         }
     })
@@ -811,6 +844,8 @@ unsafe extern "C" fn plugin_activate(plugin: *const clap_plugin, sample_rate: f6
         // a block saw it or the plugin said so.
         instance.notifier.take_some(HostNotifier::LATENCY);
         notify_latency(instance);
+        #[cfg(target_os = "macos")]
+        ara_activate(instance, f64::from(rate), main, max_block);
         instance.restart_requested.store(false, Ordering::Release);
         instance.poisoned.store(false, Ordering::Release);
         instance.activated = true;
@@ -1008,6 +1043,28 @@ fn process_block(instance: &mut Instance, process: *const clap_process) -> i32 {
     if instance.buffers.is_empty() {
         return PROCESS_ERROR;
     }
+    // ARA playback renderer: the input is the host's regions at the song position.
+    #[cfg(target_os = "macos")]
+    let ara_input;
+    #[cfg(target_os = "macos")]
+    let input = match ara_render(instance, process, frames) {
+        AraBlock::Host => input,
+        AraBlock::Through => {
+            ara_pass_through(instance, output, frames);
+            drain_note_ends(instance, process.out_events, process.frames_count.saturating_sub(1));
+            return PROCESS_CONTINUE;
+        }
+        AraBlock::Process => {
+            ara_input = clap_audio_buffer {
+                data32: instance.ara.ptrs.as_ptr() as *mut *mut f32,
+                data64: std::ptr::null_mut(),
+                channel_count: instance.ara.ptrs.len() as u32,
+                latency: 0,
+                constant_mask: 0,
+            };
+            Some(&ara_input)
+        }
+    };
     if let Some(input) = input {
         if input.data32.is_null() && layout.input_channels() > 0 {
             return PROCESS_ERROR;
@@ -1990,6 +2047,10 @@ unsafe extern "C" fn plugin_extension(plugin: *const clap_plugin, id: *const c_c
         if id == EXT_LATENCY {
             return &LATENCY as *const clap_plugin_latency as *const c_void;
         }
+        #[cfg(target_os = "macos")]
+        if ara::EXT_PLUGIN_IDS.contains(&id) && ara::loaded().is_some() {
+            return &ARA_PLUGIN_EXT as *const AraPluginExt as *const c_void;
+        }
         if id == EXT_PARAMS {
             return &PARAMS as *const clap_plugin_params as *const c_void;
         }
@@ -2200,6 +2261,11 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
     for label in labels {
         strings.push(cstring(label));
     }
+    // The same features as the factory's descriptor (`publish`), ARA included.
+    #[cfg(target_os = "macos")]
+    if ara::loaded().is_some() {
+        strings.push(cstring("ara:supported"));
+    }
     let plane = Arc::new(ParamPlane::new(info));
     plane.seed_from(inner.as_ref());
     let cursor = ParamCursor::new(plane.len());
@@ -2274,6 +2340,7 @@ fn spawn(mut inner: Box<dyn Plugin>, host: *const clap_host) -> *const clap_plug
         activated: false,
         poisoned: AtomicBool::new(false),
         flush_denormals,
+        ara: AraState::default(),
     });
     let raw = Box::into_raw(instance);
     unsafe {
@@ -2410,6 +2477,272 @@ unsafe extern "C" fn factory_create(_factory: *const clap_plugin_factory, host: 
     })
 }
 
+/// ARA 2 for CLAP (macOS). The `.clap` carries `libOpenPluginARA.dylib` in its Resources (built
+/// from OpenPluginSDK `native/ara`, `build_plugin.sh --ara-sdk`); this entry loads it, and gives it
+/// the plugin's identity and its `op_ara_analyze` / `op_ara_url` exports. Without the library or
+/// the exports the plugin is a plain CLAP.
+#[cfg(target_os = "macos")]
+mod ara {
+    use std::ffi::{c_char, c_void, CStr, CString};
+    use std::sync::OnceLock;
+
+    /// ARA_API/ARACLAP.h: CLAP_EXT_ARA_FACTORY and CLAP_EXT_ARA_PLUGINEXTENSION, and the draft
+    /// IDs hosts of the draft used (the `_COMPAT` names).
+    pub const FACTORY_IDS: [&[u8]; 2] = [b"org.ara-audio.ara.factory/2\0", b"org.ara-audio.ara.factory.draft/2\0"];
+    pub const EXT_PLUGIN_IDS: [&[u8]; 2] = [b"org.ara-audio.ara.pluginextension/2\0", b"org.ara-audio.ara.pluginextension.draft/2\0"];
+
+    #[repr(C)]
+    struct DlInfo {
+        fname: *const c_char,
+        fbase: *mut c_void,
+        sname: *const c_char,
+        saddr: *mut c_void,
+    }
+    unsafe extern "C" {
+        fn dlopen(path: *const c_char, mode: i32) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> i32;
+    }
+    const RTLD_LAZY: i32 = 0x1;
+    const RTLD_LOCAL: i32 = 0x4;
+    const RTLD_NOLOAD: i32 = 0x10;
+
+    type Analyze = unsafe extern "C" fn(*const c_char, u32, u64, f64, *const *const f32);
+    type Select = unsafe extern "C" fn(*const *const c_char, u32);
+    #[repr(C)]
+    struct Init {
+        struct_size: u32,
+        name: *const c_char,
+        vendor: *const c_char,
+        version: *const c_char,
+        id: *const c_char,
+        url: *const c_char,
+        analyze: Option<Analyze>,
+        select: Option<Select>,
+    }
+
+    pub struct Lib {
+        pub factory: unsafe extern "C" fn() -> *const c_void,
+        pub ext_new: unsafe extern "C" fn() -> *mut c_void,
+        pub ext_delete: unsafe extern "C" fn(*mut c_void),
+        pub bind: unsafe extern "C" fn(*mut c_void, *mut c_void, u32, u32) -> *const c_void,
+        pub enable: unsafe extern "C" fn(*mut c_void, f64, i32) -> i32,
+        pub render: unsafe extern "C" fn(*mut c_void, *const *mut f32, i64, i64, i32) -> i32,
+        pub plugin_id: CString,
+    }
+    // Function pointers and an owned string, set once.
+    unsafe impl Send for Lib {}
+    unsafe impl Sync for Lib {}
+
+    static LIB: OnceLock<Option<Lib>> = OnceLock::new();
+
+    /// Loads the library once. `identity`: id, name, vendor, version, url.
+    pub fn lib(identity: [&CStr; 5]) -> Option<&'static Lib> {
+        LIB.get_or_init(|| unsafe { load(identity) }).as_ref()
+    }
+
+    pub fn loaded() -> Option<&'static Lib> {
+        LIB.get().and_then(|lib| lib.as_ref())
+    }
+
+    unsafe fn sym<T: Copy>(handle: *mut c_void, name: &CStr) -> Option<T> {
+        let p = unsafe { dlsym(handle, name.as_ptr()) };
+        if p.is_null() { None } else { Some(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&p) }) }
+    }
+
+    unsafe fn load(identity: [&CStr; 5]) -> Option<Lib> {
+        let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
+        if unsafe { dladdr(load as *const c_void, &mut info) } == 0 || info.fname.is_null() {
+            return None;
+        }
+        let me = unsafe { CStr::from_ptr(info.fname) }.to_str().ok()?;
+        // Contents/MacOS/<binary> -> Contents/Resources/libOpenPluginARA.dylib
+        let path = std::path::Path::new(me).parent()?.parent()?.join("Resources/libOpenPluginARA.dylib");
+        if !path.is_file() {
+            return None;
+        }
+        let own = unsafe { dlopen(info.fname, RTLD_LAZY | RTLD_NOLOAD) };
+        if own.is_null() {
+            return None;
+        }
+        let analyze: Analyze = unsafe { sym(own, c"op_ara_analyze") }?;
+        let url_fn: unsafe extern "C" fn() -> *const c_char = unsafe { sym(own, c"op_ara_url") }?;
+        let select: Option<Select> = unsafe { sym(own, c"op_ara_select") };
+        let cpath = CString::new(path.to_str()?).ok()?;
+        let handle = unsafe { dlopen(cpath.as_ptr(), RTLD_LAZY | RTLD_LOCAL) };
+        if handle.is_null() {
+            return None;
+        }
+        let init: unsafe extern "C" fn(*const Init) -> i32 = unsafe { sym(handle, c"op_ara_clap_init") }?;
+        let url = unsafe { url_fn() };
+        let data = Init {
+            struct_size: std::mem::size_of::<Init>() as u32,
+            name: identity[1].as_ptr(),
+            vendor: identity[2].as_ptr(),
+            version: identity[3].as_ptr(),
+            id: identity[0].as_ptr(),
+            url: if url.is_null() { identity[4].as_ptr() } else { url },
+            analyze: Some(analyze),
+            select,
+        };
+        // The library copies the strings.
+        if unsafe { init(&data) } == 0 {
+            return None;
+        }
+        Some(Lib {
+            factory: unsafe { sym(handle, c"op_ara_clap_factory") }?,
+            ext_new: unsafe { sym(handle, c"op_ara_clap_ext_new") }?,
+            ext_delete: unsafe { sym(handle, c"op_ara_clap_ext_delete") }?,
+            bind: unsafe { sym(handle, c"op_ara_clap_bind") }?,
+            enable: unsafe { sym(handle, c"op_ara_clap_enable") }?,
+            render: unsafe { sym(handle, c"op_ara_clap_render") }?,
+            plugin_id: identity[0].to_owned(),
+        })
+    }
+}
+
+/// `clap_ara_factory` (ARA_API/ARACLAP.h).
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct AraFactory {
+    get_factory_count: Option<unsafe extern "C" fn(*const AraFactory) -> u32>,
+    get_ara_factory: Option<unsafe extern "C" fn(*const AraFactory, u32) -> *const c_void>,
+    get_plugin_id: Option<unsafe extern "C" fn(*const AraFactory, u32) -> *const c_char>,
+}
+
+/// `clap_ara_plugin_extension` (ARA_API/ARACLAP.h).
+#[cfg(target_os = "macos")]
+#[repr(C)]
+struct AraPluginExt {
+    get_factory: Option<unsafe extern "C" fn(*const clap_plugin) -> *const c_void>,
+    bind_to_document_controller: Option<unsafe extern "C" fn(*const clap_plugin, *mut c_void, u32, u32) -> *const c_void>,
+}
+
+#[cfg(target_os = "macos")]
+static ARA_FACTORY: AraFactory = AraFactory {
+    get_factory_count: Some(ara_factory_count),
+    get_ara_factory: Some(ara_factory_get),
+    get_plugin_id: Some(ara_factory_plugin_id),
+};
+
+#[cfg(target_os = "macos")]
+static ARA_PLUGIN_EXT: AraPluginExt = AraPluginExt { get_factory: Some(ara_plugin_factory), bind_to_document_controller: Some(ara_plugin_bind) };
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn ara_factory_count(_f: *const AraFactory) -> u32 {
+    if ara::loaded().is_some() { 1 } else { 0 }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn ara_factory_get(_f: *const AraFactory, index: u32) -> *const c_void {
+    match (index, ara::loaded()) {
+        (0, Some(lib)) => unsafe { (lib.factory)() },
+        _ => std::ptr::null(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn ara_factory_plugin_id(_f: *const AraFactory, index: u32) -> *const c_char {
+    match (index, ara::loaded()) {
+        (0, Some(lib)) => lib.plugin_id.as_ptr(),
+        _ => std::ptr::null(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn ara_plugin_factory(_plugin: *const clap_plugin) -> *const c_void {
+    ara::loaded().map(|lib| unsafe { (lib.factory)() }).unwrap_or(std::ptr::null())
+}
+
+/// Binds the instance to the host's ARA document (before `activate`, main thread).
+#[cfg(target_os = "macos")]
+unsafe extern "C" fn ara_plugin_bind(plugin: *const clap_plugin, document: *mut c_void, known: u32, assigned: u32) -> *const c_void {
+    guarded(std::ptr::null(), std::ptr::null(), || {
+        let (Some(instance), Some(lib)) = (instance(plugin), ara::loaded()) else { return std::ptr::null() };
+        if instance.ara.ext.is_null() {
+            instance.ara.ext = unsafe { (lib.ext_new)() };
+        }
+        if instance.ara.ext.is_null() {
+            return std::ptr::null();
+        }
+        unsafe { (lib.bind)(instance.ara.ext, document, known, assigned) }
+    })
+}
+
+/// At activation: a playback renderer gets its buffers and the delay a renderer-only instance
+/// passes the regions through (the reported latency, as the host compensates it).
+#[cfg(target_os = "macos")]
+fn ara_activate(instance: &mut Instance, rate: f64, channels: usize, max_block: usize) {
+    instance.ara.rendering = false;
+    let Some(lib) = ara::loaded() else { return };
+    if instance.ara.ext.is_null() || unsafe { (lib.enable)(instance.ara.ext, rate, channels as i32) } != 1 {
+        return;
+    }
+    instance.ara.rendering = true;
+    instance.ara.buf = vec![vec![0.0; max_block]; channels];
+    instance.ara.ptrs = instance.ara.buf.iter_mut().map(|c| c.as_mut_ptr()).collect();
+    instance.ara.delay_len = instance.reported_latency as usize;
+    instance.ara.delay = vec![vec![0.0; instance.ara.delay_len + 1]; channels];
+    instance.ara.delay_pos = 0;
+}
+
+#[cfg(target_os = "macos")]
+enum AraBlock {
+    Host,
+    Process,
+    Through,
+}
+
+/// Renders the host's regions into the ARA buffers: `Process` to process them, `Through` for a
+/// renderer-only instance, `Host` when the instance is not a renderer (the host's input stands).
+#[cfg(target_os = "macos")]
+fn ara_render(instance: &mut Instance, process: &clap_process, frames: usize) -> AraBlock {
+    let Some(lib) = ara::loaded() else { return AraBlock::Host };
+    if !instance.ara.rendering || instance.ara.buf.first().is_none_or(|c| c.len() < frames) {
+        return AraBlock::Host;
+    }
+    let (mut playing, mut position) = (false, 0i64);
+    if !process.transport.is_null() {
+        let t = unsafe { &*process.transport };
+        playing = t.flags & TRANSPORT_IS_PLAYING != 0;
+        if t.flags & TRANSPORT_HAS_SECONDS != 0 {
+            position = (t.song_pos_seconds as f64 / (1i64 << 31) as f64 * f64::from(instance.sample_rate)).round() as i64;
+        }
+    }
+    match unsafe { (lib.render)(instance.ara.ext, instance.ara.ptrs.as_ptr(), position, frames as i64, i32::from(playing)) } {
+        1 => AraBlock::Process,
+        2 => AraBlock::Through,
+        _ => AraBlock::Host,
+    }
+}
+
+/// A renderer-only instance: the rendered regions, delayed by the reported latency, to the output.
+#[cfg(target_os = "macos")]
+fn ara_pass_through(instance: &mut Instance, output: &mut clap_audio_buffer, frames: usize) {
+    let len = instance.ara.delay_len + 1;
+    let start = instance.ara.delay_pos;
+    for c in 0..(output.channel_count as usize) {
+        let dst = unsafe { *output.data32.add(c) };
+        if dst.is_null() {
+            continue;
+        }
+        let out = unsafe { std::slice::from_raw_parts_mut(dst, frames) };
+        let Some(src) = instance.ara.buf.get(c) else {
+            out.fill(0.0);
+            continue;
+        };
+        let delay = &mut instance.ara.delay[c];
+        let mut pos = start;
+        for (o, &x) in out.iter_mut().zip(&src[..frames]) {
+            delay[pos] = x;
+            let read = (pos + 1) % len;
+            *o = if len == 1 { x } else { delay[read] };
+            pos = (pos + 1) % len;
+        }
+    }
+    instance.ara.delay_pos = (start + frames) % len;
+}
+
 static FACTORY: clap_plugin_factory = clap_plugin_factory {
     get_plugin_count: Some(factory_count),
     get_plugin_descriptor: Some(factory_descriptor),
@@ -2428,6 +2761,10 @@ pub unsafe extern "C" fn entry_get_factory(factory_id: *const c_char) -> *const 
     let id = unsafe { CStr::from_ptr(factory_id) }.to_bytes_with_nul();
     if id == FACTORY_ID {
         return &FACTORY as *const clap_plugin_factory as *const c_void;
+    }
+    #[cfg(target_os = "macos")]
+    if ara::FACTORY_IDS.contains(&id) && publish().is_some() && ara::loaded().is_some() {
+        return &ARA_FACTORY as *const AraFactory as *const c_void;
     }
     std::ptr::null()
 }

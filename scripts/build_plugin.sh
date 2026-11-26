@@ -52,6 +52,8 @@ Paths
   --vst3-sdk DIR         VST3 SDK checkout                             [VST3_SDK]
   --au-sdk DIR           AudioUnitSDK checkout                         [AU_SDK]
   --aax-sdk DIR          AAX SDK checkout                              [AAX_SDK]
+  --ara-sdk DIR          ARA SDK checkout: the VST3 is an ARA 2 plug-in; the
+                         plugin must export op_ara_analyze               [OP_ARA_SDK]
   --out DIR              folder that receives the bundles (default: ./dist) [OP_OUT]
   --work-dir DIR         build folder for cargo and cmake
                          (default: ./build/openplugin)                 [OP_WORK_DIR]
@@ -87,7 +89,7 @@ FORMATS="${OP_FORMATS:-clap,lv2,vst3,au,aax}"
 EDITOR="${OP_EDITOR:-0}"; TAIL="${OP_TAIL:-0}"; AAX_PAGES="${OP_AAX_PAGES:-0}"
 PKG="${OP_PKG:-0}"
 ARCHS="${OP_ARCHS:-}"; DEPLOY="${OP_DEPLOYMENT_TARGET:-11.0}"
-VST3_SDK="${VST3_SDK:-}"; AU_SDK="${AU_SDK:-}"; AAX_SDK="${AAX_SDK:-}"
+VST3_SDK="${VST3_SDK:-}"; AU_SDK="${AU_SDK:-}"; AAX_SDK="${AAX_SDK:-}"; ARA_SDK="${OP_ARA_SDK:-}"
 OUT="${OP_OUT:-$PWD/dist}"; WORK="${OP_WORK_DIR:-$PWD/build/openplugin}"
 JOBS="${OP_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 2)}"
 DRY=0; VERIFY=1
@@ -122,6 +124,7 @@ while [ $# -gt 0 ]; do
     --vst3-sdk) need "$@"; VST3_SDK="$2"; shift 2 ;;
     --au-sdk) need "$@"; AU_SDK="$2"; shift 2 ;;
     --aax-sdk) need "$@"; AAX_SDK="$2"; shift 2 ;;
+    --ara-sdk) need "$@"; ARA_SDK="$2"; shift 2 ;;
     --out) need "$@"; OUT="$2"; shift 2 ;;
     --work-dir) need "$@"; WORK="$2"; shift 2 ;;
     --jobs) need "$@"; JOBS="$2"; shift 2 ;;
@@ -187,6 +190,8 @@ SHELLS=""
 if has_format vst3; then SHELLS="$SHELLS OpenPluginVST3"; fi
 if has_format au; then SHELLS="$SHELLS OpenPluginAU"; fi
 if has_format aax; then SHELLS="$SHELLS OpenPluginAAX"; fi
+# ARA in the CLAP entry: a small library the .clap carries (native/ara/ara_c.cpp). macOS only for now.
+if has_format clap && [ -n "$ARA_SDK" ] && [ "$(uname -s)" = Darwin ]; then SHELLS="$SHELLS OpenPluginARA"; fi
 check_sdk() { # variable, value, probe file, what
   [ -n "$2" ] || die "$1 is not set; the $4 shell needs it"
   if [ "$DRY" = 1 ] || [ -e "$2/$3" ]; then return 0; fi
@@ -349,7 +354,7 @@ if [ -n "$SHELLS" ]; then
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$DEPLOY" "-DCMAKE_OSX_ARCHITECTURES=$CMA" \
     "-DCMAKE_C_FLAGS=$FMAP" "-DCMAKE_CXX_FLAGS=$FMAP" "-DCMAKE_OBJCXX_FLAGS=$FMAP" \
     "-DOP_RUST_LIB=$STATICLIB" \
-    "-DOP_VST3_SDK=$VST3_SDK" "-DOP_AU_SDK=$AU_SDK" "-DOP_AAX_SDK=$AAX_SDK" \
+    "-DOP_VST3_SDK=$VST3_SDK" "-DOP_AU_SDK=$AU_SDK" "-DOP_AAX_SDK=$AAX_SDK" "-DOP_ARA_SDK=$ARA_SDK" \
     "-DOP_BUILD_VST3=$(onoff vst3)" "-DOP_BUILD_AU=$(onoff au)" "-DOP_BUILD_AAX=$(onoff aax)" \
     "-DOP_PRODUCT=$NAME" "-DOP_BUNDLE_ID=$BUNDLE_ID" "-DOP_VERSION=$VERSION" \
     "-DOP_AU_VERSION=$AU_VERSION" "-DOP_MANUFACTURER=$MANUFACTURER" "-DOP_AU_SUBTYPE=$AU_SUBTYPE" "-DOP_AU_MANUFACTURER=$AU_MANUFACTURER" \
@@ -365,6 +370,16 @@ if [ -n "$SHELLS" ]; then
       BUNDLES+=("$OUT/$NAME.$ext")
     fi
   done
+  # The CLAP entry finds ARA next to itself, in its bundle's Resources; it is signed before the bundle.
+  if has_format clap && [ -f "$CM/libOpenPluginARA.dylib" ]; then
+    R="$OUT/$NAME.clap/Contents/Resources"
+    run mkdir -p "$R"
+    run cp "$CM/libOpenPluginARA.dylib" "$R/libOpenPluginARA.dylib"
+    run install_name_tool -id "@loader_path/libOpenPluginARA.dylib" "$R/libOpenPluginARA.dylib"
+    run cp "$ARA_SDK/ARA_Library/LICENSE.txt" "$R/ARA-SDK-LICENSE.txt"
+    run cp "$ARA_SDK/NOTICE.txt" "$R/ARA-SDK-NOTICE.txt"
+    BUNDLES=("$R/libOpenPluginARA.dylib" "${BUNDLES[@]}")
+  fi
 fi
 
 if has_format standalone; then

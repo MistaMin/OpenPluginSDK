@@ -49,6 +49,7 @@ set(OP_RUST_LIB "" CACHE FILEPATH "Rust static library exporting op_shell_*")
 set(OP_VST3_SDK "" CACHE PATH "Existing VST3 SDK checkout")
 set(OP_AU_SDK "" CACHE PATH "Existing AudioUnitSDK checkout")
 set(OP_AAX_SDK "" CACHE PATH "Existing AAX SDK checkout")
+set(OP_ARA_SDK "" CACHE PATH "Existing ARA SDK checkout: makes the VST3 an ARA 2 plug-in")
 set(OP_PRODUCT "Plugin" CACHE STRING "Bundle executable and display name")
 set(OP_BUNDLE_ID "com.example.openplugin" CACHE STRING "Bundle identifier prefix")
 set(OP_VERSION "0.1.0" CACHE STRING "Bundle version")
@@ -178,6 +179,26 @@ endfunction()
 
 enable_testing()
 
+# ARA 2 for the CLAP entry: a library the .clap bundle carries and loads (ara/ara_c.cpp).
+if(OP_ARA_SDK)
+  if(NOT EXISTS "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp")
+    message(FATAL_ERROR "OP_ARA_SDK must point at an ARA SDK checkout (ARA_API, ARA_Library)")
+  endif()
+  add_library(OpenPluginARA SHARED
+    ara/ara_c.cpp
+    ara/ara_glue.cpp
+    "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp"
+    "${OP_ARA_SDK}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
+    "${OP_ARA_SDK}/ARA_Library/Utilities/ARAChannelFormat.cpp"
+    "${OP_ARA_SDK}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
+    "${OP_ARA_SDK}/ARA_Library/Debug/ARADebug.c")
+  target_include_directories(OpenPluginARA PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${OP_ARA_SDK}")
+  target_compile_definitions(OpenPluginARA PRIVATE OP_HAS_ARA=1 ARA_VALIDATE_API_CALLS=0)
+  target_compile_features(OpenPluginARA PRIVATE cxx_std_17)
+  set_target_properties(OpenPluginARA PROPERTIES CXX_VISIBILITY_PRESET hidden C_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON
+    OUTPUT_NAME OpenPluginARA)
+endif()
+
 if(OP_BUILD_VST3)
   if(NOT EXISTS "${OP_VST3_SDK}/public.sdk/source/main/macmain.cpp")
     message(FATAL_ERROR "OP_VST3_SDK must point at a VST3 SDK checkout")
@@ -204,6 +225,27 @@ if(OP_BUILD_VST3)
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-Info.plist")
   target_link_libraries(OpenPluginVST3 PRIVATE sdk)
   op_link_rust(OpenPluginVST3)
+  # ARA 2: with an ARA SDK checkout, the VST3 is an ARA plug-in (vst3/ara_glue.h) and the
+  # plugin exports op_ara_analyze. The ARA Library (Apache 2.0) is compiled in; its licence
+  # and notice go into the bundle.
+  if(OP_ARA_SDK)
+    if(NOT EXISTS "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp")
+      message(FATAL_ERROR "OP_ARA_SDK must point at an ARA SDK checkout (ARA_API, ARA_Library)")
+    endif()
+    target_sources(OpenPluginVST3 PRIVATE
+      ara/ara_glue.cpp
+      "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Utilities/ARAChannelFormat.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Debug/ARADebug.c")
+    target_include_directories(OpenPluginVST3 PRIVATE "${OP_ARA_SDK}")
+    target_compile_definitions(OpenPluginVST3 PRIVATE OP_HAS_ARA=1 OP_ARA_VST3=1 ARA_VALIDATE_API_CALLS=0)
+    add_custom_command(TARGET OpenPluginVST3 POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources"
+      COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/ARA_Library/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources/ARA-SDK-LICENSE.txt"
+      COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/NOTICE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources/ARA-SDK-NOTICE.txt")
+  endif()
   add_custom_command(TARGET OpenPluginVST3 POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_VST3_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginVST3>/Contents/Resources/VST3-SDK-LICENSE.txt"
@@ -574,7 +616,12 @@ if(OP_BUILD_AU)
       message(FATAL_ERROR "OP_AU_${code} must be four characters: pass it (--au-subtype, --au-manufacturer) or pin the codes in the plugin (Plugin::au_ids)")
     endif()
   endforeach()
+  # An ARA Audio Unit says so in its component tags, so hosts know without loading it.
+  if(OP_ARA_SDK)
+    set(OP_AU_EXTRA "<key>tags</key><array><string>ARA</string></array>")
+  endif()
   configure_file(au/Info.plist.in "${CMAKE_BINARY_DIR}/au-Info.plist" @ONLY)
+  set(OP_AU_EXTRA "")
   add_library(OpenPluginAU MODULE au/OpenPluginAU.cpp)
   op_au_set_type(OpenPluginAU "${OP_AU_TYPE}")
   if(OP_EDITOR)
@@ -596,6 +643,23 @@ if(OP_BUILD_AU)
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-Info.plist")
   target_link_libraries(OpenPluginAU PRIVATE openplugin_au_sdk)
   op_link_rust(OpenPluginAU)
+  # ARA 2 in the Audio Unit too (ara/ara_glue.h), from the same ARA SDK checkout.
+  if(OP_ARA_SDK)
+    target_sources(OpenPluginAU PRIVATE
+      ara/ara_glue.cpp
+      "${OP_ARA_SDK}/ARA_Library/PlugIn/ARAPlug.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Dispatch/ARAPlugInDispatch.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Utilities/ARAChannelFormat.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Utilities/ARAPitchInterpretation.cpp"
+      "${OP_ARA_SDK}/ARA_Library/Debug/ARADebug.c")
+    target_include_directories(OpenPluginAU PRIVATE "${OP_ARA_SDK}")
+    target_compile_definitions(OpenPluginAU PRIVATE OP_HAS_ARA=1 ARA_VALIDATE_API_CALLS=0)
+    add_custom_command(TARGET OpenPluginAU POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources"
+      COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/ARA_Library/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources/ARA-SDK-LICENSE.txt"
+      COMMAND ${CMAKE_COMMAND} -E copy "${OP_ARA_SDK}/NOTICE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources/ARA-SDK-NOTICE.txt"
+      COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:OpenPluginAU>")
+  endif()
   add_custom_command(TARGET OpenPluginAU POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_AU_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAU>/Contents/Resources/AudioUnitSDK-LICENSE.txt"
