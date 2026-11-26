@@ -853,14 +853,19 @@ public:
     bool idle() const {
         return !processing_.load(std::memory_order_acquire) || steady_ms() - lastBlockMs_.load(std::memory_order_relaxed) > kIdleMs;
     }
+    // Any thread. The reset of a fresh start is left to the audio thread, which does it
+    // before the stream's first block (process). Done here, on a host's main thread, it
+    // could land while the host's render thread already runs: the block in flight would
+    // pass through dry and the engine would lose its state mid-render. A host that starts
+    // its blocks before this call has already begun the stream, so nothing is reset then.
     tresult PLUGIN_API setProcessing(TBool active) SMTG_OVERRIDE {
         if (active) lastBlockMs_.store(steady_ms(), std::memory_order_relaxed);
         processing_.store(active != 0, std::memory_order_release);
-        if (active && engine_) {
-            op_shell_reset(engine_);
-            clearBypassLine();
-            // A fresh start has nothing to fade from.
-            mix_ = bypass_.load() ? 1.0f : 0.0f;
+        if (!active) {
+            stream_.store(kStreamStopped, std::memory_order_release);
+        } else {
+            uint32_t stopped = kStreamStopped;
+            stream_.compare_exchange_strong(stopped, kStreamResetWanted, std::memory_order_acq_rel);
         }
         return kResultOk;
     }
@@ -962,6 +967,14 @@ public:
             return kResultOk;
         }
         if (!engine_ || data.symbolicSampleSize != kSample32 || data.numSamples < 0) return kResultFalse;
+        // The first block of a stream that setProcessing(true) started: reset here, on the
+        // audio thread, before any of it runs (see setProcessing).
+        if (stream_.exchange(kStreamRunning, std::memory_order_acq_rel) == kStreamResetWanted) {
+            op_shell_reset(engine_);
+            clearBypassLine();
+            // A fresh start has nothing to fade from.
+            mix_ = bypass_.load() ? 1.0f : 0.0f;
+        }
         // The buses of the selected layout, in the host's channel order.
         AudioBusBuffers* hostIn = nullptr;
         AudioBusBuffers* hostOut = nullptr;
@@ -1692,6 +1705,10 @@ private:
     std::atomic<uint32_t> generation_{1};
     // For idle(): set by setProcessing and by every block (audio thread).
     std::atomic<bool> processing_{false};
+    // The stream setProcessing starts and stops: stopped, a reset wanted before the next
+    // block (setProcessing(true) with no block since the stop), or running.
+    static constexpr uint32_t kStreamStopped = 0, kStreamResetWanted = 1, kStreamRunning = 2;
+    std::atomic<uint32_t> stream_{kStreamStopped};
     std::atomic<int64_t> lastBlockMs_{0};
 
     // Layouts as VST3 arrangements, the buses they imply, and the selection.
