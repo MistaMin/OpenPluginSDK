@@ -177,6 +177,23 @@ function(op_link_rust target_name)
     "-lobjc")
 endfunction()
 
+# macOS: a shell bundle exports only the entry points its host looks up, as linux/exports.map
+# does, and the linker drops what nothing reaches (-dead_strip). Without the list every symbol
+# of the Rust archive is exported, so nothing counts as unused and data a plugin never uses
+# ships in the bundle: the bundled fonts of GoodLookin DRI added 3 MB per architecture to each
+# shell. Objective-C classes need no export (the runtime finds them by name).
+function(op_macos_exports target_name)
+  if(NOT APPLE)
+    return()
+  endif()
+  set(names ${ARGN})
+  list(TRANSFORM names PREPEND "_")
+  string(JOIN "\n" body ${names})
+  set(list_file "${CMAKE_BINARY_DIR}/${target_name}-exports.txt")
+  file(WRITE "${list_file}" "${body}\n")
+  target_link_options(${target_name} PRIVATE "LINKER:-exported_symbols_list,${list_file}" "LINKER:-dead_strip")
+endfunction()
+
 enable_testing()
 
 # ARA 2 for the CLAP entry: a library the .clap bundle carries and loads (ara/ara_c.cpp).
@@ -225,6 +242,8 @@ if(OP_BUILD_VST3)
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/vst3-Info.plist")
   target_link_libraries(OpenPluginVST3 PRIVATE sdk)
   op_link_rust(OpenPluginVST3)
+  # The module entry points, and what a proof asks of a stand-in plugin (op_stub_*).
+  op_macos_exports(OpenPluginVST3 GetPluginFactory bundleEntry bundleExit "op_stub_*")
   # ARA 2: with an ARA SDK checkout, the VST3 is an ARA plug-in (vst3/ara_glue.h) and the
   # plugin exports op_ara_analyze. The ARA Library (Apache 2.0) is compiled in; its licence
   # and notice go into the bundle.
@@ -643,6 +662,8 @@ if(OP_BUILD_AU)
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/au-Info.plist")
   target_link_libraries(OpenPluginAU PRIVATE openplugin_au_sdk)
   op_link_rust(OpenPluginAU)
+  # The factory function Info.plist names.
+  op_macos_exports(OpenPluginAU OpenPluginAUFactory)
   # ARA 2 in the Audio Unit too (ara/ara_glue.h), from the same ARA SDK checkout.
   if(OP_ARA_SDK)
     target_sources(OpenPluginAU PRIVATE
@@ -1053,6 +1074,7 @@ if(OP_BUILD_AAX)
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_BINARY_DIR}/aax-Info.plist")
   target_link_libraries(OpenPluginAAX PRIVATE openplugin_aax_sdk "-framework Cocoa")
   op_link_rust(OpenPluginAAX)
+  op_macos_exports(OpenPluginAAX ACFRegisterPlugin ACFRegisterComponent ACFGetClassFactory ACFCanUnloadNow ACFStartup ACFShutdown ACFGetSDKVersion)
   add_custom_command(TARGET OpenPluginAAX POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:OpenPluginAAX>/Contents/Resources"
     COMMAND ${CMAKE_COMMAND} -E copy "${OP_AAX_SDK}/LICENSE.txt" "$<TARGET_BUNDLE_DIR:OpenPluginAAX>/Contents/Resources/AAX-SDK-LICENSE.txt")
