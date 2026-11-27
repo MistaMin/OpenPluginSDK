@@ -130,6 +130,7 @@ class Parameters final : public AAX_CEffectParameters {
     std::string trackName_;                  // UTF-8; empty for none
     uint32_t trackSerial_ = 0;               // 0: the host has said nothing
     std::atomic<bool> trackPending_{false};  // the engine has not heard the current name
+    std::atomic<int32_t> stateChanges_{0};   // OP_CHANGE_STATE notices, added to the host's change count
     std::mutex trackTelling_;                // one delivery at a time, so the last name told is the last one given
     // What a block of work waiting on the main queue holds: this object, or null once it
     // is gone. The lock is held while the work runs, so the destructor waits for it.
@@ -444,9 +445,19 @@ public:
         tellChanges(Controller());
         return result;
     }
+    // The host asks whether anything changed since it last saved: parameter changes, plus
+    // changes to saved state that is not a parameter.
+    AAX_Result GetNumberOfChanges(int32_t* changes) const override {
+        if (!changes) return AAX_ERROR_NULL_ARGUMENT;
+        int32_t parameters = 0;
+        const AAX_Result result = AAX_CEffectParameters::GetNumberOfChanges(&parameters);
+        *changes = static_cast<int32_t>((static_cast<uint32_t>(parameters) + static_cast<uint32_t>(stateChanges_.load())) & 0x7fffffffu);
+        return result;
+    }
     uint32_t tellChanges(AAX_IController* controller) {
         if (!controller || !state_.engine) return 0;
-        const uint32_t flags = op_shell_take_changes(state_.engine) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
+        const uint32_t flags = op_shell_take_changes(state_.engine) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO | OP_CHANGE_STATE);
+        if (flags & OP_CHANGE_STATE) stateChanges_.fetch_add(1);
         if (flags & OP_CHANGE_LATENCY) controller->SetSignalLatency(static_cast<int32_t>(op_shell_latency(state_.engine)));
         if (flags & OP_CHANGE_PARAM_INFO) {
             // The engine's names first (ABI 9), so the host reads the renamed table when it hears.

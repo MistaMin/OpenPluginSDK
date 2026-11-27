@@ -1498,8 +1498,9 @@ private:
     // Main thread. Returns the OP_CHANGE_* bits it told the host about.
     uint32_t pollChanges() {
         if (!engine_) return 0;
-        const uint32_t flags = op_shell_take_changes(engine_) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
+        const uint32_t flags = op_shell_take_changes(engine_) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO | OP_CHANGE_STATE);
         if (flags & OP_CHANGE_LATENCY) this->PropertyChanged(kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0);
+        if (flags & OP_CHANGE_STATE) this->PropertyChanged(kAudioUnitProperty_ClassInfo, kAudioUnitScope_Global, 0);
         if (flags & OP_CHANGE_PARAM_INFO) {
             // The engine's table first (ABI 9): names, units and choice labels, so the host
             // reads the renamed table when it hears.

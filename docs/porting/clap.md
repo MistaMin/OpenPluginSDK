@@ -63,7 +63,7 @@ Read [PORTING.md](../PORTING.md) first: it has the order of work and the tools (
 | `clap_plugin_state::save` and `load` that only stream the parameter values | Nothing to write | When parameters are the whole state, return `true` from `state_is_parameters_only`: the SDK saves and restores them |
 | `save(clap_ostream)`, `load(clap_istream)` with more than parameters | `save_state() -> Option<Vec<u8>>`, `load_state(&[u8]) -> bool` | In CLAP these bytes are the whole stream, so put the parameter values in them. Start with a magic and a version, and change nothing when you return `false` |
 | The stream the old plugin wrote | The same bytes, in `load_state` | Only for a port that saves a chunk of its own. See [Foreign state import](../PORTING.md#foreign-state-import) |
-| `clap_host_state::mark_dirty` | Not available | See the list at the end |
+| `clap_host_state::mark_dirty` | `HostNotifier::state_changed` | For saved state that is not a parameter |
 | `clap_plugin_preset_load`, the preset discovery factory | Not available | See the list at the end |
 
 ### Editor
@@ -336,7 +336,6 @@ What moved where:
 
 - **Nothing for parameter ids.** A plugin that used ids other than `0..n` in table order (hashes, sparse numbers) keeps them with `ParamInfo::with_clap_id`, and its automation links with them (see [Identity pinning](../PORTING.md#identity-pinning)).
 - **Custom value text.** A parameter prints and parses by its `Unit` and its choice names.
-- **`mark_dirty`.** A change to state that is not a parameter cannot be reported to the host.
 - **Presets in the host.** `preset_count`, `preset_name` and `preset_values` reach a Rust host through `openplugin-host`; the CLAP entry has no `preset-load` and no preset discovery.
 - **64-bit audio buffers** (`data64`).
 - **More than one output port, or more than one sidechain.** An `IoConfig` is one main input, one main output and one optional sidechain.

@@ -62,6 +62,7 @@ pub struct Shift {
     notifier: Option<HostNotifier>,
     calls: Arc<Calls>,
     after: Option<u32>,
+    dirty_after: Option<u32>,
     blocks: u32,
     jumped: bool,
     lines: Vec<Vec<f32>>,
@@ -76,12 +77,18 @@ impl Default for Shift {
 
 impl Shift {
     pub fn new(calls: Arc<Calls>) -> Self {
-        Self { lookahead: 0, renamed: false, notifier: None, calls, after: None, blocks: 0, jumped: false, lines: Vec::new(), pos: 0 }
+        Self { lookahead: 0, renamed: false, notifier: None, calls, after: None, dirty_after: None, blocks: 0, jumped: false, lines: Vec::new(), pos: 0 }
     }
 
     /// Jump to [`AFTER_LATENCY`] once `blocks` blocks have run, silently.
     pub fn after_blocks(mut self, blocks: u32) -> Self {
         self.after = Some(blocks);
+        self
+    }
+
+    /// Say once, from `process`, that saved state changed (as an editor setting would).
+    pub fn dirty_after_blocks(mut self, blocks: u32) -> Self {
+        self.dirty_after = Some(blocks);
         self
     }
 
@@ -163,6 +170,11 @@ impl Plugin for Shift {
             self.pos = (start + frames) % size;
         }
         self.blocks = self.blocks.saturating_add(1);
+        if self.dirty_after == Some(self.blocks) {
+            if let Some(notifier) = &self.notifier {
+                notifier.state_changed();
+            }
+        }
         if let Some(after) = self.after {
             if self.blocks >= after {
                 self.jumped = true;

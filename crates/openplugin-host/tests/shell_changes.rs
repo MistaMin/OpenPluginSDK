@@ -35,6 +35,10 @@ fn the_constants_are_the_notifier_bits() {
     const { assert!(shell::ABI >= 6) };
     assert_eq!(CHANGE_LATENCY, HostNotifier::LATENCY);
     assert_eq!(CHANGE_PARAM_INFO, HostNotifier::PARAM_INFO);
+    assert_eq!(openplugin_host::shell::CHANGE_STATE, HostNotifier::STATE);
+    let notifier = HostNotifier::new();
+    notifier.state_changed();
+    assert_eq!(notifier.take(), HostNotifier::STATE);
     assert_eq!(unsafe { shell::take_changes(std::ptr::null()) }, 0);
 }
 

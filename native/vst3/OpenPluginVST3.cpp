@@ -1687,7 +1687,7 @@ public:
     // IComponentHandler and calls restartComponent. Never on the audio thread.
     void pollChanges() {
         if (!engine_) return;
-        const uint32_t flags = op_shell_take_changes(engine_) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO);
+        const uint32_t flags = op_shell_take_changes(engine_) & (OP_CHANGE_LATENCY | OP_CHANGE_PARAM_INFO | OP_CHANGE_STATE);
         if (flags == 0) return;
         if (IPtr<IMessage> message = owned(allocateMessage())) {
             message->setMessageID(kChangesMessage);
@@ -2106,6 +2106,9 @@ public:
             }
         }
         if (restart && componentHandler) componentHandler->restartComponent(restart);
+        if (flags & OP_CHANGE_STATE) {
+            if (FUnknownPtr<IComponentHandler2> handler = componentHandler) handler->setDirty(true);
+        }
     }
     // A value from the host: the editor shows it, and the processor hears it (kEditMessage).
     tresult PLUGIN_API setParamNormalized(ParamID tag, ParamValue value) SMTG_OVERRIDE {

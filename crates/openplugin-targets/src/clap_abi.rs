@@ -362,6 +362,11 @@ pub struct clap_host_latency {
 }
 
 #[repr(C)]
+pub struct clap_host_state {
+    pub mark_dirty: Option<unsafe extern "C" fn(*const clap_host)>,
+}
+
+#[repr(C)]
 pub struct clap_host_tail {
     pub changed: Option<unsafe extern "C" fn(host: *const clap_host)>,
 }

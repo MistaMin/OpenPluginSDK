@@ -40,6 +40,10 @@ pub const CHANGE_LATENCY: u32 = openplugin_core::HostNotifier::LATENCY;
 /// host to read them again. The same bit as
 /// [`openplugin_core::HostNotifier::PARAM_INFO`].
 pub const CHANGE_PARAM_INFO: u32 = openplugin_core::HostNotifier::PARAM_INFO;
+/// [`take_changes`] bit: saved state that is not a parameter changed; tell the
+/// host the project has unsaved changes. The same bit as
+/// [`openplugin_core::HostNotifier::STATE`].
+pub const CHANGE_STATE: u32 = openplugin_core::HostNotifier::STATE;
 
 pub const KIND_EFFECT: u32 = 0;
 pub const KIND_INSTRUMENT: u32 = 1;

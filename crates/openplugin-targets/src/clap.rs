@@ -1630,7 +1630,7 @@ fn watch_latency(instance: &mut Instance) {
     if instance.activated && now != instance.reported_latency {
         ask_restart(instance.host, &instance.restart_requested);
     }
-    if instance.notifier.pending() & HostNotifier::PARAM_INFO != 0 {
+    if instance.notifier.pending() & (HostNotifier::PARAM_INFO | HostNotifier::STATE) != 0 {
         ask_callback(instance.host, &instance.callback_requested);
     }
 }
@@ -1668,6 +1668,17 @@ unsafe fn main_thread_changes(raw: *mut Instance) {
     }
     if flags & HostNotifier::PARAM_INFO != 0 {
         notify_params_rescan_flags(host, CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT | CLAP_PARAM_RESCAN_INFO);
+    }
+    if flags & HostNotifier::STATE != 0 {
+        mark_state_dirty(host);
+    }
+}
+
+/// `clap_host_state::mark_dirty`: the saved state differs from the host's copy. Main thread.
+fn mark_state_dirty(host: *const clap_host) {
+    let ext = host_call(host, EXT_STATE) as *const clap_host_state;
+    if let Some(mark) = unsafe { ext.as_ref() }.and_then(|ext| ext.mark_dirty) {
+        unsafe { mark(host) };
     }
 }
 

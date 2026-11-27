@@ -30,6 +30,7 @@ pub struct ChangeHost {
     pub latency_changed: AtomicU32,
     pub rescans: AtomicU32,
     pub last_rescan_flags: AtomicU32,
+    pub dirty: AtomicU32,
     /// Set when `latency.changed` or `params.rescan` ran off the main thread.
     pub off_main: AtomicBool,
     /// Set when `latency.changed` ran outside `activate`.
@@ -46,6 +47,7 @@ impl ChangeHost {
             latency_changed: AtomicU32::new(0),
             rescans: AtomicU32::new(0),
             last_rescan_flags: AtomicU32::new(0),
+            dirty: AtomicU32::new(0),
             off_main: AtomicBool::new(false),
             changed_outside_activate: AtomicBool::new(false),
             in_activate: AtomicBool::new(false),
@@ -105,6 +107,15 @@ unsafe extern "C" fn rescan(h: *const clap_host, flags: u32) {
     }
 }
 
+unsafe extern "C" fn mark_dirty(h: *const clap_host) {
+    let this = host(h);
+    this.dirty.fetch_add(1, Ordering::SeqCst);
+    if !on_main() {
+        this.off_main.store(true, Ordering::SeqCst);
+    }
+}
+
+static STATE: clap_host_state = clap_host_state { mark_dirty: Some(mark_dirty) };
 static LATENCY: clap_host_latency = clap_host_latency { changed: Some(latency_changed) };
 static PARAMS: clap_host_params = clap_host_params { rescan: Some(rescan), clear: None, request_flush: None };
 
@@ -112,6 +123,9 @@ unsafe extern "C" fn extension(_host: *const clap_host, id: *const c_char) -> *c
     let id = unsafe { CStr::from_ptr(id) }.to_bytes_with_nul();
     if id == EXT_LATENCY {
         return &LATENCY as *const clap_host_latency as *const c_void;
+    }
+    if id == EXT_STATE {
+        return &STATE as *const clap_host_state as *const c_void;
     }
     if id == EXT_PARAMS {
         return &PARAMS as *const clap_host_params as *const c_void;

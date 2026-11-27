@@ -89,6 +89,13 @@ OP_STUB_EXPORT uint32_t op_stub_changes_rename(void) {
     stub->flags.fetch_or(OP_CHANGE_PARAM_INFO);
     return 1;
 }
+// The newest engine raises OP_CHANGE_STATE. Returns 0 when there is none.
+OP_STUB_EXPORT uint32_t op_stub_changes_dirty(void) {
+    Stub* stub = gLast.load();
+    if (!stub) return 0;
+    stub->flags.fetch_or(OP_CHANGE_STATE);
+    return 1;
+}
 // Whether engines made from now on declare their largest latency (default 1).
 OP_STUB_EXPORT void op_stub_changes_declare_max(uint32_t on) { gDeclareMax.store(on != 0); }
 // The name of parameter 0 through the call without an instance (op_shell_param): the

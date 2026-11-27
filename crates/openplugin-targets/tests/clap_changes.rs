@@ -161,6 +161,24 @@ fn new_parameter_names_are_rescanned_once_on_the_main_thread() {
 }
 
 #[test]
+fn a_state_change_marks_the_host_dirty_once_on_the_main_thread() {
+    mark_main_thread();
+    let host = ChangeHost::new(true);
+    let ch = host.clap_host();
+    let mut adapter = unsafe { ClapAdapter::with_host(Shift::default().dirty_after_blocks(2), &ch) };
+    let p = adapter.as_plugin();
+    assert!(adapter.activate(48_000.0, 1, 64));
+    play(p, None, 6);
+    assert_eq!(host.count(&host.callbacks), 1);
+    assert_eq!(host.count(&host.dirty), 0, "the audio thread never calls mark_dirty");
+    unsafe { (*p).on_main_thread.unwrap()(p) };
+    unsafe { (*p).on_main_thread.unwrap()(p) };
+    assert_eq!(host.count(&host.dirty), 1);
+    assert_eq!(host.count(&host.rescans), 0);
+    assert!(!host.off_main.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[test]
 fn without_request_callback_the_next_main_thread_call_rescans() {
     mark_main_thread();
     let host = ChangeHost::new(false);

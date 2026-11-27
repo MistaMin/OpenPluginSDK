@@ -76,8 +76,17 @@ RenameFn stubRename = nullptr;
 TakesFn stubTakes = nullptr;
 EnginesFn stubEngines = nullptr;
 
-struct Handler final : IComponentHandler {
+struct Handler final : IComponentHandler, IComponentHandler2 {
     std::vector<int32> restarts;
+    int dirty = 0;
+    tresult PLUGIN_API setDirty(TBool state) override {
+        if (state) ++dirty;
+        if (!pthread_main_np()) ++offMain;
+        return kResultOk;
+    }
+    tresult PLUGIN_API requestOpenEditor(FIDString) override { return kResultOk; }
+    tresult PLUGIN_API startGroupEdit() override { return kResultOk; }
+    tresult PLUGIN_API finishGroupEdit() override { return kResultOk; }
     int offMain = 0;
     tresult PLUGIN_API beginEdit(ParamID) override { return kResultOk; }
     tresult PLUGIN_API performEdit(ParamID, ParamValue) override { return kResultOk; }
@@ -90,6 +99,10 @@ struct Handler final : IComponentHandler {
     tresult PLUGIN_API queryInterface(const TUID iid, void** obj) override {
         if (FUnknownPrivate::iidEqual(iid, IComponentHandler::iid) || FUnknownPrivate::iidEqual(iid, FUnknown::iid)) {
             *obj = static_cast<IComponentHandler*>(this);
+            return kResultOk;
+        }
+        if (FUnknownPrivate::iidEqual(iid, IComponentHandler2::iid)) {
+            *obj = static_cast<IComponentHandler2*>(this);
             return kResultOk;
         }
         *obj = nullptr;
@@ -301,6 +314,14 @@ int main(int argc, char** argv) {
             CHECK(handler.restarts[2] == (kLatencyChanged | kParamTitlesChanged | kParamValuesChanged));
             CHECK(a.restart() == 64);
             CHECK(handler.offMain == 0);
+            // 4. Saved state that is not a parameter changed: one setDirty, and no restart.
+            auto stubDirty = reinterpret_cast<RenameFn>(CFBundleGetFunctionPointerForName(gBundle, CFSTR("op_stub_changes_dirty")));
+            CHECK(stubDirty && handler.dirty == 0);
+            for (int i = 0; i < 4; ++i) a.block();
+            CHECK(stubDirty() == 1);
+            CHECK(pump_until([&] { return handler.dirty == 1; }));
+            pump_for(120);
+            CHECK(handler.dirty == 1 && handler.restarts.size() == 3 && handler.offMain == 0);
             uint32_t mainTakes = 0, otherTakes = 0;
             stubTakes(&mainTakes, &otherTakes);
             CHECK(mainTakes > 0 && otherTakes == 0);  // the poll never ran on the audio thread

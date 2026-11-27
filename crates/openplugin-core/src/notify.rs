@@ -5,13 +5,13 @@
 //! [`HostNotifier`], and the format entry tells the host the way its format
 //! asks:
 //!
-//! | format | latency | parameter info |
-//! |---|---|---|
-//! | CLAP | `request_restart`, then `latency.changed` in the next `activate` | `params.rescan(INFO \| TEXT \| VALUES)` on the main thread |
-//! | VST3 | `restartComponent(kLatencyChanged)` | `restartComponent(kParamTitlesChanged \| kParamValuesChanged)` |
-//! | Audio Unit | `kAudioUnitProperty_Latency` changed | `kAudioUnitProperty_ParameterList` and `ParameterInfo` changed |
-//! | AAX | `SetSignalLatency` | `AAX_eNotificationEvent_ParameterNameChanged` per parameter |
-//! | LV2 | the latency output port | (none in LV2) |
+//! | format | latency | parameter info | state |
+//! |---|---|---|---|
+//! | CLAP | `request_restart`, then `latency.changed` in the next `activate` | `params.rescan(INFO \| TEXT \| VALUES)` on the main thread | `state.mark_dirty` on the main thread |
+//! | VST3 | `restartComponent(kLatencyChanged)` | `restartComponent(kParamTitlesChanged \| kParamValuesChanged)` | `IComponentHandler2::setDirty` |
+//! | Audio Unit | `kAudioUnitProperty_Latency` changed | `kAudioUnitProperty_ParameterList` and `ParameterInfo` changed | `kAudioUnitProperty_ClassInfo` changed |
+//! | AAX | `SetSignalLatency` | `AAX_eNotificationEvent_ParameterNameChanged` per parameter | `GetNumberOfChanges` counts it |
+//! | LV2 | the latency output port | (none in LV2) | (not sent) |
 //!
 //! The format entry hands the plugin its notifier once, through
 //! [`crate::Plugin::set_host_notifier`], on the main thread, before any audio.
@@ -61,8 +61,10 @@ impl HostNotifier {
     pub const LATENCY: u32 = 1;
     /// Parameter names, units or value text ([`crate::Plugin::info`]) changed.
     pub const PARAM_INFO: u32 = 2;
+    /// Saved state that is not a parameter changed.
+    pub const STATE: u32 = 4;
     /// Every flag this version defines.
-    pub const ALL: u32 = Self::LATENCY | Self::PARAM_INFO;
+    pub const ALL: u32 = Self::LATENCY | Self::PARAM_INFO | Self::STATE;
 
     /// A notifier with nothing pending. A format entry makes one per instance
     /// and keeps a clone; a notifier nobody reads (in a test, or a format
@@ -81,6 +83,13 @@ impl HostNotifier {
     /// thread; no allocation, no lock.
     pub fn param_info_changed(&self) {
         self.raise(Self::PARAM_INFO);
+    }
+
+    /// Say that something [`crate::Plugin::save_state`] writes, other than
+    /// a parameter, changed (an editor setting), so the host knows the
+    /// project has unsaved changes. Any thread; no allocation, no lock.
+    pub fn state_changed(&self) {
+        self.raise(Self::STATE);
     }
 
     /// Raise `flags` (bits outside [`Self::ALL`] are ignored). Returns the

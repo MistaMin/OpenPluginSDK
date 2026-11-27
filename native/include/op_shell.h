@@ -292,7 +292,11 @@ size_t op_shell_param_group(uint32_t index, char* buf, size_t cap);
 // SetSignalLatency and AAX_eNotificationEvent_ParameterNameChanged.
 enum {
     OP_CHANGE_LATENCY = 1,      // read op_shell_latency again and tell the host
-    OP_CHANGE_PARAM_INFO = 2    // tell the host to read the parameter info again
+    OP_CHANGE_PARAM_INFO = 2,   // tell the host to read the parameter info again
+    // Saved state that is not a parameter changed (no new ABI: a shell without it ignores the
+    // bit). Tell the host the project has unsaved changes: VST3 IComponentHandler2::setDirty,
+    // Audio Unit kAudioUnitProperty_ClassInfo changed, AAX GetNumberOfChanges.
+    OP_CHANGE_STATE = 4
 };
 // Returns the OP_CHANGE_* bits raised since the last call and clears them, so
 // each change is reported once; 0 for a NULL instance. A latency equal to the
