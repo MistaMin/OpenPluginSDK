@@ -133,7 +133,7 @@ typedef struct OpEvent {
     uint32_t offset;     // sample offset in the block, < frames
     uint32_t kind;       // OP_EVENT_*
     uint32_t index;      // parameter index (parameter kinds)
-    float value;         // plain or normalized value (parameter kinds)
+    float value;         // plain value as op_shell_set_plain takes it, or normalized (parameter kinds)
     uint8_t channel;     // MIDI channel 0..15 (note kinds)
     uint8_t note;        // 0..127
     uint8_t velocity;    // 0..127
