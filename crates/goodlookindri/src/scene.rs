@@ -206,6 +206,18 @@ pub enum Cmd {
     /// Premultiplied image stretched into `dest` (bilinear, clamped at the edges). An exact
     /// device-pixel fit is copied 1:1.
     Image { img: Arc<Image>, dest: Rect, opacity: f32 },
+    /// `Text` after this, in the same scene, uses this face. A scene starts with
+    /// [`FontId::DEFAULT`]. Hosts that draw text with their own font may ignore it.
+    Font(FontId),
+}
+
+/// A face the host has registered (`goodlookindri_shell::text` hands these out). `DEFAULT` is the
+/// host's own face; an id the host does not know draws with it too.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FontId(pub u16);
+
+impl FontId {
+    pub const DEFAULT: FontId = FontId(0);
 }
 
 #[derive(Clone, Debug, Default)]
@@ -248,6 +260,8 @@ impl Scene {
     pub fn text(&mut self, at: Point, text: impl Into<String>, color: Color, size: f32, center: bool) {
         self.cmds.push(Cmd::Text { at, text: text.into(), color, size, center });
     }
+    /// Text after this uses `font` (see [`Cmd::Font`]).
+    pub fn font(&mut self, font: FontId) { self.cmds.push(Cmd::Font(font)); }
     pub fn clip_round(&mut self, rect: Rect, radius: f32) { self.cmds.push(Cmd::ClipRound { rect, radius }); }
     pub fn pop_clip(&mut self) { self.cmds.push(Cmd::PopClip); }
 

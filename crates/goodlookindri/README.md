@@ -92,7 +92,7 @@ See the [integration guide](docs/INTEGRATION.md).
 | Design model, spectrum, meters, drawing commands | Rust 2021, standard library only | MIT |
 | Tests | `cargo test` | MIT |
 
-No bitmap assets, fonts, icon packs, or GUI frameworks are bundled. The screenshots are documentation of the shared catalogue. A host supplies the window, the typeface, and the plugin format (CLAP, VST3, AU, LV2, AAX, or a standalone tool). See [dependency notes](docs/DEPENDENCIES.md).
+No bitmap assets, icon packs, or GUI frameworks are bundled. The shell bundles open-licence fonts (`shell/fonts`, each folder with its SIL Open Font License) and can use fonts installed on the computer without shipping them (`goodlookindri_shell::text`). The screenshots are documentation of the shared catalogue. A host supplies the window, the typeface, and the plugin format (CLAP, VST3, AU, LV2, AAX, or a standalone tool). See [dependency notes](docs/DEPENDENCIES.md).
 
 ## Getting started
 

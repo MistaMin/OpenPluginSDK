@@ -70,6 +70,7 @@ fn blit(scene: &mut Scene, tmp: Scene, rot: &Rot) {
             Cmd::Shadow { shape, sigma, color } => Cmd::Shadow { shape: rot.shape(shape), sigma, color },
             Cmd::InnerShadow { shape, offset, sigma, color } => Cmd::InnerShadow { shape: rot.shape(shape), offset: rot.vec(offset), sigma, color },
             Cmd::Image { img, dest, opacity } => Cmd::Image { img, dest: rot.rect(dest), opacity },
+            Cmd::Font(f) => Cmd::Font(f),
         });
     }
 }

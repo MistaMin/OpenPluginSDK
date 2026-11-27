@@ -10,7 +10,7 @@
 
 use crate::text::{self, Glyph, GlyphCache};
 use goodlookindri::color::Color;
-use goodlookindri::scene::{Blend, Cmd, Image, Paint, Point, Rect, Scene, Shape, Stops};
+use goodlookindri::scene::{Blend, Cmd, FontId, Image, Paint, Point, Rect, Scene, Shape, Stops};
 
 /// Opaque `0x00RRGGBB` pixels, top row first.
 pub struct Framebuffer {
@@ -184,6 +184,7 @@ impl Framebuffer {
     pub fn replay(&mut self, scene: &Scene, scale: f32) {
         let s = scale;
         let mut clips: Vec<Clip> = Vec::new();
+        let mut font = FontId::DEFAULT;
         for cmd in &scene.cmds {
             match cmd {
                 Cmd::FillEllipse { rect, top, bottom, diagonal } => {
@@ -251,11 +252,11 @@ impl Framebuffer {
                 }
                 Cmd::Text { at, text, color, size, center } => {
                     let px = text::quantise(size * s);
-                    let (pens, total) = text::pen_positions(text, px);
+                    let (pens, total) = text::pen_positions(font, text, px);
                     let x0 = if *center { at.x * s - total * 0.5 } else { at.x * s };
                     let baseline = at.y * s + px * text::MIDDLE;
                     for (c, pen) in pens {
-                        let g = self.glyphs.get(c, px);
+                        let g = self.glyphs.get_in(font, c, px);
                         let ox = (x0 + pen).round() as i64 + g.left as i64;
                         let oy = (baseline - g.top as f32).round() as i64;
                         blit(&mut self.pixels, self.width, self.height, &clips, g, ox, oy, *color);
@@ -265,6 +266,7 @@ impl Framebuffer {
                     clips.push(Clip { cx: (rect.x + rect.w * 0.5) * s, cy: (rect.y + rect.h * 0.5) * s, hx: rect.w * 0.5 * s, hy: rect.h * 0.5 * s, r: radius * s });
                 }
                 Cmd::PopClip => { clips.pop(); }
+                Cmd::Font(f) => font = *f,
                 Cmd::Fill { shape, paint, feather, blend } => {
                     let sh = Sdf::new(*shape, s);
                     let shader = Shader::new(paint, &sh, s);
@@ -468,6 +470,20 @@ mod tests {
         fb
     }
     fn px(fb: &Framebuffer, x: usize, y: usize) -> u32 { fb.pixels[y * fb.width + x] }
+
+    #[test]
+    fn font_command_changes_the_face_until_the_scene_ends() {
+        let draw = |font: Option<FontId>| {
+            let mut sc = Scene::new();
+            if let Some(f) = font { sc.font(f); }
+            sc.text(Point::new(4.0, 32.0), "0123", Color(0xffffffff), 20.0, false);
+            render(&sc, 0xff000000).pixels
+        };
+        let mono = text::register(text::bundled::JETBRAINS_MONO_REGULAR).unwrap();
+        assert_eq!(draw(None), draw(Some(FontId::DEFAULT)), "a scene starts in the default face");
+        assert_ne!(draw(None), draw(Some(mono)), "Cmd::Font switches the face");
+        assert_eq!(draw(None), draw(Some(FontId(9999))), "an unknown id draws the default face");
+    }
 
     #[test]
     fn glyph_edges_lift_only_light_text_on_dark() {

@@ -44,6 +44,9 @@ pub use controls::{
 /// The drawing library, for building scenes of your own. Its version is part of the
 /// SDK's API: a breaking GoodLookin DRI release is a breaking SDK release.
 pub use goodlookindri;
+/// Fonts and text measuring: the bundled open-licence faces, fonts installed on the computer
+/// (`text::system`), and the `FontId` a scene draws its text with (`Scene::font`).
+pub use goodlookindri_shell::text;
 pub use design_editor::{DesignEditor, DesignEditorError, DesignOptions};
 pub use hit::{Area, Control, ControlId, ControlKind, ControlSet, DoubleClick, Key, Modifiers};
 pub use openplugin_core::editor::{DamageRect, DamageTracker};
