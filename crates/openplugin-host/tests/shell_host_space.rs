@@ -4,6 +4,7 @@
 //! descriptor per binary.
 
 use openplugin_core::{Category, HostSpace, ParamInfo, Plugin, PluginInfo, Taper, Unit};
+use openplugin_host::block::{OpEvent, OpProcess, EVENT_PARAM_PLAIN};
 use openplugin_host::shell::{self, OpParamDesc, PARAM_DISCRETE, PARAM_LOG};
 
 fn hz_text(v: f32) -> String {
@@ -53,7 +54,12 @@ impl Plugin for Shown {
     fn param(&self, id: &str) -> Option<f32> {
         INFO.params.iter().position(|p| p.id == id).map(|i| self.values[i])
     }
-    fn process(&mut self, _: &mut [&mut [f32]], _: usize) {}
+    // Writes the two values the plugin holds, so a test reads what reached it.
+    fn process(&mut self, io: &mut [&mut [f32]], frames: usize) {
+        for (channel, value) in io.iter_mut().zip(self.values) {
+            channel[..frames].fill(value);
+        }
+    }
 }
 
 #[test]
@@ -90,6 +96,44 @@ fn a_parameter_shown_normalized_speaks_0_to_1_through_the_shell_abi() {
         let mut d1 = std::mem::zeroed::<OpParamDesc>();
         shell::write_param::<Shown>(1, &mut d1);
         assert_eq!((d1.min, d1.max), (-24.0, 24.0));
+        shell::destroy(instance);
+    }
+}
+
+#[test]
+fn a_plain_event_carries_the_host_value_as_set_plain_does() {
+    // AAX and AU send a changed value as a plain event in the host's space: 0..1 for a parameter
+    // shown normalized, the parameter's units for the others.
+    let instance = shell::create::<Shown>(48_000.0, 64, 2);
+    assert!(!instance.is_null());
+    let input = [0.0f32; 16];
+    let (mut l, mut r) = ([0.0f32; 16], [0.0f32; 16]);
+    let ins = [input.as_ptr(), input.as_ptr()];
+    let outs = [l.as_mut_ptr(), r.as_mut_ptr()];
+    let events = [
+        OpEvent { kind: EVENT_PARAM_PLAIN, index: 0, value: 0.75, ..OpEvent::default() },
+        OpEvent { kind: EVENT_PARAM_PLAIN, index: 1, value: -6.0, ..OpEvent::default() },
+    ];
+    let args = OpProcess {
+        struct_size: std::mem::size_of::<OpProcess>() as u32,
+        frames: 16,
+        inputs: ins.as_ptr(),
+        input_channels: 2,
+        output_channels: 2,
+        outputs: outs.as_ptr(),
+        sidechain: std::ptr::null(),
+        sidechain_channels: 0,
+        event_count: events.len() as u32,
+        events: events.as_ptr(),
+        transport: std::ptr::null(),
+    };
+    unsafe {
+        assert_eq!(shell::process_events(instance, &args), 1);
+        let freq = PARAMS[0].from_normalized(0.75);
+        assert!((l[15] - freq).abs() < 1e-3, "the plugin got {} Hz, not {freq} Hz", l[15]);
+        assert_eq!(r[15], -6.0);
+        assert!((shell::get_plain(instance, 0) - 0.75).abs() < 1e-6);
+        assert_eq!(shell::get_plain(instance, 1), -6.0);
         shell::destroy(instance);
     }
 }

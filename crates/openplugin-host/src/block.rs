@@ -54,7 +54,8 @@ pub struct OpEvent {
     pub kind: u32,
     /// Parameter index for the two parameter kinds.
     pub index: u32,
-    /// Plain or normalized value for the parameter kinds.
+    /// Plain value as the shells' hosts see it ([`HostSession::store_host`]), or normalized
+    /// travel, for the parameter kinds.
     pub value: f32,
     /// MIDI channel 0..15 for note events.
     pub channel: u8,
@@ -244,7 +245,7 @@ impl HostSession {
             }
             match event.kind {
                 EVENT_PARAM_PLAIN => {
-                    self.plane.store(event.index as usize, event.value);
+                    self.store_host(event.index as usize, event.value);
                 }
                 EVENT_PARAM_NORMALIZED => {
                     self.store_normalized(event.index as usize, event.value);
@@ -319,7 +320,7 @@ impl HostSession {
                         .midi(0, [event.midi[0], event.midi[1], event.midi[2]]),
                 },
                 EVENT_PARAM_PLAIN => {
-                    self.plane.store(event.index as usize, event.value);
+                    self.store_host(event.index as usize, event.value);
                 }
                 EVENT_PARAM_NORMALIZED => {
                     self.store_normalized(event.index as usize, event.value);
