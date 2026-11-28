@@ -8,6 +8,10 @@ Before 1.0 the SDK does not promise compatibility between releases: any release 
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking.** Conformance kit: the output bound is advisory. A peak over `Options::max_output` (default 64) no longer fails `bounded_output`; the check reports the new `Status::Warn` with the first case and its seeds, the report ends with `result: PASS (1 warning)`, and `Report::passed` stays true (`Report::warned_checks` lists the warnings). The SDK still aims for output under 64, but gain staging works as in analogue gear: with every gain at its maximum and a hot input, a correct plugin can exceed any fixed level (OpenPreamp, as its 1.3.0 did, reaches 109 with +24 dB of output trim after a fully driven stage). The headroom is up to the developer and the drive up to the user. Output that is not finite still fails `finite_output`. `tests/broken.rs` covers it. Code that matches on `Status` needs an arm for `Warn`.
+
 ### Added
 
 - **VST3 on Linux** (`native/vst3/linux`, `native/cmake/linux.cmake`): the shell of `OpenPluginVST3.cpp`, built as `<Name>.vst3/Contents/<arch>-linux/<Name>.so` (x86_64, aarch64) with `linuxmain.cpp`'s entry points. The editor is the X11 view in the host's window (`kPlatformTypeX11EmbedWindowID`); the view registers a timer and the X connection's descriptor with the host's `Linux::IRunLoop` and is pumped on both, and attaching fails on a host without a run loop. Sizes cross in pixels through `vst3/win/editor_pixels` (now shared). A version script exports only `GetPluginFactory`, `ModuleEntry` and `ModuleExit`, so two plug-ins of this SDK in one process never bind to each other's `op_shell_*`; libstdc++ is linked in. `export_shell!` exports the editor ABI on Linux too, with `op_editor_fd`, `op_editor_pump` and `op_editor_display_scale` (`include/op_editor_x11.h`). `scripts/build_plugin_linux.sh` builds it (`--formats vst3`, `--vst3-sdk`, `--editor`, `--tail`, `--manufacturer`) and checks the exports.

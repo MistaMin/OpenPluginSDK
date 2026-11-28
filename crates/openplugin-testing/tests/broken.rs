@@ -1,5 +1,5 @@
 //! Deliberately broken plugins. Each must fail exactly the check it breaks,
-//! and the control plugin must pass all of them.
+//! and the control plugin must pass all of them. A loud plugin only warns.
 
 use openplugin::prelude::*;
 use openplugin_testing::{bench, conformance, Check, Options, Status};
@@ -38,6 +38,8 @@ enum Fault {
     BadPin,
     /// Latency follows the gain two process calls after it is written (a fade before a mode switch).
     LatencyLags,
+    /// Correct, with 40 dB of gain after its clipper: peaks of up to 800.
+    Loud,
 }
 
 struct Faulty {
@@ -178,6 +180,11 @@ impl Plugin for Faulty {
                 *s = (*s * self.gain).clamp(-8.0, 8.0);
             }
         }
+        if self.fault == Fault::Loud {
+            for ch in io.iter_mut() {
+                ch[..frames].iter_mut().for_each(|s| *s *= 100.0);
+            }
+        }
         if self.fault == Fault::Nan && self.calls == 50 {
             io[0][0] = f32::NAN;
         }
@@ -237,6 +244,22 @@ fn control_plugin_passes_everything() {
     assert_eq!(report.status(Check::Tail), Status::Pass);
     assert_eq!(report.status(Check::Reset), Status::Pass);
     assert_eq!(report.status(Check::State), Status::Pass);
+}
+
+#[test]
+fn output_over_the_bound_warns_and_does_not_fail() {
+    let report = run(Fault::Loud, Options::quick());
+    println!("{report}");
+    assert!(report.passed(), "{report}");
+    assert_eq!(report.status(Check::BoundedOutput), Status::Warn);
+    assert_eq!(report.warned_checks(), vec![Check::BoundedOutput]);
+    assert!(report.failed_checks().is_empty());
+    let first = report.result(Check::BoundedOutput).first_failure.as_ref().expect("the first case over the bound");
+    assert!(first.message.contains("over the bound 64"), "{}", first.message);
+    assert!(report.to_string().contains("result: PASS (1 warning)"), "{report}");
+    // A bound the plugin stays under: no warning.
+    let report = run(Fault::Loud, Options { max_output: 1000.0, ..Options::quick() });
+    assert_eq!(report.status(Check::BoundedOutput), Status::Pass, "{report}");
 }
 
 #[test]

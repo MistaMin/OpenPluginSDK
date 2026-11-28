@@ -203,8 +203,8 @@ z2 = if n2.abs() < 1e-30 { 0.0 } else { n2 };
 
 Policy on the *output* of a stage that cannot recover (a table lookup, a `powf`, a division): check
 it once where it is computed, per block or per sub-block, not per sample. The kit's `finite_output`
-and `bounded_output` checks (`Options::max_output`, default 64) fail on a NaN or an output of
-absurd size even if the input was fine. A plugin that passes a NaN input straight through is
+check fails on a NaN or an infinity even if the input was fine, and `bounded_output`
+(`Options::max_output`, default 64) warns about an output of absurd size without failing the run. A plugin that passes a NaN input straight through is
 accepted by default (`hostile_input` only requires recovery within a second plus latency plus tail);
 `strict_hostile_output` demands finite output *during* the burst too.
 
@@ -413,7 +413,8 @@ for seed in 1..=200u64 {
   defaults in release, use `Options::quick()` in debug builds (3 rates, 5 block sizes).
 - **What to turn on for a plugin you want to be hard to break**: `strict_hostile_output`,
   `strict_denormals`, `verify_latency_by_impulse` where it is meaningful, and a `max_output` close to
-  what the plugin can really produce (the default 64 is a ceiling for nonsense, not a spec).
+  what the plugin can really produce (the default 64 is a ceiling for nonsense, not a spec; a peak
+  over it is a warning to read, not a failure).
 - **The SDK's own fuzzers** use the same idea for the format entries: generated junk through
   `export_shell!`, CLAP and LV2 (`shell_hostile_input.rs`, `clap_hostile_input.rs`,
   `lv2_hostile_input.rs`, `lv2_atoms_hostile.rs`), through the state decoder

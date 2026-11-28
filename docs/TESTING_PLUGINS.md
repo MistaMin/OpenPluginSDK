@@ -57,7 +57,7 @@ rest runs.
 | `no_panic` | No call panics, with hostile parameters, transport, MIDI and state bytes (panics are caught). |
 | `finite_output` | Finite input gives finite output. |
 | `no_denormals` | No subnormal number appears in the output, including while a tail decays. |
-| `bounded_output` | Output stays under `Options::max_output` (default 64). |
+| `bounded_output` | Output stays under `Options::max_output` (default 64). Advisory: a peak over the bound is reported as `warn` with the first case, and the run still passes. The SDK aims for output under 64, but gain staging works as in analogue gear: with every gain at its maximum and a hot input, a correct plugin can exceed any fixed level. The headroom is up to the developer and the drive up to the user. |
 | `hostile_input` | After NaN and infinity bursts, output is finite again within one second plus latency plus tail. Passing NaN through is allowed (set `strict_hostile_output` to forbid it); a filter that keeps the NaN in its state is not. |
 | `param_fuzz` | `set_param` returns true for every parameter, `param` stays finite and inside `min..max` whatever was written. Also fails for a parameter group path hosts cannot show (case `param-groups`) and for an identity pin a format cannot carry (case `identity-pins`, from `identity::check_pins`; see [PORTING.md](PORTING.md#identity-pinning)). |
 | `latency` | `latency()` does not change while processing (unless `latency_depends_on_params`), does not depend on the `prepare` block size, and is under ten seconds. With `verify_latency_by_impulse` an impulse must peak at the reported latency, for plugins where that is meaningful. |

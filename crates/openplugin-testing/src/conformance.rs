@@ -47,7 +47,14 @@ pub struct Options {
     pub sample_rates: Vec<f32>,
     /// Block sizes to run, in frames. Default [`HOST_BLOCK_SIZES`].
     pub block_sizes: Vec<usize>,
-    /// Largest absolute output sample allowed. Default 64.0 (about +36 dBFS).
+    /// Largest absolute output sample the kit expects. Default 64.0 (about +36 dBFS).
+    ///
+    /// The SDK aims for output under this bound, but it is advisory: a peak over it is reported
+    /// as a warning ([`Status::Warn`](crate::Status::Warn)) and does not fail the run. Gain
+    /// staging works as it does in analogue gear: with every gain at its maximum and a hot
+    /// input, a correct plugin can exceed any fixed level. How much headroom a plugin leaves is
+    /// up to its developer, and how it is driven is up to its user. Output that is not finite
+    /// still fails (`finite_output`).
     pub max_output: f32,
     /// Require finite output *during* a NaN or infinity burst, not only
     /// after it has passed. Default false: a plugin that passes NaN through
