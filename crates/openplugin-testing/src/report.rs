@@ -1,4 +1,4 @@
-//! The conformance report: every check, with pass, fail or skip, and the first
+//! The conformance report: every check, with pass, fail, warning or skip, and the first
 //! failing case with what is needed to reproduce it.
 
 use std::fmt;
@@ -15,7 +15,8 @@ pub enum Check {
     FiniteOutput,
     /// No denormal numbers in the output.
     NoDenormals,
-    /// Output stays under the configured bound.
+    /// Output stays under the configured bound. Advisory: a peak over it is reported as
+    /// [`Status::Warn`] and never fails a run.
     BoundedOutput,
     /// A burst of NaN and infinity at the input does not poison the plugin for good.
     HostileInput,
@@ -89,7 +90,7 @@ impl Check {
             Check::NoPanic => "no panic",
             Check::FiniteOutput => "no NaN or infinity in the output",
             Check::NoDenormals => "no denormal numbers in the output",
-            Check::BoundedOutput => "output bounded",
+            Check::BoundedOutput => "output under the advisory bound",
             Check::HostileInput => "recovers from NaN and infinity at the input",
             Check::ParamFuzz => "parameters finite and in range under hostile writes",
             Check::Latency => "latency stable and truthful",
@@ -114,6 +115,9 @@ pub enum Status {
     Pass,
     /// At least one assertion failed; [`CheckResult::first_failure`] says which.
     Fail,
+    /// At least one assertion of an advisory check did not hold ([`Check::BoundedOutput`]);
+    /// [`CheckResult::first_failure`] says which. A warning does not fail a run.
+    Warn,
     /// The check did not run: left out through [`Options::skip`](crate::Options::skip), not
     /// applicable to the plugin, not detectable ([`Check::Locks`]), or no case ran. The
     /// note says why.
@@ -121,11 +125,12 @@ pub enum Status {
 }
 
 impl Status {
-    /// `"pass"`, `"FAIL"` or `"skip"`, as the report prints it.
+    /// `"pass"`, `"FAIL"`, `"warn"` or `"skip"`, as the report prints it.
     pub fn label(self) -> &'static str {
         match self {
             Status::Pass => "pass",
             Status::Fail => "FAIL",
+            Status::Warn => "warn",
             Status::Skip => "skip",
         }
     }
@@ -151,13 +156,13 @@ pub struct Failure {
 pub struct CheckResult {
     /// The check this line reports.
     pub check: Check,
-    /// Pass, fail or skip.
+    /// Pass, fail, warning or skip.
     pub status: Status,
     /// Assertions evaluated for this check.
     pub cases: u64,
-    /// Assertions that failed.
+    /// Assertions that failed (for a warning: that did not hold).
     pub failures: u64,
-    /// The first failing case, with its seeds; `None` when nothing failed.
+    /// The first failing (or warned) case, with its seeds; `None` when nothing failed.
     pub first_failure: Option<Failure>,
     /// Why the check was skipped, or something worth knowing.
     pub note: Option<String>,
@@ -218,7 +223,7 @@ impl Report {
         self.result(check).status
     }
 
-    /// True when no check failed. Skipped checks do not fail a run.
+    /// True when no check failed. Skipped checks and warnings do not fail a run.
     pub fn passed(&self) -> bool {
         self.checks.iter().all(|c| c.status != Status::Fail)
     }
@@ -226,6 +231,11 @@ impl Report {
     /// The checks that failed, in report order (empty when [`Report::passed`]). Allocates.
     pub fn failed_checks(&self) -> Vec<Check> {
         self.checks.iter().filter(|c| c.status == Status::Fail).map(|c| c.check).collect()
+    }
+
+    /// The checks that warned, in report order. Allocates.
+    pub fn warned_checks(&self) -> Vec<Check> {
+        self.checks.iter().filter(|c| c.status == Status::Warn).map(|c| c.check).collect()
     }
 
     /// Panic with the full report when any check failed. For use in `#[test]`.
@@ -240,7 +250,8 @@ impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "conformance: {} (seed {:#018x}, {} sessions)", self.plugin, self.seed, self.sessions)?;
         for r in &self.checks {
-            let failed = if r.failures > 0 { format!(", {} failed", r.failures) } else { String::new() };
+            let warn = r.status == Status::Warn;
+            let failed = if r.failures > 0 { format!(", {} {}", r.failures, if warn { "over the bound" } else { "failed" }) } else { String::new() };
             writeln!(
                 f,
                 "  [{}] {:<15} {} ({} assertions{})",
@@ -254,7 +265,7 @@ impl fmt::Display for Report {
                 writeln!(f, "         note: {n}")?;
             }
             if let Some(x) = &r.first_failure {
-                writeln!(f, "         first failure: {}", x.message)?;
+                writeln!(f, "         first {}: {}", if warn { "warning" } else { "failure" }, x.message)?;
                 writeln!(f, "         case: {}", x.case)?;
                 writeln!(f, "         reproduce: seed {:#018x} (case seed {:#018x})", x.seed, x.case_seed)?;
             }
@@ -265,7 +276,9 @@ impl fmt::Display for Report {
             let rates: Vec<String> = self.rates_skipped.iter().map(|r| format!("{r}")).collect();
             writeln!(f, "  sample rates refused by the plugin (skipped): {}", rates.join(", "))?;
         }
-        writeln!(f, "  result: {}", if self.passed() { "PASS" } else { "FAIL" })
+        let warnings = self.warned_checks().len();
+        let with = if warnings > 0 { format!(" ({warnings} warning{})", if warnings == 1 { "" } else { "s" }) } else { String::new() };
+        writeln!(f, "  result: {}{with}", if self.passed() { "PASS" } else { "FAIL" })
     }
 }
 
@@ -336,7 +349,8 @@ impl Recorder {
                 let status = if self.hard_skip[i] {
                     Status::Skip
                 } else if self.failures[i] > 0 {
-                    Status::Fail
+                    // The output bound is advisory: see `Options::max_output`.
+                    if check == Check::BoundedOutput { Status::Warn } else { Status::Fail }
                 } else if self.forced_skip[i] || self.cases[i] == 0 {
                     Status::Skip
                 } else {
